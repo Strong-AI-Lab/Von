@@ -46,7 +46,7 @@ def start_portal(root):
     # root = ThemedTk(theme="arc")  # Choose from available themes
     # Use CustomTkinter to create the main window
   
-    root.title("vonUKU Portal")
+    root.title("tell von")
     root.geometry('400x200')
 
 # Define custom styles that complement the Arc theme
