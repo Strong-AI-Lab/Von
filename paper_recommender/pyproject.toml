@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper_recommender"
+description = "Your trusty bot to assist and adventure with you through the stars."
+authors = [
+    {name = "Alex Peng", email = "ypen260@aucklanduni.ac.nz"},
+]
+version = "0.1.0" # major.minor.patch
+requires-python = ">= 3.8"
+readme = "README.md"
+
+# license = 
+
+# TO DO:
+# dependencies = [
+#     "requests",
+#     'importlib-metadata; python_version<"3.10"',
+# ]
+
+
+[project.scripts]
+paper_recommender = "paper_recommender.app:start_app"

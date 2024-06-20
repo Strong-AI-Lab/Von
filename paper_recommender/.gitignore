@@ -1,0 +1,4 @@
+*.pyc
+/logs/
+*checkpoint.ipynb
+**/*egg-info/
