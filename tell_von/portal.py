@@ -7,13 +7,13 @@ import customtkinter as ctk
 from googledrive import authenticate_google_drive, upload_file_to_drive, save_to_drive
 
 
+
 text_input = None  # Define the text input widget globally
 root = None  # Define the root window globally
 
-
 def start_portal(root):
     def on_submit(event=None):  # Accept an optional event argument     
-        text_input.configure(background="#1010FF")
+    
         user_input = text_input.get("1.0", tk.END).rstrip('\n') # Get the text from the text widget
 
         # print("User input raw:", user_input)
@@ -23,7 +23,7 @@ def start_portal(root):
             print("No non blank input provided.") 
 
         text_input.delete("1.0", tk.END)  # Clear the text area after submission
-       # text_input.configure(background="white")
+    
         text_input.focus()  # Optionally set focus back to the text widget
         return "break"  # Return 'break' to prevent the default behavior of the event in this case, to prevent the submission \n being added to the textfield
 
@@ -35,9 +35,11 @@ def start_portal(root):
     gtk_options = {
     "fg_color": "white",
     "text_color": "black",
-    "border_width": 2
+    "border_width": 2,
+    "bg_color":"white",
     }
-    text_input = ctk.CTkTextbox(root, corner_radius=10,  border_color="blue", width=380, height=100, **gtk_options)
+
+    text_input = ctk.CTkTextbox(root,   corner_radius=10,  border_color="blue", font=("Helvetica", 12), width=380, height=100, **gtk_options)
     text_input.pack(pady=20, padx=20)
     text_input.bind('<Control-Return>',  on_submit)  # Bind the Enter key to submi
     text_input.focus()  # Set focus to the text input box
