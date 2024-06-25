@@ -4,3 +4,4 @@ __pycache__/*
 ignore/*
 token.*
 token.json
+ignore/*
