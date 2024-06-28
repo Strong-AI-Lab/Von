@@ -33,7 +33,8 @@ def ask_gpt4(prompt_text, system_prompt=None):
     try:
         # Building the prompt with an optional system message
         full_prompt = f"{system_prompt}\n\n{prompt_text}" if system_prompt else prompt_text
-
+        print(full_prompt)
+        
         # Sending the prompt to the GPT-4 model
         response = client.chat.completions.create( model=the_model,  # Use GPT-4's engine identifier, update if necessary
             # messages=[

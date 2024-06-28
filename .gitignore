@@ -5,3 +5,6 @@ ignore/*
 token.*
 token.json
 ignore/*
+settings.txt
++/settings.txt
++/token.json
