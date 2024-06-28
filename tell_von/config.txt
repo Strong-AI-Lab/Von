@@ -1,3 +1,0 @@
-folder_id=your_folder_id
-secret_key=your_secret_key
-styling_choice=your_styling_choice

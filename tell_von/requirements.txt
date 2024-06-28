@@ -82,6 +82,7 @@ Flask>=3.0.3
 # urllib3>=2.2.1
 # Werkzeug>=3.0.3
 
+#pytest>=8.2.2
 annotated-types==0.6.0
 anyio==4.3.0
 blinker==1.8.2

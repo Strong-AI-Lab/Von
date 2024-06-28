@@ -1,4 +1,3 @@
-# import requests
 import os
 from openai import OpenAI
 
@@ -9,7 +8,6 @@ if (useollama):
     client = OpenAI(
         base_url = 'http://localhost:11434/v1',
         api_key='ollama', # required, but unused
-        model=the_model
     )
 else:
     # Your OpenAI API key
