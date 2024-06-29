@@ -3,17 +3,20 @@ from openai import OpenAI
 
 useollama=True
 
-if (useollama):
-    the_model = 'llama3'
-    client = OpenAI(
-        base_url = 'http://localhost:11434/v1',
-        api_key='ollama', # required, but unused
-    )
-else:
-    # Your OpenAI API key
-    api_key = os.getenv("OpenAI_API_KEY") 
-    the_model = 'gpt-4o'
-    client = OpenAI(api_key=api_key)
+def get_client():
+    if (not hasattr(get_client, "api_client")) or ( getattr(get_client,"api_client") == None): 
+        if (useollama):
+            the_model = 'llama3'
+            get_client.api_client = OpenAI(
+                base_url = 'http://localhost:11434/v1',
+                api_key='ollama', # required, but unused
+            )
+        else:
+            # Your OpenAI API key
+            api_key = os.getenv("OpenAI_API_KEY") 
+            get_client.api_client = OpenAI(api_key=api_key)
+    
+    return get_client.api_client
 
 
 # from flask import Flask, redirect, render_template, request, url_for
@@ -36,7 +39,7 @@ def ask_gpt4(prompt_text, system_prompt=None):
         print(full_prompt)
         
         # Sending the prompt to the GPT-4 model
-        response = client.chat.completions.create( model=the_model,  # Use GPT-4's engine identifier, update if necessary
+        response = get_client().chat.completions.create( model=the_model,  # Use GPT-4's engine identifier, update if necessary
             # messages=[
             #     {
             #         "role": "user",
@@ -65,16 +68,7 @@ def ask_gpt4(prompt_text, system_prompt=None):
 
 
 
-response = client.chat.completions.create(
-  model="llama3",
-  messages=[
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "Who won the world series in 2020?"},
-    {"role": "assistant", "content": "The LA Dodgers won in 2020."},
-    {"role": "user", "content": "Where was it played?"}
-  ]
-)
-print(response.choices[0].message.content)
+
 
 
 

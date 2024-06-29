@@ -1,6 +1,6 @@
 import unittest
 #from unittest.mock import patch
-from tell_von.gpt4connect import ask_gpt4
+from tell_von.gpt4connect import ask_gpt4,get_client
 
 class TestGpt4Connect(unittest.TestCase):
 
@@ -32,6 +32,20 @@ class TestGpt4Connect(unittest.TestCase):
         response = ask_gpt4(prompt_text)
         print(f"Test 2 Response: {response}")
         self.assertIn(expected_response,response )
+
+    def test_get_client_1(self):#, mock_openai):
+        response = get_client().chat.completions.create(
+            model="llama3",
+            messages=[ # derived from ollama documentation 
+                {"role": "system", "content": "You are a auestion answering assistant."},
+                {"role": "user", "content": "Who won the US baseball world series in 2020?"},
+                {"role": "assistant", "content": "The LA Dodgers won in 2020."},
+                {"role": "user", "content": "Where was that game played?"}
+            ]
+        )
+        result = response.choices[0].message.content
+        print("get_client based response:", result)
+        self.assertIn("Arlington", result)
 
 if __name__ == '__main__':
     unittest.main()
