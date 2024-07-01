@@ -4,6 +4,7 @@ __pycache__/*
 ignore/*
 token.*
 token.json
+*token.json
 ignore/*
 settings.txt
 +/settings.txt

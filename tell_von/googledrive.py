@@ -11,8 +11,8 @@ from googleapiclient.http import MediaIoBaseDownload
 SCOPES = [
     'https://www.googleapis.com/auth/drive.file'
 ]
-def getCredName():
-    cred= os.getenv("GOOGLE_GDRIVE_CRED") 
+def getDriveCredName():
+    cred= os.getenv("VON_GOOGLE_GDRIVE_CRED") 
     return cred
 
 def get_service():
@@ -49,7 +49,7 @@ def authenticate_google_drive():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(getCredName(), SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(getDriveCredName(), SCOPES)
             creds = flow.run_local_server(port=0)
         # Save the credentials for the next run
         with open('token.json', 'w') as token:
@@ -167,7 +167,7 @@ def update_file_description( file_id, new_description, service=None ):
         print(f"An error occurred: {e}")
         return None
 
-#print(getCredName())
+print(getDriveCredName())
 #print(get_default_folder_id())
 #get_service()
 #print("Content:",update_all_file_content())

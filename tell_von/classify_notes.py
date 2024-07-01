@@ -82,6 +82,7 @@ def build_class_list():
 
     # Iterate through files in the folder
     #TODO: Make this actually add new records into the JSON file, not append them. At present, it just keeps adding new records to the JSON file.
+    # https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-79
     for file in iterate_files_in_folder(folder_id):
         # Check if the file is newer than the JSON file or in test mode
         if is_newer_than_json(file['id'], json_file_path) or test_mode == True:
