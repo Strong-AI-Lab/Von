@@ -47,10 +47,10 @@ def is_newer_than_json(file_id, json_file_path):
     json_file_timestamp = datetime.fromtimestamp(os.path.getmtime(json_file_path))
     return file_timestamp > json_file_timestamp
 
-def save_to_json(file_content, file_name, file_timestamp, json_file_path, indent=4):
+def save_json_to(json_file_path, json_content, indent=4):
     """Save the note contents to a local JSON file."""
-    with open(json_file_path, 'a') as json_file:
-        json.dump({'timestamp': file_timestamp.isoformat(), 'filename': file_name, 'content': file_content}, json_file, indent=indent)
+    with open(json_file_path, 'w') as json_file:
+        json.dump(json_content, json_file, indent=indent)
 
 import os
 import json
@@ -76,8 +76,15 @@ def build_class_list():
     # Create the JSON file if it doesn't exist
     if not os.path.exists(dir_path):
         os.makedirs(dir_path, exist_ok=True, mode=511)
+    if not os.path.exists(json_file_path):
         with open(json_file_path, 'w') as json_file:
-            json.dump({}, json_file,indent=4)
+            json_data = []
+            json.dump(json_data, json_file, indent=4)
+            count = 0
+    else:
+        with open(json_file_path, 'r') as json_file:
+            json_data = json.load(json_file)
+            count = len(json_data)       
 
 
     # Iterate through files in the folder
@@ -89,8 +96,13 @@ def build_class_list():
             count += 1
             file_content = get_file_content(file['id'])
             file_timestamp = get_file_timestamp(file['id'])
-            print(f"{count} saving to json {file_timestamp}")
-            save_to_json(file_content, file['name'], file_timestamp, json_file_path)
+            file_record = {'timestamp': file_timestamp.isoformat(), 'filename': file['name'], 'content': file_content}
+            json_data.append(file_record)
+            print(f"{count} saving to json record from {file_record['filename']}")
+
+    # Save the modified JSON file
+    save_json_to(json_file_path,json_data)
+    print(f"Saved {count} records to {json_file_path}")
 
 
 if __name__ == "__main__":
