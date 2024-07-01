@@ -8,7 +8,9 @@ import os
 import io
 from googleapiclient.http import MediaIoBaseDownload
 
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
+SCOPES = [
+    'https://www.googleapis.com/auth/drive.file'
+]
 def getCredName():
     cred= os.getenv("GOOGLE_GDRIVE_CRED") 
     return cred
