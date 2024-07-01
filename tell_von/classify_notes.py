@@ -65,17 +65,23 @@ def build_class_list():
     Returns:
         None
     """
-    json_file_path = 'ignore/notes.json'
+    dir_path = "ignore"  
+    json_file_name = "notes.json"  
+    json_file_path = os.path.join(dir_path, json_file_name)
+    print (json_file_path)
+
     folder_id = get_default_folder_id()
     count = 0
 
     # Create the JSON file if it doesn't exist
-    if not os.path.exists(json_file_path):
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path, exist_ok=True, mode=511)
         with open(json_file_path, 'w') as json_file:
             json.dump({}, json_file,indent=4)
 
 
     # Iterate through files in the folder
+    #TODO: Make this actually add new records into the JSON file, not append them. At present, it just keeps adding new records to the JSON file.
     for file in iterate_files_in_folder(folder_id):
         # Check if the file is newer than the JSON file or in test mode
         if is_newer_than_json(file['id'], json_file_path) or test_mode == True:

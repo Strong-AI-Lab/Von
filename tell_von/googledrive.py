@@ -23,8 +23,10 @@ def get_service():
         except Exception as e:
             print(f"An error occurred authenticating to Drive: {e}")
             return None
-    else: 
+    elif not hasattr(get_service,"serviceexistremainder"):  # don't print this message again after the first time
         print("Google Service exists already, returning it.")
+        get_service.serviceexistremainder = True
+
     return get_service.service
 
 def get_default_folder_id():
