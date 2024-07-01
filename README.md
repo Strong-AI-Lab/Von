@@ -5,7 +5,23 @@ This is an open source set of projects to enhance and enrich the tasks and capab
 Hopefully this will become a family of Agents for Assisted Science and beyond.
 
 
-## The Von project is Licensed under the Apache 2.0 Licence
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### The Von project is Licensed under the Apache 2.0 Licence
 
    Copyright 2024 The University of Auckland
 
