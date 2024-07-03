@@ -1,7 +1,7 @@
 import os
 import json
 from datetime import datetime
-from gpt4connect import ask_gpt4
+from tell_von.llmconnect import ask_llm
 from googledrive import iterate_files_in_folder, get_file_content, get_default_folder_id, get_service
 
 def classify_file(file_content):
@@ -103,6 +103,21 @@ def build_class_list():
     # Save the modified JSON file
     save_json_to(json_file_path,json_data)
     print(f"Saved {count} records to {json_file_path}")
+
+def deduplicate_json(json_array, field_to_sort_on=None):
+
+    # Convert the JSON array to a list of dictionaries, making a deep copy to avoid modifying the original data
+    list_of_dicts = json.loads(json.dumps(json_array))
+
+    # Use a dictionary comprehension to remove duplicates
+    # This will keep the first occurrence of each record
+    unique_records = [dict(t) for t in set(tuple(d.items()) for d in list_of_dicts)]
+    sorted_unique_records=unique_records if field_to_sort_on is None else sorted(unique_records, key=lambda k:k[field_to_sort_on])    
+    # Convert the list of unique dictionaries back to a JSON array
+    json_array_unique = json.dumps(sorted_unique_records)
+
+    print(json_array_unique)
+    return json_array_unique
 
 
 if __name__ == "__main__":

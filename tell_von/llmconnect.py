@@ -1,11 +1,14 @@
 import os
 from openai import OpenAI
 
-useollama=True
+useollama=True  # set to True to use ollama, False to use OpenAI API directly  
+the_model = None # this will be set depending on the client used
 
 def get_client():
+    global the_model
     if (not hasattr(get_client, "api_client")) or ( getattr(get_client,"api_client") == None): 
         if (useollama):
+            # Use the ollama API - to use ollama, you need to have it running locally on port 11434: ollama run llama3
             the_model = 'llama3'
             get_client.api_client = OpenAI(
                 base_url = 'http://localhost:11434/v1',
@@ -14,6 +17,7 @@ def get_client():
         else:
             # Your OpenAI API key
             api_key = os.getenv("OpenAI_API_KEY") 
+            the_model = 'text-davinci-003'
             get_client.api_client = OpenAI(api_key=api_key)
     
     return get_client.api_client
@@ -32,14 +36,14 @@ def get_client():
 #openai.api_key = os.getenv("OPENAI_API_KEY")
 # Configure the API key from your OpenAI account
 
-def ask_gpt4(prompt_text, system_prompt=None):
+def ask_llm(prompt_text, system_prompt=None):
     try:
         # Building the prompt with an optional system message
         full_prompt = f"{system_prompt}\n\n{prompt_text}" if system_prompt else prompt_text
         print(full_prompt)
         
         # Sending the prompt to the GPT-4 model
-        response = get_client().chat.completions.create( model=the_model,  # Use GPT-4's engine identifier, update if necessary
+        response = get_client().chat.completions.create(  # Use GPT-4's engine identifier, update if necessary
             # messages=[
             #     {
             #         "role": "user",
@@ -56,6 +60,7 @@ def ask_gpt4(prompt_text, system_prompt=None):
                     "content": prompt_text,
                 },
             ],
+            model=the_model,  # Use OpenAI API's model identifier, update if necessary
             max_tokens=150  # Adjust based on how long you expect the response to be
         )
 
