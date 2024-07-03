@@ -2,7 +2,7 @@ import os
 import json
 from datetime import datetime
 from tell_von.llmconnect import ask_llm
-from googledrive import iterate_files_in_folder, get_file_content, get_default_folder_id, get_service
+from tell_von.googledrive import iterate_files_in_folder, get_file_content, get_default_folder_id, get_service
 
 def classify_file(file_content):
     """
@@ -114,7 +114,8 @@ def deduplicate_json(json_array, field_to_sort_on=None):
     unique_records = [dict(t) for t in set(tuple(d.items()) for d in list_of_dicts)]
     sorted_unique_records=unique_records if field_to_sort_on is None else sorted(unique_records, key=lambda k:k[field_to_sort_on])    
     # Convert the list of unique dictionaries back to a JSON array
-    json_array_unique = json.dumps(sorted_unique_records)
+    json_array_unique = json.loads(json.dumps(sorted_unique_records))
+    #json_array_unique = sorted_unique_records
 
     print(json_array_unique)
     return json_array_unique

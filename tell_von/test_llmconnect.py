@@ -17,7 +17,7 @@ class TestGpt4Connect(unittest.TestCase):
         print(f"Test 1 Response: {response}")
         expected_response = "os"
         self.assertIn(expected_response, response)
-        expected_response = "module"
+        expected_response = "listdir"
         self.assertIn(expected_response, response)
 
 
