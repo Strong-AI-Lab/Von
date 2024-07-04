@@ -1,9 +1,11 @@
 import os
 import json
+from datetime import timezone
 from datetime import datetime
-from tell_von.llmconnect import ask_llm
-from tell_von.googledrive import iterate_files_in_folder, get_file_content, get_default_folder_id, get_service
+from vonlib.llmconnect import ask_llm
+from vonlib.googledrive import iterate_files_in_folder, get_file_content, get_default_folder_id, get_service
 
+verbose = False
 def classify_file(file_content):
     """
     Classifies notes based on the file content. It uses a list of classes derived from a sample (or all at first) of the notes.
@@ -35,17 +37,26 @@ def classify_file(file_content):
     #     return questions
 
 
-def get_file_timestamp(file_id):
+def get_gdrive_file_timestamp(file_id):
     """Get the timestamp of a file in Google Drive."""
     file_metadata = get_service().files().get(fileId=file_id, fields='modifiedTime').execute()
     modified_time = file_metadata['modifiedTime']
-    return datetime.strptime(modified_time, '%Y-%m-%dT%H:%M:%S.%fZ')
+    modified_time_datetime = datetime.strptime(modified_time, '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=timezone.utc) 
+    return modified_time_datetime
+
+def get_timestamp_from_path(file_path):
+    """Get the timestamp of a file from its path."""
+    modified_time = os.path.getmtime(file_path)
+    #TODO: Make the date comparison reliable. The UTC timestamp is not to be relied on. If necessary, save the json file to Google Drive.
+    modified_time_datetime = datetime.fromtimestamp(modified_time, tz=timezone.utc)
+    return modified_time_datetime
 
 def is_newer_than_json(file_id, json_file_path):
     """Check if the note file is newer than the local JSON file."""
-    file_timestamp = get_file_timestamp(file_id)
-    json_file_timestamp = datetime.fromtimestamp(os.path.getmtime(json_file_path))
-    return file_timestamp > json_file_timestamp
+    file_timestamp = get_gdrive_file_timestamp(file_id)
+    json_file_timestamp = get_timestamp_from_path(json_file_path)
+    comparison = file_timestamp > json_file_timestamp
+    return comparison
 
 def save_json_to(json_file_path, json_content, indent=4):
     """Save the note contents to a local JSON file."""
@@ -55,7 +66,7 @@ def save_json_to(json_file_path, json_content, indent=4):
 import os
 import json
 
-def build_class_list():
+def build_class_list(test_mode=False):
     """
     Builds a class list by iterating through files in a folder and saving relevant information to a JSON file.
 
@@ -72,6 +83,8 @@ def build_class_list():
 
     folder_id = get_default_folder_id()
     count = 0
+    skip_count=0
+    new_count=0
 
     # Create the JSON file if it doesn't exist
     if not os.path.exists(dir_path):
@@ -84,28 +97,37 @@ def build_class_list():
     else:
         with open(json_file_path, 'r') as json_file:
             json_data = json.load(json_file)
-            count = len(json_data)       
+            count = len(json_data)    
+            print(f"Loaded {count} records from {json_file_path}")   
 
 
     # Iterate through files in the folder
-    #TODO: Make this actually add new records into the JSON file, not append them. At present, it just keeps adding new records to the JSON file.
+    #TODO: Make this actually add new records into the JSON file, not append them.
+    #  At present, it just keeps adding new records to the JSON file.
     # https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-79
     for file in iterate_files_in_folder(folder_id):
+        file_timestamp = get_gdrive_file_timestamp(file['id']).isoformat()
         # Check if the file is newer than the JSON file or in test mode
         if is_newer_than_json(file['id'], json_file_path) or test_mode == True:
             count += 1
+            new_count+=1
             file_content = get_file_content(file['id'])
-            file_timestamp = get_file_timestamp(file['id'])
-            file_record = {'timestamp': file_timestamp.isoformat(), 'filename': file['name'], 'content': file_content}
+            file_record = {'timestamp': file_timestamp, 'filename': file['name'], 'content': file_content}
             json_data.append(file_record)
             print(f"{count} saving to json record from {file_record['filename']}")
+        elif verbose:
+            skip_count+=1
+            print(f"{skip_count}: Skipping {file['name']} from {file_timestamp} becasuse it is not newer than"\
+                  f" {json_file_path} from {get_timestamp_from_path(json_file_path)} ")
 
     # Save the modified JSON file
-    save_json_to(json_file_path,deduplicate_json(json_data,field_to_sort_on='timestamp'))
-    print(f"Saved {count} records to {json_file_path}")
+    if (new_count >0):
+        save_json_to(json_file_path,deduplicate_json(json_data,field_to_sort_on='timestamp'))
+        print(f"Saved {count} records to {json_file_path}")
+    else:
+        print(f"No new records to save to {json_file_path}")
 
 def deduplicate_json(json_array, field_to_sort_on=None):
-
     # Convert the JSON array to a list of dictionaries, making a deep copy to avoid modifying the original data
     list_of_dicts = json.loads(json.dumps(json_array))
 
@@ -117,10 +139,9 @@ def deduplicate_json(json_array, field_to_sort_on=None):
     json_array_unique = json.loads(json.dumps(sorted_unique_records))
     #json_array_unique = sorted_unique_records
 
-    print(json_array_unique)
+    #print(json_array_unique)
     return json_array_unique
 
 
 if __name__ == "__main__":
-    test_mode = True
-    build_class_list()
+    build_class_list(test_mode=False)
