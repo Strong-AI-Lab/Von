@@ -9,3 +9,4 @@ ignore/*
 settings.txt
 +/settings.txt
 +/token.json
+*.code-workspace

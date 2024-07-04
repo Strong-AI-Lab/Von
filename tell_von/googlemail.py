@@ -42,7 +42,7 @@ def read_drive_files(drive_service):
 def read_gmail_messages(gmail_service, max_results=10):
     results = gmail_service.users().messages().list(userId='me', maxResults=max_results).execute()
     messages = results.get('messages', [])
-
+    count=0
     for message in messages:
         msg = gmail_service.users().messages().get(userId='me', id=message['id']).execute()
         
@@ -53,10 +53,10 @@ def read_gmail_messages(gmail_service, max_results=10):
                 subject = header['value']
             if header['name'] == 'From':
                 sender = header['value']
-        
+        count+=1
         print(f"Subject: {subject}")
         print(f"From: {sender}")
-        print("----------------------")
+        print(f"---------{count}-------------")
 
 def main():
    # drive_service = get_drive_service()
@@ -89,6 +89,6 @@ To use this:
 4. Run the script. It will prompt you to authorize for Drive and Gmail separately in your browser.
 5. After authorization, it will create `drive_token.json` and `gmail_token.json` for future use.
 
-This setup allows you to use different Google accounts for Drive and Gmail operations. The authorization flow will run separately for each service, allowing you to log in with different accounts.
-
-Would you like me to explain any part of this setup in more detail? """
+This setup allows you to use different Google accounts for Drive and Gmail operations. 
+The authorization flow will run separately for each service, allowing you to log in with different accounts.
+"""
