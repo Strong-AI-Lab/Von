@@ -26,7 +26,7 @@ dnspython==2.5.0
 exceptiongroup==1.2.0
 executing==2.0.1
 fastjsonschema==2.19.1
-feedparser==6.0.10
+feedparser==6.0.11
 frozenlist==1.4.1
 h11==0.14.0
 httpcore==1.0.2
@@ -80,17 +80,13 @@ pycparser==2.21
 pydantic==2.6.0
 pydantic_core==2.16.1
 Pygments==2.17.2
-pymongo==4.6.1
+pymongo==4.8.0
 PyMuPDF==1.24.0
 PyMuPDFb==1.24.0
 python-dateutil==2.8.2
 python-json-logger==2.0.7
 pytz==2023.4
-PyYAML==6.0.1
-pyzmq==25.1.2
--e git+https://github.com/Strong-AI-Lab/paper_recommendation.git@cf96ab1fe4b68eba81f1fc2e5e7fe77710d350d0#egg=paper_recommender
-referencing==0.33.0
-requests==2.31.0
+requests==2.32.3
 rfc3339-validator==0.1.4
 rfc3986-validator==0.1.1
 rpds-py==0.17.1
@@ -112,9 +108,10 @@ types-beautifulsoup4==4.12.0.20240229
 types-html5lib==1.1.11.20240228
 types-requests==2.31.0.20240218
 typing_extensions==4.9.0
-urllib3==2.2.0
+urllib3==2.2.2
 wcwidth==0.2.13
 webencodings==0.5.1
 websocket-client==1.7.0
 yarl==1.9.4
 zipp==3.17.0
+bs4==0.0.2
