@@ -89,5 +89,6 @@ To use this:
 4. Run the script. It will prompt you to authorize for Drive and Gmail separately in your browser.
 5. After authorization, it will create `drive_token.json` and `gmail_token.json` for future use.
 
-This setup allows you to use different Google accounts for Drive and Gmail operations. The authorization flow will run separately for each service, allowing you to log in with different accounts.
+This setup allows you to use different Google accounts for Drive and Gmail operations. 
+The authorization flow will run separately for each service, allowing you to log in with different accounts.
 """

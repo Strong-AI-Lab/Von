@@ -101,7 +101,7 @@ def build_class_list():
             print(f"{count} saving to json record from {file_record['filename']}")
 
     # Save the modified JSON file
-    save_json_to(json_file_path,json_data)
+    save_json_to(json_file_path,deduplicate_json(json_data,field_to_sort_on='timestamp'))
     print(f"Saved {count} records to {json_file_path}")
 
 def deduplicate_json(json_array, field_to_sort_on=None):
