@@ -1,6 +1,6 @@
-from googledrive import iterate_files_in_folder, get_file_content, get_default_folder_id, trash_file
+from vonlib.googledrive import iterate_files_in_folder, get_file_content, get_default_folder_id, trash_file
 from classify_notes import classify_file
-from tell_von.llmconnect import ask_llm
+from vonlib.llmconnect import ask_llm
 import re
 
 

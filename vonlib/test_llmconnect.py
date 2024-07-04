@@ -1,6 +1,6 @@
 import unittest
 #from unittest.mock import patch
-from tell_von.llmconnect import ask_llm,get_client
+from vonlib.llmconnect import ask_llm,get_client
 
 class TestGpt4Connect(unittest.TestCase):
 
