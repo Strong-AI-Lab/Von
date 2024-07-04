@@ -4,7 +4,7 @@ from tkinter import font as tkfont  # for custom fonts
 from tkinter import ttk
 from ttkthemes import ThemedTk
 import customtkinter as ctk
-from ..vonlib.googledrive import authenticate_google_drive, upload_file_to_drive, save_to_drive
+from vonlib.googledrive import authenticate_google_drive, upload_file_to_drive, save_to_drive
 
 
 

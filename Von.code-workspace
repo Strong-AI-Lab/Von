@@ -1,0 +1,25 @@
+{
+	"folders": [
+		{
+			"name": "Von",
+			"path": "."
+		},
+        // {	
+		// 	"name": "TellVon",
+		// 	"path": "./tell_von"
+		// },
+		// {	
+		// 	"name": "Ruminate",
+		// 	"path": "./ruminate"
+		// },{
+		// 	"name": "Recommender",
+		// 	"path": "./paper_recommender"		
+		// },{
+		// 	"name": "VonLib",
+		// 	"path": "./vonlib"
+		// }			
+	],
+	"settings": {
+		// "python.pythonPath": "./.venv/cripts/python.exe",
+	}
+}
