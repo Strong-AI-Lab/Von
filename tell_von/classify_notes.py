@@ -9,11 +9,12 @@ import re
 # where day month and year are (possibly 0 padded) integers
 import re
 
+verbose = True
+
 #Misc Notes is a file in the GDrive file that allows notes to be added, roughly, without the tell_von system.
 # it may be a bad idea.
 misc_notes_file_name = 'misc_inputs'
 
-verbose = True
 def split_before_date_patterns(file_content):
     # Regular expression pattern to match day/month/year with possible leading zeros
     date_pattern = r'((?<!\d)0?\d{1,2}[/\-.]0?\d{1,2}[/\-.]\d{4}(?!\d))'
@@ -172,6 +173,7 @@ def build_class_list(test_mode=False):
     count = 0
     skip_count=0
     new_count=0
+    new_json_data_file = False
 
     # Create the JSON file if it doesn't exist
     if not os.path.exists(dir_path):
@@ -181,11 +183,17 @@ def build_class_list(test_mode=False):
             json_data = []
             json.dump(json_data, json_file, indent=4)
             count = 0
+            new_json_data_file = True
+            print(f"Created {json_file_path} with an empty list.")
     else:
         with open(json_file_path, 'r') as json_file:
             json_data = json.load(json_file)
             count = len(json_data)    
-            print(f"Loaded {count} records from {json_file_path}")   
+            if (count == 0):
+                 new_json_data_file = True  
+                 print(f"Using newly created  {json_file_path}")
+            else:
+                print(f"Loaded {count} records from {json_file_path}")   
 
    
 
@@ -196,20 +204,25 @@ def build_class_list(test_mode=False):
     for file in iterate_files_in_folder(folder_id):
         file_timestamp = get_gdrive_file_timestamp(file['id']).isoformat()
         # Check if the file is newer than the JSON file or in test mode
-        if (file['name'] == misc_notes_file_name):
+
+        if (is_newer_than_json(file['id'], json_file_path) 
+            or (new_json_data_file == True) 
+            or (test_mode == True)):
+            if (file['name'] == misc_notes_file_name):
              # Get any new notes from the Misc Notes file
-            misc_json_data=misc_notes_to_timestamped_json()
-            new_count+=len(misc_json_data)
-            print(f"Added {new_count} records from {misc_notes_file_name}")
-            #print(f"Skipping {file['name']} from {file_timestamp} because it is the Misc Notes file")
-            continue
-        if is_newer_than_json(file['id'], json_file_path) or test_mode == True:
-            count += 1
-            new_count+=1
-            file_content = get_file_content(file['id'])
-            file_record = {'timestamp': file_timestamp, 'filename': file['name'], 'content': file_content}
-            json_data.append(file_record)
-            print(f"{count} saving to json record from {file_record['filename']}")
+                misc_json_data=misc_notes_to_timestamped_json()
+                new_count+=len(misc_json_data)
+                print(f"Added {new_count} records from {misc_notes_file_name}")
+                #print(f"Skipping {file['name']} from {file_timestamp} because it is the Misc Notes file")
+                continue
+            else: 
+                count += 1
+                new_count+=1
+                file_content = get_file_content(file['id'])
+                file_record = {'timestamp': file_timestamp, 'filename': file['name'], 'content': file_content}
+                json_data.append(file_record)
+                print(f"{count} saving to json record from {file_record['filename']}")
+                continue # redundant but explicit
         elif verbose:
             skip_count+=1
             print(f"{skip_count}: Skipping {file['name']} from {file_timestamp} becasuse it is not newer than"\
@@ -221,21 +234,6 @@ def build_class_list(test_mode=False):
         print(f"Saved {count} records to {json_file_path}")
     else:
         print(f"No new records to save to {json_file_path}")
-
-def deduplicate_json(json_array, field_to_sort_on=None):
-    # Convert the JSON array to a list of dictionaries, making a deep copy to avoid modifying the original data
-    list_of_dicts = json.loads(json.dumps(json_array))
-
-    # Use a dictionary comprehension to remove duplicates
-    # This will keep the first occurrence of each record
-    unique_records = [dict(t) for t in set(tuple(d.items()) for d in list_of_dicts)]
-    sorted_unique_records=unique_records if field_to_sort_on is None else sorted(unique_records, key=lambda k:k[field_to_sort_on])    
-    # Convert the list of unique dictionaries back to a JSON array
-    json_array_unique = json.loads(json.dumps(sorted_unique_records))
-    #json_array_unique = sorted_unique_records
-
-    #print(json_array_unique)
-    return json_array_unique
 
 
 def deduplicate_json(json_array, field_to_sort_on=None):

@@ -10,7 +10,7 @@ from googleapiclient.http import MediaIoBaseDownload
 
 SCOPES = [
     'https://www.googleapis.com/auth/drive.file',
-    # 'https://www.googleapis.com/auth/drive.readonly'
+    # 'https://www.googleapis.com/auth/drive.readonly' # only if we need read access to files the app didn't create
 ]
 def getDriveCredName():
     cred= os.getenv("VON_GOOGLE_GDRIVE_CRED") 
