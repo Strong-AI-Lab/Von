@@ -1,6 +1,6 @@
-from googledrive import iterate_files_in_folder, get_file_content, get_default_folder_id, trash_file
+from vonlib.googledrive import iterate_files_in_folder, get_file_content, get_default_folder_id, trash_file
 from classify_notes import classify_file
-from gpt4connect import ask_gpt4
+from vonlib.llmconnect import ask_llm
 import re
 
 
@@ -30,7 +30,7 @@ def check_file_is_test_file(file_content):
     Evaluate the following
     """
     user_prompt = file_content
-    response = ask_gpt4(user_prompt, system_prompt)
+    response = ask_llm(user_prompt, system_prompt)
     # print(f"GPT-4 says: {response} caps {response.capitalize()}")
     if 'True' in response.capitalize():
         return True
@@ -98,7 +98,7 @@ def generate_followup_questions(file_content):
         The file content is:
         """
     user_prompt = file_content
-    response = ask_gpt4(user_prompt, system_prompt)
+    response = ask_llm(user_prompt, system_prompt)
 
     # Parse the response and extract the follow-up questions
     questions = []

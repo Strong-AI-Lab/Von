@@ -96,7 +96,7 @@ darkdetect==0.8.0
 debugpy==1.8.1
 distro==1.9.0
 exceptiongroup==1.2.1
-Flask==3.0.3
+Flask>=3.0.3
 gcloud==0.18.3
 google-api-core==2.19.0
 google-api-python-client==2.128.0
@@ -120,7 +120,7 @@ oauthlib==3.2.2
 odict==1.9.0
 openai==1.28.1
 optional-django==0.1.0
-packaging==24.0
+packaging>=24.0
 pillow==10.3.0
 plumber==1.7
 proto-plus==1.23.0
