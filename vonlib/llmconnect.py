@@ -22,6 +22,10 @@ def get_client():
     
     return get_client.api_client
 
+def model_info():
+    if (the_model == None):
+        get_client()
+    return the_model
 
 # from flask import Flask, redirect, render_template, request, url_for
 
@@ -40,7 +44,7 @@ def ask_llm(prompt_text, system_prompt=None):
     try:
         # Building the prompt with an optional system message
         full_prompt = f"{system_prompt}\n\n{prompt_text}" if system_prompt else prompt_text
-        print(full_prompt)
+        #print(full_prompt)
         
         # Sending the prompt to the GPT-4 model
         response = get_client().chat.completions.create(  # Use GPT-4's engine identifier, update if necessary
