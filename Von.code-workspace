@@ -20,6 +20,7 @@
 		// }			
 	],
 	"settings": {
+		"scm.experimental.showHistoryGraph": true
 		// "python.pythonPath": "./.venv/cripts/python.exe",
 	}
 }
