@@ -9,7 +9,8 @@ import io
 from googleapiclient.http import MediaIoBaseDownload
 
 SCOPES = [
-    'https://www.googleapis.com/auth/drive.file'
+    'https://www.googleapis.com/auth/drive.file',
+    # 'https://www.googleapis.com/auth/drive.readonly' # only if we need read access to files the app didn't create
 ]
 def getDriveCredName():
     cred= os.getenv("VON_GOOGLE_GDRIVE_CRED") 
@@ -68,29 +69,53 @@ def upload_file_to_drive(service, file_name, file_content,folder_id=get_default_
     print('File Name:', file_name)
     return file.get('id')
 
-def submit_text(text):
-    if text:
-        utc_timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S')
-        file_name = f"{utc_timestamp}.txt"
-        folder_id=get_default_folder_id()
-        creds = authenticate_google_drive()
-        service = build('drive', 'v3', credentials=creds)
-        upload_file_to_drive(service, file_name, text)
+# def submit_text(text):
+#     if text:
+#         utc_timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%d-%H-%M-%S')
+#         file_name = f"{utc_timestamp}.txt"
+#         folder_id=get_default_folder_id()
+#         creds = authenticate_google_drive()
+#         service = build('drive', 'v3', credentials=creds)
+#         upload_file_to_drive(service, file_name, text)
 
 def save_to_drive(file_content, file_name=None, folder_id=get_default_folder_id()):
     if file_name==None:
         utc_timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d-%H-%M-%S')
         file_name = f"{utc_timestamp}.txt"
-   
     upload_file_to_drive(get_service(), file_name, file_content, folder_id)
     print(f"Saved {file_content} to {file_name} in GoogleDrive.")
-    upload_file_to_drive(get_service(), file_name, file_content)
+
+def save_to_drive_as_google_doc(file_content, file_name=None, folder_id=get_default_folder_id()):
+    if file_name==None:
+        utc_timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d-%H-%M-%S')
+        file_name = f"{utc_timestamp}"
+    file_metadata = {
+        'name': file_name,
+        'parents': [folder_id],  # Specify the folder ID here
+        'mimeType': 'application/vnd.google-apps.document'
+        }
+    fh = io.BytesIO(file_content.encode('utf-8'))
+    media = MediaIoBaseUpload(fh, mimetype='text/plain')
+    file = get_service().files().create(body=file_metadata, media_body=media, fields='id').execute()
+    print('File ID:', file.get('id'))
+    print('File Name:', file_name)
+    return file.get('id')
 
 def iterate_files_in_folder(folder_id=get_default_folder_id()):
     # Call the Drive API to list the files in the folder
-    results = get_service().files().list(q=f"'{folder_id}' in parents and trashed=false", fields="files(id, name)").execute()
+
+    query = f"'{folder_id}' in parents and trashed=false and (mimeType='application/vnd.google-apps.document' or mimeType='text/plain')"
+    #query = f"'{folder_id}' in parents and trashed=false and (mimeType='application/vnd.google-apps.document')"
+    results = get_service().files().list(
+        pageSize=1000,
+        q=query,
+        fields="files(name,id,mimeType)"
+    ).execute()
+
     files = results.get('files', [])
+    print("Files in the folder:", len(files))
     return files
+
 
 def update_all_file_content(summaryFileName="ALL_FILE_CONTENT.txt"):
     # Iterate through the files and print their names       
@@ -109,15 +134,29 @@ def update_all_file_content(summaryFileName="ALL_FILE_CONTENT.txt"):
     return content
 
 def get_file_content(file_id):
-    request = get_service().files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while done is False:
-        status, done = downloader.next_chunk()
-    file_content = fh.getvalue().decode()
-    return file_content
+    service = get_service()
+    try:
+    # First, get the file's metadata to check its MIME type
+        file_metadata = service.files().get(fileId=file_id, fields="mimeType").execute()
+        mime_type = file_metadata['mimeType']
 
+        if mime_type == 'application/vnd.google-apps.document':
+            # It's a Google Doc, so we need to export it
+            request = service.files().export_media(fileId=file_id, mimeType='text/plain')
+        else:
+            # It's a regular file, so we can download it directly
+            request = service.files().get_media(fileId=file_id)
+            
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while done is False:
+            status, done = downloader.next_chunk()
+        file_content = fh.getvalue().decode()
+        return file_content
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
 
 # Function to move a file to trash
 def trash_file(file_id, service=None):
