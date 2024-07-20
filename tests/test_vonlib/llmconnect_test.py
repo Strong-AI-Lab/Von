@@ -37,7 +37,7 @@ class TestGpt4Connect(unittest.TestCase):
         response = get_client().chat.completions.create(
            model="llama3",
             messages=[ # derived from ollama documentation 
-                {"role": "system", "content": "You are a auestion answering assistant."},
+                {"role": "system", "content": "You are a question answering assistant."},
                 {"role": "user", "content": "Who won the US baseball world series in 2020?"},
                 {"role": "assistant", "content": "The LA Dodgers won in 2020."},
                 {"role": "user", "content": "Where was that game played?"}
