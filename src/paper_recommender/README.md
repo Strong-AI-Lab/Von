@@ -74,4 +74,8 @@ Once all the required packages have been installed, start the app by running `pa
 - I suggest create a brand new copy of the app and database by following this readme. It serves two purposes:
   - It helps find out problems in this readme.
   - There should ideally be two copies of the app and database. One for deployment, another one for development. Only the deployment version should be installed to public channels like the literature channel. The development version can be installed to a new channel dedicated to development.
-- I suggest avoid pushing any commits directly into the `main` branch. When developing new features, use the `dev` branch instead, or creating new branches. Then you can submit pull request to merge the changes into the `main ` branch.
+- I suggest avoid pushing any commits directly into the `main` branch. When developing new features, use the `dev` branch instead, or creating new branches. Then you can submit pull request to merge the changes into the `main` branch.
+
+- A VCS line like `-e "git+https://..."` may cause issues when installing dependencies using `pip install -r requirements.txt`.
+  - I suggest that developers who are not the repository owners but have authentication access create a Personal Access Token (PAT) and insert it properly into that line. Fortunately, this issue won't occur once the repository is set to public.
+  - Further, ensure that your `pip` is upgraded before installing the dependencies by running `pip install --upgrade pip`. This prevents issues arising from older versions of `pip` that do not support `pyproject.toml`.

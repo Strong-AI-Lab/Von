@@ -1,0 +1,13 @@
+-e "git+https://github.com/Strong-AI-Lab/Von.git@a46877f9f34afcbcb986f06241129041a7df7e90#egg=paper_recommender&subdirectory=paper_recommender"
+bs4==0.0.2
+bson==0.5.10
+configparser==7.0.0
+dataclasses==0.6
+DateTime==5.5
+feedparser==6.0.11
+openai==1.35.9
+pathlib==1.0.1
+pymongo==4.8.0
+requests==2.32.3
+slack_bolt==1.19.1
+typing==3.7.4.3
