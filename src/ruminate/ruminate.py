@@ -5,15 +5,16 @@ import re
 
 
 def check_file_is_test_file(file_content):
+    """
+    Determines if the given file content is from a test file.
 
-    # system_prompt = """You are an expert at analysising the content and structure of 
-    #     files. Can you determine if the following string is the content of test file? You should return True if the file has most likely been produced during testing
-    #     and False if it is a genuine input. If it's difficult to tell, return Unknown.
-    #     Err on the side of files being non-test files, but you should flag files whose content is just babbing or that obviously only talks about testing.
-    #     Any coherent extended text should be considered a non-test file.
-    #     The following is a real file, not a test file:'An early background function for vonUKU can be recognising and deleting (binning) test cases from portal development.'
-    #     These are test files: 'test again with the button' and 'Test multi line input'
-    #     This one is difficult to tell 'Does the text input area work now?'  it was actually a test file. but it's not obvious."""
+    Args:
+        file_content (str): The content of the file.
+
+    Returns:
+        bool or None: True if the file is likely a test file, False if it is a genuine input, None if it's uncertain.
+    """
+
     system_prompt = """
     You are an expert in analyzing file content and structure. Your task is to determine if the following string is from a test file. Return 'True' if the content is likely produced during testing, 'False' if it is a genuine input, and 'Unknown' if it is difficult to tell.
 
@@ -81,6 +82,7 @@ def analyze_file_content(file_content):
 
     return next_step, additional_info
 
+
 def generate_followup_questions(file_content):
     """
     Generates follow-up questions based on the file content.
@@ -112,11 +114,17 @@ def generate_followup_questions(file_content):
         return questions
 
 
-
 def ruminate(folder_id=get_default_folder_id()):
+    """
+    Iterates through the files in the specified folder and performs analysis on their content.
 
-    # Iterate through the files and print their names       
-    # Call the function with the folder ID
+    Args:
+        folder_id (str): The ID of the folder to iterate through. Defaults to the default folder ID.
+
+    Returns:
+        None
+    """
+
     file_limit = 3
     file_counter = 0
 
@@ -139,6 +147,8 @@ def ruminate(folder_id=get_default_folder_id()):
             print(".")
         
         file_counter += 1
-      
 
-ruminate()
+
+
+if __name__ == "__main__":
+    ruminate()

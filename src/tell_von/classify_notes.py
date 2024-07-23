@@ -1,8 +1,9 @@
 import os
 import json
+
 from datetime import timezone
 from datetime import datetime
-from vonlib.llmconnect import ask_llm
+from vonlib.llmconnect import ask_llm, model_info
 from vonlib.googledrive import iterate_files_in_folder, get_file_content, get_default_folder_id, get_service,save_to_drive, save_to_drive_as_google_doc
 import re
 # Split before lines containing day/month/year patterns, 
@@ -146,17 +147,45 @@ def is_newer_than_json(file_id, json_file_path):
     comparison = file_timestamp > json_file_timestamp
     return comparison
 
-def save_json_to(json_file_path, json_content, indent=4):
+def get_json_cache_path():
+    if (not hasattr(get_json_cache_path, "json_file_path")) or ( getattr(get_json_cache_path,"json_file_path") == None): 
+        dir_path = "ignore"  
+        json_file_name = "notes.json"  
+            # Create the JSON file if it doesn't exist
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True, mode=511)
+        get_json_cache_path.json_file_path = os.path.join(dir_path, json_file_name)
+        # print (json_file_path)
+    return get_json_cache_path.json_file_path
+
+def save_json_to(json_content, json_file_path=get_json_cache_path(), indent=4):
     """Save the note contents to a local JSON file."""
     with open(json_file_path, 'w') as json_file:
         json.dump(json_content, json_file, indent=indent)
 
-import os
-import json
+def load_notes_cache(json_file_path=get_json_cache_path()):
+    with open(json_file_path, 'r') as json_file:
+        json_data = json.load(json_file)
+    return json_data
 
-def build_class_list(test_mode=False):
+def deduplicate_json(json_array, field_to_sort_on=None):
+    # Convert the JSON array to a list of dictionaries, making a deep copy to avoid modifying the original data
+    list_of_dicts = json.loads(json.dumps(json_array))
+
+    # Use a dictionary comprehension to remove duplicates
+    # This will keep the first occurrence of each record
+    unique_records = [dict(t) for t in set(tuple(d.items()) for d in list_of_dicts)]
+    sorted_unique_records=unique_records if field_to_sort_on is None else sorted(unique_records, key=lambda k:k[field_to_sort_on])    
+    # Convert the list of unique dictionaries back to a JSON array
+    json_array_unique = json.loads(json.dumps(sorted_unique_records))
+    #json_array_unique = sorted_unique_records
+
+    #print(json_array_unique)
+    return json_array_unique
+
+def build_notes_cache(test_mode=False):
     """
-    Builds a class list by iterating through files in a folder and saving relevant information to a JSON file.
+    Builds a notes cache iterating through files in a folder and saving relevant information to a JSON file.
 
     Args:
         None
@@ -164,10 +193,7 @@ def build_class_list(test_mode=False):
     Returns:
         None
     """
-    dir_path = "ignore"  
-    json_file_name = "notes.json"  
-    json_file_path = os.path.join(dir_path, json_file_name)
-    print (json_file_path)
+    json_file_path = get_json_cache_path()
 
     folder_id = get_default_folder_id()
     count = 0
@@ -175,9 +201,7 @@ def build_class_list(test_mode=False):
     new_count=0
     new_json_data_file = False
 
-    # Create the JSON file if it doesn't exist
-    if not os.path.exists(dir_path):
-        os.makedirs(dir_path, exist_ok=True, mode=511)
+
     if not os.path.exists(json_file_path):
         with open(json_file_path, 'w') as json_file:
             json_data = []
@@ -186,14 +210,14 @@ def build_class_list(test_mode=False):
             new_json_data_file = True
             print(f"Created {json_file_path} with an empty list.")
     else:
-        with open(json_file_path, 'r') as json_file:
-            json_data = json.load(json_file)
-            count = len(json_data)    
-            if (count == 0):
-                 new_json_data_file = True  
-                 print(f"Using newly created  {json_file_path}")
-            else:
-                print(f"Loaded {count} records from {json_file_path}")   
+        json_data = load_notes_cache(json_file_path)
+
+        count = len(json_data)    
+        if (count == 0):
+                new_json_data_file = True  
+                print(f"Using newly created  {json_file_path}")
+        else:
+            print(f"Loaded {count} records from {json_file_path}")   
 
    
 
@@ -230,27 +254,101 @@ def build_class_list(test_mode=False):
 
     # Save the modified JSON file
     if (new_count >0):
-        save_json_to(json_file_path,deduplicate_json(json_data,field_to_sort_on='timestamp'))
+        save_json_to(deduplicate_json(json_data,field_to_sort_on='timestamp'), json_file_path,)
         print(f"Saved {count} records to {json_file_path}")
     else:
         print(f"No new records to save to {json_file_path}")
 
 
-def deduplicate_json(json_array, field_to_sort_on=None):
-    # Convert the JSON array to a list of dictionaries, making a deep copy to avoid modifying the original data
-    list_of_dicts = json.loads(json.dumps(json_array))
+#TODO: Better to get a modification time from the Google Directory if possible.
+def time_to_rebuild_notes_cache():
+    """
+    Determines if it is time to rebuild the notes cache by comparing the last modified time of the notes cache file with the current time.
+    Currently, at Copilot's suggestion, at least a day must pass before the notes cache is rebuilt.
 
-    # Use a dictionary comprehension to remove duplicates
-    # This will keep the first occurrence of each record
-    unique_records = [dict(t) for t in set(tuple(d.items()) for d in list_of_dicts)]
-    sorted_unique_records=unique_records if field_to_sort_on is None else sorted(unique_records, key=lambda k:k[field_to_sort_on])    
-    # Convert the list of unique dictionaries back to a JSON array
-    json_array_unique = json.loads(json.dumps(sorted_unique_records))
-    #json_array_unique = sorted_unique_records
+    Args:
+        None
+    """
+    json_file_path = get_json_cache_path()
+    json_file_timestamp = get_timestamp_from_path(json_file_path)
+    current_time = datetime.now(timezone.utc)
+    time_difference = current_time - json_file_timestamp
+    # Rebuild the notes cache if the time difference is greater than 1 day
+    if time_difference.days > 0:
+        return True
+    else:
+        return False
 
-    #print(json_array_unique)
-    return json_array_unique
+
+def ask_for_project_hypotheses(file_content):
+
+    system_prompt = """
+    You are an expert in analyzing notes that pertain to projects and tasks within projectes. 
+    Based on the content of the notes, can you provide a list of projects and perhaps their tasks?
+    For each project, a new line with 
+    # Project: at the beginning of each project name, which should be 2 to 5 words long, then a colon (:)
+    On a new line, Description: and a one to two sentence project description, 
+    then on a new line the project name followed by the word tasks and a colon (:),
+    and, on a new line and then the tasks for that project, one task perline each line starting with ##. 
+
+    Example: 
+    # Project: Plan trip to Europe
+    Description: Plan a trip to Europe for the summer, make sure we visit France and Italy.
+    Plan trip to Europe tasks:
+    ## Book flights
+    ## Book hotels
+    ## Plan itinerary
+    
+    # Project: Von Open Source Lab Automation
+    Description: Automate the lab by using AI to understand and reduce the burden of lab processes.
+    Von Open Source Lab Automation tasks:
+    ## Analyze lab processes
+    ## Design AI system
+    ## Automate tracking of projects in the lab
+       
+    Evaluate the following notes and provide a list of projects and tasks.
+    """
+    user_prompt = file_content
+    response = ask_llm(user_prompt, system_prompt)
+    return response
+
+def ruminate_on_projects(projects = []):
+    """
+    Performs analysis on the tasks in the default folder that have been collected into ignore/notes.json.
+    Tries to work out what the set of projects that each might be part of.
+
+    Returns:
+        A JSON list of projects and perhaps their tasks. 
+    """
+
+    notes_cache=load_notes_cache()
+    print(f"Loaded {len(notes_cache)} records from {get_json_cache_path()}")
+    allnotes=""
+    notes_per_ask=20
+    noteNum=0
+    for note in notes_cache:
+        noteNum+=1
+        this_note=f"{note['timestamp']}:\n{note['content']}\n--------------------------------\n\n"
+        allnotes = allnotes + this_note
+        if noteNum % notes_per_ask == 0:
+            print(len(allnotes), f" characters in {notes_per_ask} notes")
+            projects=ask_for_project_hypotheses(allnotes)
+            print(f"{noteNum}: Asked {model_info()} for project hypotheses for {notes_per_ask} notes, results:\n {projects}\n======================\n")
+            allnotes=""
+        #print(note)
+        #print("----")
+        #print(note['content'])
+        #print("----")
+        #print(classify_file(note['content']))
+    projects=ask_for_project_hypotheses(allnotes)
+    print(f"{noteNum}: Asked {model_info()} for project hypotheses for {noteNum%notes_per_ask} notes, results:\n {projects}\n======================\n")
+ 
+
+    return projects
 
 
 if __name__ == "__main__":
-    build_class_list(test_mode=False)
+   if (time_to_rebuild_notes_cache()):
+       build_notes_cache(test_mode=False)
+    
+   projects=ruminate_on_projects()

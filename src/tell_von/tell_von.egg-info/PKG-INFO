@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: tell_von
+Version: 0.1.0
+Requires-Dist: vonlib@ file:///C:/Users/witbr/OneDrive/Development/External/SAILab/Von/src/vonlib#egg=vonlib
