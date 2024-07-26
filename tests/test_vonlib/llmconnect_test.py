@@ -15,6 +15,7 @@ class TestGpt4Connect(unittest.TestCase):
         system_prompt = "You are an expert on filesystem programming"
         response = ask_llm(prompt_text, system_prompt)
         print(f"Test 1 Response: {response}")
+        assert response is not None
         expected_response = "os"
         self.assertIn(expected_response, response)
         expected_response = "listdir"
@@ -30,6 +31,7 @@ class TestGpt4Connect(unittest.TestCase):
         prompt_text = "Who won the world series in 2020?"
         expected_response = "Dodgers"
         response = ask_llm(prompt_text)
+        assert response is not None
         print(f"Test 2 Response: {response}")
         self.assertIn(expected_response,response )
 
