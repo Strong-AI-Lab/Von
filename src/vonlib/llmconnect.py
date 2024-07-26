@@ -3,13 +3,14 @@ from openai import OpenAI
 
 useollama=True  # set to True to use ollama, False to use OpenAI API directly  
 the_model = None # this will be set depending on the client used
+llamaModel = 'llama3.1'
 
 def get_client():
     global the_model
     if (not hasattr(get_client, "api_client")) or ( getattr(get_client,"api_client") == None): 
         if (useollama):
             # Use the ollama API - to use ollama, you need to have it running locally on port 11434: ollama run llama3
-            the_model = 'llama3'
+            the_model = llamaModel
             get_client.api_client = OpenAI(
                 base_url = 'http://localhost:11434/v1',
                 api_key='ollama', # required, but unused
