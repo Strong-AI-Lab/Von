@@ -1,7 +1,7 @@
 import os
 from openai import OpenAI
 
-useollama=True  # set to True to use ollama, False to use OpenAI API directly  
+useollama = True  # set to True to use ollama, False to use OpenAI API directly  
 the_model = None # this will be set depending on the client used
 llamaModel = 'llama3.1'
 
