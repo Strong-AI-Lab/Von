@@ -1,15 +1,16 @@
 import os
 from openai import OpenAI
 
-useollama=True  # set to True to use ollama, False to use OpenAI API directly  
+useollama = True  # set to True to use ollama, False to use OpenAI API directly  
 the_model = None # this will be set depending on the client used
+llamaModel = 'llama3.1'
 
 def get_client():
     global the_model
     if (not hasattr(get_client, "api_client")) or ( getattr(get_client,"api_client") == None): 
         if (useollama):
             # Use the ollama API - to use ollama, you need to have it running locally on port 11434: ollama run llama3
-            the_model = 'llama3'
+            the_model = llamaModel
             get_client.api_client = OpenAI(
                 base_url = 'http://localhost:11434/v1',
                 api_key='ollama', # required, but unused
@@ -40,32 +41,28 @@ def model_info():
 #openai.api_key = os.getenv("OPENAI_API_KEY")
 # Configure the API key from your OpenAI account
 
-def ask_llm(prompt_text, system_prompt=None):
+def ask_llm(user_prompt, system_prompt=None, max_output_tokens=150):
     try:
         # Building the prompt with an optional system message
-        full_prompt = f"{system_prompt}\n\n{prompt_text}" if system_prompt else prompt_text
+        full_prompt = f"{system_prompt}\n\n{user_prompt}" if system_prompt is not None else user_prompt
         #print(full_prompt)
         
         # Sending the prompt to the GPT-4 model
-        response = get_client().chat.completions.create(  # Use GPT-4's engine identifier, update if necessary
-            # messages=[
-            #     {
-            #         "role": "user",
-            #         "content": "How do I output all files in a directory using Python?",
-            #     },
-            # ],                                     
-            messages=[
+        messagelist = []
+        if system_prompt is not None: 
+            messagelist.append(
                 {
                     "role": "system",
                     "content": system_prompt,
-                },
-                {
+                })
+        messagelist.append( {
                     "role": "user",
-                    "content": prompt_text,
-                },
-            ],
+                    "content": user_prompt,
+                })
+        response = get_client().chat.completions.create(  # Use GPT-4's engine identifier, update if necessary                           
+            messages=messagelist,        
             model=the_model,  # Use OpenAI API's model identifier, update if necessary
-            max_tokens=150  # Adjust based on how long you expect the response to be
+            max_tokens=max_output_tokens  # Adjust based on how long you expect the response to be
         )
 
         # Extracting and returning the text response
