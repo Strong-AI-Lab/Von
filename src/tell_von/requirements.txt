@@ -150,3 +150,4 @@ zope.hookable==6.0
 zope.interface==6.3
 zope.lifecycleevent==5.0
 zope.proxy==5.2
+ollama==0.3.1
