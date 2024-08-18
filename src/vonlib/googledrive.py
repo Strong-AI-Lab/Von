@@ -57,6 +57,15 @@ def authenticate_google_drive():
             token.write(creds.to_json())
     return creds
 
+def save_file_to_local_drive(drive,file_name, file_content, folder_id=get_default_folder_id()):
+
+    f = open(drive+"/"+file_name, "a")
+    f.write(file_content)
+    f.close()
+    print('File ID:', get_default_folder_id())
+    print('File Name:', file_name)
+    return get_default_folder_id()
+
 def upload_file_to_drive(service, file_name, file_content,folder_id=get_default_folder_id()):
     file_metadata = {
         'name': file_name,
@@ -82,8 +91,16 @@ def save_to_drive(file_content, file_name=None, folder_id=get_default_folder_id(
     if file_name==None:
         utc_timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d-%H-%M-%S')
         file_name = f"{utc_timestamp}.txt"
-    upload_file_to_drive(get_service(), file_name, file_content, folder_id)
-    print(f"Saved {file_content} to {file_name} in GoogleDrive.")
+    drive = scan_drives()
+    if drive is not None:
+        #upload_file_to_drive(get_service(), file_name=drive, file_content=file_content, folder_id=folder_id)
+        # param 'folder_id' is a file path
+        save_file_to_local_drive(drive,file_name=file_name, file_content=file_content, folder_id=drive)
+        print(f"Saved {file_content} to {file_name} in local drive.")
+    else:    
+        #upload_file_to_drive(get_service(), file_name, file_content)
+        upload_file_to_drive(get_service(), file_name=file_name, file_content=file_content, folder_id=folder_id)
+        print(f"Saved {file_content} to {file_name} in GoogleDrive.")
 
 def save_to_drive_as_google_doc(file_content, file_name=None, folder_id=get_default_folder_id()):
     if file_name==None:
