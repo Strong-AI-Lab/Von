@@ -5,5 +5,5 @@ setup(
     packages=find_packages(include=['vonlib']),
     version='0.1.0',
     description='Python Package of tell_von',
-    author='YUchen SU',
+    author='University of Auckland Strong AI Lab',
 )
