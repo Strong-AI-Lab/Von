@@ -4,21 +4,46 @@ from tkinter import font as tkfont  # for custom fonts
 from tkinter import ttk
 from ttkthemes import ThemedTk
 import customtkinter as ctk
-from vonlib.googledrive import authenticate_google_drive, upload_file_to_drive, save_to_drive
+from vonlib.googledrive import save_to_drive
 
-
+from openai import OpenAI
+import os
+# Load your OpenAI API key
+client = OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY")
+)
 
 text_input = None  # Define the text input widget globally
+text_input_classification = None
 root = None  # Define the root window globally
 
 def start_portal(root):
+    # def on_submit_classification(event=None):
+    #     user_input_classification = text_input_classification.get("1.0", tk.END).rstrip('\n') # Get the text from the text widget
+    #     return 
     def on_submit(event=None):  # Accept an optional event argument     
-    
         user_input = text_input.get("1.0", tk.END).rstrip('\n') # Get the text from the text widget
-
+        user_input_classification = text_input_classification.get("1.0", tk.END).rstrip('\n')
         # print("User input raw:", user_input)
-        if user_input.strip():  # Ensure the input is not just empty or spaces
-            save_to_drive(user_input)  # Save the input to a file
+
+        print(user_input_classification)
+        ###################### LLM ##########################
+        conclusion = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{
+                "role":"system","content":"Please generate a conclusion of the meeting record."
+            },{
+                "role":"user","content":user_input
+            }]
+        )
+        # Print the response
+        print(conclusion.choices[0].message.content)
+        res_conclusion = conclusion.choices[0].message.content
+
+        if res_conclusion.strip():  # Ensure the input is not just empty or spaces
+            save_to_drive(res_conclusion+"\n\n"+"---------------"+"\n\n"+user_input,user_input_classification)  # Save the input to a file
+        elif user_input.strip():  
+            save_to_drive(user_input,user_input_classification)  # Save the input to a file
         else: # If the input is empty, print a message
             print("No non blank input provided.") 
 
@@ -40,6 +65,7 @@ def start_portal(root):
     }
 
     text_input = ctk.CTkTextbox(root,   corner_radius=10,  border_color="blue", font=("Helvetica", 12), width=380, height=100, **gtk_options)
+    text_input.insert("1.0","INPUTING......")
     text_input.pack(pady=20, padx=20)
     text_input.bind('<Control-Return>',  on_submit)  # Bind the Enter key to submi
     text_input.focus()  # Set focus to the text input box
@@ -49,7 +75,7 @@ def start_portal(root):
     # Use CustomTkinter to create the main window
   
     root.title("tell von")
-    root.geometry('400x200')
+    root.geometry('400x300')
 
 # Define custom styles that complement the Arc theme
     custom_font = tkfont.Font(family="Helvetica", size=12)
@@ -61,7 +87,12 @@ def start_portal(root):
     #text_input = ttk.Entry(root, font=custom_font, width=50)
     #text_input.pack(pady=20)
 
-
+    #############classification###########
+    text_input_classification = ctk.CTkTextbox(root,   corner_radius=10,  border_color="blue", font=("Helvetica", 12), width=380, height=50, **gtk_options)
+    text_input_classification.insert("1.0","CLASSIFICATION TITLE")
+    text_input_classification.pack(pady=20, padx=20)
+    text_input_classification.bind('<Control-Return>',  on_submit)  # Bind the Enter key to submi
+    text_input_classification.focus()  # Set focus to the text input box
 
     submit_button = ctk.CTkButton(root, text='Submit', command=on_submit, border_color="blue", **gtk_options)                        
     submit_button.pack(side=tk.LEFT, padx=(20, 10))
