@@ -57,6 +57,13 @@ class VonUser:
     def get_userDB(cls):
         return cls.userdb
 
+    @classmethod
+    def find_by_id(cls, id):
+        vu=cls.get_userCollection().find_one({"_id": ObjectId(id)})
+        if vu is None:
+            return None
+        return VonUser(vu['username'])   #return VonUser object 
+    
 
 
     def __init__(self, username):

@@ -20,9 +20,9 @@ login_manager.login_view = 'login'
 # User loader callback
 @login_manager.user_loader
 def load_user(user_id):
-    user = VonUser.find() 
+    user = VonUser.find_by_id(user_id) 
     if user:
-        return User(user['username'])
+        return User(user.get_username())
     return None
 
 # User class
@@ -30,7 +30,7 @@ class User(UserMixin):
     def __init__(self, username):
         self.vonuser = VonUser(username)
         self.username = username
-        self.id = VonUser.get_id(username)
+        self.id = self.vonuser.get_id()
         #str(mongo.db.users.find_one({"username": username})['_id'])
 
 # Routes
@@ -57,7 +57,7 @@ def login():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    return render_template('dashboard.html', user=current_user.id)
+    return render_template('dashboard.html', user=current_user.username)
 
 @app.route('/logout')
 @login_required
