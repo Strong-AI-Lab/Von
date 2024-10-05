@@ -101,6 +101,7 @@ debugpy==1.8.1
 distro==1.9.0
 exceptiongroup==1.2.1
 Flask>=3.0.3
+flask_testing>=0.8.1
 gcloud==0.18.3
 google-api-core==2.19.0
 google-api-python-client==2.128.0

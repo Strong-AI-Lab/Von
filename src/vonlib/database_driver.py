@@ -197,7 +197,7 @@ class DatabaseDriver:
                 dblist = self.client.list_database_names()
 
                 if database_name not in dblist:
-                    db = self.client[database_name]
+                    db = self.client[database_name] # This will create a new database only if data is stored in it. 
                     return db
                 else:
                     return None

@@ -1,25 +1,26 @@
 from flask import Flask, render_template, redirect, url_for, request
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from flask_pymongo import PyMongo
-from bson.objectid import ObjectId
+from web_interface.user_data import VonUser # work our why it doesn't like this import when it's in the same directory
 import argparse
 
+#For details, see https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-111
+# write a minimal local web page server, that includes login and identity tracking, and 
+# is easy to redeploy on a remote server (e.g. one running on aws or google cloud or Azure). 
+# I want to be able to easily call python backend code from the server. 
+# Make sure the start code for the local server has an option to run in foreground or background.
 app = Flask(__name__)
 app.secret_key = 'your_secret_key'  # Replace with a secure secret key in production
-
-# Configure MongoDB
-app.config["MONGO_URI"] = "mongodb://localhost:27017/yourdbname"  # Change this for your MongoDB URI
-mongo = PyMongo(app)
 
 # Configure Flask-Login
 login_manager = LoginManager()
 login_manager.init_app(app)
-login_manager.login_view = 'login'
+login_manager.login_view = 'login' 
 
 # User loader callback
 @login_manager.user_loader
 def load_user(user_id):
-    user = mongo.db.users.find_one({"_id": ObjectId(user_id)})
+    user = VonUser.find() 
     if user:
         return User(user['username'])
     return None
@@ -27,8 +28,10 @@ def load_user(user_id):
 # User class
 class User(UserMixin):
     def __init__(self, username):
+        self.vonuser = VonUser(username)
         self.username = username
-        self.id = str(mongo.db.users.find_one({"username": username})['_id'])
+        self.id = VonUser.get_id(username)
+        #str(mongo.db.users.find_one({"username": username})['_id'])
 
 # Routes
 @app.route('/')
@@ -42,8 +45,8 @@ def login():
         password = request.form['password']
 
         # Verify username and password
-        user = mongo.db.users.find_one({"username": username})
-        if user and user['password'] == password:  # In production, use hashed passwords
+        user = VonUser(username)
+        if user and user.get_password() == password:  # In production, use hashed passwords
             login_user(User(username))
             return redirect(url_for('dashboard'))
         else:
