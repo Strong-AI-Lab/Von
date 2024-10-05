@@ -1,8 +1,16 @@
-from flask import Flask, render_template, redirect, url_for, request
+from flask import Flask, render_template, redirect, url_for, request, flash
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from flask_pymongo import PyMongo
-from web_interface.user_data import VonUser # work our why it doesn't like this import when it's in the same directory
+
+from werkzeug.security import generate_password_hash, check_password_hash
+from bson.objectid import ObjectId
+import re
+
+from pymongo import MongoClient
+from flask_pymongo import PyMongo #needed?
 import argparse
+import os
+from web_interface.user_data import VonUser # work our why it doesn't like this import when it's in the same directory
+
 
 #For details, see https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-111
 # write a minimal local web page server, that includes login and identity tracking, and 
@@ -43,16 +51,62 @@ def login():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-
+        hpass=generate_password_hash(password, method='pbkdf2:sha256')
+        
         # Verify username and password
-        user = VonUser(username)
-        if user and user.get_password() == password:  # In production, use hashed passwords
+        user = VonUser.find_by_username(username)
+        if user and check_password_hash(hpass,password):  # In production, use hashed passwords
             login_user(User(username))
             return redirect(url_for('dashboard'))
         else:
-            return 'Invalid credentials', 401
+            flash('Login Unsuccessful. Please try again or signup.', 'error')
+            return redirect(url_for('login'))
+            #return 'Invalid credentials', 401
 
     return render_template('login.html')
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'POST':
+        # Get form data
+        username = request.form['username']
+        email = request.form['email']
+        password = request.form['password']
+        confirm_password = request.form['confirm_password']
+
+        # Validate form data
+        if not username or not email or not password or not confirm_password:
+            flash('Please fill out all fields.', 'error')
+            return redirect(url_for('signup'))
+
+        if password != confirm_password:
+            flash('Passwords do not match.', 'error')
+            return redirect(url_for('signup'))
+
+        existing_user = VonUser.find_by_username(username)
+        # Check if user already exists
+        if existing_user and username == existing_user.get_username():
+            flash('Username already exists.', 'error')
+            return redirect(url_for('signup'))
+
+        #Validate email format
+        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+        if not re.match(email_regex, email):
+            flash('Invalid email format.', 'error')
+            return redirect(url_for('signup'))
+
+        hpass=generate_password_hash(password, method='pbkdf2:sha256')
+        newUser=VonUser.create_user(username, email, hpass) #create_user is a class method
+        if not newUser:
+            flash('Error creating user.', 'error')
+            return redirect(url_for('signup'))  
+
+
+        flash('Registration successful. Please log in.', 'success')
+        return redirect(url_for('login'))
+
+    return render_template('signup.html')
+
 
 @app.route('/dashboard')
 @login_required
@@ -75,6 +129,7 @@ if __name__ == '__main__':
 
     if args.background:
         from multiprocessing import Process
+
 
         def run_app():
             app.run(host=args.host, port=args.port)

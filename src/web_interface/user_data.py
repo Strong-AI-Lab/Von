@@ -1,4 +1,6 @@
 from bson.objectid import ObjectId
+from werkzeug.security import generate_password_hash, check_password_hash
+
 from vonlib import database_driver as vondb
 
 config = {}
@@ -42,13 +44,36 @@ class VonUser:
             if user_collection is None:
                 raise Exception(f"Collection {usercollection_name} does not exist and could not be created.")
 
-        # put self in 湛 Zhan von Neumarkt <vonneumarkt@gmail.com>
-        user_collection.insert_one({'username': 'zhan', 'email': 'vonneumarkt@gmail.com','password': 'password'})
-
         cls.userdb = user_database
         cls.usercollection = user_collection
         print(f"VonUser: DB={cls.userdb.name}, Coll={cls.usercollection.name}")
 
+    @classmethod
+    def create_user(cls, username, email, password):
+        """
+        Creates a new user in the user database collection.
+
+        This method creates a new user document in the user database collection. The user document
+        contains the provided username, email, and password.
+
+        Args:
+            username (str): The username of the new user.
+            email (str): The email of the new user.
+            password (str): The password of the new user.
+
+        Returns:
+            VonUser: A VonUser object representing the new user.
+        """
+
+        user_dict = {
+            'username': username,
+            'email': email,
+            'password': password #should be hashed by now
+        }
+
+        cls.get_userCollection().insert_one(user_dict)
+        return VonUser(username)
+    
     @classmethod
     def get_userCollection(cls):
         return cls.usercollection
@@ -64,6 +89,12 @@ class VonUser:
             return None
         return VonUser(vu['username'])   #return VonUser object 
     
+    @classmethod
+    def find_by_username(cls, username):
+        vu=cls.get_userCollection().find_one({"username": username})
+        if vu is None:
+            return None 
+        return VonUser(username)   #return VonUser object
 
 
     def __init__(self, username):
