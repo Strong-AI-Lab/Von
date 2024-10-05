@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Von</title>
+</head>
+<body>
+    <h1>Welcome to Von</h1>
+    {% if current_user.is_authenticated %}
+        <p>Hello, {{ current_user.id }}!</p>
+        <p><a href="{{ url_for('dashboard') }}">Go to Dashboard</a></p>
+        <p><a href="{{ url_for('logout') }}">Logout</a></p>
+    {% else %}
+        <p><a href="{{ url_for('login') }}">Login</a></p>
+    {% endif %}
+</body>
+</html>

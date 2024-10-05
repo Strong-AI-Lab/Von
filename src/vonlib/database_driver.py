@@ -16,8 +16,7 @@ def get_local_client():
         client = MongoClient('mongodb://localhost:27017/')
         return client
     except errors.ConnectionError as e:
-        print(f"Error connecting to MongoDB: {e}")
-        return None
+        raise RuntimeError(f"Error connecting to MongoDB: {e}")
 
 class DatabaseDriver:
 

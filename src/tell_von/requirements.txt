@@ -5,6 +5,10 @@ openai>=1.28.1
 # Flask framework for creating web applications in Python
 Flask>=3.0.3
 
+# Testing frameworks
+pytest>=7.4.0
+pytest-flask>=1.2.0
+
 # # Package 1
 # package1==1.0.0
 
@@ -129,6 +133,7 @@ pyasn1==0.6.0
 pyasn1_modules==0.4.0
 pydantic==2.7.1
 pydantic_core==2.18.2
+pymongo>=4.10.1 # AND MAKE SURE SEPARATE bson IS NOT INSTALLED
 pyparsing==3.1.2
 pysimplegui>=5.0.5
 requests==2.31.0
