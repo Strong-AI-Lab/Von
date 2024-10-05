@@ -7,6 +7,7 @@ import datetime
 import os
 import io
 from googleapiclient.http import MediaIoBaseDownload
+from vonlib.localdrive import scan_drives
 
 SCOPES = [
     'https://www.googleapis.com/auth/drive.file',

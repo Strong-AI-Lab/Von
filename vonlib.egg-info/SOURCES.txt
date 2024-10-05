@@ -1,0 +1,7 @@
+LICENSE
+README.md
+pyproject.toml
+vonlib.egg-info/PKG-INFO
+vonlib.egg-info/SOURCES.txt
+vonlib.egg-info/dependency_links.txt
+vonlib.egg-info/top_level.txt
