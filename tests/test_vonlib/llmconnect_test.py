@@ -18,7 +18,7 @@ class TestGpt4Connect(unittest.TestCase):
         assert response is not None
         expected_response = "os"
         self.assertIn(expected_response, response)
-        expected_response = "listdir"
+        expected_response = "listdir" #this doesn't always happen
         self.assertIn(expected_response, response)
 
 

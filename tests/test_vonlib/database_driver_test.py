@@ -20,15 +20,21 @@ class TestCDatabaseDriver(unittest.TestCase):
         cls.table_name = "TestTable"
 
         if cls.driver is None:
-            #print("setUpClass: cls.driver is None")
+            print("setUpClass: Failed to initialize DatabaseDriver")
+
+            cls.skip_all_tests = True # Make sure we know the driver isn't good, and skip tests
             return
 
         cls.db = cls.driver.create_database(cls.db_name)
         cls.table = cls.driver.create_table(cls.db, cls.table_name)
+        cls.skip_all_tests = False
 
     def setUp(self):
 
         #print("Entering self.setup")
+        if getattr(self, 'skip_all_tests', False):  # If the class setup failed, skip the tests; False is the default value, not the thing to test. This tests whether 'skip_all_tests' has been set to True.
+            self.skipTest("DatabaseDriver setup failed in setUpClass")
+            return
         if self.driver is None:
             self.skipTest("no valid database system")
             return
@@ -45,8 +51,8 @@ class TestCDatabaseDriver(unittest.TestCase):
         This method is called once after all tests.
         """
 
-        if cls.driver is None:
-            #print("tearDownClass: cls.driver is None")
+        if not getattr(cls, 'skip_all_tests', False):
+            cls.driver.delete_database(cls.db_name)
             return
 
         cls.driver.delete_table(cls.db, cls.table_name)

@@ -16,8 +16,7 @@ def get_local_client():
         client = MongoClient('mongodb://localhost:27017/')
         return client
     except errors.ConnectionError as e:
-        print(f"Error connecting to MongoDB: {e}")
-        return None
+        raise RuntimeError(f"Error connecting to MongoDB: {e}")
 
 class DatabaseDriver:
 
@@ -198,7 +197,7 @@ class DatabaseDriver:
                 dblist = self.client.list_database_names()
 
                 if database_name not in dblist:
-                    db = self.client[database_name]
+                    db = self.client[database_name] # This will create a new database only if data is stored in it. 
                     return db
                 else:
                     return None
