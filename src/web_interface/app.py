@@ -18,7 +18,7 @@ from web_interface.user_data import VonUser # work our why it doesn't like this 
 # I want to be able to easily call python backend code from the server. 
 # Make sure the start code for the local server has an option to run in foreground or background.
 app = Flask(__name__)
-app.secret_key = 'your_secret_key'  # Replace with a secure secret key in production
+app.secret_key = os.getenv("VON_APP_SECRET_KEY")  # Replace with a secure secret key in production
 
 # Configure Flask-Login
 login_manager = LoginManager()

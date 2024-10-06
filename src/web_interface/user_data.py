@@ -1,14 +1,15 @@
+import os
 from bson.objectid import ObjectId
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from vonlib import database_driver as vondb
+# fyi in mongosh > show databases ; > use xxx ; > show collections ; Kill collection yyy > db.yyy.drop() ; kill db xxx > db.dropDatabase()
 
-config = {}
-config["USER_DB"] = "vonUsers"
-config["USER_COLLECTION"] = "users"
+config = {}  #not entirely clear that this config
+config["CONFIG_DB"] = os.getenv('VON_CONFIG_DB')
+config["USER_COLLECTION"] = os.getenv('VON_USER_COLLECTION')
 
-vonuserdb = config["USER_DB"]
-vonusercollection = config["USER_COLLECTION"]
+
 
 class VonUser:
     vomongo = vondb.DatabaseDriver()
@@ -16,7 +17,7 @@ class VonUser:
     usercollection=None
     
     @classmethod
-    def set_userDB(cls, userdb_name=vonuserdb, usercollection_name=vonusercollection):
+    def set_userDB(cls, userdb_name=config["CONFIG_DB"], usercollection_name=config["USER_COLLECTION"]):
         """
         Sets the user database collection for the class.
 
@@ -130,7 +131,7 @@ class VonUser:
     #     }
     
 
-VonUser.set_userDB(vonuserdb, vonusercollection)
+VonUser.set_userDB(config["CONFIG_DB"], config["USER_COLLECTION"])
 
 
 
