@@ -1,17 +1,17 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Von</title>
-</head>
-<body>
-    <h1>Welcome to Von</h1>
-    {% if current_user.is_authenticated %}
-        <p>Hello, {{ current_user.username }}!</p>
-        <p><a href="{{ url_for('dashboard') }}">Go to Dashboard</a></p>
-        <p><a href="{{ url_for('logout') }}">Logout</a></p>
-    {% else %}
-        <p><a href="{{ url_for('login') }}">Login</a></p>
-    {% endif %}
-</body>
-</html>
+{% extends "base.html" %}
+
+{% block title %}Welcome to Von{% endblock %}
+
+{% block content %}
+    <div class="container">
+        <h1>Welcome to Von</h1>
+        {% if current_user.is_authenticated %}
+            <p>Hello, {{ current_user.username }}!</p>
+            <p><a href="{{ url_for('dashboard') }}">Go to Dashboard</a></p>
+            <p><a href="{{ url_for('logout') }}">Logout</a></p>
+        {% else %}
+            <p><a href="{{ url_for('login') }}">Login</a></p>
+            <p>Don't have an account? <a href="{{ url_for('signup') }}">Sign up here</a>.</p>
+        {% endif %}
+    </div>
+{% endblock %}

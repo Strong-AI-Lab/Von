@@ -1,19 +1,13 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Signup</title>
-</head>
-<body>
+{% extends "base.html" %}
+
+{% block title %}Von Signup{% endblock %}
+
+{% block content %}
     <h1>Sign Up</h1>
     <!-- Display flash messages -->
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
-        <ul>
-          {% for category, message in messages %}
-            <li style="color: {% if category == 'error' %}red{% else %}green{% endif %};">{{ message }}</li>
-          {% endfor %}
-        </ul>
+        <ul>{%- for category, message in messages -%}<li class="message {% if category == 'error' %}error{% else %}success{% endif %}">{{ message }}</li>{%- endfor -%}</ul>
       {% endif %}
     {% endwith %}
     <!-- Signup form -->
@@ -32,6 +26,6 @@
 
         <button type="submit">Register</button>
     </form>
-    <p>Already have an account? <a href="{{ url_for('login') }}">Log in here</a>.</p>
-</body>
-</html>
+    <p></p>
+    </p>Already have an account? <a href="{{ url_for('login') }}">Log in here</a>.</p>
+{% endblock %}

@@ -1,0 +1,133 @@
+/* styles.css */
+
+/* Reset default margins and padding */
+body, h1, p, ul, li, form, input, button {
+    margin: 0;
+    padding: 0;
+}
+
+/* General Styles */
+body {
+    font-family: Arial, sans-serif;
+    background-color: #f4f4f4;
+    margin: 0;
+    padding: 20px;
+}
+
+/* Flex container for centering content */
+.container {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh; /* Ensure the container takes full viewport height */
+}
+
+/* Heading Styles */
+h1 {
+    color: #333;
+}
+
+/* Paragraph Styles */
+p {
+    font-size: 1.1em;
+    color: #555;
+}
+
+/* Link Styles */
+a {
+    color: #5cb85c;
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+/* Navigation Links */
+.nav-links {
+    margin-top: 20px;
+    display: flex;
+    gap: 15px; /* Add gap between links */
+}
+
+.nav-links a {
+    padding: 10px 15px;
+    background-color: #e7e7e7;
+    border-radius: 5px;
+    text-decoration: none;
+    color: #333;
+}
+
+.nav-links a:hover {
+    background-color: #d7d7d7;
+}
+
+/* Flash Messages */
+.message {
+    list-style-type: none;
+    margin: 0;
+    padding: 0.5em;
+}
+
+.error {
+    color: #D8000C;
+    background-color: #FFBABA;
+    border: 1px solid #D8000C;
+    border-radius: 5px;
+}
+
+.success {
+    color: #4F8A10;
+    background-color: #DFF2BF;
+    border: 1px solid #4F8A10;
+    border-radius: 5px;
+}
+
+/* 
+ * This CSS code is responsible for styling the form elements.
+ * It includes styles for the form container, input fields, labels, 
+ * and buttons to ensure a consistent and visually appealing layout.
+ * 
+ * - The form container is styled to center the form on the page and 
+ *   provide padding and margin for spacing.
+ * - Input fields are styled for better readability and user interaction.
+ * - Labels are styled to align properly with their corresponding input fields.
+ * - Buttons are styled to be visually distinct and provide feedback on interaction.
+ */
+ form {
+    background: #fff;
+    padding: 20px;
+    border-radius: 5px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+input[type="text"],
+input[type="password"] {
+    width: 100%;
+    padding: 10px;
+    margin: 10px 0;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+}
+
+button {
+    width: 100%;
+    padding: 10px;
+    background: #5cb85c;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #4cae4c;
+}
+
+label {
+    display: block;
+    margin: 10px 0;
+    color: #333;
+}
+
