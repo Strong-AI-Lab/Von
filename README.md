@@ -1,0 +1,1 @@
+This is the repo for the open source collaborative development of Von, and Intelliigent agent lab knowledge management and assistant systems developed by the Strong AI Lab in the Natural Artificial and Organisational Intelligence Institute at the University of AUckland.
