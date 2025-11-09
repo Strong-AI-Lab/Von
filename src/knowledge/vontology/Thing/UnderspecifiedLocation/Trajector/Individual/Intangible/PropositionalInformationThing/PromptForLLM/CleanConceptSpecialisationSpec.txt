@@ -1,0 +1,51 @@
+        The following is a possibly incomplete description of a concept along with its specialisations.
+        Please extract as JSON, the concept itself, including its name and description, 
+        and then a list of its specialisations. Each of these specialisations should have the 
+        name and description of the specialisation. Do not attempt to extract any other information.
+        The name and description should be copied as exactly and completely as possible. If the description contains 
+        any special characters, quote marks, etc, they should be escaped as needed to comply with being included in JSON strings. 
+
+        Do not attempt to find further specialisations of the specialisations. 
+        If any standard naming schemes or representation formats apply to the concept, or any alternative names, please 
+              include these as specialisations and mention the scheme or standard in the corresponding 
+              specialisation's description.
+        Please be very careful to inlude each and every specialisation, and only the specialisations listed. 
+
+        Please be careful to include all the necessary punctuation and braces to make the output valid JSON.
+        Please be very careful to follow the format exactly as shown in the example below.     
+        Example format: 
+            {
+             "concept": {
+                "name": "<concept name>", 
+                "description": "<concept description>"
+                },
+            "specialisations": 
+                [
+                    {
+                        "name": "<specialisation name1>", 
+                        "description": "<specialisation description1>"
+                    },
+                    {
+                        "name": "<specialisation name2>", 
+                        "description": "<specialisation description2>"
+                    }
+                ]
+            }
+
+    If no specialisations are listed, do not invent new ones, instead include the empty list as follows.
+    Example format:
+        {
+            "concept": {
+            "name": "<concept name>", 
+            "description": "<concept description>"
+            },
+        "specialisations": []
+        }
+
+        Only output the JSON dict - not a single character of extra context or description;
+        this is very important since I need to parse the output simply using python. 
+        It is very important to use the exact format shown in the example - 
+        only the "concept" and "specialisations" keys should keys for the dict at the top level.
+        Be careful to use exactly the same keys as in the example, only substituting for the values, like "<concept name>".
+        
+        The concept you should describe in JSON is described in text or Markdown as follows:

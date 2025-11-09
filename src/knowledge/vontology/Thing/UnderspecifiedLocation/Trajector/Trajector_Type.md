@@ -1,0 +1,6 @@
+# Trajector
+
+**Source Concept**: http://sw.opencyc.org/concept/Mx4rv9K_OJwpEbGdrcN5Y29ycA
+**SubConcept Of**: underspecified location
+
+**Description**: This is a very broad classification, encompassing all those concepts that can be seen, in a cognitive-linguistic sense, to be trajectors relative to a given background or landmark in  an event or a relation. A <a href="http://sw.opencyc.org/concept/Mx4rv9K_OJwpEbGdrcN5Y29ycA" class="cyc_term">Trajector_Underspecified</a> is the foregrounded element of an underspecified relation that relates in some way to a <a href="http://sw.opencyc.org/concept/Mx4rwAKCcZwpEbGdrcN5Y29ycA" class="cyc_term">Landmark_Underspecified</a>. When one says that 'the cat is in the cradle', an underspecified 'in' relation (<a href="http://sw.opencyc.org/concept/Mx4rv5-MMpwpEbGdrcN5Y29ycA" class="cyc_term">in_UnderspecifiedContainer</a>) connects the trajector, <a href="http://sw.opencyc.org/concept/Mx4rvVkFc5wpEbGdrcN5Y29ycA" class="cyc_term">Cat</a>, to the landmark <a href="http://sw.opencyc.org/concept/Mx4rwP1eIJwpEbGdrcN5Y29ycA" class="cyc_term">Cradle</a> (which happens to be a container). If I kick the cradle across the floor, the <a href="http://sw.opencyc.org/concept/Mx4rwP1eIJwpEbGdrcN5Y29ycA" class="cyc_term">Cradle</a> now becomes the trajector of this action (and the room becomes the landmark).

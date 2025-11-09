@@ -1,0 +1,9 @@
+Below, you will see the name of a concept representing a type of thing, 
+a list of the types above it, and possibly a list of its sibling concepts. 
+You will also see an example of the format to use, using the concept "Thing", which is the top node of the ontology. 
+
+Please use any appropriate backround knowledge to generate descriptions of the new type concept in the format required.
+If you can generate that description, please return it, following the format for the "Thing" concept as closely as possible, 
+while still being as precise and thorough as possible. 
+If you don't think you can do so clearly, because you don't have precise enough information about that the concept 
+is supposed to denote, please just return ***CLARIFICATION NEEDED***.

@@ -1,0 +1,186 @@
+<!-- Concept Tab Content (Previously Entity Tab) -->
+<div class="concept-header">
+  <span id="conceptTypeDisplayNamePluralElement" class="concept-type-header"></span>
+  <!-- (Removed redundant left-side delete button: a primary delete control already exists elsewhere) -->
+</div>
+
+<!-- Step 1: Initial Input -->
+<div id="conceptStep1">
+  <div id="conceptFormTitle" class="concept-form-title">
+    <span id="conceptFormTitleText">Select or Create Concept</span>
+  </div>
+  <!-- Legacy single-note notes UI removed; multi-note relations UI injected dynamically -->
+  <!-- Keep Start Interaction Button -->
+  <button id="startInteractionButton">Start Interaction</button>
+  <!-- Add Save Notes Button (initially hidden/disabled) -->
+  <button id="saveNotesButton" class="concept-save-button">Save</button>
+  <button id="suggestInfoButton" class="concept-save-button">Suggest Missing Info</button>
+  <p id="conceptStep1Status" class="concept-status"></p>
+</div>
+
+<!-- Step 2: Follow-up Question and Answer -->
+<div id="conceptStep2" class="concept-step">
+  <!-- Display of concept notes for editing during interaction -->
+  <div id="updatedNotesDisplay" class="concept-notes-display">
+    <h4 id="updatedNotesTitle">Concept Notes</h4>
+    <textarea id="updatedNotesContent" class="concept-notes-content" title="Edit concept notes"
+      placeholder="Add or edit concept notes here..."></textarea>
+    <button id="saveNotesButtonInteraction" class="concept-interaction-save-button">Save Notes</button>
+  </div>
+
+  <p id="followUpQuestion" class="concept-followup-question"></p>
+
+  <!-- Move status message right after the question -->
+  <p id="conceptStep2Status" class="concept-step-status"></p>
+
+  <label for="conceptAnswer">Your Answer:</label><br>
+  <div class="concept-answer-container">
+    <input type="text" id="conceptAnswer" name="conceptAnswer" class="concept-answer-input">
+    <button id="submitAnswerButton">Submit Answer</button>
+  </div>
+  <button id="cancelInteractionButton" class="concept-cancel-button">Cancel Interaction</button>
+  <button id="endInteractionButton" class="concept-end-button">End Interaction</button>
+
+  <!-- Display of the last Q&A exchange -->
+  <div id="lastQADisplay" class="concept-last-qa-display">
+    <h4>Last Q&A Exchange:</h4>
+    <div class="concept-qa-item">
+      <strong>Question:</strong> <span id="lastQuestion" class="concept-last-question"></span>
+    </div>
+    <div class="concept-qa-item">
+      <strong>Your Answer:</strong> <span id="lastAnswer" class="concept-last-answer"></span>
+    </div>
+    <div>
+      <strong>Synthesis:</strong> <span id="lastSynthesis" class="concept-last-synthesis"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Step 3: Final Result -->
+<div id="conceptStep3" class="concept-step">
+  <p id="finalResult" class="concept-final-result"></p>
+  <button id="resetConceptTabButton">Start New Interaction</button>
+</div>
+
+<!-- Concept list display area moved under Instances section -->
+
+<!-- Type-related sections: only shown for Type tabs -->
+<div id="typeSections" class="concept-list-section">
+  <!-- Type Description (moved from Vontology tab) -->
+  <div id="typeDescriptionSection" class="concept-list-subsection">
+    <h3 class="concept-list-title">Description</h3>
+    <div class="type-description-wrapper">
+      <div id="typeDescriptionDisplay" class="concept-type-description editable-description"><i>Select or open a type to
+          view its description.</i></div>
+      <textarea id="typeDescriptionTextarea" class="description-editor hidden"
+        placeholder="Enter description for this type..." rows="6"></textarea>
+      <div class="desc-actions text-block-actions">
+        <button id="typeCopyDescription" class="round-icon-button" title="Copy description to clipboard"
+          aria-label="Copy description to clipboard" data-icon="copy"></button>
+        <button id="typeAnnotateDescription" class="round-icon-button" title="Annotate description"
+          aria-label="Annotate description" data-icon="annotate"></button>
+        <button id="typeEditDescriptionButton" class="round-icon-button" title="Edit description"
+          aria-label="Edit description" data-icon="edit"></button>
+        <button id="typeDeleteDescriptionButton" class="round-icon-button" title="Delete description"
+          aria-label="Delete description" data-icon="delete"></button>
+      </div>
+      <div id="typeDescriptionEditActions" class="description-edit-actions hidden">
+        <button id="typeEditDescriptionSave" class="small-btn">Save</button>
+        <button id="typeEditDescriptionCancel" class="small-btn">Cancel</button>
+      </div>
+    </div>
+    <span id="typeDescriptionStatus" class="concept-status ml-2"></span>
+  </div>
+
+  <!-- Names Management Section -->
+  <div id="namesSection" class="concept-list-subsection">
+    <h3 class="concept-list-title">Names</h3>
+    <div id="namesDisplay">
+      <div id="namesList" class="names-list-container">
+        <!-- Names will be populated dynamically -->
+      </div>
+      <div class="names-add-form">
+        <input id="newNameInput" type="text" placeholder="New name" />
+        <select id="newNameLanguage" title="Select language for the new name">
+          <!-- Options populated by languageConfig.js -->
+        </select>
+        <select id="newNameType" title="Select type for the new name">
+          <option value="NL">Natural Language</option>
+          <option value="CODE">Code</option>
+          <option value="ABBR">Abbreviation</option>
+        </select>
+        <button id="addNameButton" type="button">Add Name</button>
+        <span id="namesStatus" class="concept-status"></span>
+      </div>
+    </div>
+  </div>
+  <div id="subtypesSection" class="concept-list-subsection">
+    <h3 class="concept-list-title">Subtypes</h3>
+    <ul id="subtypesList">
+      <!-- Subtypes will be populated dynamically -->
+    </ul>
+    <div class="concept-create-form">
+      <input id="newSubtypeInput" type="text" placeholder="New subtype name" />
+      <button id="createSubtypeButton" type="button" class="concept-add-button">+ Add Subtype</button>
+    </div>
+    <p id="subtypesStatus" class="concept-status"></p>
+  </div>
+  <div id="instancesSection" class="concept-list-subsection">
+    <div class="concept-list-header">
+      <h3 class="concept-list-title">Instances <span id="conceptTypeDisplayNameElement">List</span> <small>(<span
+            id="conceptCount">0</span>)</small></h3>
+      <div class="concept-list-actions">
+        <label class="concept-filter-toggle" title="Show only direct instances (hide typed/indirect)">
+          <input type="checkbox" id="conceptDirectOnlyToggle"> Direct only
+          <span class="concept-direct-badge">Direct</span>
+        </label>
+        <button id="addNewConceptButton" title="Create new concept" class="concept-add-button" tabindex="4">+ Add
+          New</button>
+      </div>
+    </div>
+    <p id="conceptListNote" class="concept-list-note hidden"></p>
+    <ul id="conceptListUl">
+      <!-- List will be populated dynamically with instances -->
+    </ul>
+    <button id="refreshConceptListButton">Refresh List</button>
+    <div class="concept-create-form">
+      <input id="newInstanceInput" type="text" placeholder="New instance name" />
+      <button id="createInstanceButton" type="button" class="concept-add-button">+ Add Instance</button>
+    </div>
+    <p id="instancesStatus" class="concept-status"></p>
+  </div>
+</div>
+
+<!-- Relationships section (shown for both Type and Individual tabs) -->
+<div id="relationshipsSection" class="concept-list-subsection">
+  <h3 class="concept-list-title">Relationships</h3>
+  <div id="relationshipsContent">
+    <!-- Populated dynamically -->
+  </div>
+  <div id="relationshipsAddForm" class="mt-2 flex gap-2 ai-center flex-wrap">
+    <label for="relationshipKindSelect" class="sr-only">Relationship kind</label>
+    <select id="relationshipKindSelect" aria-label="Relationship kind">
+      <!-- Options will be populated dynamically depending on tab kind -->
+    </select>
+    <input id="relationshipTargetInput" type="text" placeholder="#V#target_concept_id" class="flex-1 minw-220" />
+    <button id="relationshipAddButton" type="button">Add</button>
+    <span id="relationshipsStatus" class="concept-status ml-2"></span>
+  </div>
+</div>
+
+<!-- Inline script for concept tab specific functionality -->
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    const conceptAnswerInput = document.getElementById('conceptAnswer');
+    const submitAnswerButton = document.getElementById('submitAnswerButton');
+
+    if (conceptAnswerInput && submitAnswerButton) {
+      conceptAnswerInput.addEventListener('keypress', function (event) {
+        if (event.key === 'Enter') {
+          event.preventDefault(); // Prevent default form submission
+          submitAnswerButton.click(); // Trigger click on the submit button
+        }
+      });
+    }
+  });
+</script>

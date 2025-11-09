@@ -1,0 +1,35 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "test:frontend",
+			"type": "npm",
+			"script": "test:frontend",
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "test:frontend:watch",
+			"type": "npm",
+			"script": "test:watch",
+			"isBackground": true,
+			"group": "test",
+			"problemMatcher": []
+		},
+		{
+			"label": "test:coverage",
+			"type": "npm",
+			"script": "test:coverage",
+			"group": "test",
+			"problemMatcher": []
+		},
+		{
+			"label": "todo",
+			"type": "shell",
+			"command": "Write-Output \"TODO placeholder\""
+		}
+	]
+}

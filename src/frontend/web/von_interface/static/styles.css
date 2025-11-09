@@ -1,0 +1,5457 @@
+/*
+    Frontend CSS Guidelines
+    - Avoid inline styles in templates. Define reusable classes here instead.
+    - Prefer semantic component classes over ad-hoc per-page styles.
+    - Use small utility classes (spacing, layout) for common one-offs.
+*/
+
+/* Remove bullets and left margin from all Vontology tree uls */
+#vontologyTreeContainer ul {
+    list-style-type: none;
+    margin: 0;
+    padding-left: 20px;
+}
+
+/* General Styles */
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0;
+    background-color: #f4f4f4;
+    color: #333;
+    padding-top: 60px;
+    /* MODIFIED: Space for the fixed tab container, adjusted height */
+    padding-bottom: 60px;
+    /* ADDED: Space for the fixed footer */
+}
+
+/* Accessibility utility: visually hidden but screen-reader accessible */
+.visually-hidden {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0 0 0 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+}
+
+/* Vontology busy indicator icon */
+#vontologyBusyIndicator {
+    display: none;
+    margin-left: 6px;
+    cursor: default;
+}
+
+#vontologyBusyIndicator.active {
+    display: inline;
+    animation: vontology-spin 1.2s linear infinite;
+}
+
+@keyframes vontology-spin {
+    0% {
+        filter: brightness(1);
+    }
+
+    50% {
+        filter: brightness(0.6);
+    }
+
+    100% {
+        filter: brightness(1);
+    }
+}
+
+.annotation-input {
+    margin-top: 4px;
+}
+
+.annotation-controls {
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.annotation-status {
+    margin-left: 4px;
+    font-style: italic;
+    color: #555;
+}
+
+.llm-toggle {
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.annotation-results {
+    margin-top: 18px;
+}
+
+.annotation-empty {
+    color: #b00;
+}
+
+.annotation-span-block {
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 8px;
+    margin-bottom: 10px;
+    background: #fafafa;
+}
+
+/* Classification colour coding (JVNAUTOSCI-552 extension)
+   kind-type: light blue, kind-individual: light green, kind-hypothesis: yellow */
+.annotation-span-block.kind-type {
+    background: #e6f2ff;
+    border-color: #b6dcff;
+}
+
+.annotation-span-block.kind-individual {
+    background: #e4f9ed;
+    border-color: #b6eccf;
+}
+
+.annotation-span-block.kind-hypothesis {
+    background: #fff7d9;
+    border-color: #ffe9a8;
+}
+
+/* Classification legend */
+.annotation-legend {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 0.55rem;
+    margin-top: 2px;
+}
+
+.annotation-legend .legend-title {
+    font-weight: 600;
+    letter-spacing: .5px;
+    color: #475569;
+    text-transform: uppercase;
+}
+
+.legend-chip {
+    padding: 2px 6px;
+    border-radius: 10px;
+    line-height: 1.2;
+    font-weight: 600;
+    letter-spacing: .3px;
+    border: 1px solid transparent;
+}
+
+.legend-chip.chip-type {
+    background: #e6f2ff;
+    border-color: #b6dcff;
+    color: #0f4c81;
+}
+
+.legend-chip.chip-individual {
+    background: #e4f9ed;
+    border-color: #b6eccf;
+    color: #065f46;
+}
+
+.legend-chip.chip-hypothesis {
+    background: #fff7d9;
+    border-color: #ffe9a8;
+    color: #915f00;
+}
+
+.annotation-span-header {
+    font-weight: bold;
+    margin-bottom: 4px;
+}
+
+.annotation-span-text {
+    color: #007bff;
+}
+
+.annotation-span-range {
+    font-weight: normal;
+    color: #666;
+    margin-left: 4px;
+}
+
+/* Source badges for annotation spans */
+.annotation-span-sources {
+    margin-left: 6px;
+}
+
+.annotation-source-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-weight: 600;
+    letter-spacing: .5px;
+    text-transform: uppercase;
+    border: 1px solid transparent;
+}
+
+.annotation-source-badge+.annotation-source-badge {
+    margin-left: 4px;
+}
+
+.annotation-source-badge.llm {
+    background: #e0f2ff;
+    color: #084c74;
+    border-color: #b6e0f9;
+}
+
+.annotation-source-badge.heuristic {
+    background: #fff3d9;
+    color: #6b4b00;
+    border-color: #ffe1a1;
+}
+
+.annotation-source-badge.ner {
+    background: #e6ffe6;
+    color: #1f5c1f;
+    border-color: #c2f2c2;
+}
+
+.annotation-source-icon {
+    font-size: 11px;
+    line-height: 1;
+}
+
+.annotation-candidate-list {
+    margin: 4px 0 8px 18px;
+    padding: 0;
+    list-style: disc;
+}
+
+.candidate-item {
+    line-height: 1.4;
+    margin-bottom: 2px;
+}
+
+.candidate-item.accepted {
+    background: #e8f8ed;
+    border-radius: 4px;
+}
+
+/* Flash effect for newly created & accepted manual candidate (JVNAUTOSCI-552) */
+.candidate-item.accepted.flash-new {
+    animation: candidateFlash 2.2s ease-out forwards;
+    position: relative;
+}
+
+@keyframes candidateFlash {
+    0% {
+        background: #fffbe6;
+        box-shadow: 0 0 0 0 rgba(250, 204, 21, 0.9);
+    }
+
+    20% {
+        background: #fff1b3;
+        box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.4);
+    }
+
+    55% {
+        background: #e8f8ed;
+        box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.45);
+    }
+
+    100% {
+        background: #e8f8ed;
+        box-shadow: none;
+    }
+}
+
+/* Lightweight inline toast for success message (auto-dismiss) */
+.annotation-toast {
+    position: fixed;
+    bottom: 14px;
+    right: 16px;
+    background: #065f46;
+    color: #ecfdf5;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.18);
+    animation: toastIn .3s ease, toastOut .3s ease 3.7s forwards;
+    z-index: 9999;
+}
+
+@keyframes toastIn {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes toastOut {
+    to {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+}
+
+.candidate-actions {
+    margin-left: 6px;
+}
+
+.candidate-proposed {
+    color: #888;
+}
+
+.candidate-reason {
+    color: #999;
+}
+
+.annotation-no-candidates {
+    color: #999;
+}
+
+.btn-mini {
+    font-size: 0.65rem;
+    padding: 2px 6px;
+    margin-left: 4px;
+    cursor: pointer;
+}
+
+/* High contrast styling for modal buttons only */
+.annotation-json-modal .btn-mini,
+.annotation-llmio-modal .btn-mini {
+    background: #1f2937;
+    color: #f9fafb;
+    border: 1px solid #111827;
+    border-radius: 4px;
+    line-height: 1.2;
+    font-weight: 600;
+    letter-spacing: .3px;
+    transition: background .15s ease, box-shadow .15s ease, color .15s ease;
+    padding: 3px 8px;
+}
+
+.annotation-json-modal .btn-mini:hover,
+.annotation-json-modal .btn-mini:focus,
+.annotation-llmio-modal .btn-mini:hover,
+.annotation-llmio-modal .btn-mini:focus {
+    background: #111827;
+    color: #ffffff;
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(17, 24, 39, 0.45);
+}
+
+.annotation-json-modal .btn-mini:active,
+.annotation-llmio-modal .btn-mini:active {
+    background: #0b1623;
+    color: #fff;
+}
+
+/* Annotation Advanced Layout */
+.annotation-layout {
+    max-width: 1200px;
+}
+
+.annotation-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.annotation-toolbar .left-set,
+.annotation-toolbar .right-set {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.annotation-columns {
+    display: flex;
+    gap: 20px;
+    align-items: stretch;
+}
+
+.annotation-left {
+    flex: 1 1 55%;
+    min-width: 380px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 100%;
+    position: relative;
+}
+
+.annotation-right {
+    flex: 1 1 45%;
+    min-width: 320px;
+}
+
+/* Full-width mode: when no annotations/highlights yet, stretch left to 100% and hide right if present */
+.annotation-columns.no-annotations .annotation-left {
+    flex: 1 1 100%;
+    max-width: 100%;
+}
+
+.annotation-columns.no-annotations .annotation-right {
+    display: none;
+}
+
+/* Ensure uniform child widths inside annotation-left */
+.annotation-left>.minor-note,
+.annotation-left>.prompt-input,
+.annotation-left>.annotation-input,
+.annotation-left>.highlight-pane {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* Hide highlight pane frame until content (spans) present */
+.annotation-left .highlight-pane:empty:not(.force-visible) {
+    display: none;
+}
+
+.annotation-left .highlight-pane:not(:empty) {
+    display: block;
+}
+
+/* When hidden, reduce gap collapse */
+.annotation-left .highlight-pane:empty+* {
+    margin-top: 0;
+}
+
+.highlight-pane {
+    border: 1px solid #ddd;
+    background: #fff;
+    padding: 10px;
+    min-height: 140px;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    border-radius: 6px;
+    position: relative;
+}
+
+.highlight-pane.empty::before {
+    content: 'No spans yet. Run Annotate.';
+    color: #999;
+    font-style: italic;
+}
+
+/* Manual instance creation (inline panel) */
+.manual-instance-create {
+    margin-top: 6px;
+    font-size: 0.75rem;
+}
+
+.manual-instance-create .manual-instance-start {
+    background: #eef3ff;
+    border: 1px solid #c5d6ff;
+    color: #1e3a8a;
+    border-radius: 4px;
+    transition: background .18s ease, box-shadow .18s ease;
+}
+
+.manual-instance-create .manual-instance-start:hover {
+    background: #d9e7ff;
+}
+
+.manual-instance-panel {
+    margin-top: 6px;
+    background: #ffffff;
+    border: 1px solid #d9e3f5;
+    border-radius: 6px;
+    padding: 8px 10px 10px;
+    position: relative;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
+    animation: panelFadeIn .22s ease;
+}
+
+@keyframes panelFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-2px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.manual-instance-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+
+.manual-instance-row input[type="text"] {
+    flex: 1 1 160px;
+    padding: 4px 6px;
+    font-size: 0.7rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background: #f8fafc;
+    transition: border-color .15s ease, background .15s ease;
+}
+
+.manual-instance-row input[type="text"]:focus {
+    outline: none;
+    border-color: #3b82f6;
+    background: #fff;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+}
+
+.manual-type-results {
+    width: 100%;
+    min-height: 20px;
+    font-size: 0.7rem;
+    color: #374151;
+    position: relative;
+}
+
+.manual-type-results.loading {
+    opacity: 0.85;
+}
+
+.manual-type-results .mini-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid #93c5fd;
+    border-top-color: #1d4ed8;
+    border-radius: 50%;
+    animation: miniSpin 0.7s linear infinite;
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 4px;
+}
+
+@keyframes miniSpin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.manual-type-options {
+    list-style: none;
+    padding: 0;
+    margin: 4px 0 0;
+    display: grid;
+    gap: 2px;
+}
+
+.manual-type-options .type-option {
+    padding: 3px 6px;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    background: #f8fafc;
+    cursor: pointer;
+    transition: background .12s ease, border-color .12s ease;
+}
+
+.manual-type-options .type-option:hover {
+    background: #eef2ff;
+    border-color: #c7d2fe;
+}
+
+.manual-type-options .type-option.selected {
+    background: #dbeafe;
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.35);
+}
+
+.manual-type-empty,
+.manual-type-hint {
+    display: inline-block;
+    padding: 2px 4px;
+    font-style: italic;
+    color: #6b7280;
+}
+
+/* Recent type shortlist (MRU) */
+.manual-type-recent-row {
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.manual-type-recent-label {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    color: #475569;
+    font-weight: 600;
+    margin-right: 2px;
+}
+
+.manual-type-recent-btn {
+    background: linear-gradient(#f8fafc, #eef2f7);
+    border: 1px solid #94a3b8;
+    color: #1e293b;
+    border-radius: 4px;
+    font-size: 0.62rem;
+    padding: 3px 7px;
+    cursor: pointer;
+    font-weight: 500;
+    letter-spacing: .25px;
+    transition: background .14s ease, border-color .14s ease, color .14s ease;
+}
+
+.manual-type-recent-btn:hover {
+    background: linear-gradient(#e2e8f0, #d9e0e8);
+    border-color: #64748b;
+    color: #0f172a;
+}
+
+.manual-type-recent-btn:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px #2563eb55, 0 0 0 4px #93c5fd55;
+}
+
+.manual-type-recent-btn:active {
+    background: #d1d9e2;
+    border-color: #475569;
+}
+
+.manual-instance-create-btn:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+}
+
+.manual-instance-status {
+    font-size: 0.65rem;
+    min-height: 14px;
+    color: #555;
+}
+
+/* Reuse screen-reader only helper */
+.sr-only,
+.manual-instance-panel .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    border: 0;
+}
+
+
+.hl-span {
+    background: #ffe9b3;
+    padding: 2px 3px;
+    margin: 1px 0;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background .15s, box-shadow .15s;
+}
+
+.hl-span.kind-type {
+    background: #dbeeff;
+}
+
+.hl-span.kind-individual {
+    background: #d6f5e5;
+}
+
+.hl-span.kind-hypothesis {
+    background: #ffefb8;
+}
+
+.hl-span[data-source~="llm"] {
+    background: #e0f2ff;
+}
+
+.hl-span[data-source~="heuristic"] {
+    background: #fff3d9;
+}
+
+.hl-span[data-source~="ner"] {
+    background: #e6ffe6;
+}
+
+/* Re-assert classification colours AFTER source attribute backgrounds so they win cascade (same specificity) */
+.hl-span.kind-type {
+    background: #dbeeff !important;
+}
+
+.hl-span.kind-individual {
+    background: #d6f5e5 !important;
+}
+
+.hl-span.kind-hypothesis {
+    background: #ffefb8 !important;
+}
+
+.hl-span.accepted {
+    background: #d9f7e5 !important;
+    box-shadow: 0 0 0 2px #34d39955;
+}
+
+.hl-span.active {
+    outline: 2px solid #2563eb;
+    background: #dbeafe !important;
+}
+
+.annotation-results {
+    max-height: calc(100vh - 260px);
+    overflow: auto;
+}
+
+.annotation-span-block.active {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 2px #2563eb22;
+}
+
+.spinner {
+    font-size: 0.9rem;
+    animation: spin 1s linear infinite;
+    display: inline-block;
+}
+
+.hidden {
+    display: none !important;
+}
+
+@keyframes spin {
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
+@media (max-width: 1100px) {
+    .annotation-columns {
+        flex-direction: column;
+    }
+
+    .annotation-right {
+        max-height: none;
+    }
+}
+
+/* LLM interaction popup */
+.llm-popup {
+    position: fixed;
+    top: 70px;
+    right: 20px;
+    width: 480px;
+    max-width: 90vw;
+    max-height: 75vh;
+    background: #fff;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
+    display: flex;
+    flex-direction: column;
+    z-index: 9998;
+    overflow: hidden;
+}
+
+.llm-popup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    background: #f3f4f6;
+    border-bottom: 1px solid #e5e7eb;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.llm-popup-body {
+    flex: 1;
+    overflow: auto;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.llm-popup-section h4 {
+    margin: 4px 0 6px;
+    font-size: 0.75rem;
+    letter-spacing: .5px;
+    text-transform: uppercase;
+    color: #374151;
+}
+
+.llm-pre {
+    background: #111827;
+    color: #e5e7eb;
+    padding: 8px 10px;
+    margin: 0;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.4;
+    max-height: 200px;
+    overflow: auto;
+}
+
+.llm-meta {
+    font-size: 0.65rem;
+    color: #555;
+    margin-top: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.llm-popup-footer {
+    padding: 6px 10px;
+    border-top: 1px solid #e5e7eb;
+    display: flex;
+    justify-content: flex-end;
+    background: #f8f9fa;
+}
+
+.llm-popup.hidden {
+    display: none !important;
+}
+
+/* LLM debug button in chat messages */
+.llm-debug-button {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    background: #007bff;
+    color: white;
+    border: 1px solid #0056b3;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.llm-debug-button:hover {
+    background: #0056b3;
+    border-color: #004085;
+}
+
+/* Hide tool section when no tools used */
+#chatLlmDebugToolsSection.hidden {
+    display: none;
+}
+
+/* Global header (title + search) fixed at very top JVNAUTOSCI-550 */
+.global-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1200;
+    /* Above tabs (1100) */
+    background: #ffffff;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    border-bottom: 1px solid #e5e7eb;
+}
+
+/* Stack: header (variable height) then tab bar */
+.global-header .main-container {
+    padding: 12px 16px 4px 16px;
+}
+
+/* Restore search input styling within global header */
+.global-header #vontologySearchInput {
+    width: 550px;
+    max-width: 100%;
+    padding: 8px 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 14px;
+    background: #ffffff;
+    transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+/* Loading state (concept selection in progress) */
+.global-header #vontologySearchInput.loading {
+    padding-right: 34px;
+    /* space for spinner */
+    position: relative;
+    background-image: none;
+    /* ensure clean base */
+}
+
+/* Spinner pseudo element */
+.global-header #vontologySearchInput.loading::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: 10px;
+    width: 16px;
+    height: 16px;
+    margin-top: -8px;
+    border-radius: 50%;
+    border: 2px solid #cfd3d8;
+    border-top-color: #3b82f6;
+    animation: von-search-spinner 0.7s linear infinite;
+}
+
+@keyframes von-search-spinner {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Respect reduced motion preferences */
+@media (prefers-reduced-motion: reduce) {
+    .global-header #vontologySearchInput.loading::after {
+        animation: none;
+        border-top-color: #3b82f6;
+        /* still show indicator */
+    }
+}
+
+.global-header #vontologySearchInput:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.global-header .vontology-search-results {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: white;
+    border: 1px solid #d1d5db;
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+    max-height: 300px;
+    overflow-y: auto;
+    z-index: 1300;
+    /* Above header (1200) */
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+.global-header .vontology-search {
+    position: relative;
+    flex: 1;
+    max-width: 600px;
+}
+
+/* Search result items within global header */
+.global-header .vontology-search-results [role="option"] {
+    padding: 8px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid #f3f4f6;
+    font-size: 14px;
+    line-height: 1.4;
+    color: #374151;
+}
+
+.global-header .vontology-search-results [role="option"]:hover,
+.global-header .vontology-search-results [role="option"][aria-selected="true"] {
+    background-color: #e5e7eb;
+}
+
+.global-header .vontology-search-results [role="option"]:last-child {
+    border-bottom: none;
+}
+
+/* Missing search result item formatting (accidentally removed during JVNAUTOSCI-550) */
+.vontology-search-item {
+    padding: 6px 10px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.vontology-search-item:hover,
+.vontology-search-item.active {
+    background: #f3f4f6;
+}
+
+.vontology-search-item-name {
+    color: #111827;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    flex: 1;
+}
+
+.vontology-search-item-kind {
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    line-height: 1.2;
+    border: 1px solid #d1d5db;
+    background: #f9fafb;
+    flex: 0 0 auto;
+}
+
+.vontology-search-item-kind.type {
+    border-color: #b6dbff;
+    background: #eef6ff;
+    color: #204a72;
+}
+
+.vontology-search-item-kind.individual {
+    border-color: #cfe3b4;
+    background: #f7f9f2;
+    color: #2f4a1f;
+}
+
+.vontology-search-item-kind.predicate {
+    border-color: #d4c5f9;
+    background: #f5f0ff;
+    color: #4a3871;
+}
+
+/* Inline ID (shown when tooltips disabled) */
+.vontology-search-item-id-inline {
+    font-size: 11px;
+    color: #6b7280;
+    max-width: 40%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    flex: 0 0 auto;
+    margin-left: 8px;
+}
+
+/* Enhanced search result styling for relations/dynamic tabs */
+.vontology-search-results .vontology-search-item {
+    padding: 6px 10px !important;
+    cursor: pointer !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 10px !important;
+    background: white !important;
+    border: 1px solid #e5e7eb !important;
+    margin-bottom: 1px !important;
+}
+
+.vontology-search-results .vontology-search-item:hover,
+.vontology-search-results .vontology-search-item.active {
+    background: #f3f4f6 !important;
+}
+
+.vontology-search-results .vontology-search-item-name {
+    color: #111827 !important;
+    overflow: hidden !important;
+    white-space: nowrap !important;
+    text-overflow: ellipsis !important;
+    flex: 1 !important;
+}
+
+.vontology-search-results .vontology-search-item-kind {
+    font-size: 12px !important;
+    padding: 2px 6px !important;
+    border-radius: 10px !important;
+    line-height: 1.2 !important;
+    border: 1px solid #d1d5db !important;
+    background: #f9fafb !important;
+    flex: 0 0 auto !important;
+}
+
+.vontology-search-results .vontology-search-item-kind.type {
+    background: #dbeafe !important;
+    color: #1e40af !important;
+    border-color: #93c5fd !important;
+}
+
+.vontology-search-results .vontology-search-item-kind.individual {
+    background: #dcfce7 !important;
+    color: #166534 !important;
+    border-color: #86efac !important;
+}
+
+.vontology-search-results .vontology-search-item-kind.predicate {
+    background: #f3e8ff !important;
+    color: #6b21a8 !important;
+    border-color: #c084fc !important;
+}
+
+/* Tab Container - now sits below global header */
+.tab-container {
+    position: fixed;
+    top: 0;
+    /* Will be set dynamically by JavaScript */
+    /* below global header height (increased for safety) */
+    left: 0;
+    right: 0;
+    height: 48px;
+    /* ADDED: Explicit height for the tab bar */
+    z-index: 1100 !important;
+    /* force above everything */
+    background-color: #f8f9fa;
+    display: flex;
+    visibility: visible;
+    /* Light background for the tab bar */
+    border-bottom: 1px solid #dee2e6;
+    /* Subtle border */
+    padding: 0 20px;
+    /* MODIFIED: Adjusted padding, top/bottom padding handled by alignment */
+    box-sizing: border-box;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    /* Soft shadow for depth */
+    display: flex;
+    /* ADDED to help align tab buttons */
+    align-items: center;
+    /* ADDED to vertically center tab buttons */
+}
+
+/* Annotation tab label icon + letter alignment */
+.tab-button .annotation-tab-icon {
+    display: inline-flex;
+    align-items: center;
+    margin-right: 4px;
+}
+
+.tab-button .annotation-tab-icon svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+}
+
+.tab-button .annotation-source-letter {
+    font-weight: 600;
+    margin-right: 2px;
+}
+
+/* Base tab button styles (moved from template) */
+.tab-button {
+    padding: 8px 15px;
+    cursor: pointer;
+    background-color: #eee;
+    border: 1px solid #ccc;
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    margin-right: 5px;
+    display: inline-block !important;
+    position: relative;
+    visibility: visible !important;
+    z-index: 1101;
+}
+
+.tab-button.active {
+    background-color: #fff;
+    border-bottom: 1px solid #fff;
+}
+
+.tab-button.closable {
+    padding-right: 25px;
+}
+
+.close-tab {
+    position: absolute;
+    right: 5px;
+    top: 50%;
+    transform: translateY(-50%);
+    cursor: pointer;
+    color: #999;
+    font-weight: bold;
+    font-size: 12px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.close-tab:hover {
+    background-color: #ff6b6b;
+    color: #fff;
+}
+
+/* Header */
+h1 {
+    font-size: 2rem;
+    color: #111;
+    /* Darker text for emphasis */
+    margin-bottom: 20px;
+    text-align: center;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    /* Subtle spacing for elegance */
+}
+
+/* Info Icon */
+.info-icon {
+    display: inline-block;
+    margin-left: 10px;
+    cursor: pointer;
+    color: #555;
+    /* Neutral gray */
+    font-size: 1.2rem;
+    transition: color 0.2s ease-in-out;
+}
+
+.info-icon:hover {
+    color: #000;
+    /* Darker on hover */
+}
+
+/* Popup */
+.popup {
+    display: none;
+    position: absolute;
+    background-color: #fff;
+    /* Clean white background */
+    border: 1px solid #ddd;
+    /* Subtle border */
+    border-radius: 6px;
+    padding: 15px;
+    width: 280px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    /* Soft shadow */
+    /* Raw JSON viewer */
+    /* (round-icon-button primary style block relocated above small variant section; removed duplicate) */
+    padding: 10px;
+    width: 100%;
+    height: 150px;
+    overflow-y: scroll;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    /* Subtle shadow */
+    color: #333;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    resize: vertical;
+    /* Allow vertical resizing */
+    min-height: 100px;
+    /* Optional: Set a minimum height */
+    overflow: auto;
+    /* Ensure scrollbars appear when needed */
+}
+
+/* ADDED: Styles for chat messages */
+.chat-message {
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    border-radius: 15px;
+    max-width: 75%;
+    word-wrap: break-word;
+    line-height: 1.4;
+}
+
+.user-message {
+    background-color: #0078d4;
+    /* Blue for user messages */
+    color: white;
+    margin-left: auto;
+    /* Align to the right */
+    border-bottom-right-radius: 5px;
+}
+
+.assistant-message {
+    background-color: #e1e1e1;
+    /* Light gray for assistant messages */
+    color: #333;
+    margin-right: auto;
+    /* Align to the left */
+    border-bottom-left-radius: 5px;
+}
+
+.system-message {
+    background-color: #f8d7da;
+    /* Light red for system/error messages */
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+    text-align: center;
+    margin-left: auto;
+    margin-right: auto;
+    max-width: 90%;
+    border-radius: 5px;
+}
+
+/* Dropdown */
+select {
+    background-color: #fff;
+    color: #333;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 0.9rem;
+    outline: none;
+    transition: border-color 0.2s ease-in-out;
+}
+
+select:hover,
+select:focus {
+    border-color: #888;
+    /* Slightly darker border on hover/focus */
+}
+
+/* Ensure dropdown options have visible text color */
+select option {
+    color: #333;
+    /* Or use 'black' or another dark color */
+    background-color: #fff;
+    /* Explicitly set background for consistency */
+}
+
+
+/* Textarea */
+textarea {
+    background-color: #fff;
+    color: #333;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 10px;
+    width: 100%;
+    font-size: 0.9rem;
+    outline: none;
+    /* resize: none; */
+    /* Remove or comment out this line */
+    resize: vertical;
+    /* Allow vertical resizing */
+    min-height: 60px;
+    /* Optional: Set a minimum height */
+    transition: border-color 0.2s ease-in-out;
+    box-sizing: border-box;
+}
+
+textarea:hover,
+textarea:focus {
+    border-color: #888;
+}
+
+/* Ensure the interaction (bottom) notes editor spans full available width */
+#updatedNotesDisplay {
+    max-width: 100%;
+}
+
+#updatedNotesContent {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    display: block;
+    /* Allow it to grow taller while keeping horizontal fit */
+    min-height: 160px;
+}
+
+/* Button utility classes (replace global button defaults) */
+.btn {
+    background-color: transparent;
+    color: inherit;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background-color 0.15s ease-in-out, transform 0.12s ease-in-out;
+    box-shadow: none;
+}
+
+/* Conservative global button defaults for legacy markup: keeps prior visual look
+   but can be overridden by component classes (e.g. .btn, .btn-primary). */
+button {
+    background-color: #0078d4;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background-color 0.15s ease-in-out, transform 0.12s ease-in-out;
+}
+
+button:hover {
+    background-color: #005a9e;
+}
+
+.btn:focus {
+    outline: none;
+}
+
+/* Primary action variant */
+.btn-primary {
+    background-color: #0078d4;
+    color: #fff;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+}
+
+.btn-primary:hover {
+    background-color: #005a9e;
+}
+
+/* Small inline button variant used across the app */
+.btn-mini {
+    padding: 4px 8px;
+    font-size: 0.78rem;
+    border-radius: 6px;
+    background: #fff;
+    color: #111;
+    border: 1px solid #d1d5db;
+}
+
+.btn-mini:hover {
+    background: #f1f5f9;
+}
+
+/* Secondary variant (for non-primary actions like Reset) */
+.btn-secondary {
+    background: transparent;
+    color: #0f172a;
+    border: 1px solid #cbd5e1;
+}
+
+.btn-secondary:hover {
+    background: #f1f5f9;
+}
+
+/* Disabled states for button utilities */
+.btn[disabled],
+.btn.disabled,
+.btn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+    filter: none;
+}
+
+.btn-primary[disabled],
+.btn-primary.disabled,
+.btn-primary:disabled {
+    background-color: #9aaec6;
+    /* muted primary */
+    color: #ffffff;
+    cursor: not-allowed;
+}
+
+.btn-secondary[disabled],
+.btn-secondary.disabled,
+.btn-secondary:disabled,
+.btn[aria-disabled="true"] {
+    background: transparent;
+    color: #6b7280;
+    border-color: #e5e7eb;
+    cursor: not-allowed;
+}
+
+/* Large action variant for important buttons in forms */
+.btn-lg {
+    padding: 10px 16px;
+    font-size: 0.95rem;
+    border-radius: 8px;
+}
+
+/* Tab Context Menu */
+.tab-context-menu {
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    box-shadow: 0 6px 18px -2px rgba(0, 0, 0, 0.18), 0 2px 4px rgba(0, 0, 0, 0.08);
+    padding: 4px 0;
+    -webkit-backdrop-filter: saturate(180%) blur(8px);
+    backdrop-filter: saturate(180%) blur(8px);
+}
+
+.tab-context-menu-item {
+    font-size: 13px;
+    line-height: 1.3;
+    letter-spacing: .2px;
+    font-weight: 500;
+    background: transparent !important;
+    color: #1f2937 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    position: relative;
+}
+
+.tab-context-menu-item:first-child {
+    margin-top: 0;
+}
+
+.tab-context-menu-item:hover,
+.tab-context-menu-item:focus {
+    background: #e5e7eb !important;
+    outline: none;
+}
+
+/* Ensure high-contrast text when a menu item is active/selected/pressed
+   (some platforms apply a dark background for selection). We only apply
+   the white text for non-disabled items. */
+.tab-context-menu-item.active:not([disabled]),
+.tab-context-menu-item.selected:not([disabled]),
+.tab-context-menu-item[aria-selected="true"]:not([disabled]),
+.tab-context-menu-item[aria-pressed="true"]:not([disabled]),
+.tab-context-menu-item:active:not([disabled]) {
+    color: #ffffff !important;
+}
+
+.tab-context-menu-item.active:not([disabled]) span,
+.tab-context-menu-item.selected:not([disabled]) span,
+.tab-context-menu-item[aria-selected="true"]:not([disabled]) span,
+.tab-context-menu-item[aria-pressed="true"]:not([disabled]) span,
+.tab-context-menu-item:active:not([disabled]) span {
+    color: #ffffff !important;
+}
+
+/* Also cover button variants inside the menu to override global button styles */
+.tab-context-menu button.tab-context-menu-item.active:not([disabled]),
+.tab-context-menu button.tab-context-menu-item.selected:not([disabled]),
+.tab-context-menu button.tab-context-menu-item[aria-selected="true"]:not([disabled]),
+.tab-context-menu button.tab-context-menu-item[aria-pressed="true"]:not([disabled]) {
+    color: #ffffff !important;
+}
+
+.tab-context-menu button.tab-context-menu-item.active:not([disabled]) span,
+.tab-context-menu button.tab-context-menu-item.selected:not([disabled]) span,
+.tab-context-menu button.tab-context-menu-item[aria-selected="true"]:not([disabled]) span,
+.tab-context-menu button.tab-context-menu-item[aria-pressed="true"]:not([disabled]) span {
+    color: #ffffff !important;
+}
+
+/* Keyboard focus ring for accessibility */
+.tab-context-menu-item:focus-visible {
+    box-shadow: inset 0 0 0 2px #2563eb55 !important;
+    background: #dbeafe !important;
+}
+
+/* High-specificity safeguard:
+   Ensure buttons inside the tab context menu keep the intended readable colour
+   even if a global `button { color: ... }` rule exists. Keep disabled fallbacks.
+*/
+.tab-context-menu button.tab-context-menu-item,
+.tab-context-menu button.tab-context-menu-item span {
+    color: #1f2937 !important;
+}
+
+.tab-context-menu button.tab-context-menu-item[disabled],
+.tab-context-menu button.tab-context-menu-item[aria-disabled="true"],
+.tab-context-menu button.tab-context-menu-item.disabled {
+    color: #6b7280 !important;
+    opacity: 1 !important;
+    cursor: not-allowed !important;
+}
+
+/* Shortcut hint alignment */
+.tab-context-menu-item span:last-child {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    opacity: .7;
+}
+
+/* Disabled tab menu items - improve readability while still signalling disabled */
+.tab-context-menu-item[disabled],
+.tab-context-menu-item[disabled],
+.tab-context-menu-item.disabled,
+.tab-context-menu-item[aria-disabled="true"] {
+    color: #6b7280 !important;
+    /* neutral-500 */
+    opacity: 1 !important;
+    /* avoid washed-out look */
+    cursor: not-allowed !important;
+}
+
+/* Also target inner text spans (some browsers/styles apply color/opacity to spans) */
+.tab-context-menu-item[disabled] span,
+.tab-context-menu-item.disabled span,
+.tab-context-menu-item[aria-disabled="true"] span {
+    color: #6b7280 !important;
+    opacity: 1 !important;
+}
+
+/* Shortcut hint inside disabled items slightly muted but readable */
+.tab-context-menu-item[disabled] span:last-child,
+.tab-context-menu-item.disabled span:last-child,
+.tab-context-menu-item[aria-disabled="true"] span:last-child {
+    opacity: .85 !important;
+    color: #6b7280 !important;
+}
+
+/* Stronger fallbacks for browsers that style disabled buttons via generic selectors */
+.tab-context-menu button:disabled,
+.tab-context-menu button[disabled],
+.tab-context-menu .tab-context-menu-item[disabled],
+.tab-context-menu .tab-context-menu-item[aria-disabled="true"],
+.tab-context-menu .tab-context-menu-item.disabled {
+    color: #6b7280 !important;
+    opacity: 1 !important;
+    background: transparent !important;
+}
+
+@media (prefers-color-scheme: dark) {
+    .tab-context-menu {
+        background: #1f2937;
+        border-color: #374151;
+        box-shadow: 0 8px 22px -4px rgba(0, 0, 0, 0.5), 0 2px 4px rgba(0, 0, 0, 0.35);
+    }
+
+    .tab-context-menu-item {
+        color: #f3f4f6 !important;
+    }
+
+    .tab-context-menu-item:hover,
+    .tab-context-menu-item:focus {
+        background: #374151 !important;
+    }
+
+    .tab-context-menu-item:focus-visible {
+        box-shadow: inset 0 0 0 2px #2563eb88 !important;
+        background: #1e3a8a !important;
+    }
+
+    .tab-context-menu-item span:last-child {
+        opacity: .75;
+    }
+}
+
+/* Vontology Context Menu */
+.vontology-context-menu {
+    position: absolute;
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    box-shadow: 0 6px 18px -2px rgba(0, 0, 0, 0.18), 0 2px 4px rgba(0, 0, 0, 0.08);
+    padding: 4px 0;
+    z-index: 10000;
+    min-width: 220px;
+    -webkit-backdrop-filter: saturate(180%) blur(8px);
+    backdrop-filter: saturate(180%) blur(8px);
+}
+
+.vontology-context-menu-header {
+    background-color: #f5f5f5;
+    border-bottom: 1px solid #ddd;
+    padding: 8px 12px;
+    font-size: 0.9em;
+}
+
+.vontology-context-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1.3;
+    letter-spacing: .2px;
+    font-weight: 500;
+    background: transparent !important;
+    color: #111 !important;
+    border: none !important;
+    box-shadow: none !important;
+    position: relative;
+}
+
+.vontology-context-menu-item:hover {
+    background: #f3f4f6 !important;
+}
+
+.vontology-context-menu-item.disabled {
+    color: #999 !important;
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.vontology-context-menu-item.disabled:hover {
+    background: transparent !important;
+}
+
+.vontology-context-menu-icon {
+    font-size: 16px;
+    width: 20px;
+    text-align: center;
+}
+
+@media (prefers-color-scheme: dark) {
+    .vontology-context-menu {
+        background: #1f2937;
+        border-color: #374151;
+        box-shadow: 0 8px 22px -4px rgba(0, 0, 0, 0.5), 0 2px 4px rgba(0, 0, 0, 0.35);
+    }
+
+    .vontology-context-menu-header {
+        background-color: #111827;
+        border-bottom-color: #374151;
+    }
+
+    .vontology-context-menu-item {
+        color: #e5e7eb !important;
+    }
+
+    .vontology-context-menu-item:hover {
+        background: #374151 !important;
+    }
+
+    .vontology-context-menu-item.disabled {
+        color: #6b7280 !important;
+    }
+}
+
+/* Button variants */
+.btn-success {
+    background-color: #28a745 !important;
+    color: #fff !important;
+}
+
+.btn-info {
+    background-color: #17a2b8 !important;
+    color: #fff !important;
+}
+
+.btn-danger {
+    background-color: #dc3545 !important;
+    color: #fff !important;
+}
+
+.btn-azure {
+    background-color: #007cba !important;
+    color: #fff !important;
+}
+
+.btn-secondary {
+    background-color: #6c757d !important;
+    color: #fff !important;
+    border: 1px solid #6c757d !important;
+}
+
+.btn-secondary:hover {
+    background-color: #5a6268 !important;
+    border-color: #545b62 !important;
+}
+
+/* Authentication status styles */
+.auth-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.auth-info {
+    font-size: 0.9rem;
+    color: #374151;
+}
+
+/* Relationship chip remove button (small × inside chips) */
+.chip-remove {
+    background: transparent !important;
+    border: none !important;
+    color: #b91c1c;
+    padding: 0 4px;
+    line-height: 1;
+    font-size: 14px;
+    border-radius: 4px;
+    /* slight to match chip curve */
+    box-shadow: none !important;
+    /* Remove shadow on its container */
+    -webkit-appearance: none;
+    appearance: none;
+    outline: none;
+}
+
+.chip-remove:hover,
+.chip-remove:focus,
+.chip-remove:active {
+    background: transparent !important;
+    box-shadow: none !important;
+    transform: none !important;
+}
+
+/* Make sure the chip container itself never shows a shadow */
+.relationship-chip {
+    box-shadow: none !important;
+}
+
+/* Salient predicate scope grouping in relationship selector */
+[id^="relationshipKindSelect"] optgroup {
+    font-weight: 600;
+    color: #1f2937;
+    background-color: #f3f4f6;
+}
+
+[id^="relationshipKindSelect"] optgroup[label*="Instance"] {
+    color: #065f46;
+}
+
+[id^="relationshipKindSelect"] optgroup[label*="Type"] {
+    color: #1d4ed8;
+}
+
+[id^="relationshipKindSelect"] optgroup[label*="Unclassified"] {
+    color: #92400e;
+}
+
+button:hover {
+    background-color: #005a9e;
+    /* Darker blue on hover */
+    transform: translateY(-1px);
+}
+
+button:active {
+    transform: translateY(0);
+}
+
+/* Style for disabled buttons */
+button:disabled {
+    background-color: #ccc;
+    /* Gray background */
+    color: #666;
+    /* Darker gray text */
+    cursor: not-allowed;
+    /* Indicate non-interactive */
+    transform: none;
+    /* No hover/active transform */
+    box-shadow: none;
+    /* Remove shadow */
+}
+
+/* Ensure global button hover styles do not darken the tab context menu.
+   The menu needs consistent contrast regardless of global button themes. */
+.tab-context-menu button.tab-context-menu-item:hover,
+.tab-context-menu button.tab-context-menu-item:focus,
+.tab-context-menu button.tab-context-menu-item:focus-visible {
+    background: #e5e7eb !important;
+    background-color: #e5e7eb !important;
+    color: #1f2937 !important;
+    transform: none !important;
+}
+
+.tab-context-menu button.tab-context-menu-item:hover span,
+.tab-context-menu button.tab-context-menu-item:focus span,
+.tab-context-menu button.tab-context-menu-item:focus-visible span {
+    color: #1f2937 !important;
+}
+
+.tab-context-menu button.tab-context-menu-item:active {
+    background: #1f2937 !important;
+    background-color: #1f2937 !important;
+    color: #ffffff !important;
+    transform: none !important;
+}
+
+.tab-context-menu button.tab-context-menu-item:active span {
+    color: #ffffff !important;
+}
+
+/* Concept Save buttons - specific disabled style (moved from template) */
+.concept-save-button:disabled,
+.concept-interaction-save-button:disabled {
+    background-color: #6c757d !important;
+    color: #ffffff !important;
+    cursor: not-allowed !important;
+    opacity: 0.6 !important;
+    border: none !important;
+}
+
+
+/* Loading Indicator */
+#loadingIndicator {
+    /* height: 20px; /* No longer needed when using display: none */
+    margin-top: 10px;
+    color: #0078d4;
+    font-style: italic;
+    text-align: center;
+    font-size: 0.9rem;
+    display: none;
+    /* Change visibility to display */
+}
+
+/* Footer */
+footer {
+    position: fixed;
+    /* ADDED: Make footer fixed at the bottom */
+    bottom: 0;
+    left: 0;
+    right: 0;
+    min-height: 40px;
+    /* Allow footer to grow if content wraps */
+    margin-top: 0;
+    /* REMOVED: margin-top as it's fixed */
+    font-size: 0.8rem;
+    color: #666;
+    text-align: center;
+    width: 100%;
+    background-color: #f8f9fa;
+    /* ADDED: Give it a background */
+    border-top: 1px solid #dee2e6;
+    /* ADDED: Add a top border */
+    padding: 10px 0;
+    /* MODIFIED: Adjusted padding */
+    box-sizing: border-box;
+    z-index: 999;
+    /* ADDED: Ensure it's above content but below tab-container if they could overlap */
+}
+
+/* Footer for Model Info */
+.footer-container {
+    position: fixed;
+    /* ADDED: Make footer fixed at the bottom */
+    bottom: 0;
+    left: 0;
+    right: 0;
+    min-height: 40px;
+    /* Allow footer to grow if content wraps */
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background-color: rgba(255, 255, 255, 0.95);
+    border-top: 1px solid #e5e7eb;
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+    z-index: 100;
+}
+
+.footer-info {
+    margin: 0;
+    /* REMOVED: margin as it's in flex container */
+    font-size: 0.8rem;
+    color: #666;
+}
+
+#chat-history-length {
+    font-size: 0.8rem;
+    color: #666;
+    padding: 4px 8px;
+}
+
+/* Footer segments & concept buttons */
+.footer-segment {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.footer-label-inline {
+    font-weight: 500;
+    color: #555;
+}
+
+.footer-placeholder {
+    opacity: 0.55;
+    font-style: italic;
+}
+
+.concept-footer-button {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 0.7rem;
+    cursor: pointer;
+    line-height: 1.3;
+    color: #0d47a1;
+    transition: background .15s, box-shadow .15s, border-color .15s;
+}
+
+.concept-footer-button:hover {
+    background: #e3f2fd;
+    border-color: #90caf9;
+}
+
+.concept-footer-button:active {
+    background: #bbdefb;
+}
+
+.concept-footer-button:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.4);
+}
+
+/* Settings iframe adjustments */
+.settings-frame-wrapper {
+    position: relative;
+    width: 100%;
+    /* Allow it to grow and shrink within tab content area */
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 60px - 60px - 20px);
+    /* viewport minus tab bar, footer, small margin */
+    max-height: calc(100vh - 60px - 10px);
+    /* safety cap */
+}
+
+.settings-iframe {
+    width: 100%;
+    flex: 1 1 auto;
+    border: 1px solid #ccc;
+    background: #fff;
+    border-radius: 4px;
+    overflow: auto;
+    resize: vertical;
+    /* Allow user to resize vertically */
+    min-height: 400px;
+    /* Reasonable minimum */
+    max-height: 100%;
+    box-sizing: border-box;
+}
+
+/* When user manually resizes smaller than wrapper, keep scroll functional */
+.settings-iframe:focus {
+    outline: none;
+}
+
+.language-indicator {
+    margin: 0;
+    font-size: 0.75rem;
+    color: #6b7280;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    background-color: #f3f4f6;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
+}
+
+
+/* DB Connection badge in footer */
+.db-conn-badge {
+    display: inline-block;
+    font-size: 12px;
+    line-height: 1;
+    padding: 6px 8px;
+    border-radius: 12px;
+    margin-left: 8px;
+    background: #444;
+    color: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.db-conn-badge.local {
+    background: #d4edda;
+    color: #155724;
+    border-color: #c3e6cb;
+}
+
+.db-conn-badge.atlas {
+    background: #e0f2fe;
+    color: #075985;
+    border-color: #7dd3fc;
+}
+
+.db-conn-badge.remote:not(.atlas):not(.local) {
+    background: #ede9fe;
+    color: #5b21b6;
+    border-color: #c4b5fd;
+}
+
+/* Degraded / fallback (local or fallback) state */
+.db-conn-badge.degraded {
+    position: relative;
+    background: #fee2e2;
+    color: #991b1b;
+    border-color: #fca5a5;
+    animation: dbBadgePulse 9s linear infinite;
+}
+
+.db-conn-badge.degraded.fallback {
+    /* Slightly deeper tone to distinguish fallback vs plain local */
+    background: #fecaca;
+}
+
+.db-conn-badge.fatal {
+    position: relative;
+    background: #7f1d1d;
+    color: #ffffff;
+    border-color: #b91c1c;
+    animation: dbBadgeFlash 1.2s ease-in-out infinite;
+}
+
+.db-conn-badge.fatal .db-latency {
+    padding: 2px 6px;
+    margin-left: 6px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.18);
+    font-weight: 600;
+}
+
+@keyframes dbBadgePulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.65);
+    }
+
+    3% {
+        box-shadow: 0 0 0 6px rgba(220, 38, 38, 0);
+    }
+
+    100% {
+        box-shadow: 0 0 0 0 rgba(220, 38, 38, 0);
+    }
+
+}
+
+@keyframes dbBadgeFlash {
+    0% {
+        box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.95);
+    }
+
+    50% {
+        box-shadow: 0 0 0 8px rgba(220, 38, 38, 0);
+    }
+
+    100% {
+        box-shadow: 0 0 0 0 rgba(220, 38, 38, 0);
+    }
+}
+
+/* Compact variant for narrow layouts */
+.db-conn-badge.compact {
+    padding: 4px 6px;
+    font-size: 10px;
+    line-height: 1.1;
+    white-space: nowrap;
+}
+
+/* Latency indicator inside DB badge */
+.db-conn-badge .db-latency {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 1px 4px;
+    font-size: 10px;
+    line-height: 1;
+    background: rgba(255, 255, 255, 0.25);
+    border-radius: 6px;
+    font-weight: 500;
+    letter-spacing: 0;
+}
+
+.db-conn-badge.degraded .db-latency {
+    background: rgba(255, 255, 255, 0.35);
+}
+
+.db-conn-badge .db-latency.warn {
+    background: #fde68a;
+    color: #92400e;
+}
+
+.db-conn-badge .db-latency.slow {
+    background: #fca5a5;
+    color: #7f1d1d;
+}
+
+.db-conn-badge.compact .db-latency {
+    margin-left: 3px;
+    padding: 0 3px;
+    font-size: 9px;
+}
+
+.db-conn-badge.remote {
+    background: #d1ecf1;
+    color: #0c5460;
+    border-color: #bee5eb;
+}
+
+/* PID copy button */
+.pid-copy-button {
+    background: #fff;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    color: #111;
+    transition: background .15s, border-color .15s;
+}
+
+.pid-copy-button:hover {
+    background: #f1f5f9;
+}
+
+.pid-copy-button:active {
+    background: #e2e8f0;
+}
+
+.pid-copy-button.copied {
+    background: #d1fae5;
+    border-color: #10b981;
+    color: #065f46;
+}
+
+/* ADDED: New styles for the main content area; allow natural document scrolling */
+.tab-content-area {
+    /* Push below combined header + tab heights (header 120px + tab 48px) */
+    margin-top: 0;
+    /* Will be set dynamically by JavaScript */
+    min-height: calc(100vh - 168px);
+    /* Let footer overlap; add bottom padding to prevent clipping */
+    overflow-y: visible;
+    /* Allow body scrolling so content is never clipped */
+    padding: 0 20px;
+    padding-bottom: 64px;
+    /* Reserve space so content isn't hidden behind footer */
+    box-sizing: border-box;
+    width: 100% !important;
+    /* Force full width */
+    display: block !important;
+    /* Force display */
+}
+
+/* --- Tab Content General Styles (for Chat, Vontology, Entity, Settings) --- */
+.tab-content {
+    max-width: 900px;
+    /* Center content with max width */
+    margin-left: auto;
+    /* Center horizontally */
+    margin-right: auto;
+    /* Center horizontally */
+    padding: 10px 30px;
+    /* Add padding for spacing */
+    box-sizing: border-box;
+    background: none;
+    display: none !important;
+    /* Force hide by default */
+    width: 100% !important;
+    /* Force full width */
+    min-height: 400px !important;
+    /* Force minimum height */
+}
+
+/* ADDED: Ensure active tab is displayed */
+.tab-content.active {
+    display: block !important;
+    /* Force display with higher specificity */
+}
+
+/* People Tab: Ensure follow-up question wraps and doesn't overflow */
+#followUpQuestion {
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    white-space: pre-line;
+    max-width: 100%;
+    font-size: 1.1em;
+    line-height: 1.5;
+}
+
+#personAnswer {
+    width: 100%;
+    /* Make it responsive to its container */
+    overflow-wrap: break-word;
+    /* Ensure long words wrap */
+    white-space: pre-wrap;
+    /* Preserve newlines/spaces and wrap */
+    word-break: break-all;
+    /* More aggressive word breaking */
+    /* Text aligns to top by default. Padding and min-height are inherited or can be set. */
+}
+
+/* Constrain the overall width of the tab content and center it */
+#vontologyTab {
+    max-width: 800px;
+    /* Adjust as needed */
+    margin-left: auto;
+    margin-right: auto;
+    padding: 15px;
+    /* Add some padding around the whole tab content */
+    box-sizing: border-box;
+    /* Include padding in the width calculation */
+    width: 100% !important;
+    /* Force width */
+    min-height: 500px !important;
+    /* Force minimum height */
+}
+
+/* Only force display when the vontology tab is active */
+#vontologyTab.active {
+    display: block !important;
+    /* Force display when active */
+}
+
+/* Style the container for the rendered Markdown content */
+#vontologyNodeContent {
+    border: 1px solid #eee;
+    padding: 15px 20px;
+    /* Add more generous padding inside the content box */
+    height: 250px;
+    /* Start with a reasonable default height */
+    min-height: 100px;
+    /* Ensure it doesn't collapse completely when empty */
+    overflow-y: auto;
+    /* Needed for resize to work properly */
+    margin-bottom: 20px;
+    /* Increase spacing below content */
+    background-color: #f9f9f9;
+    line-height: 1.6;
+    /* Improve readability */
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+    /* Subtle shadow */
+    resize: vertical;
+    /* Add this line to allow vertical resizing */
+    width: 100% !important;
+    /* Force width */
+    display: block !important;
+    /* Force display */
+}
+
+/* Optional: Style specific elements within the rendered Markdown */
+#vontologyNodeContent h1,
+#vontologyNodeContent h2,
+#vontologyNodeContent h3 {
+    margin-top: 1.2em;
+    margin-bottom: 0.6em;
+    padding-bottom: 0.3em;
+    border-bottom: 1px solid #eaecef;
+}
+
+#vontologyNodeContent p {
+    margin-bottom: 1em;
+}
+
+#vontologyNodeContent strong {
+    font-weight: 600;
+    /* Slightly bolder */
+}
+
+/* Concept tab list aesthetics */
+.concept-list-container .concept-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.concept-list-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.concept-filter-toggle {
+    font-size: 0.9rem;
+    color: #444;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.concept-list-note {
+    margin: 6px 0 10px 0;
+    font-size: 0.9rem;
+    color: #666;
+}
+
+.concept-list-item {
+    list-style: disc inside;
+    margin: 6px 0;
+}
+
+.concept-item-button {
+    display: inline-block;
+    padding: 6px 10px;
+    margin: 2px 6px 2px 0;
+    border-radius: 6px;
+    border: 1px solid #cbd5e1;
+    /* slate-300 */
+    background-color: #f8fafc;
+    /* neutral */
+    color: #1e293b;
+    /* slate-800 */
+    cursor: pointer;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.concept-item-button:hover {
+    background-color: #f1f5f9;
+    /* slate-100 */
+}
+
+/* Variants for type vs individual buttons */
+.concept-item-button.type {
+    background-color: #eef6ff !important;
+    border-color: #b6dbff !important;
+    color: #204a72;
+}
+
+.concept-item-button.type:hover {
+    background-color: #e1f0ff !important;
+}
+
+.concept-item-button.individual {
+    background-color: #f7f9f2 !important;
+    border-color: #cfe3b4 !important;
+    color: #2f4a1f;
+}
+
+.concept-item-button.individual:hover {
+    background-color: #eef4e4 !important;
+}
+
+/* Style the tree container */
+#vontologyTreeContainer {
+    border: 1px solid #ccc;
+    padding: 10px;
+    min-height: 100px;
+    min-width: 200px;
+    height: 300px;
+    /* Initial height */
+    max-height: 600px;
+    width: 100%;
+    max-width: 1000px;
+    overflow: auto;
+    margin-bottom: 15px;
+    background-color: #fff;
+    /* White background for the tree */
+    resize: both;
+    /* Allow user to resize vertically and horizontally */
+    box-sizing: border-box;
+    display: block !important;
+    /* Force display */
+    position: relative !important;
+    /* Force positioning context */
+}
+
+/* Vontology top-of-page search UI */
+.vontology-search {
+    margin: 6px 0 10px 0;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    position: relative;
+}
+
+/* Global concept search wrapper (JVNAUTOSCI-550) */
+.global-concept-search {
+    background: #ffffff;
+    border-bottom: 1px solid #e5e7eb;
+    padding: 8px 16px 4px 16px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.global-concept-search-inner {
+    display: flex;
+    align-items: flex-start;
+    gap: 20px;
+    flex-wrap: nowrap;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.global-concept-search-inner .vontology-title {
+    margin: 4px 0 0 0;
+    font-size: 1.25rem;
+    line-height: 1.3;
+    flex: 0 0 auto;
+}
+
+/* Icon replacing textual 'Vontology Explorer' label (JVNAUTOSCI-617) */
+.global-concept-search-inner .vontology-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.vontology-search-icon {
+    display: inline-flex;
+    width: 28px;
+    height: 28px;
+    padding: 4px;
+    border-radius: 6px;
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+    color: #555;
+    align-items: center;
+    justify-content: center;
+}
+
+.vontology-search-icon .icon {
+    width: 18px;
+    height: 18px;
+    display: block;
+}
+
+.vontology-search-icon:hover {
+    background: #f2f2f2;
+}
+
+.vontology-search-icon:active {
+    background: #e8e8e8;
+}
+
+@media (max-width: 900px) {
+    .global-concept-search-inner {
+        flex-wrap: wrap;
+    }
+
+    .global-concept-search-inner .vontology-title {
+        width: 100%;
+    }
+
+    #globalVontologySearchWrapper {
+        width: 100%;
+    }
+
+    /* Make search input responsive on smaller screens */
+    .global-header #vontologySearchInput {
+        width: 100%;
+        min-width: 280px;
+    }
+}
+
+@media (max-width: 600px) {
+
+    /* On very small screens, ensure search is still usable */
+    .global-header #vontologySearchInput {
+        width: 100%;
+        min-width: 200px;
+    }
+
+    .global-concept-search {
+        padding: 6px 12px 4px 12px;
+    }
+}
+
+/* --- Existing styles continue ... --- */
+
+/* CSS for inline style replacements */
+.main-container {
+    display: flex;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.popup-container {
+    margin-right: 20px;
+}
+
+/* Removed overflow override to preserve scroll area behavior and footer spacing */
+
+.content-wrapper {
+    max-width: 800px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    /* Let height be natural; we only constrain scroll area instead of forcing wrapper tall */
+    min-height: 0;
+}
+
+.main-title {
+    text-align: center;
+    margin-bottom: 20px;
+    color: #333;
+}
+
+.chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 20px;
+    position: relative;
+}
+
+.chat-header .main-title {
+    margin-bottom: 0;
+    flex: 1;
+    text-align: center;
+}
+
+.chat-header-controls {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.chat-export-btn {
+    padding: 6px 10px;
+    font-size: 14px;
+    font-weight: 600;
+    border: 1px solid #007bff;
+    background-color: #f8f9fa;
+    color: #007bff;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.chat-export-btn:hover {
+    background-color: #007bff;
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0, 123, 255, 0.2);
+}
+
+.chat-export-btn:active {
+    transform: translateY(0);
+}
+
+.chat-export-btn.success-feedback {
+    background-color: #28a745;
+    color: white;
+    border-color: #28a745;
+}
+
+.chat-export-btn.error-feedback {
+    background-color: #dc3545;
+    color: white;
+    border-color: #dc3545;
+    animation: shake 0.3s ease;
+}
+
+@keyframes shake {
+
+    0%,
+    100% {
+        transform: translateX(0);
+    }
+
+    25% {
+        transform: translateX(-4px);
+    }
+
+    75% {
+        transform: translateX(4px);
+    }
+}
+
+.chat-export-btn .btn-icon {
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.loading-indicator-row {
+    min-height: 0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+
+.scrollable-field {
+    white-space: pre-wrap;
+    border: 1px solid #ccc;
+    padding: 10px;
+    width: 100%;
+    overflow-y: auto;
+    margin-bottom: 16px;
+    resize: vertical;
+    min-height: 150px;
+    max-height: calc(55vh);
+    /* cap so buttons & input remain visible */
+    flex: 0 0 auto;
+    /* prevent over-expanding */
+    box-sizing: border-box;
+    background-color: white;
+}
+
+/* Chat variant (legacy class) updated for parity */
+.chat-scrollable-field {
+    white-space: pre-wrap;
+    border: 1px solid #ccc;
+    padding: 10px;
+    width: 100%;
+    overflow-y: auto;
+    margin-bottom: 16px;
+    resize: vertical;
+    min-height: 150px;
+    max-height: calc(55vh);
+    flex: 0 0 auto;
+    box-sizing: border-box;
+    height: auto !important;
+}
+
+/* Ensure text input and buttons do not shrink below content */
+#promptInput,
+.prompt-input,
+.chat-prompt-input {
+    flex-shrink: 0;
+}
+
+/* Chat buttons: revert to intrinsic width and align nicely */
+#sendButton,
+#resetButton {
+    width: auto;
+    max-width: 180px;
+}
+
+/* Flex row wrapper for action buttons */
+.button-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    margin-bottom: 8px;
+}
+
+/* Annotation toggle styling */
+.annotation-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    padding: 6px 10px;
+    border-radius: 4px;
+    transition: background-color 0.2s;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.annotation-toggle:hover {
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+.annotation-toggle input[type="checkbox"] {
+    cursor: pointer;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+}
+
+.annotation-toggle .eye-icon {
+    font-size: 18px;
+    line-height: 1;
+}
+
+.annotation-toggle .toggle-label {
+    font-size: 14px;
+    font-weight: 500;
+}
+
+/* Narrow screens: allow wrap but maintain spacing */
+@media (max-width: 520px) {
+
+    #sendButton,
+    #resetButton {
+        margin-bottom: 8px;
+    }
+}
+
+/* Compact the space before buttons */
+#promptInput,
+.prompt-input {
+    margin-bottom: 8px;
+}
+
+@media (max-height: 700px) {
+
+    .scrollable-field,
+    .chat-scrollable-field {
+        max-height: 45vh;
+    }
+}
+
+/* When inside the tab-content-area, make the tab content flex to propagate height */
+.tab-content-area .tab-content.active>.content-wrapper {
+    height: calc(100vh - 60px - 80px);
+    /* subtract tab bar + some footer padding allowance */
+}
+
+/* Provide a responsive fallback for very small screens */
+@media (max-height: 600px) {
+    .tab-content-area .tab-content.active>.content-wrapper {
+        height: auto;
+        min-height: 0;
+    }
+
+    .scrollable-field,
+    .chat-scrollable-field {
+        min-height: 120px;
+    }
+}
+
+.loading-indicator {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: #475569;
+    background-color: #eef2ff;
+    border-radius: 999px;
+    padding: 4px 8px;
+    white-space: nowrap;
+    transition: opacity 0.2s ease;
+}
+
+.loading-indicator[aria-hidden="true"] {
+    opacity: 0;
+}
+
+.loading-indicator[aria-hidden="false"] {
+    opacity: 1;
+}
+
+.loading-indicator-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #0d6efd;
+    animation: loading-indicator-pulse 1s ease-in-out infinite;
+}
+
+@keyframes loading-indicator-pulse {
+
+    0%,
+    100% {
+        transform: scale(0.8);
+        opacity: 0.5;
+    }
+
+    50% {
+        transform: scale(1.2);
+        opacity: 1;
+    }
+}
+
+.prompt-input {
+    width: 100%;
+}
+
+.settings-iframe {
+    width: 100%;
+    min-height: 600px;
+    height: auto;
+    border: none;
+    overflow: hidden;
+    display: block;
+}
+
+/* Concept Tab Styles */
+.concept-form-title {
+    font-weight: bold;
+    margin-bottom: 10px;
+    color: #333;
+    border-bottom: 1px solid #ccc;
+    padding-bottom: 5px;
+}
+
+/* Utility classes */
+.hidden {
+    display: none !important;
+}
+
+.pid-indicator {
+    margin: 0;
+    font-size: 0.7rem;
+    color: #555;
+    padding: 4px 8px;
+    background: #f3f4f6;
+    border-radius: 12px;
+    border: 1px solid #e5e7eb;
+}
+
+.pid-indicator.pid-error {
+    background: #fdecea;
+    color: #b71c1c;
+    border-color: #f5c2c7;
+}
+
+.footer-separator {
+    margin: 0 4px;
+    opacity: 0.5;
+}
+
+.concept-link {
+    color: #2563eb;
+    text-decoration: none;
+}
+
+.concept-link:hover {
+    text-decoration: underline;
+}
+
+.button-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+}
+
+.salient-result {
+    max-height: 220px;
+    overflow: auto;
+    background: #1e1e1e;
+    color: #ddd;
+    padding: 8px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.flex {
+    display: flex !important;
+}
+
+.flex-wrap {
+    flex-wrap: wrap !important;
+}
+
+.ai-center {
+    align-items: center !important;
+}
+
+.gap-1 {
+    gap: 4px !important;
+}
+
+.gap-2 {
+    gap: 8px !important;
+}
+
+.gap-3 {
+    gap: 10px !important;
+}
+
+.mt-1 {
+    margin-top: 6px !important;
+}
+
+.mt-2 {
+    margin-top: 8px !important;
+}
+
+.mt-3 {
+    margin-top: 10px !important;
+}
+
+.mb-2 {
+    margin-bottom: 10px !important;
+}
+
+.mb-3 {
+    margin-bottom: 15px !important;
+}
+
+.ml-1 {
+    margin-left: 4px !important;
+}
+
+.ml-2 {
+    margin-left: 8px !important;
+}
+
+.mr-1 {
+    margin-right: 4px !important;
+}
+
+.mr-3 {
+    margin-right: 15px !important;
+}
+
+.flex-1 {
+    flex: 1 1 auto !important;
+}
+
+.minw-220 {
+    min-width: 220px !important;
+}
+
+.w-200 {
+    width: 200px !important;
+}
+
+.dib {
+    display: inline-block !important;
+}
+
+.text-muted {
+    color: #999 !important;
+}
+
+.text-danger {
+    color: #ff6b6b !important;
+}
+
+.fw-bold {
+    font-weight: bold !important;
+}
+
+.line-through {
+    text-decoration: line-through !important;
+}
+
+.fs-12 {
+    font-size: 12px !important;
+}
+
+.text-md {
+    font-size: 14px !important;
+    line-height: 1.6 !important;
+}
+
+.top-10 {
+    top: 10px !important;
+}
+
+.right-15 {
+    right: 15px !important;
+}
+
+/* Small panels and cards */
+.panel-muted {
+    padding: 10px;
+    background-color: #f5f5f5;
+    border-radius: 4px;
+}
+
+.success-box {
+    padding: 10px;
+    background-color: #e8f5e8;
+    border-radius: 4px;
+    margin-top: 10px;
+}
+
+.card-muted {
+    border: 1px solid #ddd;
+    background-color: #fafafa;
+    border-radius: 8px;
+}
+
+.card-warning {
+    border: 1px solid #fff3cd;
+    background-color: #fff8e1;
+    border-radius: 8px;
+}
+
+.history-box {
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 12px;
+}
+
+.label-block {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: bold;
+}
+
+.label-inline {
+    display: inline-block;
+    margin-right: 15px;
+}
+
+.label-inline-strong {
+    display: inline-block;
+    margin-left: 10px;
+    margin-bottom: 5px;
+    font-weight: bold;
+}
+
+.concept-input {
+    width: 100%;
+    max-width: 400px;
+}
+
+.concept-remove-button {
+    margin-left: 10px;
+    display: none;
+}
+
+.concept-notes {
+    width: 100%;
+    /* Removed max-width to allow full container width so it aligns with dynamic description block */
+    box-sizing: border-box;
+}
+
+.concept-save-button {
+    margin-left: 10px;
+    display: none;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.concept-status {
+    margin-top: 10px;
+    font-style: italic;
+}
+
+.concept-step {
+    display: none;
+}
+
+.concept-step-status {
+    margin-bottom: 15px;
+    font-style: italic;
+    color: #0066cc;
+}
+
+.concept-answer-container {
+    display: flex;
+    align-items: center;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.concept-answer-input {
+    flex: 1;
+    min-width: 300px;
+    height: 50px;
+    margin-right: 10px;
+}
+
+.concept-cancel-button {
+    margin-top: 10px;
+}
+
+.concept-end-button {
+    margin-top: 10px;
+    margin-left: 10px;
+}
+
+.concept-last-qa-display {
+    display: none;
+    margin-top: 15px;
+    padding: 10px;
+    border: 1px solid #ddd;
+    background-color: #f5f5f5;
+}
+
+.concept-last-question {
+    font-style: italic;
+}
+
+.concept-qa-item {
+    margin-bottom: 8px;
+}
+
+.concept-last-answer {
+    color: #0066cc;
+}
+
+.concept-last-synthesis {
+    color: #006600;
+}
+
+.concept-final-result {
+    margin-top: 15px;
+    padding: 10px;
+    border: 1px solid #ccc;
+    background-color: #f9f9f9;
+}
+
+.concept-list-container {
+    margin-top: 30px;
+}
+
+.concept-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.concept-list-title {
+    margin: 0;
+}
+
+.concept-add-button {
+    background-color: #28a745;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+.concept-create-form {
+    margin-top: 8px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.concept-create-form input {
+    flex: 1;
+    padding: 6px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+.concept-notes-content {
+    width: 100%;
+    box-sizing: border-box;
+    height: 150px;
+    white-space: pre-wrap;
+    font-family: monospace;
+    background-color: white;
+    padding: 10px;
+    border: 1px solid #ddd;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+/* Rendered Markdown view of concept notes */
+.concept-notes-rendered {
+    border: 1px solid #ddd;
+    background: #fafafa;
+    padding: 12px 14px;
+    border-radius: 6px;
+    margin-top: 8px;
+    max-height: 420px;
+    overflow-y: auto;
+    font-size: 0.92rem;
+    line-height: 1.45;
+    white-space: normal;
+}
+
+.concept-notes-rendered h1 {
+    font-size: 1.3rem;
+    margin: 0.6em 0 0.4em;
+}
+
+.concept-notes-rendered h2 {
+    font-size: 1.15rem;
+    margin: 0.6em 0 0.4em;
+}
+
+.concept-notes-rendered h3 {
+    font-size: 1.05rem;
+    margin: 0.6em 0 0.4em;
+}
+
+.concept-notes-rendered code {
+    background: #eee;
+    padding: 2px 4px;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+.concept-notes-rendered pre {
+    background: #272822;
+    color: #f8f8f2;
+    padding: 10px 12px;
+    border-radius: 6px;
+    overflow: auto;
+}
+
+.concept-notes-rendered ul {
+    padding-left: 20px;
+    margin: 0.4em 0 0.6em;
+}
+
+.concept-notes-rendered li {
+    margin-bottom: 4px;
+}
+
+.concept-notes-rendered p {
+    margin: 0.5em 0;
+}
+
+.concept-interaction-save-button {
+    margin-top: 10px;
+    display: none;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.concept-submit-button {
+    background-color: #28a745;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-left: 10px;
+}
+
+.concept-followup-question {
+    font-weight: bold;
+    margin-bottom: 10px;
+}
+
+.concept-notes-display {
+    display: none;
+    margin-bottom: 15px;
+    padding: 10px;
+    border: 1px solid #ccc;
+    background-color: #f9f9f9;
+}
+
+.concept-notes-content {
+    width: 100%;
+    box-sizing: border-box;
+    height: 150px;
+    white-space: pre-wrap;
+    font-family: monospace;
+    background-color: white;
+    padding: 10px;
+    border: 1px solid #ccc;
+}
+
+.concept-interaction-save-button {
+    margin-top: 10px;
+    display: none;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.concept-follow-up-question {
+    font-weight: bold;
+    margin-bottom: 10px;
+}
+
+.concept-step-status {
+    margin-bottom: 15px;
+    font-style: italic;
+    color: #0066cc;
+}
+
+.concept-answer-container {
+    display: flex;
+    align-items: center;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.concept-answer-input {
+    flex: 1;
+    min-width: 300px;
+    height: 50px;
+    margin-right: 10px;
+}
+
+.concept-interaction-button {
+    margin-top: 10px;
+}
+
+.concept-interaction-button.secondary {
+    margin-left: 10px;
+}
+
+.concept-qa-display {
+    display: none;
+    margin-top: 15px;
+    padding: 10px;
+    border: 1px solid #ddd;
+    background-color: #f5f5f5;
+}
+
+.concept-qa-item {
+    margin-bottom: 8px;
+}
+
+.concept-qa-question {
+    font-style: italic;
+}
+
+.concept-qa-answer {
+    color: #0066cc;
+}
+
+.concept-qa-synthesis {
+    color: #006600;
+}
+
+.concept-final-result {
+    margin-top: 15px;
+    padding: 10px;
+    border: 1px solid #ccc;
+    background-color: #f9f9f9;
+}
+
+.concept-list-section {
+    margin-top: 30px;
+}
+
+.concept-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.concept-list-title {
+    margin: 0;
+}
+
+.concept-add-button {
+    background-color: #28a745;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.concept-direct-badge {
+    margin-left: 6px;
+    padding: 0 6px;
+    border: 1px solid #3b82f6;
+    border-radius: 10px;
+    background: #e6f0ff;
+    color: #1d4ed8;
+    font-size: 0.75em;
+}
+
+/* Vontology token annotation */
+.vontology-token {
+    color: #0069d9;
+    text-decoration: none;
+    border-bottom: 1px dotted #0069d9;
+    cursor: pointer;
+}
+
+.vontology-token:hover {
+    color: #004a99;
+    border-bottom-color: #004a99;
+}
+
+/* Annotation suggestion UI */
+.annotation-suggestions {
+    border-left: 3px solid #e6eef8;
+    padding: 8px 10px;
+    background: #fbfdff;
+    border-radius: 6px;
+    margin-top: 6px;
+}
+
+.annotation-suggestions div {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.annotation-candidate-button {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    color: #0f172a;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.annotation-candidate-button:hover {
+    background: #f1f5f9;
+}
+
+.annotation-candidate-button.accepted {
+    background: #dff3e6;
+    border-color: #b6e3b0;
+    color: #0b6234;
+}
+
+.annotation-create-button {
+    background: #fff8e1;
+    border: 1px solid #ffe8a1;
+    color: #8a6d00;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.annotation-timing {
+    font-size: 0.78em;
+    color: #666;
+    margin-top: 6px;
+}
+
+.annotation-undo {
+    background: transparent;
+    border: none;
+    color: #0d6efd;
+    cursor: pointer;
+    font-size: 0.85em;
+    padding-left: 8px;
+}
+
+.annotation-undo:hover {
+    text-decoration: underline;
+}
+
+/* Badge indicating a node is being kept visible despite filtering */
+.forced-visible-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    background: #fff3cd;
+    /* warning-like background */
+    color: #856404;
+    border: 1px solid #ffeeba;
+    border-radius: 10px;
+    font-size: 11px;
+    line-height: 1;
+    vertical-align: baseline;
+}
+
+/* Badge for newly created nodes (transient) */
+.vontology-new-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    background: #e8f5e9;
+    color: #2e7d32;
+    border: 1px solid #c8e6c9;
+    border-radius: 10px;
+    font-size: 11px;
+    line-height: 1;
+    vertical-align: baseline;
+}
+
+/* Visual distinction for dynamic concept tabs by kind */
+.tab-button.type-tab {
+    background-color: #e9f2ff;
+    /* light blue tint */
+    border-color: #b6dbff;
+    color: #0f2a49;
+}
+
+.tab-button.type-tab:hover {
+    background-color: #dcebff;
+}
+
+.tab-button.individual-tab {
+    background-color: #f0f7ea;
+    /* light green tint */
+    border-color: #cfe3b4;
+    color: #1f3a1a;
+}
+
+.tab-button.individual-tab:hover {
+    background-color: #e8f1e0;
+}
+
+/* Ensure active state keeps a slightly darker colored background rather than white */
+/* Increase specificity to override inline template .tab-button.active rule */
+.tab-container .tab-button.type-tab.active {
+    background-color: #d2e6ff;
+    /* slightly darker blue */
+    border-bottom-color: #d2e6ff;
+}
+
+.tab-container .tab-button.individual-tab.active {
+    background-color: #e0edd4;
+    /* slightly darker green */
+    border-bottom-color: #e0edd4;
+}
+
+/* Unselected (non-active) tabs keep lighter colors; no change needed but keep for clarity */
+.tab-container .tab-button.type-tab:not(.active) {
+    background-color: #e9f2ff;
+}
+
+.tab-container .tab-button.individual-tab:not(.active) {
+    background-color: #f0f7ea;
+}
+
+.tab-button.predicate-tab {
+    background-color: #f5f0ff;
+    /* lavender tint for predicates */
+    border-color: #d4c5f9;
+    color: #4a3871;
+}
+
+.tab-button.predicate-tab:hover {
+    background-color: #ede5ff;
+}
+
+.tab-container .tab-button.predicate-tab.active {
+    background-color: #e8dfff;
+    /* slightly darker lavender */
+    border-bottom-color: #e8dfff;
+}
+
+.tab-container .tab-button.predicate-tab:not(.active) {
+    background-color: #f5f0ff;
+}
+
+/* Small badge injected into Concept tab headers to show tab kind */
+.kind-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-size: 11px;
+    border: 1px solid transparent;
+    line-height: 1.1;
+    font-weight: 600;
+}
+
+.kind-badge.type {
+    background: #eef6ff;
+    border-color: #b6dbff;
+    color: #204a72;
+}
+
+.kind-badge.individual {
+    background: #f7f9f2;
+    border-color: #cfe3b4;
+    color: #2f4a1f;
+}
+
+.kind-badge.predicate {
+    background: #f5f0ff;
+    border-color: #d4c5f9;
+    color: #4a3871;
+}
+
+/* Ensure badges align flush left when they are the first visible element */
+.concept-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    /* use gap instead of relying on ad-hoc margins */
+}
+
+.concept-header .kind-badge:first-child {
+    margin-left: 0 !important;
+}
+
+/* If an ID chip precedes badge, maintain consistent gap */
+.concept-header .kind-badge {
+    margin-left: 0;
+}
+
+/* NEW badge on tabs: base and kind variants */
+.new-tab-badge {
+    margin-left: 6px;
+    border-radius: 10px;
+    padding: 0 6px;
+    font-size: 0.75em;
+    line-height: 1.6;
+    font-weight: 600;
+}
+
+.new-tab-badge.type {
+    background: #2563eb;
+    /* blue */
+    color: #ffffff;
+}
+
+.new-tab-badge.individual {
+    background: #16a34a;
+    /* green */
+    color: #ffffff;
+}
+
+/* Concept ID chip next to tab header */
+.concept-id-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    border: 1px solid #d1d5db;
+    /* gray-300 */
+    background: #f9fafb;
+    /* neutral */
+    font-size: 0.8em;
+    line-height: 1.35;
+}
+
+.concept-id-chip.type {
+    border-color: #b6dbff;
+    background: #eef6ff;
+    color: #0f2a49;
+}
+
+.concept-id-chip.individual {
+    border-color: #cfe3b4;
+    background: #f7f9f2;
+    color: #1f3a1a;
+}
+
+.concept-id-text {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.95em;
+}
+
+.copy-id-button {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 0.9em;
+    line-height: 1;
+    padding: 0;
+}
+
+.copy-id-button:hover {
+    filter: brightness(0.9);
+}
+
+/* Key Concept Star Button */
+.key-concept-star-button {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 4px;
+    margin-left: 6px;
+    transition: transform 0.2s ease, filter 0.2s ease;
+}
+
+.key-concept-star-button:hover {
+    transform: scale(1.15);
+    filter: brightness(1.1);
+}
+
+.key-concept-star-button.marked {
+    color: #fbbf24;
+    filter: drop-shadow(0 0 2px rgba(251, 191, 36, 0.5));
+}
+
+.key-concept-star-button:not(.marked) {
+    color: #9ca3af;
+}
+
+.key-concept-star-button:not(.marked):hover {
+    color: #6b7280;
+}
+
+/* Style the create-type vs create-instance buttons in Vontology tab */
+#createTypeButton {
+    background: #eef6ff;
+    color: #0f3050;
+    border: 1px solid #b6dbff;
+}
+
+#createTypeButton:hover {
+    background: #e1f0ff;
+}
+
+#createInstanceButton {
+    background: #f7f9f2;
+    color: #1f3a1a;
+    border: 1px solid #cfe3b4;
+}
+
+#createInstanceButton:hover {
+    background: #eef4e4;
+}
+
+/* Names Management Section */
+.names-list-container {
+    margin-bottom: 12px;
+    min-height: 40px;
+    background-color: #f9f9f9;
+}
+
+/* NUCLEAR OPTION - Maximum specificity cartouche rules */
+html body div[id^="namesList_"] .name-cartouche,
+html body .names-list-container .name-cartouche,
+.name-cartouche {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    padding: 8px 12px !important;
+    margin: 4px !important;
+    border: 1px solid #ddd !important;
+    background-color: #f8f9fa !important;
+    font-size: 14px !important;
+    font-weight: normal !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    border-radius: 6px !important;
+    max-width: 100% !important;
+    visibility: visible !important;
+    position: static !important;
+    overflow: visible !important;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1) !important;
+}
+
+.name-cartouche.primary {
+    background-color: #eef6ff !important;
+    border-color: #b6dbff !important;
+    font-weight: 500 !important;
+}
+
+/* NUCLEAR OPTION - Force parent container visibility for all concept tabs */
+html body div[id^="typeSections_"],
+html body .concept-list-section {
+    display: block !important;
+    visibility: visible !important;
+    overflow: visible !important;
+    position: static !important;
+    width: auto !important;
+    height: auto !important;
+    opacity: 1 !important;
+}
+
+/* Force namesSection visibility for all concept tabs */
+html body div[id^="namesSection_"],
+html body .concept-list-subsection {
+    display: block !important;
+    visibility: visible !important;
+    overflow: visible !important;
+    position: static !important;
+    width: auto !important;
+    height: auto !important;
+    opacity: 1 !important;
+}
+
+.name-cartouche.primary {
+    background: #eef6ff;
+    border-color: #b6dbff;
+    font-weight: 600;
+}
+
+/* NUCLEAR OPTION - Maximum specificity child element rules */
+html body div[id^="namesList_"] .name-cartouche .name-text,
+html body .names-list-container .name-cartouche .name-text,
+.name-cartouche .name-text,
+.name-text {
+    flex: 1 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+    font-size: 14px !important;
+    color: #333 !important;
+    display: block !important;
+    visibility: visible !important;
+    position: static !important;
+    min-height: 0 !important;
+}
+
+html body div[id^="namesList_"] .name-cartouche .name-meta,
+html body .names-list-container .name-cartouche .name-meta,
+.name-cartouche .name-meta,
+.name-meta {
+    display: flex !important;
+    gap: 4px !important;
+    font-size: 12px !important;
+    color: #6b7280 !important;
+    min-width: 0 !important;
+    visibility: visible !important;
+    position: static !important;
+    min-height: 0 !important;
+}
+
+html body div[id^="namesList_"] .name-cartouche .name-type-badge,
+html body .names-list-container .name-cartouche .name-type-badge,
+.name-cartouche .name-type-badge,
+.name-type-badge {
+    padding: 2px 4px !important;
+    border-radius: 3px !important;
+    background: #e5e7eb !important;
+    color: #374151 !important;
+    font-weight: 500 !important;
+    font-size: 10px !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    display: inline-block !important;
+    visibility: visible !important;
+    position: static !important;
+}
+
+html body div[id^="namesList_"] .name-cartouche .name-language-badge,
+html body .names-list-container .name-cartouche .name-language-badge,
+.name-cartouche .name-language-badge,
+.name-language-badge {
+    padding: 2px 4px !important;
+    border-radius: 3px !important;
+    background: #fef3c7 !important;
+    color: #92400e !important;
+    font-weight: 500 !important;
+    font-size: 10px !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    display: inline-block !important;
+    visibility: visible !important;
+    position: static !important;
+}
+
+html body div[id^="namesList_"] .name-cartouche .name-delete-button,
+html body .names-list-container .name-cartouche .name-delete-button,
+.name-cartouche .name-delete-button,
+.name-delete-button {
+    border: 1px solid #d1d5db !important;
+    background: #f9fafb !important;
+    color: #6b7280 !important;
+    cursor: pointer !important;
+    font-size: 14px !important;
+    padding: 2px !important;
+    width: 20px !important;
+    height: 20px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    border-radius: 50% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    visibility: visible !important;
+    position: static !important;
+}
+
+html body div[id^="namesList_"] .name-cartouche .name-delete-button:hover,
+html body .names-list-container .name-cartouche .name-delete-button:hover,
+.name-cartouche .name-delete-button:hover,
+.name-delete-button:hover {
+    background: #fee2e2 !important;
+    color: #ef4444 !important;
+}
+
+html body div[id^="namesList_"] .name-cartouche .name-delete-button:disabled,
+html body .names-list-container .name-cartouche .name-delete-button:disabled,
+.name-cartouche .name-delete-button:disabled,
+.name-delete-button:disabled {
+    color: #d1d5db !important;
+    cursor: not-allowed !important;
+}
+
+html body div[id^="namesList_"] .name-cartouche .name-delete-button:disabled:hover,
+html body .names-list-container .name-cartouche .name-delete-button:disabled:hover,
+.name-cartouche .name-delete-button:disabled:hover,
+.name-delete-button:disabled:hover {
+    background: #f9fafb !important;
+    color: #d1d5db !important;
+}
+
+.name-delete-button:hover {
+    background: #fee2e2;
+}
+
+.name-delete-button:disabled {
+    color: #d1d5db;
+    cursor: not-allowed;
+}
+
+.name-delete-button:disabled:hover {
+    background: transparent;
+}
+
+.names-add-form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 8px;
+}
+
+.names-add-form input {
+    flex: 1;
+    min-width: 150px;
+}
+
+.names-add-form select {
+    min-width: 120px;
+}
+
+/* Raw JSON viewer */
+.round-icon-button {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    border: 1px solid #006bbd;
+    /* slightly darker than base for definition */
+    background: #0078d4;
+    /* primary action blue (matches standard buttons) */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 0.8rem;
+    padding: 0;
+    color: #ffffff;
+    /* white stroke for inline SVG */
+    transition: background .15s ease, border-color .15s ease, transform .15s ease;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+.round-icon-button:hover {
+    background: #006bbd;
+    /* darken on hover */
+    border-color: #005fa9;
+}
+
+.round-icon-button:active {
+    background: #005fa9;
+    border-color: #005293;
+    transform: translateY(1px);
+}
+
+/* Circular plus button for add actions */
+.circular-add-button {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    border: 1px solid #006bbd;
+    background: #0078d4;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: bold;
+    padding: 0;
+    color: #ffffff;
+    transition: background .15s ease, border-color .15s ease, transform .15s ease;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+    margin-left: auto;
+}
+
+.circular-add-button:hover {
+    background: #006bbd;
+    border-color: #005fa9;
+}
+
+.circular-add-button:active {
+    background: #005fa9;
+    border-color: #005293;
+    transform: translateY(1px);
+}
+
+.circular-add-button:before {
+    content: '+';
+    font-size: 16px;
+    line-height: 1;
+}
+
+/* In-place description editing styles */
+.editable-description {
+    cursor: pointer;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 8px;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.editable-description:hover {
+    background-color: #f8f9fa;
+    border-color: #e9ecef;
+}
+
+.editable-description:focus {
+    outline: 2px solid #0078d4;
+    outline-offset: 2px;
+    background-color: #f8f9fa;
+}
+
+.description-editor {
+    width: 100%;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    padding: 8px;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    resize: vertical;
+    min-height: 120px;
+}
+
+.description-editor:focus {
+    border-color: #0078d4;
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.25);
+}
+
+.description-edit-actions {
+    margin-top: 8px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.description-edit-actions .small-btn {
+    padding: 6px 12px;
+    font-size: 0.875rem;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+    background: #fff;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.description-edit-actions .small-btn:hover {
+    background-color: #f8f9fa;
+    border-color: #adb5bd;
+}
+
+.description-edit-actions .small-btn:first-child {
+    background-color: #0078d4;
+    border-color: #0078d4;
+    color: white;
+}
+
+.description-edit-actions .small-btn:first-child:hover {
+    background-color: #106ebe;
+    border-color: #106ebe;
+}
+
+.text-relations-modal.anchored .raw-json-dialog {
+    pointer-events: auto;
+    width: min(640px, 70vw);
+    max-width: min(640px, 70vw);
+}
+
+.raw-json-dialog {
+    width: min(900px, 92vw);
+    max-height: 82vh;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+
+.raw-json-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: #f3f4f6;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.raw-json-title {
+    font-weight: 600;
+    color: #111827;
+}
+
+.raw-json-close {
+    border: none;
+    background: transparent;
+    font-size: 20px;
+    cursor: pointer;
+}
+
+.raw-json-body {
+    padding: 8px 12px;
+    /* Structured scroll fix: scrolling moved to pre so dark background covers full scrollable width */
+    overflow: hidden;
+    background: transparent;
+}
+
+.raw-json-pre {
+    margin: 0;
+    background: #111827;
+    color: #e7e7e7;
+    padding: 12px;
+    border-radius: 4px;
+    overflow: auto;
+    /* now owns scroll */
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.raw-json-footer {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    padding: 10px 12px;
+    border-top: 1px solid #e5e7eb;
+}
+
+/* Annotation JSON lightweight panel (anchored, no full-screen overlay) */
+.annotation-json-modal {
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+    padding: 0;
+    width: 400px;
+    max-width: 90vw;
+    max-height: 75vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    z-index: 3000;
+}
+
+.annotation-json-header {
+    padding: 6px 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #ddd;
+    background: #f3f4f6;
+}
+
+.annotation-json-title {
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+.annotation-json-close {
+    background: #eee;
+    border: 1px solid #ccc;
+    cursor: pointer;
+    line-height: 1;
+    padding: 2px 6px;
+}
+
+.annotation-json-close:hover {
+    background: #e2e2e2;
+}
+
+.annotation-json-body {
+    padding: 8px 10px;
+    overflow: auto;
+    flex: 1 1 auto;
+    background: #111827;
+}
+
+.annotation-json-content {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: #e5e7eb;
+}
+
+.annotation-json-footer {
+    padding: 6px 10px;
+    border-top: 1px solid #e5e7eb;
+    background: #f9fafb;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.annotation-json-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.annotation-json-copy {
+    cursor: pointer;
+}
+
+.annotation-json-close,
+.annotation-json-close-2 {
+    cursor: pointer;
+}
+
+/* Settings Page Styles (scoped) */
+body.settings-body {
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+    height: auto;
+    overflow-y: visible;
+    background-color: #fff;
+    color: #333;
+}
+
+.settings-container {
+    flex: 1 1 auto;
+    height: auto;
+    padding: 1rem 2rem;
+    width: 100%;
+    max-width: none;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+.settings-container section {
+    background-color: #fff;
+    padding: 1.5rem;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    border: 1px solid #eee;
+}
+
+.settings-container h1,
+.settings-container h2 {
+    color: #333;
+    margin-top: 0;
+}
+
+.settings-container label {
+    display: block;
+    margin-top: 15px;
+    margin-bottom: 5px;
+    font-weight: bold;
+}
+
+.settings-container select,
+.settings-container button,
+.settings-container input[type="text"] {
+    width: 100%;
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 4px;
+    border: 1px solid #ddd;
+    box-sizing: border-box;
+}
+
+.status-message {
+    padding: 10px;
+    margin-top: 15px;
+    border-radius: 4px;
+    display: none;
+}
+
+.status-message.loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background-color: #e6f2fc;
+    color: #0b5394;
+    border: 1px solid #b6d9f6;
+}
+
+.status-message.success {
+    display: block;
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+.status-message.error {
+    display: block;
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+}
+
+.loading-spinner {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid rgba(11, 83, 148, 0.25);
+    border-top-color: rgba(11, 83, 148, 0.7);
+    animation: spin 0.8s linear infinite;
+}
+
+.concept-missing-state {
+    border: 1px solid #fca5a5;
+    background-color: #fef2f2;
+    color: #991b1b;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+}
+
+.concept-missing-state h3 {
+    margin: 0 0 4px;
+    font-size: 1rem;
+}
+
+.concept-missing-state p {
+    margin: 0;
+}
+
+.concept-tab-missing input[disabled],
+.concept-tab-missing button[disabled],
+.concept-tab-missing textarea[disabled],
+.concept-tab-missing select[disabled] {
+    cursor: not-allowed;
+    opacity: 0.7;
+}
+
+.tab-button.tab-button-missing {
+    opacity: 0.6;
+}
+
+.tab-button.tab-button-missing:hover {
+    opacity: 0.75;
+}
+
+.settings-note {
+    font-size: 0.9em;
+    color: #666;
+    margin-bottom: 10px;
+}
+
+#dbInfoContent {
+    font-size: 0.95em;
+    color: #333;
+}
+
+#ollamaHostsContainer {
+    margin-bottom: 20px;
+}
+
+#ollamaHostsList {
+    margin-bottom: 15px;
+}
+
+.inline-form {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+/* Variant: tighter spacing & top margin used in settings_tab reset prefs row */
+.inline-form-tight {
+    gap: 8px;
+}
+
+.mt-8-align-center {
+    margin-top: 8px;
+    align-items: center;
+}
+
+.badge-neutral {
+    padding: 4px 8px;
+    border-radius: 12px;
+    background: #eee;
+    color: #555;
+}
+
+.text-error {
+    color: #a33;
+}
+
+/* Small round icon buttons used for annotations and editing */
+.round-icon-button {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 1px solid #d1d5db;
+    background: #f9fafb;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 0.8rem;
+    padding: 0;
+    /* Ensure icon stroke (currentColor) has sufficient contrast even inside light or white text containers */
+    color: #374151;
+}
+
+.round-icon-button:hover {
+    background: #eef2f7;
+    border-color: #c5ced8;
+}
+
+.round-icon-button.danger {
+    background: #fee2e2;
+    border-color: #f87171;
+    color: #b91c1c;
+}
+
+.round-icon-button.danger:hover {
+    background: #fecaca;
+    border-color: #ef4444;
+    color: #991b1b;
+}
+
+/* Two-step delete confirmation visual state */
+.round-icon-button.confirming {
+    animation: pulse-confirm 0.9s ease-in-out infinite;
+    box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.35);
+}
+
+@keyframes pulse-confirm {
+    0% {
+        transform: scale(1);
+    }
+
+    50% {
+        transform: scale(1.07);
+    }
+
+    100% {
+        transform: scale(1);
+    }
+}
+
+/* Accessible focus ring (only when keyboard focusing) */
+.round-icon-button:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
+/* Expand/collapse icon variants (placeholder if using same SVG) */
+.round-icon-button[data-icon="collapse"] svg {
+    transform: rotate(180deg);
+}
+
+.text-block-actions {
+    position: absolute;
+    top: 0;
+    left: 100%;
+    margin-left: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-start;
+    /* so left edge of first button aligns flush */
+    padding-top: 4px;
+}
+
+/* Edge alignment modifier (added by JS) ensures previous translate rules not applied */
+.text-block-actions.actions-edge-align {
+    transform: none;
+}
+
+/* Orientation modifiers */
+.text-block-actions.actions-vertical {
+    flex-direction: column;
+}
+
+.text-block-actions.actions-horizontal {
+    flex-direction: row;
+    align-items: center;
+}
+
+/* Horizontal spacing tweak */
+.text-block-actions.actions-horizontal .round-icon-button+.round-icon-button {
+    margin-left: 4px;
+}
+
+/* Type description wrapper needs relative positioning for absolutely positioned action buttons */
+.type-description-wrapper {
+    position: relative;
+}
+
+/* Provide consistent icon rendering via data-icon (allows later swap to SVG) */
+.round-icon-button[data-icon] {
+    font-size: 0.78rem;
+    line-height: 1;
+}
+
+/* Inline SVG inside round buttons: normalize layout & prevent accidental pointer events on paths */
+.round-icon-button svg {
+    display: block;
+    width: 16px;
+    height: 16px;
+    pointer-events: none;
+}
+
+/* Accessibility: visually hide helper text while keeping it for screen readers */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* Optional: could switch to pseudo-elements for stricter control */
+/* .round-icon-button[data-icon]::before { content: attr(data-icon); } */
+
+/* Analysis and relationship buttons */
+.analysis-buttons-group {
+    display: flex;
+    gap: 4px;
+    margin-left: 8px;
+}
+
+.analysis-flag-button,
+.org-relation-button,
+.user-relation-button {
+    padding: 2px 6px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #f9fafb;
+    color: #374151;
+    cursor: pointer;
+    font-size: 0.9rem;
+    line-height: 1.2;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.analysis-flag-button:hover,
+.org-relation-button:hover,
+.user-relation-button:hover {
+    background: #f3f4f6;
+}
+
+/* Active states */
+.analysis-flag-button[data-flagged="true"] {
+    background: #fef3c7 !important;
+    border-color: #f59e0b !important;
+}
+
+.org-relation-button[data-has-relation="true"] {
+    background: #dbeafe !important;
+    border-color: #3b82f6 !important;
+}
+
+.user-relation-button[data-has-relation="true"] {
+    background: #dcfce7 !important;
+    border-color: #10b981 !important;
+}
+
+/* Toast notifications */
+.toast {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 12px 20px;
+    border-radius: 4px;
+    color: white;
+    font-weight: 500;
+    z-index: 10000;
+    transition: opacity 0.3s ease;
+}
+
+.toast-info {
+    background-color: #10b981;
+}
+
+.toast-error {
+    background-color: #ef4444;
+}
+
+/* Deprecation Metrics */
+#deprecation-metrics .metrics-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    margin-top: 8px;
+}
+
+#deprecation-metrics .metric-item {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+#deprecation-metrics .metric-key {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    color: #475569;
+    font-weight: 600;
+}
+
+#deprecation-metrics .metric-value {
+    font-size: 1.3rem;
+    font-weight: 600;
+    color: #1e293b;
+}
+
+#deprecation-metrics .metric-empty {
+    font-style: italic;
+    color: #64748b;
+}
+
+#deprecation-metrics .metric-error {
+    color: #b91c1c;
+    font-weight: 500;
+}
+
+#deprecationMetricsTimestamp {
+    display: block;
+    margin-top: 6px;
+    font-size: 0.75rem;
+    color: #777;
+}
+
+/* Copy button feedback states */
+.round-icon-button.copy-success {
+    background: #dcfce7 !important;
+    border-color: #16a34a !important;
+    color: #166534 !important;
+    animation: copy-feedback-pulse 0.6s ease-out;
+}
+
+.round-icon-button.copy-error {
+    background: #fee2e2 !important;
+    border-color: #f87171 !important;
+    color: #b91c1c !important;
+    animation: copy-feedback-shake 0.5s ease-out;
+}
+
+@keyframes copy-feedback-pulse {
+    0% {
+        transform: scale(1);
+    }
+
+    50% {
+        transform: scale(1.1);
+    }
+
+    100% {
+        transform: scale(1);
+    }
+}
+
+@keyframes copy-feedback-shake {
+
+    0%,
+    100% {
+        transform: translateX(0);
+    }
+
+    25% {
+        transform: translateX(-3px);
+    }
+
+    75% {
+        transform: translateX(3px);
+    }
+}
+
+/* Copy button specific styling - green tint for copy action */
+.round-icon-button[data-icon="copy"] {
+    background: #f0fdf4;
+    border-color: #bbf7d0;
+    color: #15803d;
+}
+
+.round-icon-button[data-icon="copy"]:hover {
+    background: #dcfce7;
+    border-color: #86efac;
+    color: #14532d;
+}
+
+.round-icon-button[data-icon="copy"]:active {
+    background: #bbf7d0;
+    border-color: #4ade80;
+    color: #14532d;
+}
+
+/* ===========================
+   MARKDOWN CONTENT STYLING
+   ========================== */
+
+/* Enhanced typography for rendered markdown content */
+.markdown-rendered {
+    line-height: 1.6;
+    color: #374151;
+}
+
+/* Heading styles for markdown */
+.markdown-rendered h1,
+.markdown-rendered h2,
+.markdown-rendered h3,
+.markdown-rendered h4,
+.markdown-rendered h5,
+.markdown-rendered h6 {
+    margin: 0.75em 0 0.5em 0;
+    font-weight: 600;
+    color: #1f2937;
+    line-height: 1.3;
+}
+
+.markdown-rendered h1 {
+    font-size: 1.5em;
+    border-bottom: 2px solid #e5e7eb;
+    padding-bottom: 0.3em;
+}
+
+.markdown-rendered h2 {
+    font-size: 1.3em;
+    border-bottom: 1px solid #f3f4f6;
+    padding-bottom: 0.25em;
+}
+
+.markdown-rendered h3 {
+    font-size: 1.15em;
+}
+
+.markdown-rendered h4,
+.markdown-rendered h5,
+.markdown-rendered h6 {
+    font-size: 1em;
+}
+
+/* Paragraph spacing */
+.markdown-rendered p {
+    margin: 0.75em 0;
+}
+
+/* Emphasis styling */
+.markdown-rendered strong {
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.markdown-rendered em {
+    font-style: italic;
+    color: #4b5563;
+}
+
+/* Code styling */
+.markdown-rendered code {
+    background: #f3f4f6;
+    color: #be185d;
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-family: monospace;
+}
+
+/* Code block styling */
+.markdown-rendered pre {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 12px 16px;
+    overflow-x: auto;
+    margin: 1em 0;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 0.85em;
+    line-height: 1.45;
+}
+
+.markdown-rendered pre code {
+    background: none;
+    color: #374151;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+}
+
+/* List styling */
+.markdown-rendered ul,
+.markdown-rendered ol {
+    margin: 0.75em 0;
+    padding-left: 2em;
+}
+
+.markdown-rendered li {
+    margin: 0.25em 0;
+}
+
+.markdown-rendered ul {
+    list-style-type: disc;
+}
+
+.markdown-rendered ol {
+    list-style-type: decimal;
+}
+
+/* Blockquote styling */
+.markdown-rendered blockquote {
+    border-left: 4px solid #d1d5db;
+    margin: 1em 0;
+    padding: 0.5em 0 0.5em 1em;
+    background: #f9fafb;
+    font-style: italic;
+    color: #6b7280;
+}
+
+/* Link styling */
+.markdown-rendered a {
+    color: #2563eb;
+    text-decoration: underline;
+}
+
+.markdown-rendered a:hover {
+    color: #1d4ed8;
+    text-decoration: none;
+}
+
+/* Horizontal rule */
+.markdown-rendered hr {
+    border: none;
+    border-top: 2px solid #e5e7eb;
+    margin: 1.5em 0;
+}
+
+/* Ensure markdown content doesn't break container bounds */
+.markdown-rendered {
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+/* Special styling for small markdown content in notes/content items */
+.note-item .markdown-rendered,
+.content-item .markdown-rendered {
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+
+.note-item .markdown-rendered h1,
+.note-item .markdown-rendered h2,
+.note-item .markdown-rendered h3,
+.content-item .markdown-rendered h1,
+.content-item .markdown-rendered h2,
+.content-item .markdown-rendered h3 {
+    margin: 0.5em 0 0.25em 0;
+    font-size: 1.1em;
+}
+
+.note-item .markdown-rendered p,
+.content-item .markdown-rendered p {
+    margin: 0.5em 0;
+}
+
+.note-item .markdown-rendered pre,
+.content-item .markdown-rendered pre {
+    margin: 0.5em 0;
+    padding: 8px 12px;
+    font-size: 0.8em;
+}
+
+/* LLM I/O modal and trigger bar */
+.annotation-llmio-bar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 4px 0 8px 0;
+}
+
+.annotation-llmio-btn {
+    background: #1f5fbf;
+    color: #ffffff;
+    border: 1px solid #184c96;
+    padding: 2px 8px;
+    font-size: 0.72rem;
+    line-height: 1.2;
+    border-radius: 4px;
+    cursor: pointer;
+    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.15);
+    transition: background .15s ease, box-shadow .15s ease, color .15s ease;
+}
+
+.annotation-llmio-btn:hover,
+.annotation-llmio-btn:focus {
+    background: #2873e2;
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(40, 115, 226, 0.25);
+}
+
+.annotation-llmio-btn:active {
+    background: #19529f;
+}
+
+.annotation-llmio-btn {
+    background: #2b5cb8;
+    color: #fff;
+    border: 1px solid #1d4791;
+    padding: 4px 8px;
+    cursor: pointer;
+    border-radius: 3px;
+    font-size: 11px;
+}
+
+.annotation-llmio-btn:hover {
+    background: #326ad4;
+}
+
+.annotation-llmio-modal {
+    position: fixed;
+    z-index: 9999;
+    max-width: 640px;
+    width: 640px;
+    max-height: 480px;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    border: 1px solid #ccc;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+    border-radius: 6px;
+}
+
+.annotation-llmio-header {
+    padding: 6px 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #ddd;
+    background: #f3f4f6;
+}
+
+.annotation-llmio-title {
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.annotation-llmio-close {
+    background: #eee;
+    border: 1px solid #ccc;
+    cursor: pointer;
+    line-height: 1;
+    padding: 2px 6px;
+}
+
+.annotation-llmio-close:hover {
+    background: #e2e2e2;
+}
+
+.annotation-llmio-body {
+    padding: 8px 10px;
+    overflow: auto;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.annotation-llmio-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.annotation-llmio-section-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #333;
+}
+
+.annotation-llmio-pre {
+    background: #1e1e1e;
+    color: #dcdcdc;
+    padding: 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    max-height: 160px;
+    overflow: auto;
+    margin: 0;
+}
+
+.annotation-llmio-footer {
+    border-top: 1px solid #ddd;
+    padding: 6px 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #fafbfc;
+}
+
+.annotation-llmio-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.annotation-llmio-copy,
+.annotation-llmio-close-2 {
+    background: #f0f0f0;
+    border: 1px solid #ccc;
+    padding: 4px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    border-radius: 4px;
+}
+
+/* Authenticated user highlight in footer (visual cue) */
+.concept-footer-button.user-auth-active {
+    background: #d9f7d9 !important;
+    border-color: #98e29a !important;
+    color: #065f46 !important;
+    box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.35);
+    position: relative;
+    transition: background .15s, border-color .15s, color .15s, box-shadow .15s;
+}
+
+.concept-footer-button.user-auth-active:hover {
+    background: #c8f2c8 !important;
+    border-color: #7fd184 !important;
+}
+
+.concept-footer-button.user-auth-active:active {
+    background: #b4ebb4 !important;
+}
+
+/* Predicate Extent Display Component Styles */
+.predicate-extent-display {
+    margin-top: 20px;
+    margin-bottom: 20px;
+}
+
+.predicate-extent-error {
+    background-color: #fee;
+    border: 1px solid #fcc;
+    border-radius: 4px;
+    padding: 12px;
+    margin-bottom: 16px;
+    color: #c33;
+}
+
+.predicate-extent-loading {
+    text-align: center;
+    padding: 20px;
+    color: #666;
+    font-style: italic;
+}
+
+.predicate-extent-filters {
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.predicate-filters-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+}
+
+.filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+    min-width: 180px;
+}
+
+.filter-group label {
+    font-size: 0.9em;
+    font-weight: 500;
+    color: #495057;
+}
+
+.filter-group input,
+.filter-group select {
+    padding: 6px 10px;
+    border: 1px solid #ced4da;
+    border-radius: 3px;
+    font-size: 0.95em;
+}
+
+.filter-group input:focus,
+.filter-group select:focus {
+    outline: none;
+    border-color: #80bdff;
+    box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+}
+
+.predicate-extent-table-container {
+    overflow-x: auto;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    margin-bottom: 16px;
+}
+
+.predicate-extent-table {
+    width: 100%;
+    border-collapse: collapse;
+    background-color: white;
+}
+
+.predicate-extent-table thead {
+    background-color: #e9ecef;
+    border-bottom: 2px solid #dee2e6;
+}
+
+.predicate-extent-table th {
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+    color: #495057;
+    white-space: nowrap;
+}
+
+.predicate-extent-table th.sortable {
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.predicate-extent-table th.sortable:hover {
+    background-color: #d3d7db;
+}
+
+.predicate-extent-table .sort-indicator {
+    font-size: 0.8em;
+    margin-left: 4px;
+}
+
+.predicate-extent-table tbody tr {
+    border-bottom: 1px solid #dee2e6;
+}
+
+.predicate-extent-table tbody tr:hover {
+    background-color: #f8f9fa;
+}
+
+.predicate-extent-table td {
+    padding: 10px 12px;
+    color: #212529;
+    max-width: 250px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.predicate-extent-table td.source-text_relations {
+    color: #0056b3;
+    font-style: italic;
+}
+
+.predicate-extent-table td.source-structured {
+    color: #28a745;
+}
+
+/* Cartouche styling for concept links */
+.concept-cartouche {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 12px;
+    font-size: 13px;
+    font-weight: 500;
+    border: 1px solid;
+    text-decoration: none !important;
+    transition: all 0.15s ease;
+    cursor: pointer;
+}
+
+/* Type cartouche - blue (higher specificity for extent table) */
+.predicate-extent-table .concept-cartouche.type,
+.concept-cartouche.type {
+    background: #eef6ff;
+    border-color: #b6dbff;
+    color: #204a72;
+}
+
+.predicate-extent-table .concept-cartouche.type:hover,
+.concept-cartouche.type:hover {
+    background: #d9ebff;
+    border-color: #9ac9ff;
+    color: #204a72;
+}
+
+/* Individual cartouche - green (higher specificity for extent table) */
+.predicate-extent-table .concept-cartouche.individual,
+.concept-cartouche.individual {
+    background: #f7f9f2;
+    border-color: #cfe3b4;
+    color: #2f4a1f;
+}
+
+.predicate-extent-table .concept-cartouche.individual:hover,
+.concept-cartouche.individual:hover {
+    background: #ecf3e0;
+    border-color: #bbd89f;
+    color: #2f4a1f;
+}
+
+/* Predicate cartouche - lavender (higher specificity for extent table) */
+.predicate-extent-table .concept-cartouche.predicate,
+.concept-cartouche.predicate {
+    background: #f5f0ff;
+    border-color: #d4c5f9;
+    color: #4a3871;
+}
+
+.predicate-extent-table .concept-cartouche.predicate:hover,
+.concept-cartouche.predicate:hover {
+    background: #ede5ff;
+    border-color: #c5b3f3;
+    color: #4a3871;
+}
+
+/* Unknown/fallback cartouche - neutral grey */
+.predicate-extent-table .concept-cartouche:not(.type):not(.individual):not(.predicate),
+.concept-cartouche:not(.type):not(.individual):not(.predicate) {
+    background: #f3f4f6;
+    border-color: #d1d5db;
+    color: #374151;
+}
+
+.predicate-extent-table .concept-cartouche:not(.type):not(.individual):not(.predicate):hover,
+.concept-cartouche:not(.type):not(.individual):not(.predicate):hover {
+    background: #e5e7eb;
+    border-color: #9ca3af;
+    color: #374151;
+}
+
+/* Legacy concept link styling (for non-cartouche links) */
+.predicate-extent-table .concept-link:not(.concept-cartouche) {
+    color: #0056b3;
+    text-decoration: none;
+    cursor: pointer;
+    border-bottom: 1px dotted #0056b3;
+}
+
+.predicate-extent-table .concept-link:not(.concept-cartouche):hover {
+    color: #003d82;
+    border-bottom: 1px solid #003d82;
+    background-color: #f0f7ff;
+}
+
+.predicate-extent-pagination {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0;
+}
+
+.pagination-controls {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.pagination-summary {
+    font-size: 0.9em;
+    color: #495057;
+    font-weight: 500;
+}
+
+.page-size-group {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.page-size-group label {
+    font-size: 0.9em;
+    color: #495057;
+}
+
+.page-size-group select {
+    padding: 4px 8px;
+    border: 1px solid #ced4da;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+
+/* Predicate Metadata Panel Styles */
+.predicate-metadata-panel {
+    background-color: white;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    padding: 16px;
+    margin-top: 20px;
+    margin-bottom: 20px;
+}
+
+.predicate-metadata-header h3 {
+    margin: 0 0 16px 0;
+    font-size: 1.25em;
+    color: #212529;
+    border-bottom: 2px solid #4CAF50;
+    padding-bottom: 8px;
+}
+
+.predicate-metadata-error {
+    background-color: #fee;
+    border: 1px solid #fcc;
+    border-radius: 4px;
+    padding: 12px;
+    margin-bottom: 16px;
+    color: #c33;
+}
+
+.predicate-metadata-loading {
+    text-align: center;
+    padding: 20px;
+    color: #666;
+    font-style: italic;
+}
+
+.predicate-metadata-content {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.predicate-metadata-content .no-metadata {
+    color: #6c757d;
+    font-style: italic;
+    text-align: center;
+    padding: 20px;
+}
+
+.metadata-section {
+    background-color: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 4px;
+    padding: 12px 16px;
+}
+
+.metadata-section-title {
+    margin: 0 0 12px 0;
+    font-size: 1.1em;
+    color: #495057;
+    font-weight: 600;
+}
+
+.metadata-property-row {
+    display: flex;
+    padding: 6px 0;
+    border-bottom: 1px solid #e9ecef;
+}
+
+.metadata-property-row:last-child {
+    border-bottom: none;
+}
+
+.property-label {
+    flex: 0 0 180px;
+    font-weight: 500;
+    color: #495057;
+}
+
+.property-value {
+    flex: 1;
+    color: #212529;
+}
+
+.constraint-list {
+    margin: 8px 0;
+}
+
+.constraint-list strong {
+    color: #495057;
+    display: block;
+    margin-bottom: 4px;
+}
+
+.constraint-list ul {
+    margin: 4px 0 0 20px;
+    padding: 0;
+}
+
+.constraint-list li {
+    padding: 2px 0;
+    color: #212529;
+}
+
+.argument-types {
+    margin: 8px 0;
+}
+
+.argument-types strong {
+    color: #495057;
+    display: block;
+    margin-bottom: 4px;
+}
+
+.argument-types ul {
+    margin: 4px 0 0 20px;
+    padding: 0;
+}
+
+.argument-types li {
+    padding: 4px 0;
+    color: #212529;
+}
+
+.documentation-content {
+    background-color: white;
+    border: 1px solid #dee2e6;
+    border-radius: 3px;
+    padding: 12px;
+    margin-top: 8px;
+    color: #495057;
+    line-height: 1.6;
+    white-space: pre-wrap;
+}
+
+.text-documentation {
+    margin-top: 12px;
+}
+
+.text-documentation strong {
+    color: #495057;
+    display: block;
+    margin-bottom: 4px;
+}
+
+.text-documentation ul {
+    margin: 4px 0 0 20px;
+    padding: 0;
+}
+
+.text-documentation li {
+    padding: 4px 0;
+    color: #212529;
+    line-height: 1.5;
+}

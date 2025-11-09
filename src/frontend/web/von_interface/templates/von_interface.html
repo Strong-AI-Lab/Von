@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Von, Strong AI Lab's AI Assistant</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+
+  <!-- Favicon -->
+  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+
+
+</head>
+
+<body>
+  <!-- Fixed Global Header (title + search above tabs) JVNAUTOSCI-550 -->
+  <div class="global-header" id="globalHeader">
+    <div class="main-container">
+      <!-- Popup for info -->
+      <div class="popup popup-container" id="infoPopup">
+        <p><strong>What you can do with Von:</strong></p>
+        <ul>
+          <li>Enter a prompt to interact with AI models.</li>
+          <li>Select different models from the dropdown menu.</li>
+          <li>Reset the conversation context using the "Reset Context" button.</li>
+        </ul>
+      </div>
+      <!-- Header with info icon -->
+      <h1>
+        <span class="info-icon" id="infoIcon" title="Click for more info">ℹ️</span>
+        Strong AI Lab Assistant - Von
+      </h1>
+    </div>
+    <!-- Global Concept Search -->
+    <div class="global-concept-search" id="globalConceptSearchRegion">
+      <div class="global-concept-search-inner">
+        <h2 class="vontology-title" id="vontologyGlobalTitle">
+          <span class="vontology-search-icon" aria-hidden="true">
+            <!-- Simple magnifying glass icon (SVG) -->
+            <svg class="icon" viewBox="0 0 24 24" focusable="false" role="img" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none" />
+              <line x1="16.5" y1="16.5" x2="22" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          </span>
+          <span class="visually-hidden">Concept Search</span>
+        </h2>
+        <div class="vontology-search" id="globalVontologySearchWrapper">
+          <input type="text" id="vontologySearchInput" placeholder="Search concepts by name…"
+            aria-label="Search concepts" role="combobox" aria-autocomplete="list" aria-expanded="false"
+            aria-haspopup="listbox" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+            name="_vontology_search" />
+          <div id="vontologySearchResults" class="vontology-search-results" role="listbox" aria-label="Search results">
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab Structure -->
+  <div class="tab-container" id="tabContainer">
+    <div class="tab-button active" data-tab="chatTab">Chat</div>
+    <!-- Vontology Tab Button moved before Entity -->
+    <div class="tab-button" data-tab="vontologyTab">Vontology</div>
+    <!-- Concept tabs will be dynamically created here -->
+    <div class="tab-button" data-tab="importExportTab">Import/Export</div>
+    <div class="tab-button" data-tab="settingsTab">Settings</div> <!-- Added Settings Tab -->
+    <div class="tab-button" data-tab="annotationTab">Annotation</div>
+  </div>
+
+  <!-- Tab Content Area -->
+  <div class="tab-content-area">
+    <!-- Chat Tab Content - Embedded for immediate loading -->
+    <div id="chatTab" class="tab-content active">
+      <div class="content-wrapper">
+        <!-- Header with Von intro -->
+        <div class="chat-header">
+          <h2 class="main-title">Talk to Von Neumarkt</h2>
+          <div class="chat-header-controls" role="group" aria-label="Chat tools">
+            <button id="exportConversationMarkdownBtn" class="chat-export-btn" type="button"
+              title="Copy conversation as Markdown formatted transcript" aria-label="Export conversation as Markdown">
+              <span class="btn-icon">MD</span>
+            </button>
+            <button id="exportConversationJsonBtn" class="chat-export-btn" type="button"
+              title="Copy full conversation debug JSON to clipboard" aria-label="Export conversation as JSON">
+              <span class="btn-icon">{}</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Scrollable field for text input and responses -->
+        <div id="scrollableField" class="scrollable-field">
+          <!-- Content will be dynamically added here via JavaScript -->
+        </div>
+
+        <div class="loading-indicator-row">
+          <div id="loadingIndicator" class="loading-indicator" role="status" aria-live="polite" aria-hidden="true">
+            <span class="loading-indicator-dot" aria-hidden="true"></span>
+            <span class="loading-indicator-text">Thinking...</span>
+          </div>
+        </div>
+
+        <!-- Textarea for user prompt -->
+        <textarea id="promptInput" rows="6" class="prompt-input" placeholder="Talk with Von here..."></textarea>
+
+        <!-- Buttons for sending prompt and resetting context -->
+        <div class="button-row">
+          <button id="sendButton" class="btn btn-primary">Send Prompt</button>
+          <button id="resetButton" class="btn btn-secondary" type="button"
+            title="Reset Von's context while keeping this conversation view">Reset Context</button>
+          <label class="annotation-toggle" title="Enable concept annotations in chat responses">
+            <input type="checkbox" id="annotationToggle">
+            <span class="eye-icon">
+              <svg aria-hidden="true" class="icon icon-annotate" viewBox="0 0 24 24" width="16" height="16"
+                stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+            </span>
+            <span class="toggle-label">Annotations</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Hidden LLM debug popup -->
+      <div id="chatLlmDebugPopup" class="llm-popup hidden" aria-hidden="true">
+        <div class="llm-popup-header">
+          <span>LLM Debug Information</span>
+          <button id="closeChatLlmDebug" class="btn-mini" title="Close">✕</button>
+        </div>
+        <div class="llm-popup-body">
+          <div class="llm-popup-section">
+            <h4>Model & Context</h4>
+            <div id="chatLlmDebugMeta" class="llm-meta"></div>
+          </div>
+          <div class="llm-popup-section">
+            <h4>Messages Sent to LLM</h4>
+            <pre id="chatLlmDebugMessages" class="llm-pre"></pre>
+          </div>
+          <div class="llm-popup-section">
+            <h4>LLM Response</h4>
+            <pre id="chatLlmDebugResponse" class="llm-pre"></pre>
+          </div>
+          <div class="llm-popup-section" id="chatLlmDebugToolsSection">
+            <h4>Tool Invocations</h4>
+            <pre id="chatLlmDebugTools" class="llm-pre"></pre>
+          </div>
+        </div>
+        <div class="llm-popup-footer">
+          <button id="copyChatLlmDebugJson" class="btn-mini" title="Copy debug info as JSON">Copy JSON</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Vontology Tab Content -->
+    <div id="vontologyTab" class="tab-content">
+      <!-- Content will be loaded dynamically -->
+      <div class="loading">Loading vontology interface...</div>
+    </div>
+
+    <!-- Import/Export Tab Content -->
+    <div id="importExportTab" class="tab-content">
+      <!-- Content will be loaded dynamically -->
+      <div class="loading">Loading import/export interface...</div>
+    </div>
+
+    <!-- Dynamic concept tabs will be created here -->
+
+    <!-- Settings Tab Content -->
+    <div id="settingsTab" class="tab-content">
+      <div class="settings-frame-wrapper">
+        <iframe id="settingsFrame" src="{{ url_for('serve_settings_tab_route') }}" title="Settings Configuration Panel"
+          class="settings-iframe"></iframe>
+      </div>
+    </div>
+
+    <!-- Annotation Tab Content (loaded dynamically) -->
+    <div id="annotationTab" class="tab-content">
+      <div class="loading">Loading annotation interface...</div>
+    </div>
+
+  </div>
+
+  <!-- Footer for Model Info -->
+  <div class="footer-container">
+    <p id="modelInfoFooter" class="footer-info">
+      <span id="chat-history-length"></span>
+    </p>
+    <p id="languageIndicator" class="language-indicator">🌐 en-NZ</p>
+    <p id="serverPidFooter" class="pid-indicator" title="Server PID & uptime">
+      <span class="footer-label">Local IP:</span> <button id="serverLocalIpValue" class="pid-copy-button" type="button"
+        title="Click to copy local IP address">?</button>
+      <span class="footer-separator">|</span>
+      <span class="footer-label">Public IP:</span> <button id="serverPublicIpValue" class="pid-copy-button"
+        type="button" title="Click to copy public IP address (what MongoDB Atlas sees)">?</button>
+      <span class="footer-separator">|</span>
+      <span class="footer-label">PID:</span> <button id="serverPidValue" class="pid-copy-button" type="button"
+        title="Click to copy PID">?</button>
+      <span id="vontologyBusyIndicator" aria-hidden="true" title="Vontology operations in progress">⏳</span>
+      <span id="vontologyBusySrStatus" class="visually-hidden" aria-live="polite"></span>
+      <span class="footer-separator">|</span>
+      <span class="footer-label">Uptime:</span> <span id="serverUptimeValue" title="Process uptime">—</span>
+    </p>
+  </div>
+
+  <!-- Link to external JavaScript (fixed endpoint spacing) -->
+  <script type='module' src="{{ url_for('static', filename='js/main.js') }}"></script>
+
+</body>
+
+</html>

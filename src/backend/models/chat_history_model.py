@@ -1,0 +1,1 @@
+chat_history_collection_name = "chat_history"
