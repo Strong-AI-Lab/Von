@@ -1,6 +1,8 @@
 # Von - AI-Agent System for Academic Research
 
-This is the repository for the open source collaborative development of **Von**, initiated by the Strong AI Lab (S) in the Natural Artificial and Organisational Intelligence Institute at the University of Auckland. **Von** is an AI-agent system designed to help academic researchers manage knowledge, conduct research, and interact with AI systems in a structured, reliable, and academically rigorous manner. By combining ontology-based knowledge organisation, **Von** bridges the gap between implicit knowledge in Large Language Models (LLMs) and explicit, verifiable research structures.
+This is the repository for the open source collaborative development of **Von**, initiated by the Strong AI Lab (SAIL) in the Natural Artificial and Organisational Intelligence Institute at the University of Auckland. 
+
+**Von** is an AI-agent system designed to help academic researchers manage knowledge, conduct research, and interact with AI systems in a structured, reliable, and academically rigorous manner. By combining ontology-based knowledge organisation, Von bridges the gap between implicit knowledge in Large Language Models (LLMs) and explicit, verifiable research structures.
 
 ## What is Von?
 
@@ -33,16 +35,16 @@ Von embodies this neuro-symbolic approach: LLMs handle unstructured data and nat
 ```powershell
 # Clone the repository
 git clone https://github.com/Strong-AI-Lab/Von.git
-cd Von-Private
+cd Von
 
-# Run automated setup in Windows PowerShell-
+# Run automated setup in Windows PowerShell
 # This runs setup_py.ps1 (pdm dependency, python packages, etc.) and setup_js.ps1 (Javascript)
 ./setup_all.ps1
 
 ```
 
-### **Fetching knowledge (ontology)**
-By default, users are not connected to any remote database for knowledge, and you will initial have empty knowledge. We
+### **Fetching knowledge (base ontology) (⚠️)**
+By default, users are not connected to any remote database for knowledge, and you will initial have empty knowledge.
 
 ### **LLM Provider Setup (⚠️)**
 
