@@ -1,0 +1,56 @@
+<div class="content-wrapper annotation-layout">
+  <h2 class="main-title">Annotation Demo</h2>
+  <div class="annotation-toolbar">
+    <div class="left-set">
+      <button id="runAnnotationButton" class="btn-primary">Annotate</button>
+      <label class="llm-toggle"><input type="checkbox" id="llmEnrichToggle" checked /> LLM</label>
+      <label class="llm-toggle" title="Enable / disable concept name matching extraction"><input type="checkbox"
+          id="matchToggle" checked /> Match</label>
+      <button id="sampleTextButton" class="btn-mini" title="Insert sample text">Sample</button>
+      <button id="clearTextButton" class="btn-mini" title="Clear input">Clear</button>
+    </div>
+    <div class="right-set">
+      <span class="annotation-counts" id="annotationCounts"></span>
+      <button id="copyJsonButton" class="btn-mini" title="Copy raw JSON">Copy JSON</button>
+      <button id="showLlminfoButton" class="btn-mini" title="Show LLM interaction (prompt + output)">LLM ⓘ</button>
+      <span id="annotationStatus" class="annotation-status"></span>
+      <span class="spinner hidden" id="annotationSpinner">⏳</span>
+    </div>
+  </div>
+  <div class="annotation-columns">
+    <div class="annotation-left">
+      <p class="minor-note">Type or paste text, then Annotate. Spans will highlight below.</p>
+      <textarea id="annotationInput" rows="10" class="prompt-input annotation-input"
+        placeholder="Paste or type text to annotate..."></textarea>
+      <div class="highlight-pane" id="annotationHighlights" aria-label="Highlighted spans will appear here"></div>
+    </div>
+    <div class="annotation-right">
+      <div id="annotationResults" class="annotation-results" aria-label="Span candidates list"></div>
+    </div>
+  </div>
+  <!-- Hidden LLM interaction popup -->
+  <div id="llmInteractionPopup" class="llm-popup hidden" aria-hidden="true">
+    <div class="llm-popup-header">
+      <span>LLM Interaction (Prompt & Output)</span>
+      <button id="closeLlminfoButton" class="btn-mini" title="Close">✕</button>
+    </div>
+    <div class="llm-popup-body">
+      <div class="llm-popup-section">
+        <h4>Prompt (instruction + text)</h4>
+        <pre id="llmInteractionPrompt" class="llm-pre"></pre>
+      </div>
+      <div class="llm-popup-section">
+        <h4>Model Output</h4>
+        <pre id="llmInteractionOutput" class="llm-pre"></pre>
+        <div id="llmInteractionMeta" class="llm-meta"></div>
+      </div>
+      <div class="llm-popup-footer">
+        <button id="promptConceptButton" class="concept-footer-button"
+          title="Open prompt concept (#V#find_concepts_in_text_prompt)"
+          data-concept-id="#V#find_concepts_in_text_prompt">#V#find_concepts_in_text_prompt</button>
+        <button id="copyLlmJsonButton" class="btn-mini" title="Copy prompt+output as JSON">Copy JSON</button>
+        <button id="refreshLlminfoButton" class="btn-mini" title="Refresh prompt + output">↻ Refresh</button>
+      </div>
+    </div>
+  </div>
+</div>

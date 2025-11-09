@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - Von</title>
+    <!-- Link to shared CSS file -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <!-- Inline styles migrated to styles.css; keep markup clean. -->
+</head>
+
+<body class="settings-body">
+    <div class="settings-container">
+        <section id="premium-model-settings">
+            <h2>Premium Models (OpenAI)</h2>
+            <label for="openaiApiKeyEnvVar">OpenAI API Key Environment Variable:</label>
+            <input type="text" id="openaiApiKeyEnvVar" name="openai_api_key_env_var" value="OPENAI_API_KEY">
+            <button id="verifyOpenAiApiKeyButton" class="hidden">Verify Key and Load Models</button>
+            <div id="openaiModelsContainer" class="hidden">
+                <label for="openaiModelSelect">Select OpenAI Model:</label>
+                <select id="openaiModelSelect" name="openai_model">
+                    <!-- OpenAI models will be populated here -->
+                </select>
+            </div>
+            <div id="openaiStatusMessage" class="status-message" role="alert">
+                <!-- Status messages for OpenAI will appear here -->
+            </div>
+        </section>
+
+        <section id="ollima-settings">
+            <h2>Ollama Model Configuration</h2>
+
+            <!-- Ollama Hosts Management -->
+            <div id="ollamaHostsContainer">
+                <h3>Ollama Hosts</h3>
+                <p class="settings-note">
+                    Configure multiple Ollama server hosts. Set OLLAMA_HOSTS_LIST environment variable with
+                    comma-separated URLs,
+                    or add them manually below.
+                </p>
+
+                <div id="ollamaHostsList">
+                    <!-- Hosts will be populated here -->
+                </div>
+
+                <div class="inline-form">
+                    <input type="text" id="newOllamaHostUrl" placeholder="http://localhost:11434" class="flex-1">
+                    <button id="addOllamaHostButton" class="btn-azure">
+                        Add Host
+                    </button>
+                </div>
+
+                <button id="refreshOllamaHostsButton" class="btn-success mr-1">
+                    Refresh from Environment
+                </button>
+
+                <button id="loadOllamaModelsButton" class="btn-info">
+                    Load All Models
+                </button>
+            </div>
+
+            <!-- Remote Host Scanning Control -->
+            <div class="inline-form inline-form-tight mb-2 mt-3">
+                <input type="checkbox" id="disableRemoteOllamaScanToggle"
+                    aria-describedby="disableRemoteOllamaScanHelp" />
+                <label for="disableRemoteOllamaScanToggle" class="ml-1"
+                    title="When enabled, only local Ollama hosts (localhost/127.0.0.1) will be scanned for models; remote hosts will be skipped to avoid slow timeouts.">Disable
+                    remote Ollama host scanning</label>
+            </div>
+            <div>
+                <small id="disableRemoteOllamaScanHelp" class="settings-note">Enable this to prevent slow timeouts when
+                    scanning remote Ollama hosts. Only local hosts (localhost/127.0.0.1) will be scanned for available
+                    models.</small>
+            </div>
+
+            <!-- Model Selection -->
+            <label for="globalModelSelect">Global Ollama Model:</label>
+            <select id="globalModelSelect" name="global_ollama_model">
+                <option value="">Loading models...</option>
+            </select>
+
+            <div id="settingsStatusMessage" class="status-message" role="alert">
+                <!-- Messages will appear here -->
+            </div>
+        </section>
+
+        <section id="current-user-settings">
+            <h2>Current User Configuration</h2>
+
+            <!-- Authentication Status -->
+            <div id="authenticationStatus">
+                <!-- Will be populated by JavaScript -->
+                <button onclick="loginWithGoogle()" class="btn-primary">Login with Google</button>
+                <button onclick="testPopupMessage()" class="btn-secondary" style="margin-left: 10px;">Test
+                    Popup</button>
+            </div>
+
+            <p class="settings-note"><strong>Note:</strong> User, Organisation and Language selections are stored only
+                in this browser (localStorage) and are not saved on the server.</p>
+            <label for="currentUserSelect">Current User:</label>
+            <select id="currentUserSelect" name="current_user_person">
+                <option value="">Loading people...</option>
+            </select>
+
+            <label for="preferredLanguageSelect">Preferred Language:</label>
+            <select id="preferredLanguageSelect" name="preferred_language">
+                <!-- Options populated by languageConfig.js -->
+            </select>
+            <small>This will be the default language for new names and text entries.</small>
+            <div class="inline-form inline-form-tight mt-8-align-center">
+                <button type="button" id="resetLocalPrefsButton" class="btn-danger"
+                    title="Clear stored user/org/language preferences for this browser">Reset Local Preferences</button>
+            </div>
+
+            <div id="currentUserStatusMessage" class="status-message" role="alert">
+                <!-- Messages will appear here -->
+            </div>
+        </section>
+
+        <section id="current-organisation-settings">
+            <h2>Current Organisation Configuration</h2>
+            <label for="currentOrganisationSelect">Current Organisation:</label>
+            <select id="currentOrganisationSelect" name="current_organisation">
+                <option value="">Loading organisations...</option>
+            </select>
+
+            <div id="currentOrganisationStatusMessage" class="status-message" role="alert">
+                <!-- Messages will appear here -->
+            </div>
+        </section>
+
+        <section id="database-info">
+            <h2>Database</h2>
+            <div id="dbInfoContent">
+                <div><strong>Location:</strong> <span id="dbUri">Loading…</span></div>
+                <div><strong>Database:</strong> <span id="dbName">Loading…</span></div>
+                <div id="dbPing" class="mt-1">
+                    <span id="dbPingStatus" class="badge-neutral">Checking…</span>
+                    <span id="dbPingError" class="ml-2 text-error hidden"></span>
+                </div>
+            </div>
+        </section>
+
+        <section id="ontology-maintenance">
+            <h2>Ontology Maintenance</h2>
+            <p class="settings-note">Manage precomputed salient predicate inheritance. Use Dry Run first to inspect
+                planned updates. Force will overwrite existing values.</p>
+            <div class="button-row">
+                <button id="salientDryRunButton" class="btn-info">Dry Run Recompute</button>
+                <button id="salientRecomputeButton" class="btn-success">Recompute Missing</button>
+                <button id="salientForceButton" class="btn-danger">Force Recompute</button>
+            </div>
+            <div id="salientRecomputeStatus" class="status-message hidden" role="alert"></div>
+            <pre id="salientRecomputeResult" class="salient-result hidden"></pre>
+        </section>
+
+        <section id="deprecation-metrics">
+            <h2>Deprecation Metrics</h2>
+            <p class="settings-note">Tracks runtime usage of legacy code paths slated for removal. Refresh to see
+                current counts.</p>
+            <div class="inline-form inline-form-tight">
+                <button type="button" id="refreshDeprecationMetricsButton" class="btn-info">Refresh Metrics</button>
+                <span id="deprecationMetricsStatus" class="status-message ml-2" role="alert"
+                    style="display:none"></span>
+            </div>
+            <div id="deprecationMetricsContent" class="metrics-grid mt-2">
+                <!-- Populated dynamically -->
+            </div>
+            <small id="deprecationMetricsTimestamp" class="text-muted"></small>
+            <h3 class="mt-3">Performance Metrics</h3>
+            <p class="settings-note">Vontology tree build performance (server-side aggregated timings).</p>
+            <div id="performanceMetricsContent" class="metrics-grid mt-2">
+                <!-- Performance metrics populated dynamically -->
+            </div>
+            <small id="performanceMetricsTimestamp" class="text-muted"></small>
+        </section>
+
+        <section id="vontology-performance">
+            <h2>Vontology UI & Performance</h2>
+            <div class="inline-form inline-form-tight mb-2">
+                <input type="checkbox" id="fetchCountsOnLoadToggle" aria-describedby="fetchCountsOnLoadHelp" />
+                <label for="fetchCountsOnLoadToggle" class="ml-1"
+                    title="When enabled, entity counts are fetched during initial tree load; when disabled, the tree renders first and counts load in the background.">Fetch
+                    entity counts during initial tree load</label>
+            </div>
+            <div>
+                <small id="fetchCountsOnLoadHelp" class="settings-note">Disabling this can make initial tree display
+                    faster; counts will still appear shortly after as they are loaded lazily.</small>
+            </div>
+            <div id="vontologyPerformanceStatus" class="status-message" role="alert" style="display:none"></div>
+        </section>
+
+        <section id="server-controls">
+            <h2>Server Control</h2>
+            <p class="settings-note">Gracefully stop the backend server. A restart requires using the launcher script.
+            </p>
+            <div class="inline-form inline-form-tight mb-2">
+                <input type="checkbox" id="autoReloadOnRestartToggle" aria-describedby="autoReloadOnRestartHelp" />
+                <label for="autoReloadOnRestartToggle" class="ml-1"
+                    title="Reloads only after a real server restart (PID/start time change). Not triggered by brief timeouts.">Auto
+                    reload the page when the server actually
+                    restarts</label>
+            </div>
+            <div>
+                <small id="autoReloadOnRestartHelp" class="settings-note">When enabled, the page reloads automatically
+                    only after a real server restart (detected via PID/start time change). It will not reload on
+                    transient outages. This preference is stored only in this browser.</small>
+            </div>
+            <form class="inline-form" onsubmit="return false;">
+                <label for="adminTokenInput" class="sr-only">Admin token</label>
+                <!-- Hidden (but accessible) username field satisfies accessibility guidance for password forms -->
+                <div class="visually-hidden">
+                    <label for="adminUsernameInput">Username</label>
+                    <input type="text" id="adminUsernameInput" name="admin_username" autocomplete="username" />
+                </div>
+                <input type="password" id="adminTokenInput" placeholder="Admin token (auto if blank)" class="flex-1"
+                    autocomplete="current-password" aria-describedby="shutdownStatus" />
+                <button type="button" id="shutdownServerButton" class="btn-danger">Shutdown Server</button>
+            </form>
+            <div id="shutdownStatus" class="status-message hidden" role="alert"></div>
+        </section>
+
+        <!-- Add other settings sections here if needed in the future -->
+    </div>
+
+    <script>
+        // Check authentication status on page load
+        async function checkAuthenticationStatus() {
+            try {
+                console.log('Checking authentication status...');
+                const response = await fetch('/von/api/auth/status');
+                const authStatus = await response.json();
+
+                console.log('Authentication status received:', authStatus);
+                await updateAuthenticationDisplay(authStatus);
+            } catch (error) {
+                console.error('Failed to fetch authentication status:', error);
+                await updateAuthenticationDisplay({ authenticated: false });
+            }
+        }
+
+        // Update authentication display based on status
+        async function updateAuthenticationDisplay(authStatus) {
+            const authContainer = document.getElementById('authenticationStatus');
+            console.log('Updating authentication display. Container found:', !!authContainer, 'Status:', authStatus);
+
+            if (authStatus.authenticated) {
+                // User is logged in - show status and logout button
+                console.log('Showing authenticated state for:', authStatus.email);
+                authContainer.innerHTML = `
+                    <div class="auth-status">
+                        <span class="auth-info">Logged in as: <strong>${authStatus.email}</strong></span>
+                        <button onclick="logoutUser()" class="btn-secondary ml-2">Logout</button>
+                    </div>
+                `;
+
+                // After successful login, merge auth data with existing localStorage data
+                if (authStatus.user_id || authStatus.user_concept_id || authStatus.user_full_name || authStatus.name || authStatus.email) {
+                    // Read existing user info to preserve concept_id set by settings interface
+                    const existingUserInfo = JSON.parse(localStorage.getItem('von_current_user') || '{}');
+
+                    const userInfo = {
+                        // Preserve existing concept_id if it exists (set by settings interface)
+                        concept_id: existingUserInfo.concept_id || authStatus.user_concept_id,
+                        // Update auth-related fields
+                        id: authStatus.user_id || existingUserInfo.id,
+                        name: authStatus.user_full_name || authStatus.name || existingUserInfo.name,
+                        email: authStatus.email || existingUserInfo.email
+                    };
+                    localStorage.setItem('von_current_user', JSON.stringify(userInfo));
+                    console.log('Merged localStorage with auth data, preserving existing concept_id:', userInfo);
+                }
+
+                // Note: Organization info would need to be fetched separately if needed
+                // as it's not part of the Google OAuth flow
+
+                // Immediately add authentication highlighting to footer
+                const userSegments = [...document.querySelectorAll('.footer-segment')]
+                    .filter(seg => seg.querySelector('.footer-label-inline')?.textContent?.trim().startsWith('User:'));
+                userSegments.forEach(seg => {
+                    const btn = seg.querySelector('.concept-footer-button');
+                    if (btn) {
+                        btn.classList.add('user-auth-active');
+                        btn.title = `Logged in as ${authStatus.email || '(unknown email)'}`;
+                    }
+                });
+
+                // Also refresh the full footer to ensure consistency
+                if (window.updateModelInfoFooterDisplay) {
+                    try {
+                        await window.updateModelInfoFooterDisplay();
+                    } catch (error) {
+                        console.warn('Failed to update footer after login:', error);
+                    }
+                }
+
+                // Update history length display to show authenticated status
+                if (window.updateHistoryLength) {
+                    try {
+                        await window.updateHistoryLength();
+                    } catch (error) {
+                        console.warn('Failed to update history length after login:', error);
+                    }
+                }
+            } else {
+                // User is not logged in - show login button
+                console.log('Showing unauthenticated state - login button');
+                authContainer.innerHTML = `
+                    <button onclick="loginWithGoogle()" class="btn-primary">Login with Google</button>
+                `;
+            }
+        }
+
+        // Handle logout
+        async function logoutUser() {
+            try {
+                const response = await fetch('/von/api/auth/logout', {
+                    method: 'POST'
+                });
+
+                if (response.ok) {
+                    console.log('Logout successful');
+
+                    // Clear authentication data from localStorage while preserving concept_id set by settings
+                    const existingUserInfo = JSON.parse(localStorage.getItem('von_current_user') || '{}');
+                    const clearedUserInfo = {
+                        // Preserve concept_id set by settings interface
+                        concept_id: existingUserInfo.concept_id,
+                        // Clear authentication-related fields
+                        id: null,
+                        name: null,
+                        email: null
+                    };
+                    localStorage.setItem('von_current_user', JSON.stringify(clearedUserInfo));
+                    console.log('Cleared auth data from localStorage, preserved concept_id:', clearedUserInfo);
+
+                    // Update display to show login button
+                    await updateAuthenticationDisplay({ authenticated: false });
+
+                    // Immediately remove authentication highlighting from footer
+                    const userButtons = document.querySelectorAll('.concept-footer-button.user-auth-active');
+                    userButtons.forEach(btn => {
+                        btn.classList.remove('user-auth-active');
+                        btn.title = 'Not logged in';
+                    });
+
+                    // Also refresh the full footer to ensure consistency
+                    if (window.updateModelInfoFooterDisplay) {
+                        try {
+                            await window.updateModelInfoFooterDisplay();
+                        } catch (error) {
+                            console.warn('Failed to update footer after logout:', error);
+                        }
+                    }
+
+                    // Update history length display to show unauthenticated status
+                    if (window.updateHistoryLength) {
+                        try {
+                            await window.updateHistoryLength();
+                        } catch (error) {
+                            console.warn('Failed to update history length after logout:', error);
+                        }
+                    }
+                } else {
+                    console.error('Logout failed:', response.statusText);
+                    alert('Logout failed. Please try again.');
+                }
+            } catch (error) {
+                console.error('Error during logout:', error);
+                alert('Logout failed. Please try again.');
+            }
+        }
+
+        function testPopupMessage() {
+            console.log('Opening test popup...');
+
+            const width = 400;
+            const height = 300;
+            const left = (screen.width / 2) - (width / 2);
+            const top = (screen.height / 2) - (height / 2);
+
+            const popup = window.open(
+                '/von/test-popup',
+                'testPopup',
+                `width=${width},height=${height},left=${left},top=${top},scrollbars=yes,resizable=yes`
+            );
+
+            if (!popup) {
+                alert('Popup blocked! Please allow popups for this site and try again.');
+                return;
+            }
+
+            // Listen for messages from the test popup
+            const messageHandler = (event) => {
+                if (event.origin !== window.location.origin) {
+                    return;
+                }
+
+                if (event.data && event.data.type === 'testMessage') {
+                    console.log('Received test message from popup:', event.data);
+                    alert('✓ Popup communication working! Message: ' + event.data.message);
+                    window.removeEventListener('message', messageHandler);
+                }
+            };
+
+            window.addEventListener('message', messageHandler);
+
+            // Clean up after 10 seconds
+            setTimeout(() => {
+                window.removeEventListener('message', messageHandler);
+            }, 10000);
+
+            popup.focus();
+        }
+
+        function loginWithGoogle() {
+            // Calculate centered popup position
+            const width = 500;
+            const height = 600;
+            const left = (screen.width / 2) - (width / 2);
+            const top = (screen.height / 2) - (height / 2);
+
+            // Open Google OAuth in a centered popup window
+            const popup = window.open(
+                '/von/api/auth/google/login',
+                'googleLogin',
+                `width=${width},height=${height},left=${left},top=${top},scrollbars=yes,resizable=yes`
+            );
+
+            if (!popup) {
+                alert('Popup blocked! Please allow popups for this site and try again.');
+                return;
+            }
+
+            // Listen for messages from the popup
+            const messageHandler = async (event) => {
+                // Verify origin for security
+                if (event.origin !== window.location.origin) {
+                    return;
+                }
+
+                // Check if this is our login success message
+                if (event.data && event.data.type === 'googleLoginSuccess') {
+                    console.log('Received Google login success message with token:', event.data.authToken);
+                    messageReceived = true;
+
+                    // Clean up event listener
+                    window.removeEventListener('message', messageHandler);
+
+                    // Close popup if still open
+                    if (!popup.closed) {
+                        popup.close();
+                    }
+
+                    // Exchange the auth token for a proper session
+                    if (event.data.authToken) {
+                        try {
+                            console.log('Exchanging auth token for session...');
+                            const response = await fetch('/von/api/auth/exchange-token', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify({ token: event.data.authToken })
+                            });
+
+                            const result = await response.json();
+                            if (result.success) {
+                                console.log('Auth token exchange successful:', result);
+                                // Update authentication display immediately with the result
+                                await updateAuthenticationDisplay(result);
+                            } else {
+                                console.error('Auth token exchange failed:', result);
+                                // Fall back to checking status
+                                checkAuthenticationStatus();
+                            }
+                        } catch (error) {
+                            console.error('Error exchanging auth token:', error);
+                            // Fall back to checking status
+                            checkAuthenticationStatus();
+                        }
+                    } else {
+                        // No token received, fall back to status check
+                        console.log('No auth token received, checking status...');
+                        setTimeout(() => {
+                            checkAuthenticationStatus();
+                        }, 500);
+                    }
+                }
+            };
+
+            // Add message listener
+            window.addEventListener('message', messageHandler);
+
+            // Enhanced fallback: Poll auth status while popup is open AND after it closes
+            let pollCount = 0;
+            let messageReceived = false;
+            let authCheckInterval;
+
+            // Start polling auth status immediately (in case postMessage fails)
+            const startAuthPolling = () => {
+                let authPollCount = 0;
+                authCheckInterval = setInterval(async () => {
+                    authPollCount++;
+
+                    try {
+                        const response = await fetch('/von/api/auth/status');
+                        const authStatus = await response.json();
+
+                        if (authStatus.authenticated) {
+                            console.log('Authentication detected via polling!', authStatus);
+                            clearInterval(authCheckInterval);
+                            clearInterval(checkClosed);
+                            window.removeEventListener('message', messageHandler);
+
+                            // Close popup if still open
+                            if (!popup.closed) {
+                                popup.close();
+                            }
+
+                            // Update authentication display
+                            await updateAuthenticationDisplay(authStatus);
+                            messageReceived = true;
+                            return;
+                        }
+                    } catch (error) {
+                        console.log('Auth polling error:', error);
+                    }
+
+                    // Stop auth polling after 2 minutes
+                    if (authPollCount > 120) { // 120 seconds at 1-second intervals
+                        clearInterval(authCheckInterval);
+                    }
+                }, 1000);
+            };
+
+            // Start auth polling after a short delay
+            setTimeout(startAuthPolling, 2000);
+
+            const checkClosed = setInterval(() => {
+                pollCount++;
+
+                if (popup.closed) {
+                    clearInterval(checkClosed);
+                    clearInterval(authCheckInterval);
+                    window.removeEventListener('message', messageHandler);
+
+                    if (!messageReceived) {
+                        console.log('Google login popup closed - checking authentication status...');
+                        // Final check authentication status after popup closes
+                        setTimeout(() => {
+                            checkAuthenticationStatus();
+                        }, 500);
+                    }
+                }
+
+                // Stop polling after 5 minutes to prevent memory leaks
+                if (pollCount > 300) { // 300 seconds at 1-second intervals
+                    clearInterval(checkClosed);
+                    clearInterval(authCheckInterval);
+                    window.removeEventListener('message', messageHandler);
+                }
+            }, 1000);
+
+            // Handle popup focus
+            popup.focus();
+        }
+
+        // Check authentication status when page loads
+        document.addEventListener('DOMContentLoaded', function () {
+            console.log('Settings tab DOMContentLoaded - checking authentication status');
+            checkAuthenticationStatus();
+        });
+
+        // Also check when settings tab becomes visible (for dynamic tab loading)
+        function initializeSettingsAuthentication() {
+            console.log('Settings tab initialized - checking authentication status');
+            checkAuthenticationStatus();
+        }
+
+        // Export function for external tab management to call when settings tab is activated
+        window.initializeSettingsAuthentication = initializeSettingsAuthentication;
+    </script>
+    <script type="module" src="{{ url_for('static', filename='js/settingsPage.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/settings-frame-resize.js') }}"></script>
+</body>
+
+</html>

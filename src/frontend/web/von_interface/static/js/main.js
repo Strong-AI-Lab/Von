@@ -1,0 +1,453 @@
+import { initializeDomElements, initializeInfoPopup, loadAndDisplayGlobalModelInFooter } from './domUtils.js';
+import { createOrActivateConceptTab } from './dynamicTabs.js';
+import { getLanguageDisplayName } from './languageConfig.js';
+import './suppressTooltips.js';
+import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
+import { isVontologyBusy, loadKeyConceptsForUser, preloadVontologyData, selectVontologyNodeByIdentifier, setupVontologySearchUI } from './vontology.js';
+
+document.addEventListener('DOMContentLoaded', async () => {
+  console.log("DOM fully loaded and parsed.");
+
+  initializeDomElements();
+  initializeInfoPopup();
+  setupTabNavigation();
+  setupSettingsFrameResizing();
+
+  // Initialize global search UI (JVNAUTOSCI-550)
+  setupVontologySearchUI();
+
+  // Dynamic positioning: calculate header height and position tabs accordingly
+  setupDynamicLayout();
+
+  // Initialize chat tab since it's embedded and active by default
+  console.log("Initializing chat tab...");
+  import('./chatTab.js').then(module => {
+    if (module.initializeChatTab) {
+      module.initializeChatTab();
+    }
+  }).catch(err => console.error('Error loading chat tab module:', err));
+
+  // Start background preload of Vontology data while chat is active
+  try {
+    preloadVontologyData()
+      .then(() => {
+        startHealthPolling();
+      })
+      .catch((e) => {
+        console.warn('Vontology preload failed, starting health polling after delay:', e);
+        setTimeout(startHealthPolling, 3000);
+      });
+  } catch (e) {
+    console.warn('Failed to start Vontology preload:', e);
+    setTimeout(startHealthPolling, 3000);
+  }
+
+  // Load key concepts for current user immediately (needed before any concept tabs open)
+  loadKeyConceptsForUser().catch(err => {
+    console.warn('Failed to load key concepts during initialization:', err);
+  });
+
+  await loadAndDisplayGlobalModelInFooter();
+  await loadAndDisplayLanguageIndicator();
+
+  // Global handler: clicking a Vontology token navigates to concept and selects node
+  document.addEventListener('von:selectConceptById', (e) => {
+    const conceptId = e?.detail?.conceptId;
+    const createConceptTab = !!e?.detail?.createConceptTab;
+    if (!conceptId) return;
+    try {
+      const normalizedId = conceptId.startsWith('#V#') ? conceptId : `#V#${conceptId}`;
+      if (createConceptTab) {
+        // When createConceptTab is true, just create/activate the concept tab without switching to Vontology
+        selectVontologyNodeByIdentifier(normalizedId, createConceptTab);
+      } else {
+        // Original behaviour: switch to Vontology tab and select node
+        activateTab('vontologyTab');
+        setTimeout(() => {
+          selectVontologyNodeByIdentifier(normalizedId, createConceptTab);
+        }, 0);
+      }
+    } catch (err) {
+      console.warn('Failed to handle von:selectConceptById:', err);
+    }
+  });
+
+  // Check URL hash for initial tab
+  const hash = window.location.hash.substring(1);
+  let initialTabId = 'chatTab'; // Default to chatTab
+
+  if (hash) {
+    const potentialTab = document.getElementById(hash);
+
+    // Check if it's an existing tab with 'tab-content' class
+    if (potentialTab && potentialTab.classList.contains('tab-content')) {
+      initialTabId = hash;
+      console.log(`Initial tab set from URL hash: #${initialTabId}`);
+    }
+    // Check if it's a dynamic concept tab that needs to be created
+    else if (hash.startsWith('conceptTab_')) {
+      // Extract the concept ID from the tab ID
+      // conceptTab__V_person -> #V#person
+      const conceptIdPart = hash.replace(/^conceptTab_/, '');
+      const conceptId = conceptIdPart.replace(/_/g, '#');
+
+      console.log(`Detected concept tab hash: ${hash}, extracted concept ID: ${conceptId}`);
+
+      // Try to find the concept to get its display name
+      try {
+        // For now, just use the concept ID as the display name
+        // TODO: Could enhance this to fetch proper display name from the server
+        const conceptName = conceptId;
+
+        // Create the concept tab, but don't activate it yet (we'll do that below)
+        createOrActivateConceptTab(conceptId, conceptName, false);
+
+        // Now set it as the initial tab
+        initialTabId = hash;
+        console.log(`Created concept tab from URL hash: #${initialTabId} for concept ${conceptId}`);
+      } catch (err) {
+        console.warn(`Failed to create concept tab for hash '${hash}':`, err);
+        console.warn('Defaulting to chatTab.');
+      }
+    }
+    else {
+      console.warn(`URL hash '#${hash}' does not correspond to a valid tab ID. Defaulting to chatTab.`);
+    }
+  }
+
+  // Activate the determined initial tab
+  activateTab(initialTabId);
+
+  // Load data for the initially activated tab
+  console.log("Performing initial data loads for tabs...");
+  await loadTabData(initialTabId);
+  console.log("Initial data loads complete.");
+});
+
+// Function to handle iframe resizing
+function setupSettingsFrameResizing() {
+  const settingsFrame = document.getElementById('settingsFrame');
+  if (!settingsFrame) return;
+
+  let lastAutoHeight = 0;
+  let userResized = false;
+
+  // Observe inline style changes to detect manual resize
+  const resizeObserver = new MutationObserver(() => {
+    // If the iframe has a height style different from last auto height, treat as user resize
+    const current = parseInt(settingsFrame.style.height || settingsFrame.clientHeight, 10);
+    if (lastAutoHeight && Math.abs(current - lastAutoHeight) > 20) {
+      userResized = true;
+    }
+  });
+  resizeObserver.observe(settingsFrame, { attributes: true, attributeFilter: ['style'] });
+
+  function computeAvailableHeight(requested) {
+    try {
+      const vpH = window.innerHeight;
+      const tabBarH = 60; // fixed tab bar height
+      const footerH = 60; // approximate footer height + padding
+      const margins = 20; // extra spacing
+      const max = vpH - tabBarH - footerH - margins;
+      let target = Math.min(requested || max, max);
+      target = Math.max(target, 400); // minimum usable
+      return target;
+    } catch { return requested || 600; }
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'settings-frame-height') {
+      if (userResized) return; // do not override manual resize
+      const rawHeight = event.data.height;
+      if (rawHeight > 10000) return;
+      const adjusted = computeAvailableHeight(rawHeight);
+      if (Math.abs(adjusted - lastAutoHeight) < 5) return;
+      settingsFrame.style.height = `${adjusted}px`;
+      settingsFrame.style.minHeight = `${adjusted}px`;
+      lastAutoHeight = adjusted;
+      // console.debug('Auto-resized settings frame to', adjusted);
+    }
+    if (event.data && event.data.type === 'settings-content-loaded') {
+      try { settingsFrame.contentWindow.postMessage({ type: 'request-height' }, '*'); } catch (e) { console.error('Height request failed', e); }
+    }
+  });
+
+  settingsFrame.addEventListener('load', () => {
+    userResized = false; // reset when reloading
+    try { settingsFrame.contentWindow.postMessage({ type: 'request-height' }, '*'); } catch (e) { console.error('Error sending message to settings frame:', e); }
+  });
+
+  // Recompute on window resize if still auto-controlled
+  window.addEventListener('resize', () => {
+    if (userResized) return;
+    const current = parseInt(settingsFrame.style.height || settingsFrame.clientHeight, 10);
+    const recomputed = computeAvailableHeight(current);
+    settingsFrame.style.height = `${recomputed}px`;
+    settingsFrame.style.minHeight = `${recomputed}px`;
+    lastAutoHeight = recomputed;
+  });
+}
+
+
+/**
+ * Load and display the current language preference in the footer indicator
+ */
+async function loadAndDisplayLanguageIndicator() {
+  try {
+    const response = await fetch('/api/settings');
+    const settings = await response.json();
+
+    const languageIndicator = document.getElementById('languageIndicator');
+    if (languageIndicator && settings.preferred_language) {
+      const languageName = getLanguageDisplayName(settings.preferred_language);
+      languageIndicator.textContent = `🌐 ${languageName}`;
+      languageIndicator.title = `Current language preference: ${languageName}`;
+    }
+  } catch (error) {
+    console.error('Failed to load language preference:', error);
+    // Fallback to default
+    const languageIndicator = document.getElementById('languageIndicator');
+    if (languageIndicator) {
+      languageIndicator.textContent = '🌐 en-NZ';
+      languageIndicator.title = 'Current language preference: English (NZ)';
+    }
+  }
+}
+
+// Also listen for settings changes to update the language indicator
+document.addEventListener('von:settingsChanged', loadAndDisplayLanguageIndicator);
+
+/**
+ * Dynamically calculate and set positions for tabs and content based on actual header height
+ * JVNAUTOSCI-550: Replace hard-coded CSS positions with JavaScript calculation
+ */
+function setupDynamicLayout() {
+  function updateLayout() {
+    const header = document.getElementById('globalHeader');
+    const tabContainer = document.querySelector('.tab-container');
+    const contentAreas = document.querySelectorAll('.tab-content');
+    const tabContentArea = document.querySelector('.tab-content-area');
+
+    if (!header || !tabContainer) {
+      console.warn('Dynamic layout: Required elements not found');
+      return;
+    }
+
+    // Get actual header height including search box
+    const headerHeight = header.getBoundingClientRect().height;
+    const tabHeight = 48; // Standard tab height
+    const contentTop = headerHeight + tabHeight + 8; // 8px margin
+
+    console.log(`Dynamic layout: Header ${headerHeight}px, positioning tabs at ${headerHeight}px, content at ${contentTop}px`);
+
+    // Position tabs right below header
+    tabContainer.style.top = `${headerHeight}px`;
+
+    // Position main tab content area below tabs
+    if (tabContentArea) {
+      tabContentArea.style.marginTop = `${contentTop}px`;
+      // Also update the minimum height calculation to account for dynamic header
+      const footerSpace = 64; // Footer overlap space
+      const totalTopSpace = contentTop + 20; // content margin + padding
+      tabContentArea.style.minHeight = `calc(100vh - ${totalTopSpace + footerSpace}px)`;
+      tabContentArea.style.removeProperty('height');
+      tabContentArea.style.overflowY = 'visible';
+    }
+
+    // Position individual content areas below tabs (fallback for any not in main container)
+    contentAreas.forEach(area => {
+      area.style.marginTop = `${contentTop}px`;
+    });
+  }
+
+  // Initial layout
+  updateLayout();
+
+  // Re-calculate on window resize
+  window.addEventListener('resize', updateLayout);
+
+  // Re-calculate when search UI changes (in case it affects header height)
+  const searchInput = document.getElementById('vontologySearchInput');
+  // Re-select header here (local inside updateLayout previously) to avoid scope errors
+  const headerEl = document.getElementById('globalHeader');
+  if (searchInput && headerEl && !headerEl._dynamicLayoutObserved) {
+    try {
+      const resizeObserver = new ResizeObserver(() => {
+        requestAnimationFrame(updateLayout);
+      });
+      resizeObserver.observe(headerEl);
+      headerEl._dynamicLayoutObserved = true; // flag to prevent duplicate observers
+    } catch (e) {
+      console.warn('Dynamic layout: ResizeObserver setup failed', e);
+    }
+  }
+}
+
+function startHealthPolling() {
+  const localIpSpan = document.getElementById('serverLocalIpValue');
+  const publicIpSpan = document.getElementById('serverPublicIpValue');
+  const pidSpan = document.getElementById('serverPidValue');
+  const uptimeSpan = document.getElementById('serverUptimeValue');
+  if (!pidSpan) return;
+  // Copy-to-clipboard behavior for local IP address
+  if (localIpSpan) {
+    localIpSpan.addEventListener('click', async (e) => {
+      const ipText = localIpSpan.textContent.trim();
+      if (!ipText || ipText === '?') return;
+      try {
+        await navigator.clipboard.writeText(ipText);
+        localIpSpan.classList.add('copied');
+        const oldTitle = localIpSpan.title;
+        localIpSpan.title = 'Copied!';
+        setTimeout(() => { localIpSpan.classList.remove('copied'); localIpSpan.title = oldTitle; }, 1200);
+      } catch (err) { console.warn('Local IP copy failed', err); }
+    });
+  }
+  // Copy-to-clipboard behavior for public IP address
+  if (publicIpSpan) {
+    publicIpSpan.addEventListener('click', async (e) => {
+      const ipText = publicIpSpan.textContent.trim();
+      if (!ipText || ipText === '?') return;
+      try {
+        await navigator.clipboard.writeText(ipText);
+        publicIpSpan.classList.add('copied');
+        const oldTitle = publicIpSpan.title;
+        publicIpSpan.title = 'Copied!';
+        setTimeout(() => { publicIpSpan.classList.remove('copied'); publicIpSpan.title = oldTitle; }, 1200);
+      } catch (err) { console.warn('Public IP copy failed', err); }
+    });
+  }
+  // Copy-to-clipboard behavior for PID
+  pidSpan.addEventListener('click', async (e) => {
+    const pidText = pidSpan.textContent.trim();
+    if (!pidText || pidText === '?' || /[^0-9]/.test(pidText)) return;
+    try {
+      await navigator.clipboard.writeText(pidText);
+      pidSpan.classList.add('copied');
+      const oldTitle = pidSpan.title;
+      pidSpan.title = 'Copied!';
+      setTimeout(() => { pidSpan.classList.remove('copied'); pidSpan.title = oldTitle; }, 1200);
+    } catch (err) { console.warn('PID copy failed', err); }
+  });
+  let startTimeIso = null;
+  let lastIdentity = { pid: null, start: null };
+  let reloadTriggered = false;
+  function autoReloadEnabled() {
+    try { return localStorage.getItem('von:autoReloadOnRestart') === '1'; } catch (_) { return false; }
+  }
+  function formatUptime(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const d = Math.floor(totalSec / 86400);
+    const h = Math.floor((totalSec % 86400) / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+  function updateUptimeLoop() {
+    if (startTimeIso && uptimeSpan) {
+      const started = Date.parse(startTimeIso);
+      if (!isNaN(started)) {
+        const diff = Date.now() - started;
+        uptimeSpan.textContent = formatUptime(diff);
+      }
+    }
+    requestAnimationFrame(() => setTimeout(updateUptimeLoop, 1000));
+  }
+  let failureCount = 0;
+  const busyEl = document.getElementById('vontologyBusyIndicator');
+  const busySr = document.getElementById('vontologyBusySrStatus');
+  let lastBusyState = null;
+  function updateBusyIndicator() {
+    if (!busyEl) return;
+    try {
+      const busy = isVontologyBusy();
+      if (busy) {
+        busyEl.classList.add('active');
+        busyEl.style.display = 'inline';
+        if (busySr) busySr.textContent = 'Vontology operations in progress';
+      } else {
+        busyEl.classList.remove('active');
+        busyEl.style.display = 'none';
+        if (busySr) busySr.textContent = '';
+      }
+      if (lastBusyState !== busy) {
+        lastBusyState = busy;
+        document.dispatchEvent(new CustomEvent('von:vontologyBusyChange', { detail: { busy } }));
+      }
+    } catch (_) { }
+  }
+  async function poll() {
+    updateBusyIndicator();
+    const busy = isVontologyBusy();
+    let nextDelay = 5000; // base
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      const res = await fetch('/health', { cache: 'no-store', signal: controller.signal });
+      clearTimeout(timeout);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const newPid = (typeof data.pid !== 'undefined') ? data.pid : null;
+      const newStart = data.start_time || null;
+      const newLocalIp = data.local_ip || null;
+      const newPublicIp = data.public_ip || null;
+      if (localIpSpan) {
+        localIpSpan.textContent = newLocalIp || '?';
+      }
+      if (publicIpSpan) {
+        publicIpSpan.textContent = newPublicIp || '—';
+      }
+      if (newPid !== null) {
+        pidSpan.textContent = newPid;
+        pidSpan.parentElement.classList.remove('pid-error');
+      } else { pidSpan.textContent = '?'; }
+      if (newStart && !startTimeIso) {
+        startTimeIso = newStart;
+      }
+
+      if (autoReloadEnabled() && !reloadTriggered && lastIdentity.pid !== null && lastIdentity.start !== null) {
+        if (newPid !== null && newStart !== null && (newPid !== lastIdentity.pid || newStart !== lastIdentity.start)) {
+          reloadTriggered = true;
+          setTimeout(() => { try { window.location.reload(); } catch (_) { /* no-op */ } }, 300);
+        }
+      }
+
+      if (newPid !== null) lastIdentity.pid = newPid;
+      if (newStart !== null) lastIdentity.start = newStart;
+      failureCount = 0; // reset on success
+    } catch (e) {
+      failureCount++;
+      pidSpan.textContent = '—';
+      pidSpan.parentElement.classList.add('pid-error');
+      // Exponential backoff on failures (5s,10s,20s,30s cap)
+      nextDelay = Math.min(30000, 5000 * Math.pow(2, Math.min(failureCount - 1, 3)));
+    }
+    // If ontology is busy, stretch the delay (but keep success shorter than failure backoff)
+    if (busy) {
+      nextDelay = Math.min(15000, Math.max(nextDelay, 10000));
+    }
+    setTimeout(poll, nextDelay);
+  }
+  poll();
+  // Also update busy indicator more responsively
+  setInterval(updateBusyIndicator, 1500);
+  updateUptimeLoop();
+  // Concept link handlers
+  document.querySelectorAll('.concept-link').forEach(a => {
+    a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const name = a.getAttribute('data-concept-name');
+      if (!name) return;
+      try {
+        activateTab('vontologyTab');
+        // Dispatch a custom event others can listen to for name-based selection/search
+        document.dispatchEvent(new CustomEvent('von:selectConceptByName', { detail: { name } }));
+      } catch (err) {
+        console.warn('Concept link navigation failed', err);
+      }
+    });
+  });
+}

@@ -1,0 +1,234 @@
+<!-- Import/Export Tab Content -->
+<div class="import-export-container">
+  <h2>Data Import & Export</h2>
+  <p class="import-export-description">
+    Centralized data management for vontology and entity backup, migration, and transfer operations.
+  </p>
+
+  <!-- Direct Ontology Management Section -->
+  <div class="import-export-direct-management">
+  <h3>🚀 Direct Ontology Management</h3>
+  <p>
+      Complete concepts collection management for the unified ontology. Export or import the entire database with automatic backup and validation.
+    </p>
+    
+  <div class="import-export-button-group">
+      <div>
+  <button id="exportOntologyDirectButton" class="import-export-button import-export-export-button">
+          📥 Export Complete Ontology
+        </button>
+  <small class="import-export-small-text">
+          Downloads the complete concepts collection (204 documents) as timestamped JSON file with automatic validation and repair
+        </small>
+      </div>
+      
+      <div>
+  <button id="repairOntologyButton" class="import-export-button import-export-repair-button">
+          🔧 Repair Database
+        </button>
+  <small class="import-export-small-text">
+          Fixes missing concept_ids in the database before export (creates backup automatically)
+        </small>
+      </div>
+      
+      <div>
+  <label for="ontologyDirectImportFile" class="import-export-file-label">Import Complete Ontology:</label>
+  <input type="file" id="ontologyDirectImportFile" accept=".json" class="import-export-file-input">
+  <button id="importOntologyDirectButton" class="import-export-button import-export-import-button" disabled>
+          📤 Replace All Concepts
+        </button>
+  <small class="import-export-small-text">
+          ⚠️ <strong>DESTRUCTIVE:</strong> This will replace ALL existing concepts with the imported data. A backup will be created automatically.
+        </small>
+      </div>
+    </div>
+
+  <div id="ontologyDirectStatusMessage" class="import-export-status-message">
+      <!-- Status messages will appear here -->
+    </div>
+    
+    <!-- Progress indicator for import operations -->
+    <div id="ontologyDirectProgress" class="import-export-progress">
+      <div class="progress">
+        <div id="ontologyDirectProgressBar" class="progress-bar"></div>
+      </div>
+      <small id="ontologyDirectProgressText" class="import-export-small-text">Processing...</small>
+    </div>
+  </div>
+
+  <!-- Vontology Import/Export Section -->
+  <div class="import-export-vontology-panel">
+    <h3>🌳 Vontology Operations</h3>
+    
+    <!-- Vontology Import -->
+    <div class="import-export-card">
+      <h4>Import Vontology</h4>
+      <p>
+        Load additional ontology structure from a JSON file. New nodes will be added without replacing existing ones.
+      </p>
+      <div class="mb-2">
+        <label for="vontologyFileInput" class="label-inline-strong">Vontology JSON file:</label>
+        <input type="file" id="vontologyFileInput" accept=".json" class="mr-1" title="Choose Vontology JSON file to import">
+        <button id="importVontologyButton" disabled>Import Vontology</button>
+        <button id="previewVontologyImportButton" disabled class="ml-2">Preview Import</button>
+      </div>
+      <div id="vontologyImportStatus" class="status-italic"></div>
+      <div id="vontologyImportPreview" class="import-export-preview">
+        <h5>Vontology Import Preview</h5>
+        <div id="vontologyImportPreviewContent"></div>
+      </div>
+    </div>
+
+    <!-- Vontology Export -->
+    <div class="import-export-card disabled-panel">
+      <div class="disabled-badge">DISABLED</div>
+      <h4>Export Vontology</h4>
+      <p>
+        Download all ontology nodes as a JSON file compatible with the import function.
+      </p>
+      <div class="mb-2">
+        <button id="exportVontologyButton">📥 Export Vontology</button>
+        <button id="previewVontologyExportButton" class="ml-2">Preview Export</button>
+      </div>
+      <div id="vontologyExportStatus" class="status-italic"></div>
+      <div id="vontologyExportPreview" class="import-export-preview">
+        <h5>Vontology Export Preview</h5>
+        <div id="vontologyPreviewContent"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Concepts Import/Export Section (formerly Entity) -->
+  <div class="import-export-vontology-panel disabled-panel">
+  <div class="disabled-badge top-10 right-15">DISABLED</div>
+    <h3>🧩 Concept Operations</h3>
+    
+    <!-- Entity Import -->
+    <div class="import-export-card">
+      <h4>Import Concepts</h4>
+      <p>
+        Upload concepts from a JSON file with conflict resolution and validation. Legacy entity files are still supported.
+      </p>
+      
+      <!-- Import Controls -->
+      <div class="mb-3">
+        <label for="entityFileInput" class="label-inline-strong">Concepts JSON file:</label>
+        <input type="file" id="entityFileInput" accept=".json" class="mr-1" title="Choose Concepts JSON file to import">
+  <button id="importEntityButton" disabled>Import Concepts</button>
+        <button id="previewEntityButton" disabled class="ml-2">Preview Import</button>
+      </div>
+
+      <!-- Import Options -->
+  <div class="mb-3 panel-muted">
+        <h5>Import Options</h5>
+        <div class="mb-2">
+          <label class="label-inline">
+            <input type="radio" name="conflictResolution" value="update" checked class="mr-1">
+            Update existing entities
+          </label>
+          <label class="label-inline">
+            <input type="radio" name="conflictResolution" value="create_new" class="mr-1">
+            Create new (append suffix)
+          </label>
+          <label class="dib">
+            <input type="radio" name="conflictResolution" value="skip" class="mr-1">
+            Skip existing entities
+          </label>
+        </div>
+        <div>
+          <label class="label-inline">
+            <input type="checkbox" id="validateConceptsCheckbox" checked class="mr-1">
+            Validate concept references
+          </label>
+          <label class="dib">
+            <input type="checkbox" id="dryRunCheckbox" class="mr-1">
+            Preview only (dry run)
+          </label>
+        </div>
+      </div>
+
+      <!-- Import Status and Results -->
+      <div id="entityImportStatus" class="status-italic mb-2"></div>
+  <div id="entityImportResults" class="hidden success-box">
+  <h5>Import Results</h5>
+        <div id="importResultsContent"></div>
+      </div>
+    </div>
+
+    <!-- Entity Export -->
+    <div class="import-export-card">
+  <h4>Export Concepts</h4>
+      <p>
+        Download concepts as a JSON file with optional filtering by concept type.
+      </p>
+      
+      <!-- Export Filters -->
+  <div class="mb-3 panel-muted">
+        <h5>Export Filters</h5>
+        <div class="mb-2">
+          <label for="conceptFilter" class="label-block">
+            Filter by Concept (optional):
+          </label>
+          <input type="text" id="conceptFilter" placeholder="e.g., #V#person" class="mr-1 w-200">
+          <label class="ml-2">
+            <input type="checkbox" id="includeDescendantsCheckbox" class="mr-1">
+            Include descendant concepts
+          </label>
+        </div>
+        <div class="mb-2">
+          <label for="dateAfterFilter" class="label-block">
+            Created after (optional):
+          </label>
+          <input type="date" id="dateAfterFilter" class="mr-1">
+          <label for="updatedAfterFilter" class="label-inline-strong">
+            Updated after (optional):
+          </label>
+          <input type="date" id="updatedAfterFilter">
+        </div>
+      </div>
+
+      <!-- Export Controls -->
+      <div class="mb-2">
+        <button id="exportEntityButton">📤 Export Concepts</button>
+        <button id="previewEntityExportButton" class="ml-2">Preview Export</button>
+      </div>
+      
+      <div id="entityExportStatus" class="status-italic"></div>
+      <div id="entityExportPreview" class="import-export-preview">
+        <h5>Export Preview</h5>
+        <div id="exportPreviewContent"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Operation History -->
+  <div class="import-export-card card-muted">
+    <h3>📋 Operation History</h3>
+    <div id="operationHistory" class="history-box">
+      <p class="status-italic text-muted">No operations performed yet.</p>
+    </div>
+    <button id="clearHistoryButton" class="mt-3 fs-12">Clear History</button>
+  </div>
+
+  <!-- Help Section -->
+  <div class="import-export-card card-warning">
+    <h3>💡 Help & Tips</h3>
+    <div class="text-md">
+      <p><strong>Vontology Operations:</strong></p>
+      <ul>
+        <li>Import adds new concepts without overwriting existing ones</li>
+  <li><span class="text-muted line-through">Export creates a complete backup of the ontology structure</span> <span class="text-danger fw-bold">(DISABLED)</span></li>
+      </ul>
+      
+      <p><strong>Concept Operations:</strong></p>
+  <ul class="text-muted line-through">
+        <li><strong>Update mode:</strong> Updates existing concepts by name+concept_id, creates new if not found</li>
+        <li><strong>Create new mode:</strong> Always creates new concepts, appends suffix if name conflicts</li>
+        <li><strong>Skip mode:</strong> Only imports concepts that don't already exist</li>
+        <li>Use preview mode to validate imports before committing changes</li>
+        <li>Export filters help create targeted backups for specific concept types</li>
+      </ul>
+  <p class="text-danger fw-bold mt-3">⚠️ Concept Operations section is currently DISABLED</p>
+    </div>
+  </div>
+</div>

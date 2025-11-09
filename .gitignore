@@ -1,0 +1,128 @@
+# JSON files (with exceptions)
+*.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/settings.json
+!package.json
+!tsconfig.json
+!jest.config.js
+!scripts/*.json
+!docs/schemas/*.json
+
+# Python cache and virtual environments
+__pycache__/
+.venv/
+
+# pytest cache
+.pytest_cache/
+pytest-cache*/
+
+# (Remove standalone .vscode ignore here; consolidated later for allowlist clarity)
+
+# Test coverage and logs
+.coverage
+test-results.txt
+logs/
+*.log
+
+# Deprecated code
+replaced_or_deprecated_code/
+
+# Copilot chat histories
+docs/copilot_histories/
+
+# Ignore directories and sensitive files
+ignore/
+token.*
+token.json
+*token.json
+settings.txt
++/settings.txt
++/token.json
+MJWPlayground.ipynb
+
+# Python compiled files
+*.pyc
+pdm.lock
+.pdm-python
+.pdm-build
+
+test.py
+
+# Environments
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# VS Code (ignore all, then allowlist specific config & scripts)
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/.env.tests
+!.vscode/scripts/**
+!__pycache__/
+.pytest_cache
+vs_BuildTools.exe
+install_output.txt
+src/knowledge/vontology/Thing/UnderspecifiedLocation/Trajector/Individual/TheUnionOfSpatialThingsRelativeLocation/
+src/knowledge/backups/vontology_backup_*
+src/knowledge/vontology/VONTOLOGY_FILE_MONDO_MIGRATED
+install_output.txt
+pytest.ini
+Von-Private.code-workspace
+#reference_code
+#reference_code/*
+node_modules/
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Build output
+dist/
+build/
+out/
+
+# Coverage directory
+coverage/
+
+# Temporary scripts directory (keep folder, ignore contents)
+scripts/tmp/*
+!scripts/tmp/.gitkeep
+
+# Local MongoDB dumps and raw data
+data/raw/mongo_dump/
+
+# arXiv papers storage (external MCP server)
+data/arxiv_papers/
+
+# Database backup dumps (exclude committed artifacts going forward)
+backups/
+!backups/.gitkeep
+
+# Local run configurations (IDE generated)
+.run/
+
+# Emacs backup and temp files
+*~
+\#*\#
+.#*
+
+# Other editor / OS artifacts
+.idea/
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+Icon?
+
+
+#Temporary file (delete after use)
+cleanup_exe.ps1

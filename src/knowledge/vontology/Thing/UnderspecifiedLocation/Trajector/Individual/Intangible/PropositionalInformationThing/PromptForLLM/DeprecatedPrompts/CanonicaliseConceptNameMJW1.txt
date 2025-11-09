@@ -1,0 +1,26 @@
+        Please canonicalise the name of the concept currently named '{concept['name']}'
+        and is described as follows: '{concept['description']}' 
+
+        The generalisation of this concept is '{generalisation['name']}' and
+        is described as follows: '{generalisation['description']}'
+
+        The new name should be a short noun phrase that captures the essence of the concept.
+        The name should be as precise as the original name, and should meet the description of that concept.
+        The name should be as clear as possible, and should be a singular noun or noun phrase in title case.
+        If the current name is already suitable, with suitable normalisation to a noun phrase, please return in normalised form.
+        If the current name is not suitable, please provide a new name that is suitable.
+        You will wrap the new name in a JSON object with the key 'name' and the value being the new name.
+
+        Indicative examples uncanonicalised -> canonicalised names:
+        Example: ScholWrk -> {{"name":"Scholarly Work"}}
+        Example: LA, CA ->  {{"name":"City of Los Angeles California"}}
+        Example: @journal -> {{"name":"Academic Journal"}}
+        Example: #$NewZealandNativePlant -> {{"name":"New Zealand Indigenous Plant"}}
+        Example: Hydrogen Atom -> {{"name":"Hydrogen Atom"}}
+        Example: Hydrogen Atoms -> {{"name":"Hydrogen Atom"}}
+
+        Remember to generate a name for '{concept['name']}', not for its generalisation.
+        The new name should be singular and title case, and you should prefer names closer to the original name.
+        Please be careful to use the correct capitalisation and to avoid unnecessary punctuation.
+        Only output the new concept name noun phrase in the JSON wrapper - not a single character of extra context or description or explaination.
+        This is very important since I need to parse the output simply using python.

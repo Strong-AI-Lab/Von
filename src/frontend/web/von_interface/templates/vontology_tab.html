@@ -1,0 +1,51 @@
+<!-- Vontology Tab Content -->
+<!-- JVNAUTOSCI-322: Dynamic Concept Tabs on Vontology Selection -->
+<div class="vontology-container">
+  <!-- Title & search moved to global header (JVNAUTOSCI-550) -->
+  <div id="vontologyTreeContainer">
+    <!-- Tree will be rendered here by JavaScript -->
+    <p>Loading Vontology tree...</p>
+  </div>
+  <div id="vontologySelectedNode">
+    Selected: <span id="selectedNodePath">None</span>
+  </div>
+  <!-- Node content and editing controls removed from Vontology tab.
+             Description is now shown and editable on the Type concept tab. -->
+
+  <!-- Move the button here, below the node content box -->
+  <div class="vontology-controls">
+    <button id="showSubtreeDetailsButton" disabled>Show Subtree Details</button>
+    <button id="refreshTreeButton" class="vontology-refresh-button">🔄 Refresh Tree</button>
+    <label>
+      <input type="checkbox" id="collapseLinearCheckbox" /> Collapse linear chains
+    </label>
+    <label>
+      <input type="checkbox" id="filterRedundantCheckbox" checked /> Filter redundant nodes
+    </label>
+    <label>
+      <input type="checkbox" id="showOnlyKeyConceptsCheckbox" /> Show only key concepts ⭐
+    </label>
+  </div>
+
+  <!-- Removed old Import/Export informational message -->
+
+  <!-- Add Area for Subtree Details -->
+  <div id="subtreeDetailsContainer" class="hidden">
+    <h3>Subtree Node Details:</h3>
+    <pre id="subtreeDetailsDisplay">Click "Show Subtree Details" after selecting a node.</pre>
+    <p id="subtreeDetailsStatus"></p>
+  </div>
+
+  <div id="vontologyCreateConcept" class="hidden"> <!-- Hidden until a type is selected -->
+    <h3>Create New Concept</h3>
+    <div class="vontology-form-group">
+      <label for="newConceptName">New Concept Name:</label>
+      <input type="text" id="newConceptName" name="newConceptName">
+    </div>
+    <div class="vontology-create-actions">
+      <button id="createTypeButton" class="btn btn-primary btn-lg">Create new type</button>
+      <button id="createInstanceButton" class="btn btn-secondary btn-lg">Create new instance</button>
+    </div>
+    <p id="createConceptStatus"></p>
+  </div>
+</div>
