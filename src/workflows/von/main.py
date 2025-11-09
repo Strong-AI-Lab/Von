@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
 
-from backend.languagemodels.llm_interface import OllamaClient  # type: ignore
-from backend.server.routes.settings_routes import settings_bp  # type: ignore
-from backend.server.routes.vontology_routes import vontology_bp  # type: ignore
-from backend.server.routes.von_routes import von_bp  # type: ignore
-from backend.server.utils_flask import create_flask_app
-import threading
-import time
-import traceback
-import faulthandler
-import argparse
-import logging  # Import logging
-from pathlib import Path  # ADDED
-from flask import Flask, render_template  # Added render_template
 import sys
 import os
 project_root_str = os.path.abspath(
@@ -20,6 +7,21 @@ project_root_str = os.path.abspath(
 src_root = os.path.join(project_root_str, "src")
 if src_root not in sys.path:
     sys.path.insert(0, src_root)
+
+
+from flask import Flask, render_template  # Added render_template
+from pathlib import Path  # ADDED
+import logging  # Import logging
+import argparse
+import faulthandler
+import traceback
+import time
+import threading
+from backend.server.utils_flask import create_flask_app
+from backend.server.routes.von_routes import von_bp  # type: ignore
+from backend.server.routes.vontology_routes import vontology_bp  # type: ignore
+from backend.server.routes.settings_routes import settings_bp  # type: ignore
+from backend.languagemodels.llm_interface import OllamaClient  # type: ignore
 
 
 # Add src directory to Python path FIRST, before any backend imports
