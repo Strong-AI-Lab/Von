@@ -26,11 +26,11 @@ Von (or vonNeumarkt) provides researchers with AI-enriched tools that enhance ac
 
 ## 🚀 How to Start
 
-### **Prerequisites:**
+### 1. **Prerequisites:**
 - Python 3.10 or higher
 - Node.js 16+ (for frontend)
 
-### **Installation:**
+### 2. **Installation:**
 
 ```powershell
 # Clone the repository
@@ -57,10 +57,10 @@ If directly running `./setup_all.ps1` does not work, then run each setup script 
 ./setup_js.ps1
 ```
 
-### **Fetching Knowledge (base ontology) (⚠️)**
+### 3. **Fetching Knowledge (base ontology) (⚠️)**
 By default, users are not connected to any remote database for knowledge, and you will initial have empty knowledge.
 
-### **LLM Provider Setup (⚠️)**
+### 4. **LLM Provider Setup**
 
 **Ollama (Local Models):**
 1. Install Ollama: https://ollama.ai
@@ -79,7 +79,7 @@ By default, users are not connected to any remote database for knowledge, and yo
 3. Select Gemini model in Von's Settings panel
 
 
-### **Run:**
+### 5. **Run:**
 
 ```powershell
 # Start the server locally
@@ -88,14 +88,14 @@ By default, users are not connected to any remote database for knowledge, and yo
 # Open browser to http://localhost:5001
 ```
 
-### **Stop:**
+### 6. **Stop:**
 ```powershell
 # Stop the local server
 ./run.ps1 stop
 
 ```
 
-### **Basic Usage:**
+### 7. **Basic Usage:**
 -  Browse the Vontology tree to explore knowledge structure
 -  Create your first concepts and entities, and make relations between them to construct your own ontological knowledge
 -  Configure your preferred LLM provider in Settings (Ollama local models by default)
