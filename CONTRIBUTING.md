@@ -135,13 +135,13 @@ Examples:
 - `feature/arxiv-integration`
 - `fix/concept-search-bug`
 
-### 2. Make Your Changes
+### 2. Make Your Changes and Test
 
-### 3. Write Tests
+Make your changes following the project conventions. See the [Suggested Style](#-suggested-style) section for code style guidelines.
 
-### 4. Test Your Changes
+Before committing, ensure your changes work correctly by running the application locally with `./run.ps1` and testing your modifications.
 
-### 5. Commit Your Changes
+### 3. Commit Your Changes
 
 Write clear, concise commit messages that describe what changed and why:
 
@@ -250,7 +250,7 @@ We particularly welcome contributions in these areas:
 
 ---
 
-## 📖 Documentation
+## 📖 Suggested Style
 
 When contributing, please follow these guidelines:
 
