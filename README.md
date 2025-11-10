@@ -43,7 +43,21 @@ cd Von
 
 ```
 
-### **Fetching knowledge (base ontology) (⚠️)**
+If directly running `./setup_all.ps1` does not work, then run each setup file separately:
+
+```powershell
+# Run setup_py.ps1
+# If your python version is 3.15 
+./setup_all.ps1
+
+# If your python version is not 3.15 (say 3.12)
+./setup_py.ps1 -ConfigureVSCode -PythonVersion 3.12
+
+# Then,
+./setup_js.ps1
+```
+
+### **Fetching Knowledge (base ontology) (⚠️)**
 By default, users are not connected to any remote database for knowledge, and you will initial have empty knowledge.
 
 ### **LLM Provider Setup (⚠️)**
@@ -83,7 +97,7 @@ By default, users are not connected to any remote database for knowledge, and yo
 
 ### **Basic Usage:**
 -  Browse the Vontology tree to explore knowledge structure
--  Create your first concepts and entities, and make relations between them to construct your own ontology
+-  Create your first concepts and entities, and make relations between them to construct your own ontological knowledge
 -  Configure your preferred LLM provider in Settings (Ollama local models by default)
 -  Start a chat conversation with Von's AI assistant
 
@@ -147,6 +161,7 @@ We welcome contributions from the community! Von is designed to evolve with acad
 
 **Areas for Contribution (ex):**
 - External MCP server integrations
+- Automatic information extraction for entity creation 
 - Domain-specific Vontology extensions
 - Research workflow templates
 - Documentation improvements
