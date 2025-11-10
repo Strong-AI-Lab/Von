@@ -10,7 +10,7 @@ Von (or vonNeumarkt) provides researchers with AI-enriched tools that enhance ac
 
 **Why ontologies are the missing piece for AI agents:** Modern AI systems face a critical challenge—while LLMs excel at pattern recognition and flexible understanding, they suffer from hallucinations (generating plausible but false information) because they rely on statistical probabilities rather than verifiable facts. The future of reliable AI agents lies in **neuro-symbolic systems** that combine neural networks with symbolic reasoning.
 
-Von embodies this neuro-symbolic approach: LLMs handle unstructured data and natural language understanding, while Vontology provides a factual, logical backbone—a semantic network of concepts and relationships dating back to Aristotelian knowledge organisation. This combination has been shown to reduce hallucinations to near-zero in certain applications by grounding AI responses in explicit, verifiable knowledge structures.
+**Von embodies this neuro-symbolic approach:** LLMs handle unstructured data and natural language understanding, while Vontology provides a factual, logical backbone—a semantic network of concepts and relationships dating back to Aristotelian knowledge organisation. This combination has been shown to reduce hallucinations to near-zero in certain applications by grounding AI responses in explicit, verifiable knowledge structures.
 
 **In practice, this means:** Researchers can distinguish certain facts from uncertain AI suggestions, track how information relates across domains, build verifiable knowledge bases that grow more reliable over time, and maintain provenance for every piece of information. Whether you're conducting systematic literature reviews, mapping research networks, or managing complex entities (people, scholarly works, concepts, institutions), Von provides the structured foundation and AI assistance to work more effectively—without the usual risks of AI-generated misinformation.
 
@@ -38,19 +38,19 @@ git clone https://github.com/Strong-AI-Lab/Von.git
 cd Von
 
 # Run automated setup in Windows PowerShell
-# This runs setup_py.ps1 (pdm dependency, python packages, etc.) and setup_js.ps1 (Javascript)
+# This runs setup_py.ps1 (pdm dependencies, python packages, etc.) and setup_js.ps1 (Javascript dependencies)
 ./setup_all.ps1
 
 ```
 
-If directly running `./setup_all.ps1` does not work, then run each setup file separately:
+If directly running `./setup_all.ps1` does not work, then run each setup script separately:
 
 ```powershell
 # Run setup_py.ps1
 # If your python version is 3.15 
 ./setup_all.ps1
 
-# If your python version is not 3.15 (say 3.12)
+# If your python version is not 3.15 (e.g., 3.12)
 ./setup_py.ps1 -ConfigureVSCode -PythonVersion 3.12
 
 # Then,
@@ -101,9 +101,9 @@ By default, users are not connected to any remote database for knowledge, and yo
 -  Configure your preferred LLM provider in Settings (Ollama local models by default)
 -  Start a chat conversation with Von's AI assistant
 
-See **[User Guide](docs/USER_GUIDE.md)** for comprehensive guide to Von's features and workflows *(coming soon)*
+See **[User Guide](USER_GUIDE.md)** for comprehensive guide to Von's features and workflows *(coming soon)*
 
-## 🎯 Usage Examples
+## 🎯 Quick Usage Examples
 
 ### **Ex 1. Systematic Literature Review**
 Von helps researchers conduct comprehensive literature reviews by:
@@ -155,9 +155,8 @@ We welcome contributions from the community! Von is designed to evolve with acad
 
 **How to Contribute:**
 1. Read our [Contributing Guidelines](CONTRIBUTING.md)
-2. Check out the [Developer Guide](docs/DEVELOPER_GUIDE.md) for technical details *(coming soon)*
-3. Browse [open issues](https://https://github.com/Strong-AI-Lab/Von/issues) or propose new features
-4. Submit pull requests with tests and documentation
+2. Browse [open issues](https://https://github.com/Strong-AI-Lab/Von/issues) or propose new features
+3. Submit pull requests with tests and documentation
 
 **Areas for Contribution (ex):**
 - External MCP server integrations
