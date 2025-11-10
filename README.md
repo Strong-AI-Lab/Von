@@ -149,13 +149,13 @@ Create structured, verifiable knowledge repositories:
 4. Validate knowledge with confidence assessment
 5. Share knowledge base with research team
 
-## 🤝 Contributing (⚠️)
+## 🤝 Contributing
 
 We welcome contributions from the community! Von is designed to evolve with academic research needs.
 
 **How to Contribute:**
 1. Read our [Contributing Guidelines](CONTRIBUTING.md)
-2. Browse [open issues](https://https://github.com/Strong-AI-Lab/Von/issues) or propose new features
+2. Browse [open issues](https://github.com/Strong-AI-Lab/Von/issues) or propose new features
 3. Submit pull requests with tests and documentation
 
 **Areas for Contribution (ex):**
