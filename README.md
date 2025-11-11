@@ -57,8 +57,42 @@ If directly running `./setup_all.ps1` does not work, then run each setup script 
 ./setup_js.ps1
 ```
 
-### 3. **Fetching Knowledge (base ontology) (⚠️)**
-By default, users are not connected to any remote database for knowledge, and you will initial have empty knowledge.
+### 3. **Database Setup**
+
+Von uses MongoDB to store your knowledge base (concepts, entities, relationships).
+
+**MongoDB Installation:**
+MongoDB will be automatically installed during the setup process (via `setup_py.ps1`). If automatic installation fails or you prefer manual installation, download MongoDB Community Edition from https://www.mongodb.com/try/download/community
+
+**Configuration:**
+
+1. **Copy the template:** `cp .env.template .env` (or `.env.example` to `.env`)
+
+2. **Choose your database option** by editing `.env`:
+
+   - **Local MongoDB** (Default):
+     ```bash
+     MONGO_URI=mongodb://localhost:27017/
+     VON_DB_NAME=von_db
+     ```
+     Make sure that MongoDB is running on your local machine.
+
+   - **MongoDB Atlas** (Cloud - Optional for team collaboration):
+     ```bash
+     MONGO_URI=mongodb+srv://YOUR_USERNAME:YOUR_PASSWORD@YOUR_CLUSTER.mongodb.net/
+     VON_DB_NAME=von_db
+     MONGO_PROJECT=Your Project Name
+     ```
+
+you should see `[Von Database] Connecting to LOCAL MongoDB at localhost:27017` or connection to your Atlas cluster in log file under `./logs` folder once running the system.
+
+**Starting with Knowledge:**
+
+By default, you start with an empty knowledge base. You can:
+- Create concepts manually through the Von interface
+- Import scholarly articles via arXiv integration
+- Load sample ontology: `python src/utilities/init_database.py --load-starter`
+- Build your custom ontology from scratch
 
 ### 4. **LLM Provider Setup**
 
@@ -70,12 +104,12 @@ By default, users are not connected to any remote database for knowledge, and yo
 
 **OpenAI:**
 1. Get your own API key from https://platform.openai.com/api-keys
-2. Set `OPENAI_API_KEY` in `.env`- create `.env` if not already present
+2. Set `OPENAI_API_KEY` in `.env`
 3. Select OpenAI model in Von's Settings panel
 
 **Google Gemini:**
 1. Get your own API key from https://ai.google.dev
-2. Set `GOOGLE_API_KEY` in `.env` - create `.env` if not already present
+2. Set `GOOGLE_API_KEY` in `.env`
 3. Select Gemini model in Von's Settings panel
 
 
