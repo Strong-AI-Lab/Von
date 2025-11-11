@@ -394,31 +394,8 @@ OLLAMA_HOSTS_LIST=127.0.0.1
     } else {
         Write-Host ".env file already exists. Skipping creation." -ForegroundColor Green
     }
+
     
-    # Check if MongoDB is accessible (optional check, doesn't fail setup)
-    Write-Host ""
-    Write-Host "=== Checking MongoDB ===" -ForegroundColor Cyan
-    $mongoRunning = $false
-    try {
-        # Check if mongod is running (Windows)
-        $mongoProcess = Get-Process -Name "mongod" -ErrorAction SilentlyContinue
-        if ($mongoProcess) {
-            Write-Host "✓ MongoDB is running (PID=$($mongoProcess.Id))" -ForegroundColor Green
-            $mongoRunning = $true
-        }
-    } catch {
-        # Ignore errors
-    }
-    
-    if (-not $mongoRunning) {
-        Write-Host "⚠ MongoDB process not detected" -ForegroundColor Yellow
-        Write-Host "  Von requires MongoDB for data persistence" -ForegroundColor Gray
-        Write-Host "  MongoDB may start automatically when Von runs" -ForegroundColor Gray
-        Write-Host "  Or use mock database: set VON_USE_MOCK_DB=1 in .env" -ForegroundColor Gray
-        Write-Host "  (Setup will continue - MongoDB check is informational only)" -ForegroundColor Gray
-    }
-    
-    Write-Host ""
 }
 
 # Function to check and install MongoDB (Windows)
