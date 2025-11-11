@@ -364,6 +364,63 @@ function Ensure-UvAndArxiv {
     }
 }
 
+# Function to check and create .env file from template
+function Ensure-EnvFile {
+    Write-Host ""
+    Write-Host "=== Database Configuration ===" -ForegroundColor Cyan
+    
+    if (-not (Test-Path ".env")) {
+        Write-Host "No .env file found. Creating from template..." -ForegroundColor Yellow
+        
+        if (Test-Path ".env.template") {
+            Copy-Item ".env.template" ".env"
+            Write-Host "✓ Created .env from .env.template" -ForegroundColor Green
+            Write-Host "  You can edit .env to customize database and API settings" -ForegroundColor Gray
+        } elseif (Test-Path ".env.example") {
+            Copy-Item ".env.example" ".env"
+            Write-Host "✓ Created .env from .env.example" -ForegroundColor Green
+            Write-Host "  You can edit .env to customize database and API settings" -ForegroundColor Gray
+        } else {
+            Write-Host "✗ No .env template found. Creating minimal .env..." -ForegroundColor Yellow
+            @"
+MONGO_URI=mongodb://localhost:27017/
+VON_DB_NAME=von_db
+MONGO_LOCAL_URI=mongodb://127.0.0.1:27017/?directConnection=true
+MONGO_ALLOW_LOCAL_FALLBACK=1
+OLLAMA_HOSTS_LIST=127.0.0.1
+"@ | Out-File -FilePath ".env" -Encoding UTF8
+            Write-Host "✓ Created minimal .env file" -ForegroundColor Green
+        }
+    } else {
+        Write-Host ".env file already exists. Skipping creation." -ForegroundColor Green
+    }
+    
+    # Check if MongoDB is accessible (optional check, doesn't fail setup)
+    Write-Host ""
+    Write-Host "=== Checking MongoDB ===" -ForegroundColor Cyan
+    $mongoRunning = $false
+    try {
+        # Check if mongod is running (Windows)
+        $mongoProcess = Get-Process -Name "mongod" -ErrorAction SilentlyContinue
+        if ($mongoProcess) {
+            Write-Host "✓ MongoDB is running (PID=$($mongoProcess.Id))" -ForegroundColor Green
+            $mongoRunning = $true
+        }
+    } catch {
+        # Ignore errors
+    }
+    
+    if (-not $mongoRunning) {
+        Write-Host "⚠ MongoDB process not detected" -ForegroundColor Yellow
+        Write-Host "  Von requires MongoDB for data persistence" -ForegroundColor Gray
+        Write-Host "  MongoDB may start automatically when Von runs" -ForegroundColor Gray
+        Write-Host "  Or use mock database: set VON_USE_MOCK_DB=1 in .env" -ForegroundColor Gray
+        Write-Host "  (Setup will continue - MongoDB check is informational only)" -ForegroundColor Gray
+    }
+    
+    Write-Host ""
+}
+
 # Function to check and install MongoDB (Windows)
 function Ensure-MongoDB {
     Write-Host "Checking for MongoDB installation..." -ForegroundColor Cyan
@@ -520,6 +577,9 @@ if ($Reset) {
 
 # Ensure MongoDB is installed before proceeding
 Ensure-MongoDB
+
+# Ensure .env file exists (create from template if missing)
+Ensure-EnvFile
 
 # Ensure uv and arxiv-mcp-server are installed for MCP integrations
 Ensure-UvAndArxiv
