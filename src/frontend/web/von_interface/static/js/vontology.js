@@ -3807,6 +3807,29 @@ export function initializeVontologyTab() {
     });
   }
 
+  // CRITICAL FIX: Wire up create concept buttons
+  if (elements.createTypeButton) {
+    elements.createTypeButton.addEventListener('click', async () => {
+      await handleCreateType();
+    });
+    console.log('[initializeVontologyTab] Create Type button wired up');
+  }
+
+  if (elements.createInstanceButton) {
+    elements.createInstanceButton.addEventListener('click', async () => {
+      await handleCreateInstance();
+    });
+    console.log('[initializeVontologyTab] Create Instance button wired up');
+  }
+
+  // Also wire up refresh tree button while we're at it
+  if (elements.refreshTreeButton) {
+    elements.refreshTreeButton.addEventListener('click', () => {
+      handleRefreshTree();
+    });
+    console.log('[initializeVontologyTab] Refresh Tree button wired up');
+  }
+
   if (elements.vontologyTreeContainer) {
     console.log("Calling fetchAndRenderVontologyTree...");
     fetchAndRenderVontologyTree();
