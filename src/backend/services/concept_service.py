@@ -201,16 +201,14 @@ def create_concept(
 
     now = datetime.now(timezone.utc)
 
-    # Persist display name canonically in names[]; avoid writing legacy top-level name
+    # Persist display name using text_relations (modern approach) instead of legacy names[] field
     # Determine relationship shape based on creation kind
     parent_ids = parent_concept_ids or []
     is_instance_of = parent_ids if create_as_instance else []
     is_a_type_of = [] if create_as_instance else parent_ids
 
     concept_doc: Dict[str, Any] = {
-        "names": (
-            [{"name": name.strip(), "language": "en-NZ", "type": "NL"}] if isinstance(name, str) and name.strip() else []
-        ),
+        # DO NOT include "names" field - will be created as text_relations below
         "created_at": now,
         "updated_at": now,
         "attributes": attributes or {},
@@ -238,8 +236,25 @@ def create_concept(
         # Fetch the document to ensure all defaults/triggers (if any) are included
         created_concept = concepts_coll.find_one({"_id": result.inserted_id})
 
+        # CRITICAL: Create name as text_relation immediately (modern approach)
+        # This prevents migrate-on-read from triggering and creating duplicates
+        concept_identifier = concept_doc.get("concept_id")
+        if concept_identifier and name and name.strip():
+            try:
+                from .text_value_service import upsert_text_for_concept
+                upsert_text_for_concept(
+                    subject_concept_id=concept_identifier,
+                    predicate='hasName',
+                    text=name.strip(),
+                    lang='en-NZ',
+                    context={'name_type': 'NL'}
+                )
+                logger.info(f"[create_concept] Created hasName text_relation for {concept_identifier}: {name}")
+            except Exception as name_err:
+                # Non-fatal: concept is created, just name relation failed
+                logger.warning(f"[create_concept] Failed to create hasName relation for {concept_identifier}: {name_err}")
+
         try:
-            concept_identifier = concept_doc.get("concept_id")
             if concept_identifier:
                 ConceptsRepository.reconcile_relationships(
                     concept_identifier,
