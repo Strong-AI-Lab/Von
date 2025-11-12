@@ -253,6 +253,50 @@ def get_tree():
     return jsonify({**tree_data, '_cache': {'hit': False, 'build_sec': build_secs, 'alloc_kb': alloc_kb, 'ttl_sec': _TREE_CACHE_TTL_SECONDS, 'hits': 0}})
 
 
+@vontology_bp.route('/ensure_thing', methods=['POST'])
+def ensure_thing_route():
+    """Endpoint to ensure Thing root concept exists and link any orphan concepts.
+    
+    This is called automatically by the frontend when it detects an empty or incomplete ontology.
+    It will:
+    1. Create Thing if it doesn't exist
+    2. Link any orphan concepts (types without parents) to Thing
+    
+    Returns:
+        JSON with thing_created, thing_concept_id, orphans_linked, orphan_ids
+    """
+    current_app.logger.info("Received request for /api/vontology/ensure_thing")
+    
+    try:
+        from ...vontology.utils_vontology import ensure_thing_exists_and_link_orphans
+        
+        result = ensure_thing_exists_and_link_orphans()
+        
+        if "error" in result:
+            current_app.logger.error(f"Error ensuring Thing exists: {result['error']}")
+            return jsonify({"success": False, "message": result['error']}), 500
+        
+        # Invalidate tree cache since we modified the ontology structure
+        with _TREE_CACHE_LOCK:
+            _TREE_CACHE.clear()
+        
+        current_app.logger.info(
+            f"Thing ensured: created={result['thing_created']}, orphans_linked={result['orphans_linked']}"
+        )
+        
+        return jsonify({
+            "success": True,
+            "thing_created": result['thing_created'],
+            "thing_concept_id": result['thing_concept_id'],
+            "orphans_linked": result['orphans_linked'],
+            "orphan_ids": result['orphan_ids']
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Unexpected error in ensure_thing: {e}", exc_info=True)
+        return jsonify({"success": False, "message": f"Internal error: {str(e)}"}), 500
+
+
 def _build_tree_job(job_id: str) -> None:
     """Background worker that constructs the Vontology tree whilst tracking progress."""
     try:
@@ -580,7 +624,7 @@ def create_concept_route():
         current_app.logger.warning("Received non-JSON or empty payload for /create_concept.")
         return jsonify({"success": False, "message": "Request body must be JSON."}), 400
 
-    parent_id = data.get("parent_id")
+    parent_id = data.get("parent_id")  # Optional: None for root concept creation
     new_concept_name = data.get("new_concept_name")
     # ONTOLOGICAL FLAG: create_as_instance determines type vs individual creation
     # - False (default): Creates a TYPE (has is_a_type_of relationships, can be subtype AND instance)
@@ -590,9 +634,14 @@ def create_concept_route():
 
     current_app.logger.info(f"Request details - Parent ID: {parent_id}, New Concept: {new_concept_name}, Create as instance: {create_as_instance}")
 
-    if not parent_id or not new_concept_name:
-        current_app.logger.warning("Missing 'parent_id' or 'new_concept_name' in /create_concept request.")
-        return jsonify({"success": False, "message": "Missing 'parent_id' or 'new_concept_name'."}), 400
+    # CHICKEN-AND-EGG FIX: Allow root concept creation without parent_id
+    if not new_concept_name:
+        current_app.logger.warning("Missing 'new_concept_name' in /create_concept request.")
+        return jsonify({"success": False, "message": "Missing 'new_concept_name'."}), 400
+    
+    # parent_id is optional - if omitted, creates a root concept
+    if not parent_id:
+        current_app.logger.info("No parent_id provided - creating root concept")
 
     try:
         # Create concept without user attribution for privacy

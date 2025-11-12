@@ -3069,6 +3069,122 @@ def create_vontology_concept(
         }
 
 
+def ensure_thing_exists_and_link_orphans() -> Dict[str, Any]:
+    """
+    Ensures that the Thing root concept exists in the database.
+    If it doesn't exist, creates it.
+    If it exists but there are orphan concepts (types with no parent), links them to Thing.
+    
+    Returns:
+        Dict with keys:
+        - thing_created: bool indicating if Thing was newly created
+        - thing_concept_id: str with Thing's concept_id
+        - orphans_linked: int count of orphan concepts linked to Thing
+        - orphan_ids: list of concept_ids that were linked
+    """
+    from ..services.concept_service import create_concept
+    from ..db.repositories.concepts_repository import ConceptsRepository
+    
+    logger.info("[ensure_thing_exists] Checking for Thing root concept")
+    
+    # Check if Thing already exists
+    thing_concept = ConceptsRepository.find_one({"concept_id": THING_PRIMARY_ID})
+    thing_created = False
+    
+    if not thing_concept:
+        # Create Thing as root concept with rich metadata following OWL conventions
+        logger.info("[ensure_thing_exists] Thing not found, creating root concept")
+        try:
+            thing_concept = create_concept(
+                name="Thing",
+                concept_id=THING_PRIMARY_ID,
+                parent_concept_ids=[],  # No parent - it's the root
+                create_as_instance=False,  # It's a type
+                description="Thing is the root concept in an ontology, encompassing all entities, whether physical or abstract, real or conceptual. It serves as the broadest possible category, providing a common ancestor for every concept in the ontology.",
+                notes="This is the universal root following OWL (Web Ontology Language) conventions. All concepts without explicit parent relationships are children of Thing. This prevents orphaned concepts in the hierarchy.",
+                attributes={
+                    "domain": "Ontology",
+                    "role": "root",
+                    "standard": "OWL"
+                },
+                system_tags=["root", "ontology", "foundational", "owl"],
+                user_tags=[]
+            )
+            thing_created = True
+            logger.info(f"[ensure_thing_exists] Created Thing with rich metadata: {thing_concept.get('concept_id')}")
+        except Exception as e:
+            logger.error(f"[ensure_thing_exists] Failed to create Thing: {e}")
+            return {
+                "thing_created": False,
+                "thing_concept_id": None,
+                "orphans_linked": 0,
+                "orphan_ids": [],
+                "error": str(e)
+            }
+    else:
+        logger.info("[ensure_thing_exists] Thing already exists")
+    
+    # Find orphan concepts (types with empty or missing is_a_type_of)
+    orphan_concepts = list(ConceptsRepository.find({
+        "$and": [
+            # Has no instance-of (it's not an instance)
+            {"$or": [
+                {"relationships.is_an_instance_of": {"$exists": False}},
+                {"relationships.is_an_instance_of": []},
+                {"relationships.is_an_instance_of": ""}
+            ]},
+            # Has empty or missing is_a_type_of (it's an orphan type)
+            {"$or": [
+                {"relationships.is_a_type_of": {"$exists": False}},
+                {"relationships.is_a_type_of": []},
+                {"relationships.is_a_type_of": ""}
+            ]},
+            # Not Thing itself
+            {"concept_id": {"$ne": THING_PRIMARY_ID}}
+        ]
+    }))
+    
+    orphans_linked = 0
+    orphan_ids = []
+    
+    if orphan_concepts:
+        logger.info(f"[ensure_thing_exists] Found {len(orphan_concepts)} orphan concepts, linking to Thing")
+        
+        for orphan in orphan_concepts:
+            try:
+                orphan_id = orphan.get("concept_id")
+                if not orphan_id:
+                    continue
+                
+                # Update orphan to have Thing as parent
+                ConceptsRepository.update_one(
+                    {"concept_id": orphan_id},
+                    {"$set": {"relationships.is_a_type_of": [THING_PRIMARY_ID]}}
+                )
+                
+                # Update Thing to have this orphan as child (reciprocal relationship)
+                ConceptsRepository.update_one(
+                    {"concept_id": THING_PRIMARY_ID},
+                    {"$addToSet": {"relationships.has_subtype": orphan_id}}
+                )
+                
+                orphans_linked += 1
+                orphan_ids.append(orphan_id)
+                logger.info(f"[ensure_thing_exists] Linked orphan {orphan_id} to Thing")
+                
+            except Exception as e:
+                logger.warning(f"[ensure_thing_exists] Failed to link orphan {orphan_id}: {e}")
+    
+    logger.info(f"[ensure_thing_exists] Complete - created={thing_created}, orphans_linked={orphans_linked}")
+    
+    return {
+        "thing_created": thing_created,
+        "thing_concept_id": THING_PRIMARY_ID,
+        "orphans_linked": orphans_linked,
+        "orphan_ids": orphan_ids
+    }
+
+
 # Note: add_upward_closure_nodes defined later (duplicate removed - keeping complete implementation at line 2949)
 def _invalidate_vontology_caches_duplicate_removed(affected_concepts: list, correlation_id: str) -> None:
     """
