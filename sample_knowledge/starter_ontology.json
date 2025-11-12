@@ -1,0 +1,189 @@
+{
+  "metadata": {
+    "version": "1.1",
+    "description": "Von Starter Ontology - Foundational AI concepts with ontology root",
+    "created": "2025-11-11",
+    "updated": "2025-11-12",
+    "author": "Von Team",
+    "concepts_count": 6,
+    "schema_note": "Uses Von actual schema with valid fields only: concept_id, names[], attributes, system_tags, user_tags, relationships{is_a_type_of, has_subtype, linked_to}, preserved_fields{description, notes}"
+  },
+  "concepts": [
+    {
+      "concept_id": "#V#thing",
+      "names": [
+        {
+          "name": "Thing",
+          "language": "en-NZ",
+          "type": "NL"
+        }
+      ],
+      "attributes": {
+        "domain": "Ontology",
+        "role": "root",
+        "standard": "OWL"
+      },
+      "system_tags": ["root", "ontology", "foundational", "owl"],
+      "user_tags": [],
+      "relationships": {
+        "is_a_type_of": [],
+        "has_subtype": ["#V#artificial_intelligence"],
+        "linked_to": []
+      },
+      "preserved_fields": {
+        "description": "Thing is the root concept in an ontology, encompassing all entities, whether physical or abstract, real or conceptual. It serves as the broadest possible category, providing a common ancestor for every concept in the ontology.",
+        "notes": "This is the universal root following OWL (Web Ontology Language) conventions. All concepts without explicit parent relationships are children of Thing. This prevents orphaned concepts in the hierarchy."
+      }
+    },
+    {
+      "concept_id": "#V#artificial_intelligence",
+      "names": [
+        {
+          "name": "Artificial Intelligence",
+          "language": "en-NZ",
+          "type": "NL"
+        },
+        {
+          "name": "AI",
+          "language": "en-NZ",
+          "type": "NL"
+        }
+      ],
+      "attributes": {
+        "domain": "Computer Science",
+        "established_year": "1956"
+      },
+      "system_tags": ["AI", "field", "computer_science", "ai_domain_root"],
+      "user_tags": [],
+      "relationships": {
+        "is_a_type_of": ["#V#thing"],
+        "has_subtype": ["#V#machine_learning", "#V#natural_language_processing"],
+        "linked_to": []
+      },
+      "preserved_fields": {
+        "description": "The simulation of human intelligence processes by machines, especially computer systems. Founded as an academic discipline in 1956, AI research encompasses machine learning, reasoning, knowledge representation, natural language processing, and perception.",
+        "notes": "Root concept for AI domain in this starter ontology. Child of Thing (the universal ontology root)."
+      }
+    },
+    {
+      "concept_id": "#V#machine_learning",
+      "names": [
+        {
+          "name": "Machine Learning",
+          "language": "en-NZ",
+          "type": "NL"
+        },
+        {
+          "name": "ML",
+          "language": "en-NZ",
+          "type": "NL"
+        }
+      ],
+      "attributes": {
+        "domain": "Artificial Intelligence",
+        "paradigms": "supervised, unsupervised, reinforcement"
+      },
+      "system_tags": ["ML", "field", "learning_algorithms", "data_driven"],
+      "user_tags": [],
+      "relationships": {
+        "is_a_type_of": ["#V#artificial_intelligence"],
+        "has_subtype": ["#V#deep_learning"],
+        "linked_to": []
+      },
+      "preserved_fields": {
+        "description": "A subset of AI focused on algorithms that improve automatically through experience and data. ML systems learn patterns from data without being explicitly programmed for specific tasks.",
+        "notes": "Includes supervised learning (labeled data), unsupervised learning (pattern discovery), and reinforcement learning (reward-based learning)."
+      }
+    },
+    {
+      "concept_id": "#V#natural_language_processing",
+      "names": [
+        {
+          "name": "Natural Language Processing",
+          "language": "en-NZ",
+          "type": "NL"
+        },
+        {
+          "name": "NLP",
+          "language": "en-NZ",
+          "type": "NL"
+        }
+      ],
+      "attributes": {
+        "domain": "Artificial Intelligence"
+      },
+      "system_tags": ["NLP", "field", "language", "linguistics"],
+      "user_tags": [],
+      "relationships": {
+        "is_a_type_of": ["#V#artificial_intelligence"],
+        "has_subtype": [],
+        "linked_to": ["#V#machine_learning", "#V#large_language_model"]
+      },
+      "preserved_fields": {
+        "description": "Field concerned with interactions between computers and human language. Encompasses understanding, interpreting, and generating human language in valuable ways.",
+        "notes": "Key applications: machine translation, sentiment analysis, text summarization, question answering, and named entity recognition."
+      }
+    },
+    {
+      "concept_id": "#V#deep_learning",
+      "names": [
+        {
+          "name": "Deep Learning",
+          "language": "en-NZ",
+          "type": "NL"
+        },
+        {
+          "name": "DL",
+          "language": "en-NZ",
+          "type": "NL"
+        }
+      ],
+      "attributes": {
+        "domain": "Machine Learning",
+        "key_architecture": "multilayer neural networks"
+      },
+      "system_tags": ["deep_learning", "neural_networks", "technique", "representation_learning"],
+      "user_tags": [],
+      "relationships": {
+        "is_a_type_of": ["#V#machine_learning"],
+        "has_subtype": [],
+        "linked_to": []
+      },
+      "preserved_fields": {
+        "description": "Machine learning using neural networks with multiple layers (deep architectures). Capable of learning hierarchical representations of data through successive layers of abstraction.",
+        "notes": "Powers modern breakthroughs in computer vision, speech recognition, and language understanding. Requires large datasets and computational resources."
+      }
+    },
+    {
+      "concept_id": "#V#large_language_model",
+      "names": [
+        {
+          "name": "Large Language Model",
+          "language": "en-NZ",
+          "type": "NL"
+        },
+        {
+          "name": "LLM",
+          "language": "en-NZ",
+          "type": "NL"
+        }
+      ],
+      "attributes": {
+        "domain": "Natural Language Processing",
+        "examples": "GPT, BERT, Claude, LLaMA",
+        "architecture": "transformer"
+      },
+      "system_tags": ["LLM", "language_model", "transformer", "foundation_model"],
+      "user_tags": [],
+      "relationships": {
+        "is_a_type_of": [],
+        "has_subtype": [],
+        "linked_to": ["#V#natural_language_processing", "#V#deep_learning"]
+      },
+      "preserved_fields": {
+        "description": "Neural networks trained on vast amounts of text data for language understanding and generation. Based on transformer architecture, capable of various NLP tasks with minimal task-specific fine-tuning.",
+        "notes": "Represents major advancement in AI. Enables sophisticated language interaction, translation, summarization, code generation, and reasoning. Von can integrate with LLMs for enhanced functionality."
+      }
+    }
+  ]
+}

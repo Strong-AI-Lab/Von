@@ -8,6 +8,7 @@
 !jest.config.js
 !scripts/*.json
 !docs/schemas/*.json
+!sample_knowledge/*.json
 
 # Python cache and virtual environments
 __pycache__/
