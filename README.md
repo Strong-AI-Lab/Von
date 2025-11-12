@@ -66,7 +66,7 @@ MongoDB will be automatically installed during the setup process (via `setup_py.
 
 **Configuration:**
 
-1. **Copy the template:** `cp .env.template .env` (or `.env.example` to `.env`)
+1. **Copy the template:** `cp .env.template .env` (or `.env.template` to `.env`)
 
 2. **Choose your database option** by editing `.env`:
 
