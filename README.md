@@ -90,9 +90,45 @@ you should see `[Von Database] Connecting to LOCAL MongoDB at localhost:27017` o
 
 By default, you start with an empty knowledge base. You can:
 - Create concepts manually through the Von interface
-- Import scholarly articles via arXiv integration
-- Load sample ontology: `python src/utilities/init_database.py --load-starter`
-- Build your custom ontology from scratch
+- Load sample ontology
+- Build your custom ontology from scratch and import it
+
+You have two options for initializing your knowledge base (note: SAIL members with access to remote SAIL database do not need to do this):
+
+**Option 1: Manual Creation** (Empty Start)
+- Start Von and create concepts through the user interface
+- Build your ontology from scratch with full control
+- Ideal for: Custom domains, specific research needs
+
+**Option 2: Load Sample Base Knowledge** (Quick Start)
+A sample base ontological knowledge with a few concepts and their definition is provided in `./sample_knowledge` folder.
+
+To load the sample knowledge base:
+
+```powershell
+# Ensure you're in the Von root directory
+# 1. Activate Python environment (if not already active)
+.\.venv\Scripts\Activate.ps1   # Windows PowerShell
+# or: source .venv/bin/activate  # Mac/Linux
+
+# 2. Make sure that your local database does not already have corrupted 'von_db' (drop 'von_db' if it exists)
+
+# 3. Run the initialization script
+python src/utilities/init_database.py --full-setup
+```
+
+**What this does:**
+- Creates database collections and indexes
+- Loads sample interconnected AI concepts with relationships
+- Sets up proper ontology hierarchy
+- Provides working examples for exploration
+
+**After loading**, start Von normally:
+```powershell
+./run.ps1
+```
+
+Visit `http://localhost:5000` and explore the pre-loaded concepts in the interface. You can extend this base ontology by adding your own concepts and relationships.
 
 ### 4. **LLM Provider Setup**
 
