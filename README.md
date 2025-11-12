@@ -57,8 +57,78 @@ If directly running `./setup_all.ps1` does not work, then run each setup script 
 ./setup_js.ps1
 ```
 
-### 3. **Fetching Knowledge (base ontology) (⚠️)**
-By default, users are not connected to any remote database for knowledge, and you will initial have empty knowledge.
+### 3. **Database Setup**
+
+Von uses MongoDB to store your knowledge base (concepts, entities, relationships).
+
+**MongoDB Installation:**
+MongoDB will be automatically installed during the setup process (via `setup_py.ps1`). If automatic installation fails or you prefer manual installation, download MongoDB Community Edition from https://www.mongodb.com/try/download/community
+
+**Configuration:**
+
+1. **Copy the template:** `cp .env.template .env` (or `.env.example` to `.env`)
+
+2. **Choose your database option** by editing `.env`:
+
+   - **Local MongoDB** (Default):
+     ```bash
+     MONGO_URI=mongodb://localhost:27017/
+     VON_DB_NAME=von_db
+     ```
+     Make sure that MongoDB is running on your local machine.
+
+   - **MongoDB Atlas** (Cloud - Optional for team collaboration):
+     ```bash
+     MONGO_URI=mongodb+srv://YOUR_USERNAME:YOUR_PASSWORD@YOUR_CLUSTER.mongodb.net/
+     VON_DB_NAME=von_db
+     MONGO_PROJECT=Your Project Name
+     ```
+
+you should see `[Von Database] Connecting to LOCAL MongoDB at localhost:27017` or connection to your Atlas cluster in log file under `./logs` folder once running the system.
+
+**Starting with Knowledge:**
+
+By default, you start with an empty knowledge base. You can:
+- Create concepts manually through the Von interface
+- Load sample ontology
+- Build your custom ontology from scratch and import it
+
+You have two options for initializing your knowledge base (note: SAIL members with access to remote SAIL database do not need to do this):
+
+**Option 1: Manual Creation** (Empty Start)
+- Start Von and create concepts through the user interface
+- Build your ontology from scratch with full control
+- Ideal for: Custom domains, specific research needs
+
+**Option 2: Load Sample Base Knowledge** (Quick Start)
+A sample base ontological knowledge with a few concepts and their definition is provided in `./sample_knowledge` folder.
+
+To load the sample knowledge base:
+
+```powershell
+# Ensure you're in the Von root directory
+# 1. Activate Python environment (if not already active)
+.\.venv\Scripts\Activate.ps1   # Windows PowerShell
+# or: source .venv/bin/activate  # Mac/Linux
+
+# 2. Make sure that your local database does not already have corrupted 'von_db' (drop 'von_db' if it exists)
+
+# 3. Run the initialization script
+python src/utilities/init_database.py --full-setup
+```
+
+**What this does:**
+- Creates database collections and indexes
+- Loads sample interconnected AI concepts with relationships
+- Sets up proper ontology hierarchy
+- Provides working examples for exploration
+
+**After loading**, start Von normally:
+```powershell
+./run.ps1
+```
+
+Visit `http://localhost:5000` and explore the pre-loaded concepts in the interface. You can extend this base ontology by adding your own concepts and relationships.
 
 ### 4. **LLM Provider Setup**
 
@@ -70,12 +140,12 @@ By default, users are not connected to any remote database for knowledge, and yo
 
 **OpenAI:**
 1. Get your own API key from https://platform.openai.com/api-keys
-2. Set `OPENAI_API_KEY` in `.env`- create `.env` if not already present
+2. Set `OPENAI_API_KEY` in `.env`
 3. Select OpenAI model in Von's Settings panel
 
 **Google Gemini:**
 1. Get your own API key from https://ai.google.dev
-2. Set `GOOGLE_API_KEY` in `.env` - create `.env` if not already present
+2. Set `GOOGLE_API_KEY` in `.env`
 3. Select Gemini model in Von's Settings panel
 
 
