@@ -948,8 +948,75 @@ export async function fetchAndRenderVontologyTree() {
     if (treeData.error) {
       console.error("[fetchAndRenderVontologyTree] Error from server:", treeData.error);
       elements.vontologyTreeContainer.innerHTML = `<p>Error loading Vontology tree: ${treeData.error}</p>`;
-    } else if (treeData.tree) {
+    } else if (treeData.tree !== undefined && treeData.tree !== null) {
       debugLog("[fetchAndRenderVontologyTree] treeData.tree structure:", JSON.stringify(treeData.tree, null, 2));
+      
+      // CHICKEN-AND-EGG FIX: Check if tree is empty array (database is empty)
+      if (Array.isArray(treeData.tree) && treeData.tree.length === 0) {
+        console.log("[fetchAndRenderVontologyTree] Tree is empty - auto-creating Thing root concept");
+        
+        // Show loading message
+        elements.vontologyTreeContainer.innerHTML = `
+          <div style="padding: 20px; text-align: center; color: #666;">
+            <p style="font-size: 1.2em; margin-bottom: 10px;">🌱 <strong>Empty Vontology</strong></p>
+            <p>Automatically creating "Thing" root concept...</p>
+            <div style="margin-top: 15px;">
+              <div style="display: inline-block; width: 200px; height: 4px; background: #eee; border-radius: 2px; overflow: hidden;">
+                <div style="width: 100%; height: 100%; background: linear-gradient(90deg, #2b8cff, #68d1ff); animation: slide 1.5s infinite;"></div>
+              </div>
+            </div>
+          </div>
+        `;
+        
+        // Auto-create Thing
+        try {
+          const response = await fetch('/vontology/api/vontology/ensure_thing', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+          });
+          
+          const result = await response.json();
+          
+          if (result.success) {
+            console.log(`[fetchAndRenderVontologyTree] Thing auto-created: created=${result.thing_created}, orphans_linked=${result.orphans_linked}`);
+            
+            // Show success message briefly
+            elements.vontologyTreeContainer.innerHTML = `
+              <div style="padding: 20px; text-align: center; color: #2b8cff;">
+                <p style="font-size: 1.2em; margin-bottom: 10px;">✅ <strong>Thing Created!</strong></p>
+                <p>Root concept established. Refreshing tree...</p>
+              </div>
+            `;
+            
+            // Refresh the tree after a brief delay
+            setTimeout(() => {
+              console.log("[fetchAndRenderVontologyTree] Refreshing tree after Thing creation");
+              handleRefreshTree();
+            }, 800);
+            
+            hideProgressBar();
+            return;
+          } else {
+            throw new Error(result.message || 'Failed to create Thing');
+          }
+        } catch (error) {
+          console.error("[fetchAndRenderVontologyTree] Failed to auto-create Thing:", error);
+          
+          // Show error with manual fallback
+          elements.vontologyTreeContainer.innerHTML = `
+            <div style="padding: 20px; text-align: center; color: #666;">
+              <p style="font-size: 1.2em; margin-bottom: 10px; color: #ff4444;">⚠️ <strong>Auto-creation Failed</strong></p>
+              <p style="color: #ff4444; margin-bottom: 15px;">${error.message}</p>
+              <p>You can create the root concept manually below.</p>
+            </div>
+          `;
+          
+          // Enable manual creation mode as fallback
+          handleNodeSelect(null, null, null, false, { mutateConceptTab: false });
+          hideProgressBar();
+          return;
+        }
+      }
       clearContainer(elements.vontologyTreeContainer);
       progressMgr.updateProgress(0.1, `${__vontologyEstimatedTotal ? '0/' + __vontologyEstimatedTotal : ''}`);
       __vontologyRenderCount = 0;
@@ -1008,6 +1075,75 @@ export async function fetchAndRenderVontologyTree() {
           }
         }
       } else if (typeof processedTree === 'object' && processedTree !== null) {
+        // CHICKEN-AND-EGG FIX: Check for auto-injected Thing placeholder before rendering
+        // The backend auto-injects a Thing node even when DB is empty (mongo_id will be "")
+        const isPlaceholderTree = processedTree.id === '#V#thing' && 
+                                 processedTree.mongo_id === '' &&
+                                 (!processedTree.children || processedTree.children.length === 0);
+        
+        if (isPlaceholderTree) {
+          console.log("[fetchAndRenderVontologyTree] Detected auto-injected Thing placeholder - auto-creating real Thing");
+          
+          // Show loading message
+          elements.vontologyTreeContainer.innerHTML = `
+            <div style="padding: 20px; text-align: center; color: #666;">
+              <p style="font-size: 1.2em; margin-bottom: 10px;">🌱 <strong>Empty Vontology</strong></p>
+              <p>Creating "Thing" root concept...</p>
+              <div style="margin-top: 15px;">
+                <div style="display: inline-block; width: 200px; height: 4px; background: #eee; border-radius: 2px; overflow: hidden;">
+                  <div style="width: 100%; height: 100%; background: linear-gradient(90deg, #2b8cff, #68d1ff); animation: slide 1.5s infinite;"></div>
+                </div>
+              </div>
+            </div>
+          `;
+          
+          // Auto-create Thing
+          try {
+            const response = await fetch('/vontology/api/vontology/ensure_thing', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' }
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+              console.log(`[fetchAndRenderVontologyTree] Thing auto-created from placeholder: created=${result.thing_created}, orphans_linked=${result.orphans_linked}`);
+              
+              // Show success and refresh
+              elements.vontologyTreeContainer.innerHTML = `
+                <div style="padding: 20px; text-align: center; color: #2b8cff;">
+                  <p style="font-size: 1.2em; margin-bottom: 10px;">✅ <strong>Thing Created!</strong></p>
+                  <p>Refreshing tree...</p>
+                </div>
+              `;
+              
+              setTimeout(() => {
+                handleRefreshTree();
+              }, 800);
+              
+              hideProgressBar();
+              return;
+            } else {
+              throw new Error(result.message || 'Failed to create Thing');
+            }
+          } catch (error) {
+            console.error("[fetchAndRenderVontologyTree] Failed to auto-create Thing from placeholder:", error);
+            
+            // Show error with manual fallback
+            elements.vontologyTreeContainer.innerHTML = `
+              <div style="padding: 20px; text-align: center; color: #666;">
+                <p style="font-size: 1.2em; margin-bottom: 10px; color: #ff4444;">⚠️ <strong>Auto-creation Failed</strong></p>
+                <p style="color: #ff4444; margin-bottom: 15px;">${error.message}</p>
+                <p>Manual creation mode enabled below.</p>
+              </div>
+            `;
+            
+            handleNodeSelect(null, null, null, false, { mutateConceptTab: false });
+            hideProgressBar();
+            return;
+          }
+        }
+        
         // Build subtree counts cache once
         subtreeCountMap = buildSubtreeCountCache([processedTree], entityCounts);
         debugLog("[fetchAndRenderVontologyTree] processedTree is a single object, processing as the root.");
@@ -1060,7 +1196,21 @@ export async function fetchAndRenderVontologyTree() {
       }
 
     } else {
-      elements.vontologyTreeContainer.innerHTML = '<p>Vontology tree data is empty or invalid.</p>';
+      // CHICKEN-AND-EGG FIX: Empty database - show helpful message and enable root creation
+      console.log("[fetchAndRenderVontologyTree] Tree is empty - enabling root concept creation mode");
+      elements.vontologyTreeContainer.innerHTML = `
+        <div style="padding: 20px; text-align: center; color: #666;">
+          <p style="font-size: 1.2em; margin-bottom: 10px;">🌱 <strong>Empty Vontology</strong></p>
+          <p>No concepts exist yet. Create your first root concept below.</p>
+          <p style="font-size: 0.9em; margin-top: 10px; color: #888;">
+            Tip: Start with "Thing" as the root of your ontology.
+          </p>
+        </div>
+      `;
+      
+      // Enable empty-tree creation mode by triggering handleNodeSelect with null
+      // This will show the creation panel with appropriate messaging
+      handleNodeSelect(null, null, null, false, { mutateConceptTab: false });
     }
   } catch (error) {
     console.error("[fetchAndRenderVontologyTree] Error during Vontology tree fetch or render:", error);
@@ -2160,17 +2310,29 @@ export async function handleNodeSelect(nodeName, nodeId, mongoId, createConceptT
   console.log(`[handleNodeSelect] Node selected: Name='${nodeName}', ID='${nodeId}', MongoID='${mongoId}', createConceptTab='${createConceptTab}'`);
   const mutateConceptTab = options.mutateConceptTab !== false; // default true
 
+  // CHICKEN-AND-EGG FIX: Check if this is empty tree mode (all params null)
+  const isEmptyTreeMode = !nodeName && !nodeId && !mongoId;
+
   // Prefer the semantic concept_id (nodeId, e.g. '#V#person') for API calls
   // since backend endpoints expect concept identifiers; fall back to mongoId
   // only if the concept_id is missing.
   const identifier = nodeId || mongoId;
-  debugLog(`[handleNodeSelect] Using identifier for API calls: ${identifier} (nodeId=${nodeId}, mongoId=${mongoId})`);
+  debugLog(`[handleNodeSelect] Using identifier for API calls: ${identifier} (nodeId=${nodeId}, mongoId=${mongoId}, emptyTreeMode=${isEmptyTreeMode})`);
 
   // 1. Update UI for selected node path display
   if (elements.selectedNodePathSpan) {
-    // If an Individual tab is active, prefer singular; otherwise types may display plurals elsewhere.
-    // Here we keep the node label itself as provided (nodeName), and include the ID.
-    elements.selectedNodePathSpan.textContent = `Selected: ${nodeName} (${nodeId})`; // Initial update with concept ID
+    if (isEmptyTreeMode) {
+      // Empty tree mode - show special message
+      elements.selectedNodePathSpan.textContent = 'Empty ontology - create root concept below';
+      elements.selectedNodePathSpan.style.fontStyle = 'italic';
+      elements.selectedNodePathSpan.style.color = '#888';
+    } else {
+      // If an Individual tab is active, prefer singular; otherwise types may display plurals elsewhere.
+      // Here we keep the node label itself as provided (nodeName), and include the ID.
+      elements.selectedNodePathSpan.textContent = `Selected: ${nodeName} (${nodeId})`; // Initial update with concept ID
+      elements.selectedNodePathSpan.style.fontStyle = 'normal';
+      elements.selectedNodePathSpan.style.color = '';
+    }
     // Add/Update forced-visible badge
     const existingBadge = elements.selectedNodePathSpan.querySelector('.forced-visible-badge');
     // Determine if current node is visible only due to temporary reveal or forced filter state
@@ -2277,12 +2439,46 @@ export async function handleNodeSelect(nodeName, nodeId, mongoId, createConceptT
 
   // 6. Handle the "Create Concept" section visibility and state
   if (elements.createConceptDiv) {
-    if (nodeId) {
+    if (isEmptyTreeMode) {
+      // CHICKEN-AND-EGG FIX: Empty tree mode - show creation UI with special instructions
+      elements.createConceptDiv.classList.remove('hidden');
+      elements.createConceptDiv.style.removeProperty('display');
+      if (elements.createConceptStatusP) {
+        elements.createConceptStatusP.textContent = 'Create root concept (typically "Thing"):';
+        elements.createConceptStatusP.style.fontWeight = 'bold';
+        elements.createConceptStatusP.style.color = '#2b8cff';
+      }
+      // Enable creation UI
+      if (elements.newConceptNameInput) {
+        elements.newConceptNameInput.value = '';
+        elements.newConceptNameInput.disabled = false;
+        elements.newConceptNameInput.placeholder = 'e.g., Thing';
+      }
+      // Only show Create Type button in root mode (no parent)
+      if (elements.createTypeButton) {
+        elements.createTypeButton.disabled = false;
+        elements.createTypeButton.textContent = 'Create Root Concept';
+        elements.createTypeButton.style.display = '';
+      }
+      // Hide instance button in root mode (can't create instance without types)
+      if (elements.createInstanceButton) {
+        elements.createInstanceButton.style.display = 'none';
+      }
+    } else if (nodeId) {
       elements.createConceptDiv.classList.remove('hidden');
       // Clear any conflicting inline style from older logic
       elements.createConceptDiv.style.removeProperty('display');
       if (elements.createConceptStatusP) {
         elements.createConceptStatusP.textContent = `Create new concept under: ${nodeName}`;
+        elements.createConceptStatusP.style.fontWeight = 'normal';
+        elements.createConceptStatusP.style.color = '';
+      }
+      // Show both buttons in normal mode
+      if (elements.createTypeButton) {
+        elements.createTypeButton.style.display = '';
+      }
+      if (elements.createInstanceButton) {
+        elements.createInstanceButton.style.display = '';
       }
     } else {
       elements.createConceptDiv.classList.add('hidden');
@@ -2292,12 +2488,12 @@ export async function handleNodeSelect(nodeName, nodeId, mongoId, createConceptT
         elements.createConceptStatusP.textContent = '';
       }
     }
-    if (elements.newConceptNameInput) {
+    if (elements.newConceptNameInput && !isEmptyTreeMode) {
       elements.newConceptNameInput.value = '';
     }
 
-    // Disable create actions if no type is selected
-    const disabled = !nodeId;
+    // Disable create actions if no type is selected (unless empty tree mode)
+    const disabled = !nodeId && !isEmptyTreeMode;
     if (elements.createTypeButton) elements.createTypeButton.disabled = disabled;
     if (elements.createInstanceButton) elements.createInstanceButton.disabled = disabled;
     if (elements.newConceptNameInput) elements.newConceptNameInput.disabled = disabled;
@@ -3438,7 +3634,12 @@ export async function handleCreateType() {
     return;
   }
 
-  if (!parentId) {
+  // CHICKEN-AND-EGG FIX: Allow root creation when tree is empty (no parentId)
+  // Check if tree is truly empty by looking for any vontology-node-name elements
+  const hasExistingNodes = document.querySelector('.vontology-node-name[data-concept-id]') !== null;
+  const isRootCreation = !parentId && !hasExistingNodes;
+  
+  if (!parentId && !isRootCreation) {
     if (elements.createConceptStatusP) {
       elements.createConceptStatusP.textContent = "Please select a parent node first.";
       elements.createConceptStatusP.style.color = "red";
@@ -3450,20 +3651,37 @@ export async function handleCreateType() {
     if (elements.createTypeButton) elements.createTypeButton.disabled = true;
     if (elements.createInstanceButton) elements.createInstanceButton.disabled = true;
     if (elements.createConceptStatusP) {
-      elements.createConceptStatusP.textContent = "Creating type...";
+      elements.createConceptStatusP.textContent = isRootCreation ? "Creating root concept..." : "Creating type...";
       elements.createConceptStatusP.style.color = "black";
     }
 
-    const response = await postJson('/vontology/api/vontology/create_concept', {
+    // CHICKEN-AND-EGG FIX: For root creation, omit parent_id entirely
+    const requestPayload = {
       new_concept_name: newConceptName,
-      parent_id: parentId,
       create_as_instance: false
-    });
+    };
+    if (!isRootCreation && parentId) {
+      requestPayload.parent_id = parentId;
+    }
+
+    const response = await postJson('/vontology/api/vontology/create_concept', requestPayload);
 
     const createdConceptId = response?.concept_id || response?.concept?.concept_id;
     const createdConceptName = response?.concept?.name || newConceptName;
     const createdMongoId = response?.concept?.mongo_id;
-    if (createdConceptId) {
+    
+    if (isRootCreation) {
+      // For root creation, refresh the entire tree to show the new root
+      console.log('[handleCreateType] Root concept created, refreshing tree...');
+      await handleRefreshTree();
+      // Auto-select the newly created root
+      if (createdConceptId) {
+        setTimeout(() => {
+          selectVontologyNodeByIdentifier(createdConceptId, false);
+        }, 500);
+      }
+    } else if (createdConceptId) {
+      // Normal node insertion
       await insertNodeIntoVontologyTree(parentId, {
         id: createdConceptId,
         name: createdConceptName,
