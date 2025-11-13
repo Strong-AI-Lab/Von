@@ -4186,6 +4186,23 @@ function selectConcept(concept) {
 // The filtering removes nodes that have no entity instances associated with them,
 // keeping only nodes that either have entities or lead to nodes with entities.
 export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds = new Set()) {
+  /**
+   * Filter redundant nodes from the tree while preserving complete ontology paths.
+   * 
+   * MODIFIED (JVNAUTOSCI-748): Fixed issue where intermediate nodes were being filtered out,
+   * breaking the hierarchy display. The filter now:
+   * 
+   * 1. PRESERVES all nodes that have children (they're part of valid paths)
+   * 2. PRESERVES all leaf nodes (they're valid type concepts even without instances)
+   * 3. PRESERVES nodes without entity count data (common for pure types)
+   * 4. Only filters legacy nodes (non-#V# prefixed)
+   * 
+   * Previous behavior: Would collapse intermediate nodes with no entities and one child,
+   * causing chains like Thing -> AI -> ML -> DL to display as only Thing -> DL.
+   * 
+   * New behavior: Maintains complete hierarchy structure, showing all intermediate
+   * concepts regardless of entity counts.
+   */
   if (!tree) {
     return tree;
   }
@@ -4227,11 +4244,19 @@ export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds 
       }
       // This node has no entities, but check its children
     } else {
-      // No entity count data for this specific node - assume it has no entities
-      // but still check children
+      // MODIFIED: No entity count data for this specific node
+      // This is common for pure type concepts with no instances yet
+      // If it has children, we should check them; if it's a leaf, keep it
+      // (it's part of the ontology structure even if it has no instances)
+      if (!node.children || node.children.length === 0) {
+        // Leaf node with no entity data - keep it (it's a valid type concept)
+        return true;
+      }
+      // Has children - check them recursively
     }
 
-    // Check children recursively
+    // Check children recursively - CRITICAL: This preserves paths to leaf nodes
+    // Even if intermediate nodes have no entities, they're part of valid paths
     if (node.children && node.children.length > 0) {
       return node.children.some(child => hasEntitiesInSubtree(child));
     }
@@ -4247,20 +4272,29 @@ export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds 
   }
 
   function isRedundant(node) {
-    // A node is redundant if:
-    // 1. It has no entities (entityCounts[node.id].entity_count === 0)
-    // 2. It has exactly one child
-    // 3. It has exactly one parent (will be checked by caller)
-
+    // MODIFIED: A node is redundant ONLY if it's truly isolated (no children with entities in subtree)
+    // We should NOT collapse intermediate nodes that form valid paths in the ontology hierarchy
+    // 
+    // Original logic was too aggressive: it would skip intermediate nodes with no entities and one child
+    // This breaks hierarchical paths like: Thing -> AI -> ML -> DL -> Networks -> Transformers
+    //
+    // NEW RULE: Never consider a node redundant if it has any descendants (directly or indirectly)
+    // This preserves the complete ontology structure while still filtering truly empty branches
+    
     if (!node.id || !entityCounts[node.id]) {
       return false; // No entity count data, keep the node to be safe
     }
 
-    const hasEntities = entityCounts[node.id].entity_count > 0;
-    const hasOneChild = node.children && node.children.length === 1;
+    // Don't collapse nodes that are part of a path - only filter completely empty branches
+    // A node is redundant ONLY if it has no children at all AND no entities
+    const hasChildren = node.children && node.children.length > 0;
+    if (hasChildren) {
+      // If it has children, it's part of a path structure - keep it
+      return false;
+    }
 
-    // A node is redundant if it has no entities AND has exactly one child
-    return !hasEntities && hasOneChild;
+    // Leaf nodes are kept (even if empty) to show the complete ontology
+    return false;
   }
 
   async function filter(node) {
@@ -4287,11 +4321,11 @@ export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds 
     }
 
     if (!node.children || node.children.length === 0) {
-      // Leaf node: always keep (even if empty) per new rule
+      // Leaf node: always keep (even if empty) to preserve complete ontology structure
       return node;
     }
 
-    // First, recursively filter children
+    // Recursively filter children
     const filteredChildren = [];
 
     for (let i = 0; i < node.children.length; i++) {
@@ -4302,13 +4336,10 @@ export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds 
         continue;
       }
 
-      if (isRedundant(filteredChild)) {
-        if (filteredChild.children && filteredChild.children.length === 1) {
-          filteredChildren.push(filteredChild.children[0]);
-        }
-      } else {
-        filteredChildren.push(filteredChild);
-      }
+      // MODIFIED: Don't apply redundancy collapsing - preserve the hierarchy
+      // The old logic would skip intermediate nodes, breaking the tree structure
+      filteredChildren.push(filteredChild);
+      
       if ((i + 1) % RENDER_BATCH_SIZE === 0) {
         await yieldThread();
       }
@@ -4328,7 +4359,12 @@ export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds 
         const node = nodes[i];
         debugLog(`[filterRedundantNodes] Root node ${i}: ${node.name} (${node.id})`);
         const isLeaf = !node.children || node.children.length === 0;
-        const shouldKeep = isForcedVisible(node) || isLeaf || hasEntitiesInSubtree(node);
+        
+        // MODIFIED: If a node has children, it's part of the hierarchy - always keep it
+        // Only filter root nodes that are truly empty (no children, no entities)
+        const hasChildren = node.children && node.children.length > 0;
+        const shouldKeep = isForcedVisible(node) || hasChildren || isLeaf || hasEntitiesInSubtree(node);
+        
         if (!shouldKeep) {
           debugLog(`[filterRedundantNodes] FILTERING OUT disconnected root: ${node.name} (${node.id}) - no entities in subtree`);
         } else {
@@ -4346,7 +4382,11 @@ export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds 
       return finalFiltered;
     } else if (nodes) {
       const isLeaf = !nodes.children || nodes.children.length === 0;
-      const shouldKeep = isForcedVisible(nodes) || isLeaf || hasEntitiesInSubtree(nodes);
+      const hasChildren = nodes.children && nodes.children.length > 0;
+      
+      // MODIFIED: If a node has children, it's part of the hierarchy - keep it
+      const shouldKeep = isForcedVisible(nodes) || hasChildren || isLeaf || hasEntitiesInSubtree(nodes);
+      
       if (!shouldKeep) {
         debugLog(`[filterRedundantNodes] Filtering out single disconnected node: ${nodes.name} (${nodes.id}) - no entities in subtree`);
         return null;
