@@ -1974,10 +1974,10 @@ async function ensureUnifiedDescriptionSection(conceptId, suffix) {
                   <div id="typeDescriptionDisplay_${suffix}" class="concept-type-description editable-description" tabindex="0">${initialHtml}</div>
                   <textarea id="typeDescriptionTextarea_${suffix}" class="description-editor hidden" placeholder="Enter description..." rows="6"></textarea>
                   <div class="desc-actions text-block-actions">
-                    <button id="typeCopyDescription_${suffix}" class="round-icon-button" title="Copy description to clipboard" aria-label="Copy description to clipboard" data-icon="copy"></button>
-                    <button id="typeAnnotateDescription_${suffix}" class="round-icon-button" title="Annotate description" aria-label="Annotate description" data-icon="annotate"></button>
-                    <button id="typeEditDescriptionButton_${suffix}" class="round-icon-button" title="Edit description" aria-label="Edit description" data-icon="edit"></button>
-                    <button id="typeDeleteDescriptionButton_${suffix}" class="round-icon-button" title="Delete description" aria-label="Delete description" data-icon="delete"></button>
+                    <button id="typeCopyDescription_${suffix}" class="round-icon-button" title="Copy description to clipboard" aria-label="Copy description to clipboard" data-icon="copy" data-keep-title="true"></button>
+                    <button id="typeAnnotateDescription_${suffix}" class="round-icon-button" title="Annotate description" aria-label="Annotate description" data-icon="annotate" data-keep-title="true"></button>
+                    <button id="typeEditDescriptionButton_${suffix}" class="round-icon-button" title="Edit description" aria-label="Edit description" data-icon="edit" data-keep-title="true"></button>
+                    <button id="typeDeleteDescriptionButton_${suffix}" class="round-icon-button" title="Delete description" aria-label="Delete description" data-icon="delete" data-keep-title="true"></button>
                   </div>
                   <div id="typeDescriptionEditActions_${suffix}" class="description-edit-actions hidden">
                     <button id="typeEditDescriptionSave_${suffix}" class="small-btn">Save</button>
@@ -2006,10 +2006,10 @@ async function ensureUnifiedDescriptionSection(conceptId, suffix) {
                   <div id="typeDescriptionDisplay_${suffix}" class="concept-type-description editable-description" tabindex="0"><i>Loading description...</i></div>
                   <textarea id="typeDescriptionTextarea_${suffix}" class="description-editor hidden" placeholder="Enter description..." rows="6"></textarea>
                   <div class="desc-actions text-block-actions">
-                    <button id="typeCopyDescription_${suffix}" class="round-icon-button" title="Copy description to clipboard" aria-label="Copy description to clipboard" data-icon="copy"></button>
-                    <button id="typeAnnotateDescription_${suffix}" class="round-icon-button" title="Annotate description" aria-label="Annotate description" data-icon="annotate"></button>
-                    <button id="typeEditDescriptionButton_${suffix}" class="round-icon-button" title="Edit description" aria-label="Edit description" data-icon="edit"></button>
-                    <button id="typeDeleteDescriptionButton_${suffix}" class="round-icon-button" title="Delete description" aria-label="Delete description" data-icon="delete"></button>
+                    <button id="typeCopyDescription_${suffix}" class="round-icon-button" title="Copy description to clipboard" aria-label="Copy description to clipboard" data-icon="copy" data-keep-title="true"></button>
+                    <button id="typeAnnotateDescription_${suffix}" class="round-icon-button" title="Annotate description" aria-label="Annotate description" data-icon="annotate" data-keep-title="true"></button>
+                    <button id="typeEditDescriptionButton_${suffix}" class="round-icon-button" title="Edit description" aria-label="Edit description" data-icon="edit" data-keep-title="true"></button>
+                    <button id="typeDeleteDescriptionButton_${suffix}" class="round-icon-button" title="Delete description" aria-label="Delete description" data-icon="delete" data-keep-title="true"></button>
                   </div>
                   <div id="typeDescriptionEditActions_${suffix}" class="description-edit-actions hidden">
                     <button id="typeEditDescriptionSave_${suffix}" class="small-btn">Save</button>
@@ -2464,6 +2464,7 @@ export function attachRawDataButton(headerH2, conceptId, kind, containerEl) {
         };
         btn.title = baseTooltip();
         btn.setAttribute('aria-label', baseTooltip());
+        btn.setAttribute('data-keep-title', 'true');
         btn.textContent = '{ }'; // lightweight icon
 
         // Place it at the far right within the header
@@ -2527,6 +2528,7 @@ export function attachRawDataButton(headerH2, conceptId, kind, containerEl) {
             relBtn.textContent = '[ ]';
             relBtn.title = 'list relations';
             relBtn.setAttribute('aria-label', 'list relations');
+            relBtn.setAttribute('data-keep-title', 'true');
             relBtn.style.fontFamily = 'monospace';
             relBtn.style.fontSize = '0.9rem';
             relBtn.style.padding = '2px 6px';
@@ -2571,6 +2573,7 @@ function attachKeyConceptStarButton(headerH2, conceptId) {
         btn.type = 'button';
         btn.className = 'key-concept-star-button';
         btn.setAttribute('aria-label', 'Toggle key concept');
+        btn.setAttribute('data-keep-title', 'true');
         btn.style.display = 'inline-block';  // Ensure it's visible
 
         // Get current key concept state
@@ -3352,11 +3355,11 @@ async function populateNotesSection(conceptId, suffix) {
                       </div>
                    </div>
                    <div class="note-actions text-block-actions">
-                             <button type="button" class="round-icon-button note-copy-btn" title="Copy note to clipboard" aria-label="Copy note to clipboard" data-icon="copy"></button>
-                             <button type="button" class="round-icon-button note-expand-btn" title="Show more" aria-label="Show full note" data-icon="expand" ${truncated ? '' : 'style="display:none;"'}></button>
-                             <button type="button" class="round-icon-button note-annotate-btn" title="Annotate note" aria-label="Annotate note" data-icon="annotate"></button>
-                             <button type="button" class="round-icon-button note-edit-btn" title="Edit note" aria-label="Edit note" data-icon="edit"></button>
-                             <button type="button" class="round-icon-button note-delete-btn" title="Delete note" aria-label="Delete note" data-icon="delete"></button>
+                             <button type="button" class="round-icon-button note-copy-btn" title="Copy note to clipboard" aria-label="Copy note to clipboard" data-icon="copy" data-keep-title="true"></button>
+                             <button type="button" class="round-icon-button note-expand-btn" title="Show more" aria-label="Show full note" data-icon="expand" data-keep-title="true" ${truncated ? '' : 'style="display:none;"'}></button>
+                             <button type="button" class="round-icon-button note-annotate-btn" title="Annotate note" aria-label="Annotate note" data-icon="annotate" data-keep-title="true"></button>
+                             <button type="button" class="round-icon-button note-edit-btn" title="Edit note" aria-label="Edit note" data-icon="edit" data-keep-title="true"></button>
+                             <button type="button" class="round-icon-button note-delete-btn" title="Delete note" aria-label="Delete note" data-icon="delete" data-keep-title="true"></button>
                    </div>`;
                 listEl.appendChild(item);
                 wireNoteItem(item, n);
@@ -5113,6 +5116,7 @@ function attachAnalysisButtons(headerDiv, conceptId, kind) {
         flagBtn.className = 'analysis-flag-button';
         flagBtn.title = 'Toggle analysis flag';
         flagBtn.setAttribute('aria-label', 'Toggle analysis flag for later analysis');
+        flagBtn.setAttribute('data-keep-title', 'true');
         flagBtn.innerHTML = '🏴'; // Flag emoji
         flagBtn.style.padding = '2px 6px';
         flagBtn.style.border = '1px solid #d1d5db';
@@ -5127,6 +5131,7 @@ function attachAnalysisButtons(headerDiv, conceptId, kind) {
         orgBtn.className = 'org-relation-button';
         orgBtn.title = 'Toggle organization relation';
         orgBtn.setAttribute('aria-label', 'Toggle specific_to_organisation relationship');
+        orgBtn.setAttribute('data-keep-title', 'true');
         orgBtn.innerHTML = '🏢'; // Building emoji
         orgBtn.style.padding = '2px 6px';
         orgBtn.style.border = '1px solid #d1d5db';
@@ -5141,6 +5146,7 @@ function attachAnalysisButtons(headerDiv, conceptId, kind) {
         userBtn.className = 'user-relation-button';
         userBtn.title = 'Toggle user relation';
         userBtn.setAttribute('aria-label', 'Toggle specific_to_user relationship');
+        userBtn.setAttribute('data-keep-title', 'true');
         userBtn.innerHTML = '👤'; // Person emoji
         userBtn.style.padding = '2px 6px';
         userBtn.style.border = '1px solid #d1d5db';
@@ -5183,6 +5189,7 @@ function attachDeleteConceptButton(headerDiv, conceptId, kind) {
         btn.className = 'delete-concept-button';
         btn.title = 'Delete this concept';
         btn.setAttribute('aria-label', 'Delete this concept');
+        btn.setAttribute('data-keep-title', 'true');
         btn.textContent = '🗑️';
         btn.style.padding = '2px 6px';
         btn.style.border = '1px solid #d1d5db';
