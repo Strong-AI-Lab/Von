@@ -11,10 +11,10 @@
   </div>
   <!-- Legacy single-note notes UI removed; multi-note relations UI injected dynamically -->
   <!-- Keep Start Interaction Button -->
-  <button id="startInteractionButton">Start Interaction</button>
+  <button id="startInteractionButton" title="Begin an interactive Q&A session to gather information about this concept">Start Interaction</button>
   <!-- Add Save Notes Button (initially hidden/disabled) -->
-  <button id="saveNotesButton" class="concept-save-button">Save</button>
-  <button id="suggestInfoButton" class="concept-save-button">Suggest Missing Info</button>
+  <button id="saveNotesButton" class="concept-save-button" title="Save changes to concept notes">Save</button>
+  <button id="suggestInfoButton" class="concept-save-button" title="Use AI to suggest missing information for this concept">Suggest Missing Info</button>
   <p id="conceptStep1Status" class="concept-status"></p>
 </div>
 
@@ -35,11 +35,11 @@
 
   <label for="conceptAnswer">Your Answer:</label><br>
   <div class="concept-answer-container">
-    <input type="text" id="conceptAnswer" name="conceptAnswer" class="concept-answer-input">
-    <button id="submitAnswerButton">Submit Answer</button>
+    <input type="text" id="conceptAnswer" name="conceptAnswer" class="concept-answer-input" title="Enter your answer to the follow-up question">
+    <button id="submitAnswerButton" title="Submit your answer and continue the interaction">Submit Answer</button>
   </div>
-  <button id="cancelInteractionButton" class="concept-cancel-button">Cancel Interaction</button>
-  <button id="endInteractionButton" class="concept-end-button">End Interaction</button>
+  <button id="cancelInteractionButton" class="concept-cancel-button" title="Cancel the current interaction session">Cancel Interaction</button>
+  <button id="endInteractionButton" class="concept-end-button" title="End the interaction and finalize the information gathered">End Interaction</button>
 
   <!-- Display of the last Q&A exchange -->
   <div id="lastQADisplay" class="concept-last-qa-display">
@@ -59,7 +59,7 @@
 <!-- Step 3: Final Result -->
 <div id="conceptStep3" class="concept-step">
   <p id="finalResult" class="concept-final-result"></p>
-  <button id="resetConceptTabButton">Start New Interaction</button>
+  <button id="resetConceptTabButton" title="Reset the tab to start a new interaction">Start New Interaction</button>
 </div>
 
 <!-- Concept list display area moved under Instances section -->
@@ -76,13 +76,13 @@
         placeholder="Enter description for this type..." rows="6"></textarea>
       <div class="desc-actions text-block-actions">
         <button id="typeCopyDescription" class="round-icon-button" title="Copy description to clipboard"
-          aria-label="Copy description to clipboard" data-icon="copy"></button>
+          aria-label="Copy description to clipboard" data-icon="copy" data-keep-title="true"></button>
         <button id="typeAnnotateDescription" class="round-icon-button" title="Annotate description"
-          aria-label="Annotate description" data-icon="annotate"></button>
+          aria-label="Annotate description" data-icon="annotate" data-keep-title="true"></button>
         <button id="typeEditDescriptionButton" class="round-icon-button" title="Edit description"
-          aria-label="Edit description" data-icon="edit"></button>
+          aria-label="Edit description" data-icon="edit" data-keep-title="true"></button>
         <button id="typeDeleteDescriptionButton" class="round-icon-button" title="Delete description"
-          aria-label="Delete description" data-icon="delete"></button>
+          aria-label="Delete description" data-icon="delete" data-keep-title="true"></button>
       </div>
       <div id="typeDescriptionEditActions" class="description-edit-actions hidden">
         <button id="typeEditDescriptionSave" class="small-btn">Save</button>
@@ -109,7 +109,7 @@
           <option value="CODE">Code</option>
           <option value="ABBR">Abbreviation</option>
         </select>
-        <button id="addNameButton" type="button">Add Name</button>
+        <button id="addNameButton" type="button" title="Add this name to the concept">Add Name</button>
         <span id="namesStatus" class="concept-status"></span>
       </div>
     </div>
@@ -120,8 +120,8 @@
       <!-- Subtypes will be populated dynamically -->
     </ul>
     <div class="concept-create-form">
-      <input id="newSubtypeInput" type="text" placeholder="New subtype name" />
-      <button id="createSubtypeButton" type="button" class="concept-add-button">+ Add Subtype</button>
+      <input id="newSubtypeInput" type="text" placeholder="New subtype name" title="Enter a name for the new subtype" />
+      <button id="createSubtypeButton" type="button" class="concept-add-button" title="Create a new subtype under this concept">+ Add Subtype</button>
     </div>
     <p id="subtypesStatus" class="concept-status"></p>
   </div>
@@ -142,10 +142,10 @@
     <ul id="conceptListUl">
       <!-- List will be populated dynamically with instances -->
     </ul>
-    <button id="refreshConceptListButton">Refresh List</button>
+    <button id="refreshConceptListButton" title="Refresh the list of instances from the database">Refresh List</button>
     <div class="concept-create-form">
-      <input id="newInstanceInput" type="text" placeholder="New instance name" />
-      <button id="createInstanceButton" type="button" class="concept-add-button">+ Add Instance</button>
+      <input id="newInstanceInput" type="text" placeholder="New instance name" title="Enter a name for the new instance" />
+      <button id="createInstanceButton" type="button" class="concept-add-button" title="Create a new instance of this type">+ Add Instance</button>
     </div>
     <p id="instancesStatus" class="concept-status"></p>
   </div>
@@ -159,11 +159,11 @@
   </div>
   <div id="relationshipsAddForm" class="mt-2 flex gap-2 ai-center flex-wrap">
     <label for="relationshipKindSelect" class="sr-only">Relationship kind</label>
-    <select id="relationshipKindSelect" aria-label="Relationship kind">
+    <select id="relationshipKindSelect" aria-label="Relationship kind" title="Select the type of relationship to add">
       <!-- Options will be populated dynamically depending on tab kind -->
     </select>
-    <input id="relationshipTargetInput" type="text" placeholder="#V#target_concept_id" class="flex-1 minw-220" />
-    <button id="relationshipAddButton" type="button">Add</button>
+    <input id="relationshipTargetInput" type="text" placeholder="#V#target_concept_id" class="flex-1 minw-220" title="Enter the concept ID of the target concept" />
+    <button id="relationshipAddButton" type="button" title="Add this relationship to the concept">Add</button>
     <span id="relationshipsStatus" class="concept-status ml-2"></span>
   </div>
 </div>
