@@ -2,9 +2,12 @@
 
 This directory contains technical documentation for the Von project.
 
-## Script Comparison Report
+## Bash and PowerShell Script Compatibility
 
-**[script_comparison_report.md](script_comparison_report.md)** - Comprehensive comparison between PowerShell and Bash setup/runtime scripts.
+**Quick Links:**
+- **[BASH_POWERSHELL_COMPATIBILITY_SUMMARY.md](BASH_POWERSHELL_COMPATIBILITY_SUMMARY.md)** - Executive summary and final report
+- **[script_comparison_report.md](script_comparison_report.md)** - Detailed feature-by-feature comparison
+- **[bash_script_quality_report.md](bash_script_quality_report.md)** - Code quality and shellcheck analysis
 
 ### Summary
 
