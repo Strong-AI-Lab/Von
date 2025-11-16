@@ -57,6 +57,14 @@ If directly running `./setup_all.ps1` does not work, then run each setup script 
 ./setup_js.ps1
 ```
 
+**For Linux/macOS users:**
+```bash
+# Run the bash setup script
+./setup_all.sh
+```
+
+**Note**: The bash scripts (`setup_all.sh`, `run.sh`) provide basic functionality but lack some advanced features available in the PowerShell versions. See [docs/script_comparison_report.md](docs/script_comparison_report.md) for details.
+
 ### 3. **Database Setup**
 
 Von uses MongoDB to store your knowledge base (concepts, entities, relationships).
@@ -151,18 +159,34 @@ Visit `http://localhost:5000` and explore the pre-loaded concepts in the interfa
 
 ### 5. **Run:**
 
+**Windows (PowerShell):**
 ```powershell
 # Start the server locally
 ./run.ps1
 
-# Open browser to http://localhost:5001
+# Open browser to http://localhost:5000
+```
+
+**Linux/macOS (Bash):**
+```bash
+# Start the server locally
+./run.sh start
+
+# Open browser to http://localhost:5000
 ```
 
 ### 6. **Stop:**
+
+**Windows (PowerShell):**
 ```powershell
 # Stop the local server
 ./run.ps1 stop
+```
 
+**Linux/macOS (Bash):**
+```bash
+# Stop the local server
+./run.sh stop
 ```
 
 ### 7. **Basic Usage:**
