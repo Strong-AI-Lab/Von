@@ -236,15 +236,6 @@ We welcome contributions from the community! Von is designed to evolve with acad
 - Documentation improvements
 - Frontend improvements
 
-## 🔒 Security
-
-Von takes security seriously. All sensitive credentials are managed via environment variables, and the repository is regularly scanned for secrets.
-
-**For Security Issues:**
-- Please review our [Security Policy](SECURITY.md)
-- Report vulnerabilities via [GitHub Security Advisories](https://github.com/Strong-AI-Lab/Von/security/advisories)
-- See [SECURITY_SCAN_REPORT.md](SECURITY_SCAN_REPORT.md) for the latest security audit
-
 ## 📄 Licence
 
 Von is licensed under the **Apache Licence 2.0**. See [LICENSE](LICENSE) for details.
