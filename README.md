@@ -49,13 +49,10 @@ If directly running `./setup_all.ps1` does not work, then run each setup script 
 ```powershell
 # Run setup_py.ps1
 # If your python version is 3.15 
+./setup_all.ps1 -ConfigureVSCode
+
+# If your python version is not 3.15 (e.g., 3.12) 
 ./setup_all.ps1 -ConfigureVSCode -PythonVersion 3.12
-
-# If your python version is not 3.15 (e.g., 3.12)
-./setup_py.ps1 -ConfigureVSCode -PythonVersion 3.12
-
-# Then,
-./setup_js.ps1 
 ```
 
 **For Linux/macOS users:**
