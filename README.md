@@ -29,6 +29,7 @@ Von (or vonNeumarkt) provides researchers with AI-enriched tools that enhance ac
 ### 1. **Prerequisites:**
 - Python 3.10 or higher
 - Node.js 16+ (for frontend)
+- PowerShell 7.x (for Windows)
 
 ### 2. **Installation:**
 
