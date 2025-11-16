@@ -236,7 +236,6 @@ We welcome contributions from the community! Von is designed to evolve with acad
 - Documentation improvements
 - Frontend improvements
 
-
 ## 📄 Licence
 
 Von is licensed under the **Apache Licence 2.0**. See [LICENSE](LICENSE) for details.
