@@ -49,9 +49,9 @@ if (-not $Force -and (Test-Path 'node_modules')) {
 
 if (-not $skip) {
     Write-Host 'Installing JavaScript dependencies with npm...'
-    $args = @('install')
-    if ($CI) { $args += @('--no-fund','--no-audit') }
-    npm @args
+    $npmArgs = @('install')
+    if ($CI) { $npmArgs += @('--no-fund','--no-audit') }
+    npm @npmArgs
     Write-Host 'npm install complete.'
 } else {
     Write-Host 'Skipped install.'
@@ -59,12 +59,17 @@ if (-not $skip) {
 
 if (-not $NoJestCheck) {
     try {
-        $jestVersion = (npx jest --version) 2>$null
-        if ($jestVersion) { Write-Host ("jest version: {0}" -f $jestVersion) }
-        else { Write-Host 'jest not found after install (unexpected)'; exit 2 }
+        # Use npm exec to run locally installed jest (avoids npx downloading wrong version)
+        $jestVersion = (npm exec jest -- --version) 2>$null
+        if ($LASTEXITCODE -eq 0 -and $jestVersion) {
+            Write-Host ("jest version: {0}" -f $jestVersion)
+        } else {
+            Write-Host 'jest not found after install (unexpected)' -ForegroundColor Yellow
+            # Don't fail setup just because jest version check failed
+        }
     } catch {
-        Write-Host 'jest invocation failed.'
-        exit 2
+        Write-Host 'jest invocation failed (non-critical)' -ForegroundColor Yellow
+        # Don't fail setup just because jest version check failed
     }
 }
 

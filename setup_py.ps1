@@ -17,12 +17,16 @@
     Optional string to specify the target Python minor version (e.g., "3.12").
     If not provided, the script searches for a compatible version (3.10-3.15).
 
+.PARAMETER SkipMongoDB
+    Optional flag to skip MongoDB installation checks and continue setup.
+
 .EXAMPLES
     ./setup_py.ps1
     ./setup_py.ps1 -ConfigureVSCode
     ./setup_py.ps1 -Reset
     ./setup_py.ps1 -ConfigureVSCode -PythonVersion 3.12
     ./setup_py.ps1 -Reset -ConfigureVSCode -PythonVersion 3.11
+    ./setup_py.ps1 -SkipMongoDB -ConfigureVSCode
 #>
 param (
     [Parameter(Mandatory = $false)]
@@ -32,7 +36,10 @@ param (
     [switch]$Reset, # Renamed from RESET_FLAG
 
     [Parameter(Mandatory = $false)]
-    [string]$PythonVersion
+    [string]$PythonVersion,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipMongoDB
 )
 
 # Function to reset the environment
@@ -267,7 +274,12 @@ function Initialize-Windows {
     # Create a virtual environment if it doesn't exist
     if (-not (Test-Path ".venv\Scripts\python.exe")) {
         Write-Host "Creating virtual environment..." -ForegroundColor Cyan
-        & $pythonCmd $pythonExec -m venv .venv
+        if ($pythonExec) {
+            & $pythonCmd $pythonExec -m venv .venv
+        }
+        else {
+            & $pythonCmd -m venv .venv
+        }
 
         if (-not (Test-Path ".venv\Scripts\python.exe")) {
             Write-Host "Error: Failed to create virtual environment." -ForegroundColor Red
@@ -368,10 +380,10 @@ function Ensure-UvAndArxiv {
 function Ensure-EnvFile {
     Write-Host ""
     Write-Host "=== Database Configuration ===" -ForegroundColor Cyan
-    
+
     if (-not (Test-Path ".env")) {
         Write-Host "No .env file found. Creating from template..." -ForegroundColor Yellow
-        
+
         if (Test-Path ".env.template") {
             Copy-Item ".env.template" ".env"
             Write-Host "✓ Created .env from .env.template" -ForegroundColor Green
@@ -395,7 +407,7 @@ OLLAMA_HOSTS_LIST=127.0.0.1
         Write-Host ".env file already exists. Skipping creation." -ForegroundColor Green
     }
 
-    
+
 }
 
 # Function to check and install MongoDB (Windows)
@@ -422,7 +434,8 @@ function Ensure-MongoDB {
                 $mongoExe = Join-Path $ver.FullName "bin\mongod.exe"
                 if (Test-Path $mongoExe) {
                     Write-Host "MongoDB found at $mongoExe (not in PATH). Adding to PATH for this session." -ForegroundColor Yellow
-                    $env:Path += ";$($ver.FullName)\bin"
+                    $binPath = Join-Path $ver.FullName "bin"
+                    $env:Path = $env:Path + ";" + $binPath
                     $foundMongo = $true
                     break
                 }
@@ -489,7 +502,8 @@ function Ensure-MongoDB {
                 $mongoExe = Join-Path $ver.FullName "bin\mongod.exe"
                 if (Test-Path $mongoExe) {
                     Write-Host "MongoDB found at $mongoExe after install. Adding to PATH for this session." -ForegroundColor Yellow
-                    $env:Path += ";$($ver.FullName)\bin"
+                    $binPath = Join-Path $ver.FullName "bin"
+                    $env:Path = $env:Path + ";" + $binPath
                     $foundMongo = $true
                     break
                 }
@@ -517,7 +531,7 @@ function Ensure-MongoDB {
     Write-Host "   (Installer path: $msiPath)" -ForegroundColor DarkGray
     Write-Host "3. Follow the on-screen prompts in the installer. Choosing 'Network Service' for the service account is usually appropriate for local development." -ForegroundColor Cyan
     Write-Host "If the problem persists, check the MongoDB installation logs in your %TEMP% directory (search for MSI*.log files)." -ForegroundColor Yellow
-    exit 1
+    throw "MongoDB installation failed. Run setup with -SkipMongoDB to bypass this check."
 }
 
 ## Validate parameters and provide an explanatory message
@@ -527,7 +541,7 @@ if (-not $ConfigureVSCode -and -not $Reset -and -not $PythonVersion) {
     Write-Host ""
     Write-Host "  -Reset            : Resets the environment by removing the .venv and .vscode directories." -ForegroundColor Cyan
     Write-Host "  -ConfigureVSCode  : Configures VS Code settings for the Python environment." -ForegroundColor Cyan
-    Write-Host "  -PythonVersion <ver> : Specify the target Python minor version (e.g., ""3.12"")." -ForegroundColor Cyan
+    Write-Host '  -PythonVersion <ver> : Specify the target Python minor version (e.g., "3.12").' -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Examples:" -ForegroundColor Yellow
     Write-Host "  ./setup_py.ps1 -Reset" -ForegroundColor Green
@@ -552,8 +566,19 @@ if ($Reset) {
 # Main script logic
 # Pass the PythonVersion parameter to Initialize-Windows
 
-# Ensure MongoDB is installed before proceeding
-Ensure-MongoDB
+# Ensure MongoDB is installed before proceeding (unless skipped)
+if (-not $SkipMongoDB) {
+    try {
+        Ensure-MongoDB
+    }
+    catch {
+        Write-Host "MongoDB setup failed, but continuing with Python setup..." -ForegroundColor Yellow
+        Write-Host "You can run setup later with -SkipMongoDB to bypass MongoDB checks." -ForegroundColor Yellow
+    }
+}
+else {
+    Write-Host "Skipping MongoDB installation checks (-SkipMongoDB flag set)." -ForegroundColor Yellow
+}
 
 # Ensure .env file exists (create from template if missing)
 Ensure-EnvFile
@@ -569,4 +594,4 @@ if ($ConfigureVSCode) {
 }
 
 Write-Host "=== Setup Complete! ===" -ForegroundColor Cyan
-Write-Host "To activate the virtual environment, run: .\.venv\Scripts\Activate.ps1" -ForegroundColor Green
+Write-Host 'To activate the virtual environment, run: .\.venv\Scripts\Activate.ps1' -ForegroundColor Green
