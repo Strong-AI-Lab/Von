@@ -1,4 +1,31 @@
 {
+  "editor.tabSize": 4,
+  "typescript.inlayHints.functionLikeReturnTypes.enabled": true,
+  "atlassian.jira.cloud.id": "b2b12142-9002-4b11-b421-83f073678fd3",
+  "git.confirmSync": false,
+  "typescript.inlayHints.parameterNames.enabled": "literals",
+  "files.eol": "\n",
+  "editor.renderWhitespace": "selection",
+  "python.defaultInterpreterPath": ".venv\\Scripts\\python.exe",
+  "editor.trimAutoWhitespace": true,
+  "editor.rulers": [
+    100
+  ],
+  "editor.formatOnSave": true,
+  "python.envFile": "${workspaceFolder}\\.vscode\\.env.tests",
+  "typescript.tsserver.maxTsServerMemory": 4096,
+  "python.testing.unittestEnabled": false,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit",
+    "source.fixAll.eslint": "explicit"
+  },
+  "files.insertFinalNewline": true,
+  "python.testing.pytestArgs": [
+    "tests"
+  ],
+  "python.terminal.activateEnvironment": true,
+  "terminal.integrated.shellIntegration.suggestEnabled": true,
+  "typescript.preferences.importModuleSpecifier": "non-relative",
   "files.exclude": {
     "**/__pycache__": true,
     "**/.pytest_cache": true,
@@ -6,75 +33,16 @@
     "**/coverage": true,
     "**/dist": true
   },
-  "editor.tabSize": 4,
-  "python.terminal.useEnvFile": true,
-  "terminal.integrated.profiles.windows": {
-    "PowerShell": {
-      "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
-      "args": [
-        "-NoLogo"
-      ]
-    }
-  },
   "python.testing.pytestEnv": {
     "VON_DB_NAME": "test_von_db",
     "VON_USE_MOCK_DB": "1"
   },
-  "jupyter.askForKernelRestart": false,
-  "editor.formatOnSave": true,
-  "workbench.editor.enablePreview": false,
-  "typescript.enablePromptUseWorkspaceTsdk": true,
-  "editor.trimAutoWhitespace": true,
-  "terminal.integrated.shellIntegration.suggestEnabled": true,
-  "python.defaultInterpreterPath": ".venv\\Scripts\\python.exe",
-  "jest.rootPath": "${workspaceFolder}",
-  "python.formatting.provider": "black",
-  "jest.shell": "",
-  "terminal.integrated.defaultProfile.windows": "PowerShell",
-  "python.testing.pytestArgs": [
-    "tests"
-  ],
-  "editor.rulers": [
-    100
-  ],
-  "files.insertFinalNewline": true,
-  "files.eol": "\n",
-  "isort.args": [
-    "--profile",
-    "black"
-  ],
-  "typescript.inlayHints.functionLikeReturnTypes.enabled": true,
-  "python.testing.unittestEnabled": false,
-  "terminal.integrated.shellIntegration.enabled": true,
-  "typescript.tsserver.maxTsServerMemory": 4096,
-  "jest.jestCommandLine": "node --unhandled-rejections=strict node_modules/jest/bin/jest.js",
-  "jest.enableInlineErrorMessages": true,
-  "git.autofetch": true,
-  "python.envFile": "${workspaceFolder}\\.vscode\\.env.tests",
-  "python.analysis.inlayHints.functionReturnTypes": true,
-  "atlassian.jira.cloud.id": "b2b12142-9002-4b11-b421-83f073678fd3",
-  "python.analysis.importFormat": "absolute",
-  "jest.runMode": "deferred",
-  "typescript.preferences.importModuleSpecifier": "non-relative",
-  "python.terminal.activateEnvironment": true,
-  "python.testing.pytestEnabled": true,
-  "typescript.inlayHints.enumMemberValues.enabled": true,
   "typescript.inlayHints.variableTypes.enabled": true,
-  "files.trimTrailingWhitespace": true,
-  "python-envs.pythonProjects": [
-    {
-      "path": "",
-      "envManager": "ms-python.python:system",
-      "packageManager": "ms-python.python:pip"
-    }
-  ],
-  "search.exclude": {
-    "**/coverage": true,
-    "**/dist": true,
-    "**/node_modules": true,
-    "**/.venv": true,
-    "**/logs": true
-  },
+  "python.formatting.provider": "black",
+  "jest.runMode": "deferred",
+  "python.testing.pytestEnabled": true,
+  "python.analysis.inlayHints.functionReturnTypes": true,
+  "jest.enableInlineErrorMessages": true,
   "files.watcherExclude": {
     "**/coverage/**": true,
     "**/dist/**": true,
@@ -84,20 +52,52 @@
     "**/logs/**": true,
     "**/__pycache__/**": true
   },
-  "jupyter.interactiveWindow.textEditor.executeSelection": true,
-  "editor.codeActionsOnSave": {
-    "source.organizeImports": "explicit",
-    "source.fixAll.eslint": "explicit"
-  },
-  "python.analysis.inlayHints.variableTypes": true,
-  "python.languageServer": "Pylance",
-  "git.confirmSync": false,
-  "explorer.confirmDragAndDrop": false,
-  "git.pruneOnFetch": true,
+  "jest.rootPath": "${workspaceFolder}",
   "editor.formatOnSaveMode": "file",
-  "javascript.suggestionActions.enabled": true,
-  "editor.renderWhitespace": "selection",
+  "python-envs.pythonProjects": [
+    {
+      "path": "",
+      "envManager": "ms-python.python:system",
+      "packageManager": "ms-python.python:pip"
+    }
+  ],
+  "terminal.integrated.shellIntegration.enabled": true,
+  "terminal.integrated.profiles.windows": {
+    "PowerShell": {
+      "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "args": [
+        "-NoLogo"
+      ]
+    }
+  },
+  "python.analysis.importFormat": "absolute",
+  "python.terminal.useEnvFile": true,
   "python.testing.pytestLogLevel": "INFO",
+  "javascript.suggestionActions.enabled": true,
+  "explorer.confirmDragAndDrop": false,
+  "python.languageServer": "Pylance",
+  "typescript.inlayHints.enumMemberValues.enabled": true,
+  "search.exclude": {
+    "**/coverage": true,
+    "**/dist": true,
+    "**/node_modules": true,
+    "**/.venv": true,
+    "**/logs": true
+  },
+  "jupyter.askForKernelRestart": false,
+  "workbench.editor.enablePreview": false,
   "workbench.tree.expandMode": "singleClick",
-  "typescript.inlayHints.parameterNames.enabled": "literals"
+  "git.autofetch": true,
+  "jest.shell": "",
+  "isort.args": [
+    "--profile",
+    "black"
+  ],
+  "jupyter.interactiveWindow.textEditor.executeSelection": true,
+  "git.pruneOnFetch": true,
+  "jest.jestCommandLine": "node --unhandled-rejections=strict node_modules/jest/bin/jest.js",
+  "terminal.integrated.defaultProfile.windows": "PowerShell",
+  "python.analysis.inlayHints.variableTypes": true,
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "files.trimTrailingWhitespace": true
 }

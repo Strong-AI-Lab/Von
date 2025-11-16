@@ -25,12 +25,16 @@
 .PARAMETER PythonVersion
     Forwarded to setup_py.ps1 to target a specific Python minor version.
 
+.PARAMETER SkipMongoDB
+    Skip MongoDB installation checks (forwarded to setup_py.ps1).
+
 .EXAMPLES
     ./setup_all.ps1
     ./setup_all.ps1 -ConfigureVSCode
     ./setup_all.ps1 -SkipJS
     ./setup_all.ps1 -SkipPy -Force
     ./setup_all.ps1 -CI -PythonVersion 3.12
+    ./setup_all.ps1 -SkipMongoDB -ConfigureVSCode
 
 .NOTES
     Exit codes: 0 success, non-zero on any failed phase.
@@ -41,7 +45,8 @@ param(
     [switch]$Force,
     [switch]$CI,
     [switch]$ConfigureVSCode,
-    [string]$PythonVersion
+    [string]$PythonVersion,
+    [switch]$SkipMongoDB
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,7 +68,12 @@ if (-not $SkipPy) {
     if ($ConfigureVSCode) { $pyParams['ConfigureVSCode'] = $true }
     if ($Force) { $pyParams['Reset'] = $true }
     if ($PythonVersion) { $pyParams['PythonVersion'] = $PythonVersion }
-    $pyArgsDisplay = ($pyParams.GetEnumerator() | ForEach-Object { '-' + $_.Key + ($_.Value -is [string] ? ' ' + $_.Value : '') }) -join ' '
+    if ($SkipMongoDB) { $pyParams['SkipMongoDB'] = $true }
+    $pyArgsDisplay = ($pyParams.GetEnumerator() | ForEach-Object {
+        $arg = '-' + $_.Key
+        if ($_.Value -is [string]) { $arg += ' ' + $_.Value }
+        $arg
+    }) -join ' '
     Write-Phase ("[1/2] Python setup starting (args: {0})" -f $pyArgsDisplay)
     $pyStart = Get-Date
     try {
