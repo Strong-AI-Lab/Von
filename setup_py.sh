@@ -74,7 +74,7 @@ command_exists() {
 # Function to reset environment
 reset_environment() {
     echo -e "${CYAN}=== Resetting Environment ===${NC}"
-    
+
     # Remove virtual environment
     if [[ -d ".venv" ]]; then
         echo "Removing .venv directory..."
@@ -89,7 +89,7 @@ reset_environment() {
     else
         echo -e "${YELLOW}.venv directory does not exist. Skipping removal.${NC}"
     fi
-    
+
     # Remove .vscode directory
     if [[ -d ".vscode" ]]; then
         rm -rf ".vscode"
@@ -102,17 +102,17 @@ reset_environment() {
 # Function to configure VS Code settings
 configure_vscode() {
     echo -e "${CYAN}Setting up VS Code settings...${NC}"
-    
+
     # Create .vscode directory if it doesn't exist
     mkdir -p .vscode
-    
+
     # Determine Python path based on OS
     if [[ -f ".venv/bin/python" ]]; then
         PYTHON_PATH=".venv/bin/python"
     else
         PYTHON_PATH=".venv/Scripts/python.exe"
     fi
-    
+
     # Create or update settings.json
     SETTINGS_FILE=".vscode/settings.json"
     if [[ ! -f "$SETTINGS_FILE" ]]; then
@@ -133,30 +133,31 @@ EOF
             $PYTHON_CMD << 'PYEOF'
 import json
 import sys
+import os
 
 try:
-    with open('.vscode/settings.json', 'r') as f:
-        settings = json.load(f)
-except:
-    settings = {}
+    try:
+        with open('.vscode/settings.json', 'r') as f:
+            settings = json.load(f)
+    except:
+        settings = {}
 
-# Determine Python path
-import os
-if os.path.exists('.venv/bin/python'):
-    python_path = '.venv/bin/python'
-else:
-    python_path = '.venv/Scripts/python.exe'
+    # Determine Python path
+    if os.path.exists('.venv/bin/python'):
+        python_path = '.venv/bin/python'
+    else:
+        python_path = '.venv/Scripts/python.exe'
 
-settings['python.defaultInterpreterPath'] = python_path
-if sys.platform == 'darwin':
-    settings['terminal.integrated.defaultProfile.osx'] = 'bash'
-else:
-    settings['terminal.integrated.defaultProfile.linux'] = 'bash'
+    settings['python.defaultInterpreterPath'] = python_path
+    if sys.platform == 'darwin':
+        settings['terminal.integrated.defaultProfile.osx'] = 'bash'
+    else:
+        settings['terminal.integrated.defaultProfile.linux'] = 'bash'
 
-with open('.vscode/settings.json', 'w') as f:
-    json.dump(settings, f, indent=2)
+    with open('.vscode/settings.json', 'w') as f:
+        json.dump(settings, f, indent=2)
 
-print('VS Code settings updated successfully.')
+    print('VS Code settings updated successfully.')
 except Exception as e:
     print(f'Warning: Failed to update settings.json: {e}', file=sys.stderr)
 PYEOF
@@ -178,34 +179,34 @@ EOF
 find_python() {
     local target_version="$1"
     local python_cmd=""
-    
-    echo -e "${CYAN}Detecting Python installation...${NC}"
-    
+
+    echo -e "${CYAN}Detecting Python installation...${NC}" >&2
+
     # If specific version requested, try that first
     if [[ -n "$target_version" ]]; then
-        echo -e "${CYAN}Attempting to find specified Python version: ${target_version}${NC}"
-        
+        echo -e "${CYAN}Attempting to find specified Python version: ${target_version}${NC}" >&2
+
         # Try python3.X command
         local cmd="python${target_version}"
         if command_exists "$cmd"; then
             if version=$($cmd --version 2>&1); then
                 if echo "$version" | grep -q "Python ${target_version}"; then
-                    echo -e "${GREEN}Found specified version: $version via '$cmd'${NC}"
+                    echo -e "${GREEN}Found specified version: $version via '$cmd'${NC}" >&2
                     python_cmd="$cmd"
                     echo "$python_cmd"
                     return 0
                 fi
             fi
         fi
-        
-        echo -e "${RED}Error: Specified Python version ${target_version} not found.${NC}"
-        echo -e "${RED}Please ensure Python ${target_version} is installed and accessible.${NC}"
+
+        echo -e "${RED}Error: Specified Python version ${target_version} not found.${NC}" >&2
+        echo -e "${RED}Please ensure Python ${target_version} is installed and accessible.${NC}" >&2
         exit 1
     fi
-    
+
     # Default search logic if no specific version requested
-    echo -e "${CYAN}No specific version requested, searching for compatible Python (3.10-3.15)...${NC}"
-    
+    echo -e "${CYAN}No specific version requested, searching for compatible Python (3.10-3.15)...${NC}" >&2
+
     # Try different Python commands in order of preference
     for cmd in python3.15 python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do
         if command_exists "$cmd"; then
@@ -214,10 +215,10 @@ find_python() {
                 if [[ -n "$version_num" ]]; then
                     major_minor=$(echo "$version_num" | cut -d. -f1,2)
                     minor_version=$(echo "$major_minor" | cut -d. -f2)
-                    
+
                     # Check if it's Python 3.10 or higher
                     if [[ "$major_minor" =~ ^3\.[0-9]+$ ]] && [[ "$minor_version" -ge 10 ]]; then
-                        echo -e "${GREEN}Found compatible Python $version_num via '$cmd'${NC}"
+                        echo -e "${GREEN}Found compatible Python $version_num via '$cmd'${NC}" >&2
                         python_cmd="$cmd"
                         break
                     fi
@@ -225,21 +226,21 @@ find_python() {
             fi
         fi
     done
-    
+
     # Try pyenv if available
     if [[ -z "$python_cmd" ]] && command_exists pyenv; then
-        echo -e "${CYAN}Detected pyenv, trying to find compatible Python version...${NC}"
-        
+        echo -e "${CYAN}Detected pyenv, trying to find compatible Python version...${NC}" >&2
+
         available_versions=$(pyenv versions --bare 2>/dev/null | grep -E '^3\.(1[0-5]|[0-9]+)\.' | sort -V -r)
-        
+
         for version in $available_versions; do
             major_minor=$(echo "$version" | cut -d. -f1,2)
             minor_version=$(echo "$major_minor" | cut -d. -f2)
-            
+
             if [[ "$minor_version" -ge 10 ]]; then
                 if pyenv shell "$version" 2>/dev/null && python --version >/dev/null 2>&1; then
-                    echo -e "${GREEN}Found compatible Python $version via pyenv${NC}"
-                    echo -e "${YELLOW}Setting pyenv to use Python $version${NC}"
+                    echo -e "${GREEN}Found compatible Python $version via pyenv${NC}" >&2
+                    echo -e "${YELLOW}Setting pyenv to use Python $version${NC}" >&2
                     pyenv global "$version" 2>/dev/null || pyenv shell "$version"
                     python_cmd="python"
                     break
@@ -247,16 +248,16 @@ find_python() {
             fi
         done
     fi
-    
+
     if [[ -z "$python_cmd" ]]; then
-        echo -e "${RED}Error: Compatible Python (3.10-3.15) not found via python, python3, or python3.X.${NC}"
-        echo -e "${RED}Please install a compatible Python version from https://www.python.org/downloads/${NC}"
+        echo -e "${RED}Error: Compatible Python (3.10-3.15) not found via python, python3, or python3.X.${NC}" >&2
+        echo -e "${RED}Please install a compatible Python version from https://www.python.org/downloads/${NC}" >&2
         if command_exists pyenv; then
-            echo -e "${YELLOW}Or install via pyenv: pyenv install 3.12.0 && pyenv global 3.12.0${NC}"
+            echo -e "${YELLOW}Or install via pyenv: pyenv install 3.12.0 && pyenv global 3.12.0${NC}" >&2
         fi
         exit 1
     fi
-    
+
     echo "$python_cmd"
 }
 
@@ -264,10 +265,10 @@ find_python() {
 ensure_env_file() {
     echo ""
     echo -e "${CYAN}=== Database Configuration ===${NC}"
-    
+
     if [[ ! -f ".env" ]]; then
         echo -e "${YELLOW}No .env file found. Creating from template...${NC}"
-        
+
         if [[ -f ".env.template" ]]; then
             cp ".env.template" ".env"
             echo -e "${GREEN}✓ Created .env from .env.template${NC}"
@@ -303,7 +304,7 @@ main() {
             exit 0
         fi
     fi
-    
+
     # MongoDB check (Linux/macOS version - manual install required)
     if [[ $SKIP_MONGODB -eq 0 ]]; then
         echo -e "${CYAN}Checking for MongoDB...${NC}"
@@ -320,17 +321,17 @@ main() {
     else
         echo -e "${YELLOW}Skipping MongoDB installation checks (-skip-mongodb flag set).${NC}"
     fi
-    
+
     # Ensure .env file exists
     ensure_env_file
-    
+
     # Find Python
     PYTHON_CMD=$(find_python "$PYTHON_VERSION")
     echo -e "${GREEN}Using Python command: $PYTHON_CMD${NC}"
-    
+
     # Setup Python environment
     echo -e "${CYAN}=== Running Python Setup ===${NC}"
-    
+
     # Determine venv paths based on OS
     if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]]; then
         VENV_PYTHON=".venv/Scripts/python.exe"
@@ -339,12 +340,12 @@ main() {
         VENV_PYTHON=".venv/bin/python"
         VENV_PDM=".venv/bin/pdm"
     fi
-    
+
     # Create virtual environment if it doesn't exist
     if [[ ! -f "$VENV_PYTHON" ]]; then
         echo -e "${CYAN}Creating virtual environment...${NC}"
         $PYTHON_CMD -m venv .venv
-        
+
         if [[ ! -f "$VENV_PYTHON" ]]; then
             echo -e "${RED}Error: Failed to create virtual environment.${NC}"
             exit 1
@@ -353,11 +354,11 @@ main() {
     else
         echo -e "${YELLOW}Virtual environment already exists. Skipping creation.${NC}"
     fi
-    
+
     # Upgrade pip
     echo -e "${CYAN}Updating pip in virtual environment...${NC}"
     $VENV_PYTHON -m pip install --upgrade pip
-    
+
     # Install PDM if not present
     if ! $VENV_PYTHON -m pip show pdm >/dev/null 2>&1; then
         echo -e "${CYAN}Installing PDM in virtual environment...${NC}"
@@ -366,7 +367,7 @@ main() {
     else
         echo -e "${YELLOW}PDM is already installed in the virtual environment. Skipping installation.${NC}"
     fi
-    
+
     # Initialize PDM project if pyproject.toml doesn't exist
     if [[ ! -f "pyproject.toml" ]]; then
         echo -e "${CYAN}Initializing PDM project...${NC}"
@@ -375,7 +376,7 @@ main() {
     else
         echo -e "${YELLOW}pyproject.toml already exists. Skipping PDM project initialisation.${NC}"
     fi
-    
+
     # Install dependencies with PDM
     echo -e "${CYAN}Installing dependencies with PDM...${NC}"
     if $VENV_PDM install --verbose; then
@@ -383,12 +384,12 @@ main() {
     else
         echo -e "${YELLOW}⚠ PDM install encountered issues${NC}"
         echo -e "${YELLOW}  Trying alternative installation method...${NC}"
-        
+
         # Fallback: install critical packages with pip
         CRITICAL_PACKAGES="flask pymongo python-dotenv requests pytest pytest-mock pytest-cov mongomock"
         echo -e "${CYAN}Installing critical packages with pip...${NC}"
         $VENV_PYTHON -m pip install $CRITICAL_PACKAGES
-        
+
         # Try PDM again with --no-sync
         echo -e "${CYAN}Retrying PDM install...${NC}"
         if $VENV_PDM install --verbose --no-sync; then
@@ -397,12 +398,12 @@ main() {
             echo -e "${YELLOW}⚠ Some Python packages may not be installed correctly${NC}"
         fi
     fi
-    
+
     # Configure VS Code if requested
     if [[ $CONFIGURE_VSCODE -eq 1 ]]; then
         configure_vscode
     fi
-    
+
     echo ""
     echo -e "${GREEN}=== Setup Complete! ===${NC}"
     echo ""
