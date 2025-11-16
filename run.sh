@@ -81,7 +81,8 @@ run_governance_scan() {
     local sentinel_dir="${SCRIPT_DIR_ABS}/.run"
     local sentinel_file="${sentinel_dir}/last_governance_scan.txt"
     mkdir -p "${sentinel_dir}" 2>/dev/null || true
-    local now_epoch=$(date +%s)
+    local now_epoch
+    now_epoch=$(date +%s)
     local should_run=1
     if [ "$force" != "1" ] && [ -f "$sentinel_file" ]; then
         last_iso=$(cat "$sentinel_file" 2>/dev/null || true)
@@ -100,11 +101,11 @@ run_governance_scan() {
     if [ "${VON_GOV_SCAN_ALLOW_LOCAL}" = "1" ]; then
         allow_local_flag="--allow-local"
     fi
-    local start_epoch=$(epoch_ms)
+    local start_epoch
+    start_epoch=$(epoch_ms)
     # Run quietly (no progress) to keep logs clean
     if output=$(pdm run python scripts/mark_code_referenced_concepts.py --execute ${allow_local_flag} 2>&1); then
-        # Attempt to parse JSON tail
-        added=$(echo "$output" | grep '"added"' | head -n1 | sed 's/.*\"added\": \[//' | wc -w | awk '{print $1}') || added="?"
+        # Attempt to parse JSON tail - removed unused 'added' variable
         # Fallback simple parse by counting occurrences inside JSON arrays is imprecise; we keep summary generic
         echo "$now_epoch" > "$sentinel_file" 2>/dev/null || true
         end_epoch=$(epoch_ms)
@@ -191,8 +192,16 @@ start_bg() {
     # Run governance scan first (best-effort)
     run_governance_scan || true
     echo "Starting Von application in background (port $PORT)..."
-    export VON_SKIP_BROWSER_LAUNCH=$([ "$NO_BROWSER" -eq 1 ] && echo 1 || echo 0)
-    export VON_FORCE_BROWSER=$([ "$FORCE_BROWSER" -eq 1 ] && echo 1 || echo 0)
+    if [ "$NO_BROWSER" -eq 1 ]; then
+        export VON_SKIP_BROWSER_LAUNCH=1
+    else
+        export VON_SKIP_BROWSER_LAUNCH=0
+    fi
+    if [ "$FORCE_BROWSER" -eq 1 ]; then
+        export VON_FORCE_BROWSER=1
+    else
+        export VON_FORCE_BROWSER=0
+    fi
     # Ensure admin token is present for graceful shutdown
     ADM_TOKEN=$(read_admin_token)
     export VON_ADMIN_TOKEN="$ADM_TOKEN"
@@ -268,8 +277,16 @@ start_foreground() {
 
     run_governance_scan || true
     echo "Running in foreground (port $PORT)... Ctrl+C to stop"
-    export VON_SKIP_BROWSER_LAUNCH=$([ "$NO_BROWSER" -eq 1 ] && echo 1 || echo 0)
-    export VON_FORCE_BROWSER=$([ "$FORCE_BROWSER" -eq 1 ] && echo 1 || echo 0)
+    if [ "$NO_BROWSER" -eq 1 ]; then
+        export VON_SKIP_BROWSER_LAUNCH=1
+    else
+        export VON_SKIP_BROWSER_LAUNCH=0
+    fi
+    if [ "$FORCE_BROWSER" -eq 1 ]; then
+        export VON_FORCE_BROWSER=1
+    else
+        export VON_FORCE_BROWSER=0
+    fi
     ADM_TOKEN=$(read_admin_token)
     export VON_ADMIN_TOKEN="$ADM_TOKEN"
     PDM_CMD="pdm"
