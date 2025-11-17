@@ -1,6 +1,6 @@
 # Von - AI-Agent System for Academic Research
 
-This is the repository for the open source collaborative development of **Von**, initiated by the Strong AI Lab (SAIL) in the Natural Artificial and Organisational Intelligence Institute at the University of Auckland. 
+This is the repository for the open source collaborative development of **Von**, initiated by the Strong AI Lab (SAIL) in the Natural Artificial and Organisational Intelligence Institute at the University of Auckland.
 
 **Von** is an AI-agent system designed to help academic researchers manage knowledge, conduct research, and interact with AI systems in a structured, reliable, and academically rigorous manner. By combining ontology-based knowledge organisation, Von bridges the gap between implicit knowledge in Large Language Models (LLMs) and explicit, verifiable research structures.
 
@@ -42,19 +42,25 @@ cd Von
 # This runs setup_py.ps1 (pdm dependencies, python packages, etc.) and setup_js.ps1 (Javascript dependencies)
 ./setup_all.ps1
 
+# Configure VSCode settings
+./setup_all.ps1 -ConfigureVSCode
+
+# Configure VSCode settings and specific Python version (e.g., 3.12)
+./setup_all.ps1 -ConfigureVSCode -PythonVersion 3.12
+
 ```
 
 If directly running `./setup_all.ps1` does not work, then run each setup script separately:
 
 ```powershell
 # Run setup_py.ps1
-# If your python version is 3.15 
+# Runs setup_py.ps1, which automatically finds and uses the newest compatible Python 3.10–3.15 version available in your PATH
 ./setup_py.ps1 -ConfigureVSCode
 
-# If your python version is not 3.15 (e.g., 3.12) 
+# How to specify a specific Python version (e.g., 3.12)
 ./setup_py.ps1 -ConfigureVSCode -PythonVersion 3.12
 
-# Then, 
+# Then,
 ./setup_js.ps1
 ```
 
@@ -144,7 +150,7 @@ Visit `http://localhost:5000` and explore the pre-loaded concepts in the interfa
 **Ollama (Local Models):**
 1. Install Ollama: https://ollama.ai
 2. Pull models: `ollama pull llama3.2` (or your preferred model) or install directly from ollama UI.
-3. Ensure Ollama is running: `ollama serve` 
+3. Ensure Ollama is running: `ollama serve`
 4. Von will auto-detect available models (if not, select the installed local model in Von's Settings panel)
 
 **OpenAI:**
@@ -255,7 +261,7 @@ We welcome contributions from the community! Von is designed to evolve with acad
 
 **Areas for Contribution (ex):**
 - External MCP server integrations
-- Automatic information extraction for entity creation 
+- Automatic information extraction for entity creation
 - Domain-specific Vontology extensions
 - Research workflow templates
 - Documentation improvements
