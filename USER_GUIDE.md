@@ -101,8 +101,6 @@ Entities are linked to concepts (e.g., the paper "Attention Is All You Need" wou
 
 **Annotations**: Highlighted portions of text extracted from entities, often with automatically detected predicates showing relationships mentioned in the text.
 
-[Screenshot: Von interface overview showing Vontology tree, entity list, and chat interface] (⚠️)
-
 ---
 
 ## 2. Quick Start: Exploring Von's Interface
@@ -124,8 +122,6 @@ This quick walkthrough will introduce you to Von's core features through hands-o
 ```
 
 **Open your browser** to `http://localhost:5001`
-
-[Screenshot: Von home interface with Vontology tree on left, main panel in center, chat on right]
 
 ### 2.2 Explore the Vontology
 
@@ -178,8 +174,6 @@ The Vontology panel shows your hierarchical tree of concepts. Depending on your 
 - **Use search** to quickly locate concepts by name
 - **Star key concepts** to mark them as favorites for quick access
 
-[Screenshot: Vontology tree showing Thing root with expandable children]
-
 ### 2.3 Building Your First Knowledge Base: A Complete Workflow
 
 This section will walk you through building your first research knowledge structure in Von and demonstrate how structured knowledge improves AI interactions. We'll use a practical scenario: organizing knowledge about neural network architectures.
@@ -215,8 +209,6 @@ Now let's build structured knowledge. Start by creating a concept for your resea
 - Your concept is created with ID `#V#neural_network_architecture`
 - It appears under "Thing" in the Vontology tree
 - It's stored in MongoDB with full metadata (description, notes, attributes, relationships)
-
-[Screenshot: Create concept form with neural network architecture details]
 
 **What just happened**:
 - ✅ Created concept in `von_db.concepts` collection
@@ -261,8 +253,6 @@ Thing (#V#thing)
 - Relationships stored in `relationships.is_a_type_of` and `relationships.has_subtype` fields
 - Names stored in `von_db.text_relations` with `predicate: "hasName"`
 
-[Screenshot: Expanded Vontology tree showing neural network hierarchy]
-
 #### Step 4: Add a Research Paper Entity
 
 Now let's add a concrete research paper to your knowledge base.
@@ -292,8 +282,6 @@ Now let's add a concrete research paper to your knowledge base.
 - It's linked to `#V#transformer_architecture` via `is_an_instance_of` relationship
 - Von now knows about this specific paper in your research domain
 
-[Screenshot: Entity creation form filled with Attention Is All You Need details]
-
 #### Step 5: Create an Annotation to Extract Key Knowledge
 
 Let's highlight and extract important information from the paper.
@@ -306,8 +294,6 @@ Let's highlight and extract important information from the paper.
 6. **Click "Save"**
 
 **Result**: The key claim is now extracted and searchable.
-
-[Screenshot: Annotation interface showing highlighted text and notes]
 
 #### Step 6: Experience the Difference (After Adding Knowledge)
 
