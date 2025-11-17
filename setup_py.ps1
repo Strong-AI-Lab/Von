@@ -290,6 +290,19 @@ function Initialize-Windows {
         Write-Host "Virtual environment already exists. Skipping creation." -ForegroundColor Yellow
     }
 
+    # Make sure pip exists before trying to upgrade it
+    Write-Host "Checking pip availability in virtual environment..." -ForegroundColor Green
+    & .venv\Scripts\python -m pip --version 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "pip not detected; running ensurepip to repair the environment..." -ForegroundColor Yellow
+        & .venv\Scripts\python -m ensurepip --upgrade
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Error: ensurepip failed to install pip inside the virtual environment." -ForegroundColor Red
+            Write-Host "Please reinstall Python with ensurepip support or recreate the environment manually." -ForegroundColor Yellow
+            exit 1
+        }
+    }
+
     # Ensure pip is updated in the virtual environment
     Write-Host "Updating pip in virtual environment..." -ForegroundColor Green
     & .venv\Scripts\python -m pip install --upgrade pip
@@ -388,11 +401,13 @@ function Ensure-EnvFile {
             Copy-Item ".env.template" ".env"
             Write-Host "✓ Created .env from .env.template" -ForegroundColor Green
             Write-Host "  You can edit .env to customize database and API settings" -ForegroundColor Gray
-        } elseif (Test-Path ".env.example") {
+        }
+        elseif (Test-Path ".env.example") {
             Copy-Item ".env.example" ".env"
             Write-Host "✓ Created .env from .env.example" -ForegroundColor Green
             Write-Host "  You can edit .env to customize database and API settings" -ForegroundColor Gray
-        } else {
+        }
+        else {
             Write-Host "✗ No .env template found. Creating minimal .env..." -ForegroundColor Yellow
             @"
 MONGO_URI=mongodb://localhost:27017/
@@ -403,7 +418,8 @@ OLLAMA_HOSTS_LIST=127.0.0.1
 "@ | Out-File -FilePath ".env" -Encoding UTF8
             Write-Host "✓ Created minimal .env file" -ForegroundColor Green
         }
-    } else {
+    }
+    else {
         Write-Host ".env file already exists. Skipping creation." -ForegroundColor Green
     }
 
