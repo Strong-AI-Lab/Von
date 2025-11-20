@@ -37,6 +37,7 @@ from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
 import logging
 import os
+import uuid  # Added for GUID generation
 import traceback # Added for error logging
 from datetime import datetime, timezone # Ensure timezone is imported
 import requests # Added for requests.exceptions.ConnectionError
@@ -209,6 +210,7 @@ def create_concept(
 
     concept_doc: Dict[str, Any] = {
         # DO NOT include "names" field - will be created as text_relations below
+        "guid": str(uuid.uuid4()),  # JVNAUTOSCI-730: Stable GUID
         "created_at": now,
         "updated_at": now,
         "attributes": attributes or {},
@@ -269,6 +271,16 @@ def create_concept(
                         subject_concept_id=concept_identifier,
                         predicate='hasName',
                         text=str(concept_doc['_id']),
+                        lang='en-NZ',
+                        context={'name_type': 'CODE'}
+                    )
+
+                # 4. Register stable GUID as CODE name (JVNAUTOSCI-730)
+                if 'guid' in concept_doc:
+                    upsert_text_for_concept(
+                        subject_concept_id=concept_identifier,
+                        predicate='hasName',
+                        text=concept_doc['guid'],
                         lang='en-NZ',
                         context={'name_type': 'CODE'}
                     )
@@ -593,7 +605,7 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
 
     # REFACTORING_NOTE: Prevent modification of certain fields.
     # Client should not send these, but good to enforce on server-side.
-    immutable_fields = ["_id", "created_at", "vontology_path"]
+    immutable_fields = ["_id", "created_at", "vontology_path", "guid"]
     for field in immutable_fields:
         if field in update_data:
             raise InvalidConceptDataError(f"Field '{field}' cannot be modified.")
