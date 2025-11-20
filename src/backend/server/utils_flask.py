@@ -419,6 +419,22 @@ def create_flask_app(
         except Exception:
             pass
 
+        # GUID coverage stats
+        guid_stats = {}
+        try:
+            from ..db.mongo_client import get_concepts_collection
+            coll = get_concepts_collection()
+            if coll is not None:
+                total_concepts = coll.count_documents({})
+                with_guid = coll.count_documents({'guid': {'$exists': True}})
+                guid_stats = {
+                    'total_concepts': total_concepts,
+                    'with_guid': with_guid,
+                    'coverage_percent': round((with_guid / total_concepts * 100), 1) if total_concepts > 0 else 0
+                }
+        except Exception:
+            guid_stats = {'error': 'unavailable'}
+
         search_proxy_stats = {}
         try:
             from ..integrations.internal_mcp import search_proxy_mcp as _search_proxy_mod  # type: ignore
@@ -452,6 +468,7 @@ def create_flask_app(
             'instance_counts_cache': counts_cache,
             'salient_cache': salient_cache,
             'entity_counts': entity_counts_stats,
+            'guid_stats': guid_stats,
             'search_proxy': search_proxy_stats,
             'python_version': sys.version.split()[0]
         }
