@@ -6,9 +6,9 @@ from backend.services.relation_elicitation_service import RelationElicitationSer
 
 class TestRelationElicitationService(unittest.TestCase):
 
-    @patch('backend.services.relation_elicitation_service.get_concept_by_id')
-    @patch('backend.services.relation_elicitation_service.get_concept_by_concept_id')
-    def test_get_elicitation_opportunities(self, mock_get_by_concept_id, mock_get_by_id):
+    @patch('backend.services.concept_service.get_concept_by_concept_id')
+    @patch('backend.services.concept_service.get_concept_by_id')
+    def test_get_elicitation_opportunities(self, mock_get_by_id, mock_get_by_concept_id):
         # Arrange
         instance_id = "instance_123"
         type_id = "#V#Person"

@@ -180,3 +180,11 @@ dev = [
 
 [tool.pdm.python]
 use_venv = true
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "src",
+]
+testpaths = [
+    "tests",
+]
