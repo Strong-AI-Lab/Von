@@ -1,0 +1,25 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"git.confirmSync": false,
+		"typescript.tsserver.maxTsServerMemory": 4096,
+		"terminal.integrated.shellIntegration.enabled": true,
+		"terminal.integrated.profiles.windows": {
+			"PowerShell": {
+				"path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+				"args": [
+					"-NoLogo"
+				]
+			}
+		},
+		"explorer.confirmDragAndDrop": false,
+		"workbench.editor.enablePreview": false,
+		"workbench.tree.expandMode": "singleClick",
+		"terminal.integrated.defaultProfile.windows": "PowerShell",
+		"typescript.enablePromptUseWorkspaceTsdk": true
+	}
+}

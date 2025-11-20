@@ -239,20 +239,43 @@ def create_concept(
         # CRITICAL: Create name as text_relation immediately (modern approach)
         # This prevents migrate-on-read from triggering and creating duplicates
         concept_identifier = concept_doc.get("concept_id")
-        if concept_identifier and name and name.strip():
+        if concept_identifier:
             try:
                 from .text_value_service import upsert_text_for_concept
+
+                # 1. Register the primary display name (NL)
+                if name and name.strip():
+                    upsert_text_for_concept(
+                        subject_concept_id=concept_identifier,
+                        predicate='hasName',
+                        text=name.strip(),
+                        lang='en-NZ',
+                        context={'name_type': 'NL'}
+                    )
+                    logger.info(f"[create_concept] Created hasName text_relation for {concept_identifier}: {name}")
+
+                # 2. Register vonID as CODE name (JVNAUTOSCI-316)
                 upsert_text_for_concept(
                     subject_concept_id=concept_identifier,
                     predicate='hasName',
-                    text=name.strip(),
+                    text=concept_identifier,
                     lang='en-NZ',
-                    context={'name_type': 'NL'}
+                    context={'name_type': 'CODE'}
                 )
-                logger.info(f"[create_concept] Created hasName text_relation for {concept_identifier}: {name}")
+
+                # 3. Register GUID as CODE name (JVNAUTOSCI-316)
+                if '_id' in concept_doc:
+                    upsert_text_for_concept(
+                        subject_concept_id=concept_identifier,
+                        predicate='hasName',
+                        text=str(concept_doc['_id']),
+                        lang='en-NZ',
+                        context={'name_type': 'CODE'}
+                    )
+
             except Exception as name_err:
                 # Non-fatal: concept is created, just name relation failed
-                logger.warning(f"[create_concept] Failed to create hasName relation for {concept_identifier}: {name_err}")
+                logger.warning(f"[create_concept] Failed to create name relations for {concept_identifier}: {name_err}")
 
         try:
             if concept_identifier:
