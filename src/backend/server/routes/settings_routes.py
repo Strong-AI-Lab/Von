@@ -294,6 +294,71 @@ def get_db_location_info():
         current_app.logger.error(f"Error retrieving DB info: {e}", exc_info=True)
         return jsonify({"error": "Failed to retrieve DB info."}), 500
 
+@settings_bp.route("/llm/info", methods=["GET"])
+def get_llm_info():
+    """API endpoint to report the LLM status."""
+    try:
+        active_llm = get_active_llm_setting()
+        provider = active_llm.get("provider", "openai")
+        model = active_llm.get("model", "gpt-4o")
+
+        status = "unknown"
+        error_message = None
+        ping_ok = False
+        details = {}
+
+        if provider == "openai":
+            api_key = get_openai_env_var()
+            if not api_key:
+                status = "missing_key"
+                error_message = "OpenAI API key not set"
+            else:
+                try:
+                    # Verify connectivity
+                    # We use a lightweight check if possible, or just assume configured if key is present
+                    # to avoid latency on every page load if this is called frequently.
+                    # However, the user wants "available", which implies a check.
+                    # The DB check does a ping.
+                    # Let's do a list_models check but maybe catch errors gracefully.
+                    client = OpenAIClient(api_key_env_var=api_key)
+                    # client.list_models() # This might be slow.
+                    # For now, let's assume if key is present it is "configured"
+                    # but maybe we can do a real check if the user specifically asked for "available".
+                    # "blue cartouche when the model set is available"
+                    # I'll do the check.
+                    client.list_models()
+                    status = "ready"
+                    ping_ok = True
+                    details["masked_key"] = f"{api_key[:5]}...{api_key[-4:]}" if len(api_key) > 9 else "..."
+                except Exception as e:
+                    status = "error"
+                    error_message = str(e)
+
+        elif provider == "ollama":
+            host = get_active_ollama_host()
+            details["host"] = host
+            try:
+                from ...languagemodels.llm_interface import OllamaClient
+                client = OllamaClient(host=host)
+                client.list_models()
+                status = "ready"
+                ping_ok = True
+            except Exception as e:
+                status = "error"
+                error_message = str(e)
+
+        return jsonify({
+            "provider": provider,
+            "model": model,
+            "status": status,
+            "ping_ok": ping_ok,
+            "error": error_message,
+            "details": details
+        }), 200
+    except Exception as e:
+        current_app.logger.error(f"Error retrieving LLM info: {e}", exc_info=True)
+        return jsonify({"error": "Failed to retrieve LLM info."}), 500
+
 def _get_entity_with_fallback(entity_id: Optional[str], concept_id: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Try to get entity by ID first, then fall back to concept_id if provided.
