@@ -70,87 +70,8 @@
 
   <!-- Tab Content Area -->
   <div class="tab-content-area">
-    <!-- Chat Tab Content - Embedded for immediate loading -->
-    <div id="chatTab" class="tab-content active">
-      <div class="content-wrapper">
-        <!-- Header with Von intro -->
-        <div class="chat-header">
-          <h2 class="main-title">Talk to Von Neumarkt</h2>
-          <div class="chat-header-controls" role="group" aria-label="Chat tools">
-            <button id="exportConversationMarkdownBtn" class="chat-export-btn" type="button"
-              title="Copy conversation as Markdown formatted transcript" aria-label="Export conversation as Markdown">
-              <span class="btn-icon">MD</span>
-            </button>
-            <button id="exportConversationJsonBtn" class="chat-export-btn" type="button"
-              title="Copy full conversation debug JSON to clipboard" aria-label="Export conversation as JSON">
-              <span class="btn-icon">{}</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Scrollable field for text input and responses -->
-        <div id="scrollableField" class="scrollable-field">
-          <!-- Content will be dynamically added here via JavaScript -->
-        </div>
-
-        <div class="loading-indicator-row">
-          <div id="loadingIndicator" class="loading-indicator" role="status" aria-live="polite" aria-hidden="true">
-            <span class="loading-indicator-dot" aria-hidden="true"></span>
-            <span class="loading-indicator-text">Thinking...</span>
-          </div>
-        </div>
-
-        <!-- Textarea for user prompt -->
-        <textarea id="promptInput" rows="6" class="prompt-input" placeholder="Talk with Von here..."></textarea>
-
-        <!-- Buttons for sending prompt and resetting context -->
-        <div class="button-row">
-          <button id="sendButton" class="btn btn-primary">Send Prompt</button>
-          <button id="resetButton" class="btn btn-secondary" type="button"
-            title="Reset Von's context while keeping this conversation view">Reset Context</button>
-          <label class="annotation-toggle" title="Enable concept annotations in chat responses">
-            <input type="checkbox" id="annotationToggle">
-            <span class="eye-icon">
-              <svg aria-hidden="true" class="icon icon-annotate" viewBox="0 0 24 24" width="16" height="16"
-                stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12Z"></path>
-                <circle cx="12" cy="12" r="3"></circle>
-              </svg>
-            </span>
-            <span class="toggle-label">Annotations</span>
-          </label>
-        </div>
-      </div>
-
-      <!-- Hidden LLM debug popup -->
-      <div id="chatLlmDebugPopup" class="llm-popup hidden" aria-hidden="true">
-        <div class="llm-popup-header">
-          <span>LLM Debug Information</span>
-          <button id="closeChatLlmDebug" class="btn-mini" title="Close">✕</button>
-        </div>
-        <div class="llm-popup-body">
-          <div class="llm-popup-section">
-            <h4>Model & Context</h4>
-            <div id="chatLlmDebugMeta" class="llm-meta"></div>
-          </div>
-          <div class="llm-popup-section">
-            <h4>Messages Sent to LLM</h4>
-            <pre id="chatLlmDebugMessages" class="llm-pre"></pre>
-          </div>
-          <div class="llm-popup-section">
-            <h4>LLM Response</h4>
-            <pre id="chatLlmDebugResponse" class="llm-pre"></pre>
-          </div>
-          <div class="llm-popup-section" id="chatLlmDebugToolsSection">
-            <h4>Tool Invocations</h4>
-            <pre id="chatLlmDebugTools" class="llm-pre"></pre>
-          </div>
-        </div>
-        <div class="llm-popup-footer">
-          <button id="copyChatLlmDebugJson" class="btn-mini" title="Copy debug info as JSON">Copy JSON</button>
-        </div>
-      </div>
-    </div>
+    <!-- Chat Tab Content - Included from separate file -->
+    {% include 'chat_tab.html' %}
 
     <!-- Vontology Tab Content -->
     <div id="vontologyTab" class="tab-content">

@@ -25,7 +25,7 @@
       "name": "KnowKat Active and Todo",
       "query": "project = KKAT AND statusCategory != Done",
       "enabled": true,
-      "monitor": true
+      "monitor": false
     },
     {
       "id": "e5780c55-f2a3-434d-9247-e21bd97b2831",
@@ -33,7 +33,7 @@
       "name": "Von Active and Todo",
       "query": "project = JVNAUTOSCI AND statusCategory != Done",
       "enabled": true,
-      "monitor": true
+      "monitor": false
     }
   ],
   "editor.formatOnSave": true,
