@@ -143,6 +143,15 @@ export async function setModelInfoFooterText() {
   const userInfo = await getCurrentUserInfo();
   const orgInfo = await getCurrentOrganisationInfo();
 
+  // Fetch LLM connection info early for merging into Model segment
+  let llmInfo = null;
+  try {
+    const res = await fetch('/api/settings/llm/info');
+    if (res?.ok) {
+      llmInfo = await res.json();
+    }
+  } catch (e) { }
+
   let modelText = 'Model: Not Set';
   if (activeLlm?.provider && activeLlm?.model) {
     modelText = `Model: ${activeLlm.provider}: ${activeLlm.model}`;
@@ -208,13 +217,47 @@ export async function setModelInfoFooterText() {
   }
   const resolvedModelConcept = await resolveLlmConcept(activeLlm);
 
+  // Determine LLM status styles
+  const status = llmInfo?.status || 'unknown';
+  const errorMsg = llmInfo?.error || '';
+  let llmClass = '';
+  let llmTooltipSuffix = '';
+
+  if (status === 'missing_key') {
+    llmClass = 'fatal';
+    llmTooltipSuffix = `\nStatus: Missing Key`;
+  } else if (status === 'error') {
+    llmClass = 'fatal';
+    llmTooltipSuffix = `\nStatus: Error\n${errorMsg}`;
+  } else if (status === 'ready') {
+    llmClass = 'atlas';
+    llmTooltipSuffix = `\nStatus: Ready`;
+  }
+
   // Build dynamic segments (User / Org as concept buttons)
   const segments = [];
   if (resolvedModelConcept) {
     // Create a concept button for the model individual (label prefix 'Model')
-    segments.push(makeConceptButton('Model', activeLlm?.model || resolvedModelConcept.name, resolvedModelConcept.conceptId, resolvedModelConcept.name));
+    const seg = makeConceptButton('Model', activeLlm?.model || resolvedModelConcept.name, resolvedModelConcept.conceptId, resolvedModelConcept.name);
+    if (llmClass) seg.classList.add('db-conn-badge', llmClass);
+    if (llmTooltipSuffix) {
+      const btn = seg.querySelector('button');
+      if (btn) btn.title = (btn.title || '') + llmTooltipSuffix;
+    }
+    segments.push(seg);
   } else {
-    segments.push(modelText);
+    const span = document.createElement('span');
+    span.className = 'footer-segment';
+    if (llmClass) span.classList.add('db-conn-badge', llmClass);
+    const label = document.createElement('span');
+    label.className = 'footer-label-inline';
+    label.textContent = 'Model: ';
+    span.appendChild(label);
+    const val = document.createElement('span');
+    val.textContent = activeLlm?.model || 'Not Set';
+    span.appendChild(val);
+    if (llmTooltipSuffix) span.title = llmTooltipSuffix.trim();
+    segments.push(span);
   }
 
   function makeConceptButton(labelPrefix, displayName, conceptId, conceptName) {

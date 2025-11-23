@@ -115,11 +115,16 @@ async function loadChatHistory() {
                 if (msg.role === 'user' || msg.role === 'assistant') {
                     const turnId = `history-${msg.role}-${index}`;
                     const label = msg.role === 'user' ? 'User' : 'Von';
-                    appendMessage(label, msg.content, turnId, false, true); // false = no LLM debug, true = isHistory
+                    appendMessage(label, msg.content, turnId, false, true, msg.timestamp); // false = no LLM debug, true = isHistory
                 }
             });
 
             console.log(`Loaded ${data.history.length} historical messages`);
+
+            // Scroll to bottom after loading history
+            setTimeout(() => {
+                scrollableField.scrollTop = scrollableField.scrollHeight;
+            }, 0);
         } else {
             console.log('No chat history to load or empty history');
         }
@@ -329,10 +334,33 @@ async function handleResetContext() {
     }
 }
 
-function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false) {
-    const scrollableField = document.getElementById('scrollableField');
+function formatChatTimestamp(isoString) {
+    if (!isoString) return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const date = new Date(isoString);
     const now = new Date();
-    const timestamp = now.toLocaleTimeString();
+    const diffMs = now - date;
+    const diffDays = diffMs / (1000 * 60 * 60 * 24);
+
+    // Check if it's the same calendar day
+    const isToday = now.getDate() === date.getDate() &&
+        now.getMonth() === date.getMonth() &&
+        now.getFullYear() === date.getFullYear();
+
+    if (isToday) {
+        // Today: Time only
+        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } else if (diffDays < 7) {
+        // Within a week: Day + Time
+        return date.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+    } else {
+        // Older: Date + Time
+        return date.toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+}
+
+function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null) {
+    const scrollableField = document.getElementById('scrollableField');
+    const displayTimestamp = formatChatTimestamp(timestampStr);
 
     if (sender === 'Von' || (isHistory && sender === 'assistant')) {
         // Create a container for Von's response with image
@@ -353,7 +381,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
         messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; align-items: center; gap: 8px;';
 
         const headerText = document.createElement('span');
-        headerText.textContent = `Von • ${timestamp}`;
+        headerText.textContent = `Von • ${displayTimestamp}`;
         messageHeader.appendChild(headerText);
 
         // Add LLM debug button if debug data available
@@ -393,7 +421,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
         messageHeader.style.color = sender === 'Error' ? '#dc3545' : '#28a745';
 
         const headerText = document.createElement('span');
-        headerText.textContent = `${sender} • ${timestamp}`;
+        headerText.textContent = `${sender} • ${displayTimestamp}`;
         messageHeader.appendChild(headerText);
 
         // Add LLM debug button for errors if debug data available
@@ -417,7 +445,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
         scrollableField.appendChild(messageContainer);
     }
 
-    recordTranscriptTurn(sender, message, { turnId, isHistory, timestamp: now.toISOString() });
+    recordTranscriptTurn(sender, message, { turnId, isHistory, timestamp: timestampStr || new Date().toISOString() });
 
     // Auto-scroll to bottom
     if (!isHistory) {
