@@ -346,9 +346,19 @@ function formatChatTimestamp(isoString) {
         now.getMonth() === date.getMonth() &&
         now.getFullYear() === date.getFullYear();
 
+    // Check if it was yesterday
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const isYesterday = yesterday.getDate() === date.getDate() &&
+        yesterday.getMonth() === date.getMonth() &&
+        yesterday.getFullYear() === date.getFullYear();
+
     if (isToday) {
-        // Today: Time only
-        return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        // Today: "Today HH:MM"
+        return 'Today ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } else if (isYesterday) {
+        // Yesterday: "Yesterday HH:MM"
+        return 'Yesterday ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     } else if (diffDays < 7) {
         // Within a week: Day + Time
         return date.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
@@ -736,5 +746,5 @@ export const resetChat = handleResetContext;
 export const handleChatResponse = appendMessage;
 export const exportConversationJson = handleExportConversationJson;
 export const exportConversationMarkdown = handleExportConversationMarkdown;
-export { updateHistoryLength };
+export { formatChatTimestamp, updateHistoryLength };
 
