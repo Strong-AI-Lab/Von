@@ -330,13 +330,41 @@ function Initialize-Windows {
     Write-Host "Installing dependencies with PDM..." -ForegroundColor Cyan
     & .venv\Scripts\pdm install --verbose
 
-    # Verify installation
-    if (Test-Path ".venv\Lib\site-packages") {
+    # Verify installation and attempt repair if needed
+    Write-Host "Verifying installation..." -ForegroundColor Cyan
+    $verificationScript = "
+try:
+    import flask
+    import pymongo
+    import pdm
+    print('VERIFICATION_SUCCESS')
+except ImportError as e:
+    print(f'VERIFICATION_FAILED: {e}')
+    exit(1)
+"
+    $verificationResult = & .venv\Scripts\python.exe -c $verificationScript 2>&1
+
+    if ($LASTEXITCODE -eq 0 -and $verificationResult -match "VERIFICATION_SUCCESS") {
         Write-Host "PDM successfully installed packages." -ForegroundColor Green
     }
     else {
-        Write-Host "Error: Package installation failed." -ForegroundColor Red
-        exit 1
+        Write-Host "Verification failed: $verificationResult" -ForegroundColor Red
+        Write-Host "Attempting auto-repair of dependencies..." -ForegroundColor Yellow
+
+        # Attempt 1: Force reinstall PDM and sync
+        Write-Host "Reinstalling PDM and syncing..." -ForegroundColor Cyan
+        & .venv\Scripts\python.exe -m pip install --upgrade pdm
+        & .venv\Scripts\pdm sync --clean --verbose
+
+        # Verify again
+        $verificationResult = & .venv\Scripts\python.exe -c $verificationScript 2>&1
+        if ($LASTEXITCODE -eq 0 -and $verificationResult -match "VERIFICATION_SUCCESS") {
+            Write-Host "Repair successful." -ForegroundColor Green
+        }
+        else {
+            Write-Host "Repair failed. Please try running setup with -Reset." -ForegroundColor Red
+            exit 1
+        }
     }
 }
 
