@@ -170,6 +170,8 @@ $CurrentLog = Join-Path $LogsDir "von_${Port}_current.log"
 $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $NewLog = Join-Path $LogsDir "von_${Port}_${Timestamp}.log"
 
+$script:RepairAttempted = $false
+
 function Get-ExistingProcess {
     if (-not (Test-Path $PidFile)) { return $null }
     $content = Get-Content $PidFile -ErrorAction SilentlyContinue | Where-Object { $_ }
@@ -492,9 +494,35 @@ function Start-VonServer {
                 catch { $procCheck = $null }
                 if (-not $procCheck) {
                     Write-LauncherLog "ERROR: Server process exited early before listening on port $Port. Showing last 40 log lines:"
+                    $logTail = @()
                     if (Test-Path $CurrentLog) {
-                        try { Get-Content $CurrentLog -Tail 40 | ForEach-Object { Write-Host $_ } } catch { Write-LauncherLog "(Log tail unavailable: $($_.Exception.Message))" }
+                        try { 
+                            $logTail = Get-Content $CurrentLog -Tail 40 
+                            $logTail | ForEach-Object { Write-Host $_ } 
+                        } catch { Write-LauncherLog "(Log tail unavailable: $($_.Exception.Message))" }
                     }
+
+                    # Auto-repair logic for missing dependencies
+                    if (-not $script:RepairAttempted) {
+                        $logText = $logTail -join "`n"
+                        if ($logText -match "ModuleNotFoundError" -or $logText -match "ImportError") {
+                            Write-LauncherLog "Detected missing dependencies. Attempting auto-repair..."
+                            $script:RepairAttempted = $true
+                            
+                            $setupScript = Join-Path $Root "setup_py.ps1"
+                            if (Test-Path $setupScript) {
+                                & $setupScript
+                                if ($LASTEXITCODE -eq 0) {
+                                    Write-LauncherLog "Repair completed successfully. Retrying server start..."
+                                    Start-VonServer
+                                    return
+                                } else {
+                                    Write-LauncherLog "Repair failed."
+                                }
+                            }
+                        }
+                    }
+
                     Write-LauncherLog "Aborting start. (Use -HealthDebug for verbose retries)"
                     return
                 }
