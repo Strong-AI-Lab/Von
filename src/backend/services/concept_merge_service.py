@@ -173,6 +173,8 @@ def merge_concepts(source_id: str, target_id: str, simulate: bool = True) -> Dic
         # This is complex to do atomically without full document replacement.
         # We'll fetch target again, update in memory, and save.
         target_doc = get_concept_by_id(target_id) # Refresh
+        if target_doc is None:
+            raise ValueError(f"Target concept '{target_id}' no longer exists")
         target_rels = target_doc.get("relationships", {})
 
         for rel_type, targets in source_rels.items():

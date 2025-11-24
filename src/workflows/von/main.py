@@ -2,6 +2,8 @@
 
 import sys
 import os
+import importlib
+from importlib import util as importlib_util
 project_root_str = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../.."))
 src_root = os.path.join(project_root_str, "src")
@@ -97,7 +99,7 @@ if os.environ.get(DEBUG_ATTACH_ENV):  # pragma: no cover
     try:
         import importlib
         # type: ignore[attr-defined]
-        if importlib.util.find_spec("debugpy") is not None:
+        if importlib_util.find_spec("debugpy") is not None:
             debugpy = importlib.import_module("debugpy")  # type: ignore
             host = os.environ.get("VON_DEBUGPY_HOST", "127.0.0.1")
             port = int(os.environ.get("VON_DEBUGPY_PORT", "5678"))
@@ -120,7 +122,7 @@ def _periodic_mem_logger():  # pragma: no cover
     try:
         import importlib
         # type: ignore[attr-defined]
-        if importlib.util.find_spec("psutil") is None:
+        if importlib_util.find_spec("psutil") is None:
             logger.debug("psutil not installed; memory logger disabled.")
             return
         psutil = importlib.import_module("psutil")  # type: ignore
@@ -290,7 +292,7 @@ def main():
             import importlib
             serve = None
             # type: ignore[attr-defined]
-            if importlib.util.find_spec("waitress") is not None:
+            if importlib_util.find_spec("waitress") is not None:
                 waitress_mod = importlib.import_module(
                     "waitress")  # type: ignore
                 serve = getattr(waitress_mod, "serve", None)
