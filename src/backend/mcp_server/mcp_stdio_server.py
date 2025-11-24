@@ -621,7 +621,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "error_count": len(errors),
                     "results": results,
                     "errors": errors if errors else []
-                }, indent=2)
+                }, indent=2))
             ]
 
         elif name == "get_tree":
