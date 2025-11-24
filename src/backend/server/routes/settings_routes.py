@@ -298,7 +298,7 @@ def get_db_location_info():
 def get_llm_info():
     """API endpoint to report the LLM status."""
     try:
-        active_llm = get_active_llm_setting()
+        active_llm = get_active_llm_setting() or {}
         provider = active_llm.get("provider", "openai")
         model = active_llm.get("model", "gpt-4o")
 
