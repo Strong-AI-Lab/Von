@@ -544,6 +544,31 @@ def _extract_url(**kwargs):
     return asyncio.run(_async_extract())
 
 
+def _delete_concept(**kwargs):
+    from ...vontology.utils_vontology import simulate_or_delete_concept
+
+    concept_id = kwargs.get("concept_id")
+    simulate = kwargs.get("simulate", True)
+
+    if not concept_id:
+        return {"error": "Missing concept_id parameter"}
+
+    return simulate_or_delete_concept(concept_id, execute=not simulate)
+
+
+def _merge_concepts(**kwargs):
+    from ...services.concept_merge_service import merge_concepts
+
+    source_id = kwargs.get("source_id")
+    target_id = kwargs.get("target_id")
+    simulate = kwargs.get("simulate", True)
+
+    if not source_id or not target_id:
+        return {"error": "Missing source_id or target_id parameter"}
+
+    return merge_concepts(source_id, target_id, simulate=simulate)
+
+
 def _tree_input_schema() -> Schema:
     return Schema(
         required={},
@@ -982,6 +1007,42 @@ def _extract_url_output_schema() -> Schema:
     )
 
 
+def _delete_concept_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={"simulate": (bool,)},
+        allow_unknown=False,
+        description="delete_concept input: concept_id (str), simulate (bool, default true)"
+    )
+
+
+def _delete_concept_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={"simulate": (bool,), "error": (str,), "operations": (list,), "warnings": (list,)},
+        allow_unknown=True,
+        description="delete_concept output"
+    )
+
+
+def _merge_concepts_input_schema() -> Schema:
+    return Schema(
+        required={"source_id": str, "target_id": str},
+        optional={"simulate": (bool,)},
+        allow_unknown=False,
+        description="merge_concepts input: source_id (str), target_id (str), simulate (bool, default true)"
+    )
+
+
+def _merge_concepts_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={"simulate": (bool,), "error": (str,), "operations": (list,), "warnings": (list,)},
+        allow_unknown=True,
+        description="merge_concepts output"
+    )
+
+
 def build_default_catalogue() -> MethodCatalogue:
     """Return a catalogue pre-populated with the baseline method set."""
 
@@ -1080,6 +1141,22 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=_add_relationship_output_schema(),
             category="write",
             description="Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' → 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'. Examples: source_id='#V#nikola_k._kasabov', predicate='instance_of', target='#V#professor' OR source_id='#V#nikola_k._kasabov', predicate='#V#hasAffiliation', target='Auckland University of Technology'.",
+        ),
+        MethodDefinition(
+            name="delete_concept",
+            handler=_delete_concept,
+            input_schema=_delete_concept_input_schema(),
+            output_schema=_delete_concept_output_schema(),
+            category="write",
+            description="Deletes a concept and handles its relationships. Can simulate the deletion first to see impact. Use when you need to remove a concept from the ontology. Returns a report of operations and warnings.",
+        ),
+        MethodDefinition(
+            name="merge_concepts",
+            handler=_merge_concepts,
+            input_schema=_merge_concepts_input_schema(),
+            output_schema=_merge_concepts_output_schema(),
+            category="write",
+            description="Merges a source concept into a target concept. Moves relationships, names, and text values, then deletes the source. Can simulate first. Use when you have duplicate concepts and want to consolidate them into one.",
         ),
         # arXiv MCP tools
         MethodDefinition(

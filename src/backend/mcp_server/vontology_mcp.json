@@ -1,0 +1,363 @@
+{
+    "mcpVersion": "1.0.0",
+    "tools": [
+        {
+            "name": "get_context",
+            "description": "Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "name": "create_concepts",
+            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "parent_id": {
+                        "type": "string",
+                        "description": "Parent concept ID"
+                    },
+                    "concepts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string"
+                                },
+                                "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                        "instance",
+                                        "type",
+                                        "predicate"
+                                    ]
+                                },
+                                "description": {
+                                    "type": "string"
+                                },
+                                "notes": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "name"
+                            ]
+                        }
+                    }
+                },
+                "required": [
+                    "parent_id",
+                    "concepts"
+                ]
+            }
+        },
+        {
+            "name": "find_subconcepts",
+            "description": "Finds direct subconcepts (children) of a given concept.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to find children for"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ]
+            }
+        },
+        {
+            "name": "find_concepts_by_name",
+            "description": "Finds concepts with a name containing the provided string.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name substring to search for"
+                    }
+                },
+                "required": [
+                    "name"
+                ]
+            }
+        },
+        {
+            "name": "add_names",
+            "description": "Add one or more names/aliases/synonyms to a concept using text relations (hasName predicate). Supports bulk operations and multilingual names. Pass array of strings for simple names (defaults: en-NZ, NL) or objects for control. Name types: NL (Natural Language - standard names/translations, default), ABBR (Abbreviation - 'EU', 'NATO', 'PhD'), CODE (URIs/system IDs). Language codes: en-NZ (default), en-US, fr, de, es, it, mi (Māori), zh (Chinese), ja (Japanese), etc. Examples: names=['EU member', 'EU state'] or names=[{name:'État membre', language:'fr'}, {name:'EU MS', name_type:'ABBR'}].",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to add names to"
+                    },
+                    "names": {
+                        "type": "array",
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {
+                                            "type": "string"
+                                        },
+                                        "language": {
+                                            "type": "string"
+                                        },
+                                        "name_type": {
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "name"
+                                    ]
+                                }
+                            ]
+                        },
+                        "description": "List of names to add (strings or objects)"
+                    }
+                },
+                "required": [
+                    "concept_id",
+                    "names"
+                ]
+            }
+        },
+        {
+            "name": "delete_concept",
+            "description": "Deletes a concept and handles its relationships. Can simulate the deletion first to see impact. Use when you need to remove a concept from the ontology. Returns a report of operations and warnings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to delete"
+                    },
+                    "simulate": {
+                        "type": "boolean",
+                        "description": "Whether to simulate the deletion first (default: true)"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ]
+            }
+        },
+        {
+            "name": "merge_concepts",
+            "description": "Merges a source concept into a target concept. Moves relationships, names, and text values, then deletes the source. Can simulate first. Use when you have duplicate concepts and want to consolidate them into one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_id": {
+                        "type": "string",
+                        "description": "The source concept ID to merge from"
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "description": "The target concept ID to merge into"
+                    },
+                    "simulate": {
+                        "type": "boolean",
+                        "description": "Whether to simulate the merge first (default: true)"
+                    }
+                },
+                "required": [
+                    "source_id",
+                    "target_id"
+                ]
+            }
+        },
+        {
+            "name": "search_web",
+            "description": "⚠️ USE FOR RECENT/CURRENT INFORMATION ⚠️ Search the web for information published after your training cutoff. REQUIRED when user asks for: recent, latest, current, new, breaking, today's, this week's, 2024+, 2025+, 'what's new', 'recent advances', 'latest research', 'current developments'. Returns web pages with titles, URLs, content snippets, and relevance scores. Supports advanced search (search_depth='advanced'), domain filtering (include_domains/exclude_domains), AI-generated answers (include_answer=true), full page content (include_raw_content=true), and images (include_images=true).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string"
+                    },
+                    "max_results": {
+                        "type": "integer"
+                    },
+                    "search_depth": {
+                        "type": "string",
+                        "enum": [
+                            "basic",
+                            "advanced"
+                        ]
+                    },
+                    "include_domains": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "exclude_domains": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "include_answer": {
+                        "type": "boolean"
+                    },
+                    "include_raw_content": {
+                        "type": "boolean"
+                    },
+                    "include_images": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "query"
+                ]
+            }
+        },
+        {
+            "name": "context_search",
+            "description": "Context-aware web search that uses provided context to improve search relevance. Use when you have background information that would help narrow or focus the search. The context parameter should contain relevant information about the topic, domain, or specific requirements. More precise than basic search when you have contextual information. Example: query='latest research', context='machine learning interpretability in healthcare applications'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string"
+                    },
+                    "context": {
+                        "type": "string"
+                    },
+                    "max_results": {
+                        "type": "integer"
+                    },
+                    "search_depth": {
+                        "type": "string",
+                        "enum": [
+                            "basic",
+                            "advanced"
+                        ]
+                    },
+                    "include_answer": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "query",
+                    "context"
+                ]
+            }
+        },
+        {
+            "name": "qna_search",
+            "description": "Question-answering optimized search that returns a direct answer to a specific question. Use when user asks a direct question that needs a factual answer from the web. Returns both a concise answer and supporting sources. Uses advanced search depth by default for better answer quality. Best for factual questions like 'When was X founded?', 'What is the population of Y?', 'Who invented Z?', 'How does X work?'. More focused and answer-oriented than general search.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string"
+                    },
+                    "max_results": {
+                        "type": "integer"
+                    },
+                    "search_depth": {
+                        "type": "string",
+                        "enum": [
+                            "basic",
+                            "advanced"
+                        ]
+                    }
+                },
+                "required": [
+                    "query"
+                ]
+            }
+        },
+        {
+            "name": "extract_url",
+            "description": "Extract and return the main text content from a specific URL. Use when user provides a URL and wants to read, analyse, or extract information from that specific web page. Returns cleaned text content and page title. Useful for reading articles, documentation, or any web page content. Example: 'read this article: https://example.com/article', 'extract content from this URL'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "url"
+                ]
+            }
+        },
+        {
+            "name": "search_arxiv",
+            "description": "Search arXiv.org for scholarly articles. Use when user asks to find papers by author, keyword, topic, or date range. Returns list of papers with id, title, authors, summary, and publication date. Supports boolean operators in query (AND, OR, NOT). Example: 'causal reasoning AND neural networks'. Results can be sorted by relevance, submission date, or last updated date.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string"
+                    },
+                    "max_results": {
+                        "type": "integer"
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "enum": [
+                            "relevance",
+                            "lastUpdatedDate",
+                            "submittedDate"
+                        ]
+                    },
+                    "sort_order": {
+                        "type": "string",
+                        "enum": [
+                            "ascending",
+                            "descending"
+                        ]
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "get_paper_metadata",
+            "description": "Get detailed metadata for a single arXiv paper (title, authors, abstract, categories, DOI, pdf_url). Use when a user needs paper details without downloading the PDF.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "arxiv_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "arxiv_id"
+                ]
+            }
+        },
+        {
+            "name": "download_paper",
+            "description": "Download PDF of an arXiv paper to local storage (data/arxiv_papers/). Use when user asks to download/save/fetch a paper. Returns file path where PDF was saved. Accepts optional filename parameter for custom naming (defaults to arxiv_id.pdf).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "arxiv_id": {
+                        "type": "string"
+                    },
+                    "filename": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "arxiv_id"
+                ]
+            }
+        }
+    ]
+}
