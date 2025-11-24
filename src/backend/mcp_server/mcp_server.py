@@ -13,11 +13,13 @@ if project_root not in sys.path:
 from ..vontology.utils_vontology import (
     create_vontology_concept,
     get_all_vontology_nodes_with_details,
+    simulate_or_delete_concept,
 )
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.concept_service import get_concept_display_name_with_names_fallback
 from ..services.concept_search_service import search_concepts
 from ..services.text_value_service import upsert_text_for_concept
+from ..services.concept_merge_service import merge_concepts
 from ..integrations.internal_mcp.arxiv_proxy import get_arxiv_proxy, ArxivProxyError
 from ..integrations.internal_mcp.search_proxy_mcp import get_search_proxy, SearchProxyError
 
@@ -311,6 +313,73 @@ def mcp_add_names():
 
     except PermissionError as e:
         return jsonify({"error": f"Permission denied: {str(e)}"}), 403
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/delete_concept', methods=['POST'])
+def mcp_delete_concept():
+    """
+    Deletes a concept and handles its relationships.
+    Expects JSON: {
+        "concept_id": "#V#...",
+        "simulate": true/false (default true)
+    }
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    concept_id = data.get('concept_id')
+    simulate = data.get('simulate', True)
+
+    if not concept_id:
+        return jsonify({"error": "Missing 'concept_id'"}), 400
+
+    try:
+        # Reuse the existing logic
+        result = simulate_or_delete_concept(concept_id, execute=not simulate)
+
+        status_code = 200
+        if not result.get('success', False):
+             status_code = 404 if 'not found' in result.get('error', '').lower() else 400
+
+        return jsonify(result), status_code
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/merge_concepts', methods=['POST'])
+def mcp_merge_concepts():
+    """
+    Merges a source concept into a target concept.
+    Expects JSON: {
+        "source_id": "#V#...",
+        "target_id": "#V#...",
+        "simulate": true/false (default true)
+    }
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    source_id = data.get('source_id')
+    target_id = data.get('target_id')
+    simulate = data.get('simulate', True)
+
+    if not source_id or not target_id:
+        return jsonify({"error": "Missing 'source_id' or 'target_id'"}), 400
+
+    try:
+        result = merge_concepts(source_id, target_id, simulate=simulate)
+
+        status_code = 200
+        if not result.get('success', False):
+             status_code = 400
+
+        return jsonify(result), status_code
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
