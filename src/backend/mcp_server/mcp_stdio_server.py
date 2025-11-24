@@ -30,6 +30,7 @@ from src.backend.vontology.utils_vontology import (
     create_vontology_concept,
     get_all_vontology_nodes_with_details,
     get_vontology_tree,
+    simulate_or_delete_concept,
 )
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.services.concept_service import (
@@ -41,6 +42,7 @@ from src.backend.services.concept_relation_service import build_concept_relation
 from src.backend.services.concept_search_service import search_concepts
 from src.backend.services.text_value_service import upsert_text_for_concept
 from src.backend.services.annotation_extraction_service import extract_annotations
+from src.backend.services.concept_merge_service import merge_concepts
 from src.backend.services.settings_service import (
     get_active_llm_setting,
     get_preferred_language,
@@ -367,6 +369,48 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["source_id", "predicate", "target"]
             }
+        ),
+        Tool(
+            name="delete_concept",
+            description="Deletes a concept and handles its relationships. Can simulate the deletion first to see impact.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to delete"
+                    },
+                    "simulate": {
+                        "type": "boolean",
+                        "description": "If true (default), only simulates the deletion and returns a report. If false, executes the deletion.",
+                        "default": True
+                    }
+                },
+                "required": ["concept_id"]
+            }
+        ),
+        Tool(
+            name="merge_concepts",
+            description="Merges a source concept into a target concept. Moves relationships, names, and text values, then deletes the source. Can simulate first.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_id": {
+                        "type": "string",
+                        "description": "The concept ID to merge FROM (will be deleted)"
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "description": "The concept ID to merge TO (will receive data)"
+                    },
+                    "simulate": {
+                        "type": "boolean",
+                        "description": "If true (default), only simulates the merge and returns a report. If false, executes the merge.",
+                        "default": True
+                    }
+                },
+                "required": ["source_id", "target_id"]
+            }
         )
     ]
 
@@ -578,7 +622,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     "results": results,
                     "errors": errors if errors else []
                 }, indent=2)
-            )]
+            ]
 
         elif name == "get_tree":
             # Reuse existing tree function
@@ -858,6 +902,39 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     type="text",
                     text=json.dumps({"error": f"Failed to add relationship: {str(e)}"})
                 )]
+
+        elif name == "delete_concept":
+            concept_id = arguments.get("concept_id")
+            simulate = arguments.get("simulate", True)
+
+            if not concept_id:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Missing concept_id parameter"})
+                )]
+
+            result = simulate_or_delete_concept(concept_id, execute=not simulate)
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "merge_concepts":
+            source_id = arguments.get("source_id")
+            target_id = arguments.get("target_id")
+            simulate = arguments.get("simulate", True)
+
+            if not source_id or not target_id:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Missing source_id or target_id parameter"})
+                )]
+
+            result = merge_concepts(source_id, target_id, simulate=simulate)
+            return [TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
 
         else:
             return [TextContent(
