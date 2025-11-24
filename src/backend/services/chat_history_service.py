@@ -55,6 +55,46 @@ def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
         raise ChatHistoryServiceError(f"Could not retrieve chat history: {e}") from e
 
 
+def get_chat_history_segments(user_id: str, session_id: str) -> List[List[Dict[str, Any]]]:
+    """Return chat history split into segments separated by reset markers."""
+    if not user_id or not session_id:
+        raise ChatHistoryServiceError("user_id and session_id are required.")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    try:
+        doc = chat_history_coll.find_one({
+            "user_id": user_id,
+            "session_id": session_id
+        })
+
+        if not doc or "history" not in doc:
+            return []
+
+        history = doc.get("history", [])
+        if not history:
+            return []
+
+        segments: List[List[Dict[str, Any]]] = []
+        current_segment: List[Dict[str, Any]] = []
+
+        for entry in history:
+            if entry.get("role") == "system" and entry.get("content") == "__RESET__":
+                segments.append(current_segment)
+                current_segment = []
+                continue
+            current_segment.append(entry)
+
+        # Always append the tail segment (even if empty) to record fresh resets
+        segments.append(current_segment)
+        return segments
+    except PyMongoError as e:
+        logger.error(f"Error retrieving segmented chat history: {e}", exc_info=True)
+        raise ChatHistoryServiceError(f"Could not retrieve segmented chat history: {e}") from e
+
+
 def add_message_to_history(user_id: str, session_id: str, message: Dict[str, Any]) -> None:
     """
     Adds a message to the chat history for a specific user and session.

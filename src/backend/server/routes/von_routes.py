@@ -411,25 +411,45 @@ def generate():
 
 @von_bp.route("/history", methods=["GET"])
 def history():
-    """Retrieve the chat history for the current user."""
+    """Retrieve chat history segments for the current user."""
     user_concept_id = session.get("user_concept_id")
     session_id = session.get("session_id")
 
     if not user_concept_id or not session_id:
-        return jsonify({"history": []})
+        return jsonify({
+            "history": [],
+            "segments_returned": 0,
+            "total_segments": 0,
+            "has_more_history": False
+        })
+
+    requested_segments = request.args.get("segments", default=1, type=int)
+    segment_count = max(1, requested_segments)
 
     try:
-        history = chat_history_service.get_chat_history(user_concept_id, session_id)
-        # Find the index of the last reset marker
-        last_reset_index = -1
-        for i, msg in enumerate(reversed(history)):
-            if msg.get("role") == "system" and msg.get("content") == "__RESET__":
-                last_reset_index = len(history) - 1 - i
-                break
-        if last_reset_index != -1:
-            history = history[last_reset_index + 1:]
+        segments = chat_history_service.get_chat_history_segments(user_concept_id, session_id)
+        total_segments = len(segments)
 
-        return jsonify({"history": history})
+        if total_segments == 0:
+            return jsonify({
+                "history": [],
+                "segments_returned": 0,
+                "total_segments": 0,
+                "has_more_history": False
+            })
+
+        segment_count = min(segment_count, total_segments)
+        selected_segments = segments[-segment_count:]
+        flattened_history = [msg for segment in selected_segments for msg in segment]
+
+        has_more = segment_count < total_segments
+
+        return jsonify({
+            "history": flattened_history,
+            "segments_returned": segment_count,
+            "total_segments": total_segments,
+            "has_more_history": has_more
+        })
     except Exception as e:
         print(f"Error retrieving history: {e}")
         return jsonify({"error": str(e)}), 500

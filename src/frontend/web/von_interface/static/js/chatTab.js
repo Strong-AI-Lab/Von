@@ -7,6 +7,8 @@ import { annotateElementText } from './utils/textDecorator.js';
 const llmDebugData = new Map();
 // Track conversation turns for Markdown export and state resets
 const transcriptTurns = [];
+let historySegmentsShown = 1;
+let totalHistorySegments = 1;
 
 // Persist sender/message pairs for transcript exports
 function recordTranscriptTurn(sender, message, options = {}) {
@@ -21,6 +23,28 @@ function recordTranscriptTurn(sender, message, options = {}) {
         isHistory: !!options.isHistory,
         timestamp: options.timestamp || new Date().toISOString()
     });
+}
+
+function updateHistoryBanner() {
+    const banner = document.getElementById('historyBanner');
+    const bannerText = document.getElementById('historyBannerText');
+    const loadButton = document.getElementById('loadOlderHistoryBtn');
+
+    if (!banner || !bannerText || !loadButton) {
+        return;
+    }
+
+    const remainingSegments = Math.max(totalHistorySegments - historySegmentsShown, 0);
+
+    if (remainingSegments > 0) {
+        const segmentLabel = remainingSegments === 1 ? 'segment' : 'segments';
+        bannerText.textContent = `Earlier conversation ${segmentLabel} available (${remainingSegments})`;
+        banner.classList.remove('hidden');
+        loadButton.disabled = false;
+    } else {
+        banner.classList.add('hidden');
+        loadButton.disabled = true;
+    }
 }
 
 function indicateClipboardResult(button, originalContent, isSuccess) {
@@ -93,44 +117,126 @@ async function updateHistoryLength() {
     }
 }
 
-async function loadChatHistory() {
+async function loadChatHistory(options = {}) {
+    const {
+        segments,
+        scrollToBottom = true,
+        preserveScroll = false,
+        showResetNotice = false
+    } = options;
+
+    const scrollableField = document.getElementById('scrollableField');
+    if (!scrollableField) {
+        console.error('scrollableField not found');
+        return false;
+    }
+
+    const requestedSegments = Number.isInteger(segments) && segments > 0 ? segments : historySegmentsShown;
+    const segmentCount = Math.max(requestedSegments || 1, 1);
+    const params = new URLSearchParams({ segments: segmentCount.toString() });
+
     try {
-        const response = await fetch('/von/history');
+        const response = await fetch(`/von/history?${params.toString()}`);
         const data = await response.json();
 
         if (response.ok && data.history && Array.isArray(data.history)) {
-            const scrollableField = document.getElementById('scrollableField');
-            if (!scrollableField) {
-                console.error('scrollableField not found');
-                return;
-            }
+            historySegmentsShown = Math.max(data.segments_returned || segmentCount, 0);
+            totalHistorySegments = Math.max(data.total_segments || historySegmentsShown, historySegmentsShown);
 
-            // Clear existing messages and cached state before rehydration
-            scrollableField.innerHTML = '';
-            transcriptTurns.length = 0;
-            llmDebugData.clear();
-
-            // Append historical messages
-            data.history.forEach((msg, index) => {
-                if (msg.role === 'user' || msg.role === 'assistant') {
-                    const turnId = `history-${msg.role}-${index}`;
-                    const label = msg.role === 'user' ? 'User' : 'Von';
-                    appendMessage(label, msg.content, turnId, false, true, msg.timestamp); // false = no LLM debug, true = isHistory
-                }
+            rehydrateHistory(scrollableField, data.history, {
+                scrollToBottom,
+                preserveScroll,
+                showResetNotice
             });
 
-            console.log(`Loaded ${data.history.length} historical messages`);
-
-            // Scroll to bottom after loading history
-            setTimeout(() => {
-                scrollableField.scrollTop = scrollableField.scrollHeight;
-            }, 0);
-        } else {
-            console.log('No chat history to load or empty history');
+            updateHistoryBanner();
+            console.log(`Loaded ${data.history.length} historical messages across ${historySegmentsShown} segment(s)`);
+            return true;
         }
+
+        historySegmentsShown = Math.max(data?.segments_returned || 0, 0);
+        totalHistorySegments = Math.max(data?.total_segments || historySegmentsShown, historySegmentsShown);
+        updateHistoryBanner();
+        console.log('No chat history to load or empty history');
+        return false;
     } catch (error) {
         console.error('Error loading chat history:', error);
+        updateHistoryBanner();
+        return false;
     }
+}
+
+function rehydrateHistory(scrollableField, historyMessages, options = {}) {
+    const {
+        scrollToBottom = true,
+        preserveScroll = false,
+        showResetNotice = false
+    } = options;
+
+    const previousScrollHeight = scrollableField.scrollHeight;
+    const previousScrollTop = scrollableField.scrollTop;
+
+    scrollableField.innerHTML = '';
+    transcriptTurns.length = 0;
+    llmDebugData.clear();
+
+    historyMessages.forEach((msg, index) => {
+        if (msg.role === 'user' || msg.role === 'assistant') {
+            const turnId = `history-${msg.role}-${index}`;
+            const label = msg.role === 'user' ? 'User' : 'Von';
+            appendMessage(label, msg.content, turnId, false, true, msg.timestamp);
+        }
+    });
+
+    if (showResetNotice) {
+        appendResetNotice(scrollableField);
+    }
+
+    const requestFrame = (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function')
+        ? window.requestAnimationFrame.bind(window)
+        : (cb) => setTimeout(cb, 0);
+
+    requestFrame(() => {
+        if (preserveScroll) {
+            const newScrollHeight = scrollableField.scrollHeight;
+            const delta = newScrollHeight - previousScrollHeight;
+            scrollableField.scrollTop = previousScrollTop + Math.max(delta, 0);
+        } else if (scrollToBottom) {
+            scrollableField.scrollTop = scrollableField.scrollHeight;
+        }
+    });
+}
+
+function initializeHistoryControls() {
+    const loadButton = document.getElementById('loadOlderHistoryBtn');
+    if (!loadButton) {
+        return;
+    }
+
+    loadButton.addEventListener('click', async () => {
+        if (totalHistorySegments === 0 || historySegmentsShown >= totalHistorySegments) {
+            return;
+        }
+
+        loadButton.disabled = true;
+        loadButton.classList.add('loading');
+
+        try {
+            const targetSegments = totalHistorySegments > 0
+                ? Math.min(historySegmentsShown + 1, totalHistorySegments)
+                : historySegmentsShown + 1;
+            await loadChatHistory({
+                segments: targetSegments,
+                scrollToBottom: false,
+                preserveScroll: true
+            });
+        } catch (error) {
+            console.error('Error loading older history:', error);
+        } finally {
+            loadButton.classList.remove('loading');
+            updateHistoryBanner();
+        }
+    });
 }
 
 export function initializeChatTab() {
@@ -151,6 +257,8 @@ export function initializeChatTab() {
 
     // Initialize LLM debug popup handlers
     initializeLlmDebugPopup();
+    initializeHistoryControls();
+    updateHistoryBanner();
 
     // Initialize export conversation button
     if (exportConversationJsonBtn) {
@@ -305,7 +413,6 @@ async function handleSendPrompt() {
 }
 
 async function handleResetContext() {
-    const scrollableField = document.getElementById('scrollableField');
     try {
         const response = await fetch('/von/reset', {
             method: 'POST'
@@ -314,17 +421,21 @@ async function handleResetContext() {
         const data = await response.json();
 
         if (response.ok) {
-            // Clear the scrollable field with new format
-            scrollableField.innerHTML = '';
+            historySegmentsShown = 1;
+            const loaded = await loadChatHistory({
+                segments: 1,
+                scrollToBottom: false,
+                showResetNotice: true
+            });
 
-            // Add a success message
-            const resetMessage = document.createElement('div');
-            resetMessage.style.cssText = 'text-align: center; padding: 20px; color: #28a745; font-style: italic; background-color: #f8f9fa; border-radius: 8px; margin-bottom: 10px;';
-            resetMessage.textContent = 'Context reset successfully. You can start a new conversation.';
-            scrollableField.appendChild(resetMessage);
+            if (!loaded) {
+                const scrollableField = document.getElementById('scrollableField');
+                appendResetNotice(scrollableField);
+            }
 
             transcriptTurns.length = 0;
             llmDebugData.clear();
+            updateHistoryLength();
         } else {
             alert('Error resetting context: ' + (data.error || 'Unknown error'));
         }
@@ -461,6 +572,17 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
     if (!isHistory) {
         scrollableField.scrollTop = scrollableField.scrollHeight;
     }
+}
+
+function appendResetNotice(scrollableField) {
+    if (!scrollableField) {
+        return;
+    }
+
+    const resetMessage = document.createElement('div');
+    resetMessage.className = 'reset-notice';
+    resetMessage.textContent = 'Context reset successfully. You can start a new conversation.';
+    scrollableField.appendChild(resetMessage);
 }
 
 // Initialize LLM debug popup handlers
