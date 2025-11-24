@@ -580,6 +580,24 @@ def enrich_concept_with_text_relations(concept: Dict[str, Any], logger=None) -> 
             if logger:
                 logger.warning(f"[migrate-on-read] Failed to migrate description: {e}")
 
+    # Fetch content from text relations (for diary entries, articles, etc.)
+    content_relations = get_texts_for_concept(
+        subject_concept_id=concept_id,
+        predicate='hasContent',
+        limit=1
+    )
+    if content_relations:
+        concept['content'] = content_relations[0].get('text', '')
+
+    # Fetch notes from text relations
+    note_relations = get_texts_for_concept(
+        subject_concept_id=concept_id,
+        predicate='hasNote',
+        limit=1
+    )
+    if note_relations:
+        concept['note'] = note_relations[0].get('text', '')
+
     return concept
 
 
