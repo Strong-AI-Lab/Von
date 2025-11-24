@@ -9,6 +9,7 @@
 !scripts/*.json
 !docs/schemas/*.json
 !sample_knowledge/*.json
+!src/backend/mcp_server/vontology_mcp.json
 
 # Python cache and virtual environments
 __pycache__/
