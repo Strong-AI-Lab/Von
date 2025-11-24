@@ -352,7 +352,7 @@ Please use the correct project key when creating new issues.
 
 To ensure consistency and maintain a clean history, all agents must follow this workflow for every task:
 
-1.  **JIRA Issue**: Ensure a JIRA issue exists for the task. If not, create one (Project: `JVNAUTOSCI`).
+1.  **JIRA Issue**: Ensure a JIRA issue exists for the task. If not, create one and assign it to the user (Project: `JVNAUTOSCI`).
 2.  **Branching**: Create a new branch from `main` using the JIRA key: `git checkout -b JVNAUTOSCI-XXX-short-description`.
 3.  **Implementation**:
     *   Make changes.
@@ -365,6 +365,7 @@ To ensure consistency and maintain a clean history, all agents must follow this 
 5.  **Merge**:
     *   Merge the PR using `gh pr merge --merge --delete-branch`.
     *   **Do not squash** unless specifically requested (preserve commit history for context).
+    *   Transition the JIRA isseue to done, after commenting on the issue documenting the changes
 6.  **Cleanup**:
     *   Switch to `main`: `git checkout main`.
     *   Pull latest changes: `git pull`.
@@ -395,7 +396,7 @@ To ensure consistency and maintain a clean history, all agents must follow this 
 *   **Correct Usage**:
     ```python
     from src.backend.utils.knowledge_interaction_logger import log_knowledge_interaction
-    
+
     log_knowledge_interaction(
         interaction_type="create_concept",
         details={"name": "NewConcept", "parent": "Thing"},

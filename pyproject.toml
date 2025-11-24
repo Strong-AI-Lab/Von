@@ -166,6 +166,8 @@ reportMissingImports = true
 reportMissingTypeStubs = false
 extraPaths = ["src"]
 stubPath = "typings"
+venvPath = "."
+venv = ".venv"
 
 [tool.pdm]
 distribution = false
