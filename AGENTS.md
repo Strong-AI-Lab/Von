@@ -348,6 +348,28 @@ When creating or referencing JIRA issues, please note the following primary proj
 
 Please use the correct project key when creating new issues.
 
+## Standard Development Workflow
+
+To ensure consistency and maintain a clean history, all agents must follow this workflow for every task:
+
+1.  **JIRA Issue**: Ensure a JIRA issue exists for the task. If not, create one (Project: `JVNAUTOSCI`).
+2.  **Branching**: Create a new branch from `main` using the JIRA key: `git checkout -b JVNAUTOSCI-XXX-short-description`.
+3.  **Implementation**:
+    *   Make changes.
+    *   Run tests.
+    *   Commit with the JIRA key in the message: `JVNAUTOSCI-XXX: Description of changes`.
+4.  **Pull Request**:
+    *   Push the branch: `git push -u origin JVNAUTOSCI-XXX-short-description`.
+    *   Create a PR using `gh pr create`.
+    *   **Self-Review**: Verify the diff and ensure it matches the intent.
+5.  **Merge**:
+    *   Merge the PR using `gh pr merge --merge --delete-branch`.
+    *   **Do not squash** unless specifically requested (preserve commit history for context).
+6.  **Cleanup**:
+    *   Switch to `main`: `git checkout main`.
+    *   Pull latest changes: `git pull`.
+    *   Delete local branch: `git branch -d JVNAUTOSCI-XXX-short-description`.
+
 ## Test Compatibility and Maintenance
 
 **CRITICAL TESTING PHILOSOPHY**: This project is **NOT test-driven**. Tests are written to validate implementation correctness and catch regressions, but they do not drive design decisions. Dead code and its associated tests can be removed without hesitation when identified.
