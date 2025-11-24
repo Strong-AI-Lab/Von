@@ -515,7 +515,8 @@ async function updateTabLabelWithShortestName(conceptId, tabButton, force = fals
                             text: n.text || n.name || n.abbrev || '',
                             language: n.language || n.lang || 'en',
                             abbrev: n.abbrev || (typeof n.name === 'string' && n.name?.length <= 6 ? n.name : undefined),
-                            name: n.name
+                            name: n.name,
+                            type: n.type // Preserve name type (NL, CODE, ABBR)
                         }));
                         try { namesCache.set(conceptId, names); } catch (_) { /* ignore */ }
                     }
@@ -546,24 +547,42 @@ async function updateTabLabelWithShortestName(conceptId, tabButton, force = fals
         if (!candidates.length) return;
         // CRITICAL: Prioritize names in the user's preferred language before selecting shortest.
         // This ensures "Person" (en-NZ) is chosen over "人" (zh) when user prefers English.
-        // Sort by: 1) language match (current lang first), 2) length (shorter first)
+        // Sort by: 1) language match (current lang first), 2) Type (NL > ABBR > CODE), 3) length (shorter first)
         const langBase = (lang || '').split('-')[0];
         candidates.sort((a, b) => {
-            // Find corresponding name objects to check language
+            // Find corresponding name objects to check language and type
             const aName = relevant.find(n => n.text === a || n.abbrev === a || n.name === a);
             const bName = relevant.find(n => n.text === b || n.abbrev === b || n.name === b);
+
             const aLang = (aName?.language || '').toLowerCase();
             const bLang = (bName?.language || '').toLowerCase();
+            const aType = (aName?.type || '').toUpperCase();
+            const bType = (bName?.type || '').toUpperCase();
+
             const aMatchExact = aLang === lang.toLowerCase();
             const bMatchExact = bLang === lang.toLowerCase();
             const aMatchBase = aLang === langBase || aLang.startsWith(langBase + '-');
             const bMatchBase = bLang === langBase || bLang.startsWith(langBase + '-');
-            // Prefer exact match > base match > then shortest
+
+            // 1. Language Preference
             if (aMatchExact && !bMatchExact) return -1;
             if (!aMatchExact && bMatchExact) return 1;
             if (aMatchBase && !bMatchBase) return -1;
             if (!aMatchBase && bMatchBase) return 1;
-            // Both same language preference, pick shortest
+
+            // 2. Type Preference (NL > ABBR > CODE)
+            // We want NL to come first.
+            const typeScore = (t) => {
+                if (t === 'NL') return 3;
+                if (t === 'ABBR') return 2;
+                return 1; // CODE or others
+            };
+            const scoreA = typeScore(aType);
+            const scoreB = typeScore(bType);
+            if (scoreA > scoreB) return -1;
+            if (scoreB > scoreA) return 1;
+
+            // 3. Length Preference (Shortest first)
             return a.length - b.length || a.localeCompare(b);
         });
         const shortest = candidates[0];
