@@ -370,6 +370,51 @@ To ensure consistency and maintain a clean history, all agents must follow this 
     *   Pull latest changes: `git pull`.
     *   Delete local branch: `git branch -d JVNAUTOSCI-XXX-short-description`.
 
+## Technical Standards & Constraints
+
+**All AI agents must adhere to these technical standards. Deviations require explicit user approval.**
+
+### 1. Dependency Management: PDM Only
+*   **Standard**: This project uses **PDM** for Python dependency management.
+*   **Forbidden**: Do NOT use `pip install` directly. Do NOT create or suggest `requirements.txt` files unless they are generated artifacts.
+*   **Correct Usage**:
+    *   Add dependency: `pdm add <package>`
+    *   Add dev dependency: `pdm add -d <package>`
+    *   Run script: `pdm run python script.py`
+    *   Run tests: `pdm run pytest`
+
+### 2. Frontend Architecture: Vanilla JS + ES6 Modules
+*   **Standard**: The frontend uses **Vanilla JavaScript** with native **ES6 Modules**.
+*   **Forbidden**: Do NOT introduce frontend frameworks (React, Vue, Angular) or build steps (Webpack, Vite) without explicit architectural approval.
+*   **Icon System**: Use the `IconRegistry` in `src/frontend/web/von_interface/static/js/icon_registry.js`. Do NOT inline SVG strings repeatedly in components.
+    *   *Usage*: `import { IconRegistry } from './icon_registry.js'; const icon = IconRegistry.getIcon('iconName');`
+
+### 3. Logging: Knowledge Interaction Logger
+*   **Standard**: All interactions with the Vontology (concepts, relations) must be logged using the `knowledge_interaction_logger`.
+*   **Purpose**: Ensures a consistent audit trail of AI-driven knowledge base modifications.
+*   **Correct Usage**:
+    ```python
+    from src.backend.utils.knowledge_interaction_logger import log_knowledge_interaction
+    
+    log_knowledge_interaction(
+        interaction_type="create_concept",
+        details={"name": "NewConcept", "parent": "Thing"},
+        agent_id="agent_name"
+    )
+    ```
+
+### 4. Code Quality: Black & Pyright
+*   **Formatting**: Python code must be formatted with **Black**.
+*   **Typing**: Python code must be type-checked with **Pyright**.
+*   **Action**: If you modify a file, ensure it passes these checks before committing.
+    *   `pdm run black .`
+    *   `pdm run pyright`
+
+### 5. Concept Identifiers
+*   **Standard**: All internal concept identifiers must use the `#V#` prefix format (e.g., `#V#person`, `#V#thing`).
+*   **Deprecated**: Do NOT use filesystem-like paths (e.g., `/Thing/Person`) or raw names without prefixes as IDs.
+*   **Reason**: Ensures consistent identification across the graph database and application logic.
+
 ## Test Compatibility and Maintenance
 
 **CRITICAL TESTING PHILOSOPHY**: This project is **NOT test-driven**. Tests are written to validate implementation correctness and catch regressions, but they do not drive design decisions. Dead code and its associated tests can be removed without hesitation when identified.
