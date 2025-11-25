@@ -133,11 +133,18 @@ async function loadChatHistory(options = {}) {
 
     const requestedSegments = Number.isInteger(segments) && segments > 0 ? segments : historySegmentsShown;
     const segmentCount = Math.max(requestedSegments || 1, 1);
-    const params = new URLSearchParams({ segments: segmentCount.toString() });
 
+    // Get user context to ensure we can load history even if session is new
+    const userContext = getUserContext();
+    const params = new URLSearchParams({ segments: segmentCount.toString() });
+    if (userContext && userContext.user_id) {
+        params.append('user_id', userContext.user_id);
+    }
     try {
         const response = await fetch(`/von/history?${params.toString()}`);
         const data = await response.json();
+
+        console.log(`[chatTab] loadChatHistory response: ok=${response.ok}, segments=${data.segments_returned}, total=${data.total_segments}, history_len=${data.history ? data.history.length : 'undefined'}`);
 
         if (response.ok && data.history && Array.isArray(data.history)) {
             historySegmentsShown = Math.max(data.segments_returned || segmentCount, 0);
@@ -481,96 +488,115 @@ function formatChatTimestamp(isoString) {
 
 function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null) {
     const scrollableField = document.getElementById('scrollableField');
-    const displayTimestamp = formatChatTimestamp(timestampStr);
-
-    if (sender === 'Von' || (isHistory && sender === 'assistant')) {
-        // Create a container for Von's response with image
-        const messageContainer = document.createElement('div');
-        messageContainer.style.cssText = 'display: flex; align-items: flex-start; margin-bottom: 15px; padding: 10px; background-color: #f8f9fa; border-radius: 8px; border-left: 4px solid #007bff;';
-
-        // Add Von's image
-        const vonImage = document.createElement('img');
-        vonImage.src = '/static/VonImageBig.png';
-        vonImage.alt = 'Von';
-        vonImage.style.cssText = 'width: 40px; height: 40px; border-radius: 50%; margin-right: 12px; flex-shrink: 0; object-fit: cover;';
-
-        // Add message content
-        const messageContent = document.createElement('div');
-        messageContent.style.cssText = 'flex: 1; line-height: 1.5;';
-
-        const messageHeader = document.createElement('div');
-        messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; align-items: center; gap: 8px;';
-
-        const headerText = document.createElement('span');
-        headerText.textContent = `Von • ${displayTimestamp}`;
-        messageHeader.appendChild(headerText);
-
-        // Add LLM debug button if debug data available
-        if (hasLlmDebug && turnId) {
-            const llmDebugButton = document.createElement('button');
-            llmDebugButton.className = 'btn-mini llm-debug-button';
-            llmDebugButton.textContent = 'LLM ⓘ';
-            llmDebugButton.title = 'Show LLM interaction details';
-            llmDebugButton.dataset.turnId = turnId;
-            llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
-            messageHeader.appendChild(llmDebugButton);
-        }
-
-        const messageText = document.createElement('div');
-        messageText.style.cssText = 'color: #333; white-space: pre-wrap;';
-        annotateElementText(messageText, message);
-
-        messageContent.appendChild(messageHeader);
-        messageContent.appendChild(messageText);
-        messageContainer.appendChild(vonImage);
-        messageContainer.appendChild(messageContent);
-
-        if (turnId) messageContainer.dataset.turnId = turnId;
-        scrollableField.appendChild(messageContainer);
-    } else {
-        // For user messages and errors, use simpler styling
-        const messageContainer = document.createElement('div');
-        messageContainer.style.cssText = 'margin-bottom: 15px; padding: 10px; background-color: #fff; border-radius: 8px; border-left: 4px solid #28a745;';
-
-        if (sender === 'Error') {
-            messageContainer.style.borderLeftColor = '#dc3545';
-            messageContainer.style.backgroundColor = '#fff5f5';
-        }
-
-        const messageHeader = document.createElement('div');
-        messageHeader.style.cssText = 'font-weight: bold; margin-bottom: 5px; font-size: 0.9em; display: flex; align-items: center; gap: 8px;';
-        messageHeader.style.color = sender === 'Error' ? '#dc3545' : '#28a745';
-
-        const headerText = document.createElement('span');
-        headerText.textContent = `${sender} • ${displayTimestamp}`;
-        messageHeader.appendChild(headerText);
-
-        // Add LLM debug button for errors if debug data available
-        if (sender === 'Error' && hasLlmDebug && turnId) {
-            const llmDebugButton = document.createElement('button');
-            llmDebugButton.className = 'btn-mini llm-debug-button';
-            llmDebugButton.textContent = 'LLM ⓘ';
-            llmDebugButton.title = 'Show what was sent to LLM before error';
-            llmDebugButton.dataset.turnId = turnId;
-            llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
-            messageHeader.appendChild(llmDebugButton);
-        }
-
-        const messageText = document.createElement('div');
-        messageText.style.cssText = 'color: #333; white-space: pre-wrap;';
-        annotateElementText(messageText, message);
-
-        messageContainer.appendChild(messageHeader);
-        messageContainer.appendChild(messageText);
-        if (turnId) messageContainer.dataset.turnId = turnId;
-        scrollableField.appendChild(messageContainer);
+    if (!scrollableField) {
+        console.error('[chatTab] appendMessage: scrollableField not found!');
+        return;
     }
 
-    recordTranscriptTurn(sender, message, { turnId, isHistory, timestamp: timestampStr || new Date().toISOString() });
+    try {
+        const displayTimestamp = formatChatTimestamp(timestampStr);
 
-    // Auto-scroll to bottom
-    if (!isHistory) {
-        scrollableField.scrollTop = scrollableField.scrollHeight;
+        if (sender === 'Von' || (isHistory && sender === 'assistant')) {
+            // Create a container for Von's response with image
+            const messageContainer = document.createElement('div');
+            messageContainer.style.cssText = 'display: flex; align-items: flex-start; margin-bottom: 15px; padding: 10px; background-color: #f8f9fa; border-radius: 8px; border-left: 4px solid #007bff;';
+
+            // Add Von's image
+            const vonImage = document.createElement('img');
+            vonImage.src = '/static/VonImageBig.png';
+            vonImage.alt = 'Von';
+            vonImage.style.cssText = 'width: 40px; height: 40px; border-radius: 50%; margin-right: 12px; flex-shrink: 0; object-fit: cover;';
+
+            // Add message content
+            const messageContent = document.createElement('div');
+            messageContent.style.cssText = 'flex: 1; line-height: 1.5;';
+
+            const messageHeader = document.createElement('div');
+            messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; align-items: center; gap: 8px;';
+
+            const headerText = document.createElement('span');
+            headerText.textContent = `Von • ${displayTimestamp}`;
+            messageHeader.appendChild(headerText);
+
+            // Add LLM debug button if debug data available
+            if (hasLlmDebug && turnId) {
+                const llmDebugButton = document.createElement('button');
+                llmDebugButton.className = 'btn-mini llm-debug-button';
+                llmDebugButton.textContent = 'LLM ⓘ';
+                llmDebugButton.title = 'Show LLM interaction details';
+                llmDebugButton.dataset.turnId = turnId;
+                llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
+                messageHeader.appendChild(llmDebugButton);
+            }
+
+            const messageText = document.createElement('div');
+            messageText.style.cssText = 'color: #333; white-space: pre-wrap;';
+            try {
+                annotateElementText(messageText, message);
+            } catch (e) {
+                console.error('[chatTab] annotateElementText failed for Von message:', e);
+                messageText.textContent = String(message);
+            }
+
+            messageContent.appendChild(messageHeader);
+            messageContent.appendChild(messageText);
+            messageContainer.appendChild(vonImage);
+            messageContainer.appendChild(messageContent);
+
+            if (turnId) messageContainer.dataset.turnId = turnId;
+            scrollableField.appendChild(messageContainer);
+        } else {
+            // For user messages and errors, use simpler styling
+            const messageContainer = document.createElement('div');
+            messageContainer.style.cssText = 'margin-bottom: 15px; padding: 10px; background-color: #fff; border-radius: 8px; border-left: 4px solid #28a745;';
+
+            if (sender === 'Error') {
+                messageContainer.style.borderLeftColor = '#dc3545';
+                messageContainer.style.backgroundColor = '#fff5f5';
+            }
+
+            const messageHeader = document.createElement('div');
+            messageHeader.style.cssText = 'font-weight: bold; margin-bottom: 5px; font-size: 0.9em; display: flex; align-items: center; gap: 8px;';
+            messageHeader.style.color = sender === 'Error' ? '#dc3545' : '#28a745';
+
+            const headerText = document.createElement('span');
+            headerText.textContent = `${sender} • ${displayTimestamp}`;
+            messageHeader.appendChild(headerText);
+
+            // Add LLM debug button for errors if debug data available
+            if (sender === 'Error' && hasLlmDebug && turnId) {
+                const llmDebugButton = document.createElement('button');
+                llmDebugButton.className = 'btn-mini llm-debug-button';
+                llmDebugButton.textContent = 'LLM ⓘ';
+                llmDebugButton.title = 'Show what was sent to LLM before error';
+                llmDebugButton.dataset.turnId = turnId;
+                llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
+                messageHeader.appendChild(llmDebugButton);
+            }
+
+            const messageText = document.createElement('div');
+            messageText.style.cssText = 'color: #333; white-space: pre-wrap;';
+            try {
+                annotateElementText(messageText, message);
+            } catch (e) {
+                console.error('[chatTab] annotateElementText failed for User/Error message:', e);
+                messageText.textContent = String(message);
+            }
+
+            messageContainer.appendChild(messageHeader);
+            messageContainer.appendChild(messageText);
+            if (turnId) messageContainer.dataset.turnId = turnId;
+            scrollableField.appendChild(messageContainer);
+        }
+
+        recordTranscriptTurn(sender, message, { turnId, isHistory, timestamp: timestampStr || new Date().toISOString() });
+
+        // Auto-scroll to bottom
+        if (!isHistory) {
+            scrollableField.scrollTop = scrollableField.scrollHeight;
+        }
+    } catch (err) {
+        console.error('[chatTab] appendMessage crashed:', err);
     }
 }
 
