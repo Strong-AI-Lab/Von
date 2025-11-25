@@ -19,6 +19,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Dynamic positioning: calculate header height and position tabs accordingly
   setupDynamicLayout();
 
+  // Ensure user context is loaded BEFORE initializing chat to prevent race condition
+  // where chat history loads with null user_id
+  await ensureUserContext();
+
   // Initialize chat tab since it's embedded and active by default
   console.log("Initializing chat tab...");
   import('./chatTab.js').then(module => {
@@ -29,14 +33,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Start background preload of Vontology data while chat is active
   try {
-    preloadVontologyData()
-      .then(() => {
-        startHealthPolling();
-      })
-      .catch((e) => {
-        console.warn('Vontology preload failed, starting health polling after delay:', e);
-        setTimeout(startHealthPolling, 3000);
-      });
+    preloadVontologyData();
+    startHealthPolling();
   } catch (e) {
     console.warn('Failed to start Vontology preload:', e);
     setTimeout(startHealthPolling, 3000);
@@ -188,6 +186,45 @@ function setupSettingsFrameResizing() {
   });
 }
 
+/**
+ * Ensure user context is available in localStorage before app initialization.
+ * Fetches settings if localStorage is empty.
+ */
+async function ensureUserContext() {
+  try {
+    // If we already have user context, we don't need to block
+    if (localStorage.getItem('von_current_user')) {
+      return;
+    }
+
+    console.log('[main] Fetching settings to populate user context...');
+    const res = await fetch('/api/settings/');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const settings = await res.json();
+
+    if (settings.current_user_person_id) {
+      const user = {
+        id: settings.current_user_person_id,
+        concept_id: settings.current_user_person_concept_id,
+        name: settings.current_user_person_name
+      };
+      localStorage.setItem('von_current_user', JSON.stringify(user));
+      console.log('[main] Populated von_current_user from settings');
+    }
+
+    if (settings.current_organisation_id) {
+      const org = {
+        id: settings.current_organisation_id,
+        concept_id: settings.current_organisation_concept_id,
+        name: settings.current_organisation_name
+      };
+      localStorage.setItem('von_current_org', JSON.stringify(org));
+      console.log('[main] Populated von_current_org from settings');
+    }
+  } catch (e) {
+    console.warn('[main] Failed to ensure user context:', e);
+  }
+}
 
 /**
  * Load and display the current language preference in the footer indicator

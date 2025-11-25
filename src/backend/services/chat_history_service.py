@@ -56,40 +56,50 @@ def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
 
 
 def get_chat_history_segments(user_id: str, session_id: str) -> List[List[Dict[str, Any]]]:
-    """Return chat history split into segments separated by reset markers."""
-    if not user_id or not session_id:
-        raise ChatHistoryServiceError("user_id and session_id are required.")
+    """
+    Return chat history split into segments separated by reset markers.
+    Retrieves history from ALL sessions for the user, sorted chronologically.
+    """
+    if not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
 
     chat_history_coll = get_chat_history_collection_service()
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
     try:
-        doc = chat_history_coll.find_one({
-            "user_id": user_id,
-            "session_id": session_id
-        })
+        # Fetch all sessions for the user, sorted by last update time
+        # This ensures that recently active sessions appear at the end of the history
+        cursor = chat_history_coll.find({"user_id": user_id}).sort("updated_at", 1)
 
-        if not doc or "history" not in doc:
-            return []
+        all_segments: List[List[Dict[str, Any]]] = []
+        found_any_history = False
 
-        history = doc.get("history", [])
-        if not history:
-            return []
-
-        segments: List[List[Dict[str, Any]]] = []
-        current_segment: List[Dict[str, Any]] = []
-
-        for entry in history:
-            if entry.get("role") == "system" and entry.get("content") == "__RESET__":
-                segments.append(current_segment)
-                current_segment = []
+        for doc in cursor:
+            history = doc.get("history", [])
+            if not history:
                 continue
-            current_segment.append(entry)
 
-        # Always append the tail segment (even if empty) to record fresh resets
-        segments.append(current_segment)
-        return segments
+            found_any_history = True
+            current_session_segments: List[List[Dict[str, Any]]] = []
+            current_segment: List[Dict[str, Any]] = []
+
+            for entry in history:
+                if entry.get("role") == "system" and entry.get("content") == "__RESET__":
+                    current_session_segments.append(current_segment)
+                    current_segment = []
+                    continue
+                current_segment.append(entry)
+
+            # Always append the tail segment of the session
+            current_session_segments.append(current_segment)
+            all_segments.extend(current_session_segments)
+
+        # If no history found at all, return empty list
+        if not found_any_history:
+            return []
+
+        return all_segments
     except PyMongoError as e:
         logger.error(f"Error retrieving segmented chat history: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Could not retrieve segmented chat history: {e}") from e
