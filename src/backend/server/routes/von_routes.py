@@ -228,6 +228,12 @@ def generate():
     try:
         from ...security.access_control import get_effective_user_concept_id
         user_concept_id = get_effective_user_concept_id()
+
+        # Fallback: If no authenticated user in session, trust the client-provided user_id
+        # This is critical for the research prototype where auth might be loose or client-driven
+        if not user_concept_id and request_user_id:
+            user_concept_id = request_user_id
+
         org_concept_id = session.get('organisation_concept_id') if session else None
 
         # Store user_concept_id in session for history tracking
@@ -412,10 +418,15 @@ def generate():
 @von_bp.route("/history", methods=["GET"])
 def history():
     """Retrieve chat history segments for the current user."""
-    user_concept_id = session.get("user_concept_id")
-    session_id = session.get("session_id")
+    # Try to get user_id from session first, then query param
+    user_concept_id = session.get("user_concept_id") or request.args.get("user_id")
 
-    if not user_concept_id or not session_id:
+    # Ensure session_id exists (create if needed for the current session context)
+    if "session_id" not in session:
+        session["session_id"] = str(uuid.uuid4())
+    session_id = session["session_id"]
+
+    if not user_concept_id:
         return jsonify({
             "history": [],
             "segments_returned": 0,
