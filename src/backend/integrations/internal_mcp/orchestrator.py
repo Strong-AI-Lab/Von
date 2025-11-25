@@ -143,20 +143,48 @@ class InternalMCPChatOrchestrator:
 
     @staticmethod
     def _extract_json_blob(text: str) -> Optional[MutableMapping[str, Any]]:
+        """Extract JSON object from text, handling code blocks and embedded JSON."""
         raw = text.strip()
         if not raw:
             return None
-        if raw.startswith("```"):
-            # Handle fenced code blocks
-            chunks = raw.split("```")
-            if len(chunks) >= 3:
-                raw = chunks[1].strip()
+
+        # 1. Try parsing the whole text
         try:
             parsed = json.loads(raw)
+            if isinstance(parsed, MutableMapping):
+                return parsed
         except json.JSONDecodeError:
-            return None
-        if isinstance(parsed, MutableMapping):
-            return parsed
+            pass
+
+        # 2. Handle fenced code blocks (```json ... ```)
+        if "```" in raw:
+            chunks = raw.split("```")
+            # Iterate through chunks to find valid JSON
+            for i in range(1, len(chunks), 2):  # Code blocks are usually at odd indices
+                chunk = chunks[i].strip()
+                if chunk.startswith("json"):
+                    chunk = chunk[4:].strip()
+                try:
+                    parsed = json.loads(chunk)
+                    if isinstance(parsed, MutableMapping):
+                        return parsed
+                except json.JSONDecodeError:
+                    continue
+
+        # 3. Try to find a JSON object embedded in text
+        # Look for the first '{' and the last '}'
+        first_brace = raw.find('{')
+        last_brace = raw.rfind('}')
+
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            candidate = raw[first_brace : last_brace + 1]
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, MutableMapping):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
         return None
 
     def _format_tool_result(self, tool_name: str, payload: Any, duration_ms: float | None, status: str, error: str | None = None) -> str:
@@ -224,28 +252,33 @@ class InternalMCPChatOrchestrator:
                 model or "default"
             )
 
+        # Extract potential tool request
+        tool_request = self._extract_json_blob(response)
+
+        # Check if we have a valid tool call
+        has_valid_tool_call = False
+        if tool_request and isinstance(tool_request, MutableMapping):
+            action = tool_request.get(self._ACTION_FIELD)
+            if action == self._CALL_ACTION:
+                has_valid_tool_call = True
+
         # Only attempt extraction if detection passed (has action="call_tool" structure)
         # This prevents treating tool result JSON as tool call requests (JVNAUTOSCI-699)
-        if not is_json_action:
+        if not has_valid_tool_call:
             # If the model attempted to issue a tool call but omitted required
             # metadata (e.g., missing tool name), surface a parsing error so the
             # failure is visible rather than silently ignored (JVNAUTOSCI-717).
-            malformed_request = self._extract_json_blob(response)
-            if isinstance(malformed_request, MutableMapping):
-                action = malformed_request.get(self._ACTION_FIELD)
-                if action == self._CALL_ACTION and self._TOOL_FIELD not in malformed_request:
+            if tool_request and isinstance(tool_request, MutableMapping):
+                action = tool_request.get(self._ACTION_FIELD)
+                if action == self._CALL_ACTION and self._TOOL_FIELD not in tool_request:
                     raise ToolCallParsingError("Missing tool metadata: 'tool'")
                 if action == self._CALL_ACTION:
-                    payload_candidate = malformed_request.get(self._PAYLOAD_FIELD, {})
+                    payload_candidate = tool_request.get(self._PAYLOAD_FIELD, {})
                     if payload_candidate is not None and not isinstance(payload_candidate, MutableMapping):
                         raise ToolCallParsingError("Tool payload must be a JSON object.")
             return OrchestratorResult(response_text=response, extra_messages=(), tool_invocations=())
 
-        tool_request = self._extract_json_blob(response)
-        if tool_request is None:
-            self._logger.debug("[mcp_orchestrator] No JSON tool request extracted from response: %s", response[:200])
-            return OrchestratorResult(response_text=response, extra_messages=(), tool_invocations=())
-
+        # If we are here, tool_request is valid and has action="call_tool"
         self._logger.debug("[mcp_orchestrator] Extracted tool request: %s", tool_request)
 
         try:

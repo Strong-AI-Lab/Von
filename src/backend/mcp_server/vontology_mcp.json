@@ -133,6 +133,117 @@
             }
         },
         {
+            "name": "get_tree",
+            "description": "Get complete ontology tree structure starting from the root 'thing' concept. Returns nested hierarchy showing all concepts and their relationships.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "name": "fetch_concept",
+            "description": "Fetch full details of ONE specific concept by its ID. Returns complete information including names (from text relations), description, metadata, relationships, salient predicates, and all other concept properties.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to fetch (format: #V#concept_name, e.g., '#V#person')"
+                    },
+                    "include_relations_arg1": {
+                        "type": "boolean",
+                        "description": "When true, include structural relations where the concept is the subject (argument 1)."
+                    },
+                    "include_relations_any_arg": {
+                        "type": "boolean",
+                        "description": "When true, include structural relations where the concept appears in any argument position (incoming references)."
+                    },
+                    "include_text_relations_arg1": {
+                        "oneOf": [
+                            {"type": "boolean"},
+                            {"type": "string", "enum": ["snippets"], "description": "Use 'snippets' to request short text snippets in addition to raw text."}
+                        ],
+                        "description": "Include text relations (e.g., hasName, hasDescription) where the concept is the subject."
+                    },
+                    "predicate_filter": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional whitelist of predicate identifiers to include."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of relation entries to return (defaults to 200, capped at 500)."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Offset applied before collecting relation entries."
+                    },
+                    "include_concept_preview": {
+                        "type": "boolean",
+                        "description": "Toggle inclusion of light-weight previews for related concepts.",
+                        "default": true
+                    }
+                },
+                "required": ["concept_id"]
+            }
+        },
+        {
+            "name": "search_concepts",
+            "description": "Advanced concept search with multiple filter options. Supports filtering by kind (individual/type/predicate), instance_of, hierarchy paths, and match types.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query text"},
+                    "instance_of": {"type": "string", "description": "Filter to instances of a specific type (e.g., '#V#researcher')"},
+                    "filter_kind": {"type": "array", "items": {"type": "string", "enum": ["individual", "type", "predicate"]}, "description": "Filter by concept kind"},
+                    "include_hierarchy_path": {"type": "boolean", "description": "Include full hierarchy path"},
+                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"}
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "vontology_concept_search",
+            "description": "Namespaced alias for concept search used by the MCP orchestrator. Same behaviour as search_concepts (query required; use empty string when combining with instance_of filters).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query text"},
+                    "instance_of": {"type": "string", "description": "Filter to instances of a specific type"},
+                    "filter_kind": {"type": "array", "items": {"type": "string", "enum": ["individual", "type", "predicate"]}, "description": "Filter by concept kind"},
+                    "include_hierarchy_path": {"type": "boolean", "description": "Include full hierarchy path"},
+                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"}
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "extract_annotations",
+            "description": "Extract structured annotations from text using LLM analysis. Identifies concept mentions and suggests ontology links. Returns array of annotation objects with concept IDs, matched text, and confidence scores.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "input_text": {"type": "string", "description": "The text content to analyze"},
+                    "context_concept_id": {"type": "string", "description": "Optional context concept ID"}
+                },
+                "required": ["input_text"]
+            }
+        },
+        {
+            "name": "add_relationship",
+            "description": "Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' → 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string", "description": "Source concept ID (e.g., '#V#nikola_k._kasabov')"},
+                    "predicate": {"type": "string", "description": "Relationship type: 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'"},
+                    "target": {"type": "string", "description": "Target concept ID (e.g., '#V#professor') or text value for text predicates"}
+                },
+                "required": ["source_id", "predicate", "target"]
+            }
+        },
+        {
             "name": "delete_concept",
             "description": "Deletes a concept and handles its relationships. Can simulate the deletion first to see impact. Use when you need to remove a concept from the ontology. Returns a report of operations and warnings.",
             "inputSchema": {
