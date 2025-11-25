@@ -4,7 +4,7 @@
 // Removed imported populateContentSection to avoid duplicate with local implementation below
 
 import { initializeAnnotationTab } from './annotationTab.js';
-import { initializeNamesForm, loadConceptNames, selectConceptWithSuffix } from './conceptTab.js';
+import { fetchConceptListWithSuffix, fetchSubtypesWithSuffix, initializeNamesForm, loadConceptNames, selectConceptWithSuffix } from './conceptTab.js';
 import { getCurrentUserConceptId } from './domUtils.js';
 import { DEFAULT_LANGUAGE } from './languageConfig.js';
 import { detectMarkdown, renderSmartText } from './markdownUtils.js';
@@ -90,7 +90,8 @@ const ICON_SVGS = {
     edit: '<svg aria-hidden="true" class="icon icon-edit" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
     delete: '<svg aria-hidden="true" class="icon icon-delete" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg>',
     expand: '<svg aria-hidden="true" class="icon icon-expand" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>',
-    copy: '<svg aria-hidden="true" class="icon icon-copy" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>'
+    copy: '<svg aria-hidden="true" class="icon icon-copy" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>',
+    refresh: '<svg aria-hidden="true" class="icon icon-refresh" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>'
 };
 
 function injectIconContent(el, key, label) {
@@ -1281,6 +1282,17 @@ async function reloadConceptTab(conceptId) {
         // Reload names explicitly to ensure they're fresh
         await loadConceptNames(conceptId, suffix);
 
+        // Refresh lists for Type tabs (Instances and Subtypes)
+        const kind = (dynamicConceptTabs.get(conceptId) || {}).kind;
+        if (kind !== 'individual') {
+            try {
+                await fetchConceptListWithSuffix(conceptId, suffix);
+                await fetchSubtypesWithSuffix(conceptId, suffix);
+            } catch (listErr) {
+                console.warn('[dynamicTabs] Failed to refresh lists during reload', listErr);
+            }
+        }
+
         console.log(`[dynamicTabs] Concept tab reloaded successfully: ${conceptId}`);
 
         // Restore button text
@@ -1459,6 +1471,19 @@ async function initializeDynamicConceptTab(conceptId, uniqueIdSuffix) {
             console.log(`[dynamicTabs] Refresh button connected for ${conceptId}`);
         } else {
             console.warn(`[dynamicTabs] Refresh button not found for ${conceptId} (ID: refreshConceptListButton_${uniqueIdSuffix})`);
+        }
+
+        // Get the unique concept refresh button (header) for this tab
+        const refreshConceptButton = document.getElementById(`refreshConceptButton_${uniqueIdSuffix}`);
+        if (refreshConceptButton) {
+            const newBtn = refreshConceptButton.cloneNode(true);
+            refreshConceptButton.parentNode.replaceChild(newBtn, refreshConceptButton);
+            newBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                reloadConceptTab(conceptId);
+            });
+            // Inject icon if needed (though upgradeActionButtonIcons should handle it)
+            injectIconContent(newBtn, 'refresh', 'Refresh concept data');
         }
 
         // Initialize the concept tab with unique element IDs
