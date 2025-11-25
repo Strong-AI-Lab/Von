@@ -350,10 +350,21 @@ def get_concept_by_id(concept_id: str) -> Optional[Dict[str, Any]]:
 
     try:
         concept_doc = None
+        # Use a unified query to check _id (ObjectId/string) and concept_id
+        query_filter: Dict[str, Any]
         if obj_id is not None:
-            concept_doc = concepts_coll.find_one({"_id": obj_id})
-        if not concept_doc:
-            concept_doc = concepts_coll.find_one({"_id": concept_id})
+            query_filter = {"$or": [
+                {"_id": obj_id},
+                {"_id": concept_id},
+                {"concept_id": concept_id}
+            ]}
+        else:
+            query_filter = {"$or": [
+                {"_id": concept_id},
+                {"concept_id": concept_id}
+            ]}
+
+        concept_doc = concepts_coll.find_one(query_filter)
 
         if concept_doc:
             concept_doc["id"] = str(concept_doc.pop("_id")) if "_id" in concept_doc else concept_id
