@@ -169,6 +169,8 @@ $PidFile = Join-Path $RunDir "von_${Port}.pid"
 $CurrentLog = Join-Path $LogsDir "von_${Port}_current.log"
 $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $NewLog = Join-Path $LogsDir "von_${Port}_${Timestamp}.log"
+$RagPidFile = Join-Path $RunDir "rag_worker.pid"
+$RagLogFile = Join-Path $LogsDir "rag_worker_${Timestamp}.log"
 
 $script:RepairAttempted = $false
 
@@ -382,6 +384,43 @@ function Test-VonLogReady {
     return $false
 }
 
+function Start-RagWorker {
+    if (Test-Path $RagPidFile) {
+        $pidContent = Get-Content $RagPidFile -ErrorAction SilentlyContinue
+        if ($pidContent -match 'PID=([0-9]+)') {
+            $oldPid = [int]$Matches[1]
+            if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
+                Write-LauncherLog "RAG Worker already running (PID=$oldPid)."
+                return
+            }
+        }
+        Remove-Item $RagPidFile -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-LauncherLog "Starting RAG Indexing Worker..."
+    $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
+
+    $commandToRun = "& `"$pdm`" run python -u src/backend/utilities/rag_indexing_worker.py"
+    $psExe = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+
+    $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoLogo', '-NoProfile', '-Command', "$commandToRun *>> `"$RagLogFile`"") -WorkingDirectory $Root -PassThru -WindowStyle Hidden
+
+    $startIso = (Get-Date).ToString('o')
+    Set-Content $RagPidFile "PID=$($proc.Id)`nSTART=$startIso"
+    Write-LauncherLog "RAG Worker started (PID=$($proc.Id)). Log: $RagLogFile"
+}
+
+function Stop-RagWorker {
+    if (-not (Test-Path $RagPidFile)) { return }
+    $content = Get-Content $RagPidFile -ErrorAction SilentlyContinue
+    if ($content -match 'PID=([0-9]+)') {
+        $pidToKill = [int]$Matches[1]
+        Write-LauncherLog "Stopping RAG Worker (PID=$pidToKill)..."
+        try { Stop-Process -Id $pidToKill -Force -ErrorAction SilentlyContinue } catch { }
+    }
+    Remove-Item $RagPidFile -Force -ErrorAction SilentlyContinue
+}
+
 function Sync-PidFileToListener {
     # Align PID file with actual port-owning python process if mismatch
     $listener = Get-ListeningProcessByPort -Port $Port
@@ -463,6 +502,7 @@ function Start-VonServer {
     $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoLogo', '-NoProfile', '-Command', "$commandToRun *>> `"$NewLog`"") -WorkingDirectory $Root -PassThru -WindowStyle Hidden
     # Initial write uses launcher (pdm shell) PID; we'll refine after short delay by finding child python process if present.
     Write-PidFile $proc.Id
+
     # Update current log pointer: prefer a hard link so the "current" file
     # refers to the same underlying file as the timestamped log. This ensures
     # that readers (e.g. tail) see live writes. Fallback to copy if hard link
@@ -631,6 +671,9 @@ function Start-VonServer {
     try { Invoke-DailyBackupIfDue } catch { Write-LauncherLog "[daily-backup] ERROR (scheduling failed): $($_.Exception.Message)" }
     # Trigger test DB refresh (non-blocking) if due
     try { Invoke-TestDbRefreshIfDue } catch { Write-LauncherLog "[test-db-refresh] ERROR (scheduling failed): $($_.Exception.Message)" }
+
+    # Start RAG Worker
+    try { Start-RagWorker } catch { Write-LauncherLog "[rag-worker] ERROR: $($_.Exception.Message)" }
 }
 
 function Stop-VonServer {
@@ -677,6 +720,9 @@ function Stop-VonServer {
         if ($graceful) { Write-LauncherLog "Graceful shutdown completed." } else { Write-LauncherLog "Process exited." }
     }
     if ((Test-Path $PidFile) -and (Select-String -Path $PidFile -Pattern "PID=$targetPid" -Quiet)) { Remove-PidFile }
+
+    # Stop RAG Worker
+    Stop-RagWorker
 }
 
 function Get-VonStatus {
