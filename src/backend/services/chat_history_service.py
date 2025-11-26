@@ -1,11 +1,18 @@
 """Chat history service for persistent conversation storage."""
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from pymongo.errors import PyMongoError
 from ..db.mongo_client import get_db
 from ..models.chat_history_model import chat_history_collection_name
+
+# Try to import RAG service, but don't fail if it's not available (circular imports etc)
+try:
+    from .rag_service import get_rag_service
+except ImportError:
+    get_rag_service = None
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +153,36 @@ def add_message_to_history(user_id: str, session_id: str, message: Dict[str, Any
         )
 
         logger.debug(f"Added message to history for user {user_id}, session {session_id}")
+
+        # Index to RAG (Best effort)
+        if get_rag_service:
+            try:
+                rag = get_rag_service()
+                content = message.get("content", "")
+                # Only index string content that isn't empty
+                if isinstance(content, str) and content.strip():
+                    # Skip indexing tool outputs that are just "truncated" markers or very short
+                    if len(content) > 5000:  # Truncate for indexing if huge
+                        content = content[:5000]
+
+                    doc_id = str(uuid.uuid4())
+                    doc = {
+                        "id": doc_id,
+                        "text": content,
+                        "metadata": {
+                            "user_id": user_id,
+                            "session_id": session_id,
+                            "role": message.get("role", "unknown"),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "type": "chat_message"
+                        }
+                    }
+                    # Use a specific namespace for chat history to allow filtered queries later
+                    rag.upsert_documents([doc], namespace="chat_history")
+            except Exception as e:
+                # Log but don't fail the chat request
+                logger.warning(f"Failed to index chat message to RAG: {e}")
+
     except PyMongoError as e:
         logger.error(f"Error adding message to history: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Could not add message to history: {e}") from e

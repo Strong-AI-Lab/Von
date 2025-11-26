@@ -1462,7 +1462,8 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
         "start_time": datetime.now(timezone.utc), # Use timezone.utc
         "last_updated_time": datetime.now(timezone.utc), # Use timezone.utc
         "status": "active",
-        "history": []
+        "history": [],
+        "indexing_status": "pending"
     }
 
     if initial_notes:
@@ -2001,7 +2002,8 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
             {
                 "$set": {
                     "history": current_history, # current_history has already been updated
-                    "last_updated_time": datetime.now(timezone.utc)
+                    "last_updated_time": datetime.now(timezone.utc),
+                    "indexing_status": "pending"
                 }
             }
         )

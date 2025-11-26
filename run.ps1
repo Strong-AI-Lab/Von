@@ -496,10 +496,11 @@ function Start-VonServer {
                     Write-LauncherLog "ERROR: Server process exited early before listening on port $Port. Showing last 40 log lines:"
                     $logTail = @()
                     if (Test-Path $CurrentLog) {
-                        try { 
-                            $logTail = Get-Content $CurrentLog -Tail 40 
-                            $logTail | ForEach-Object { Write-Host $_ } 
-                        } catch { Write-LauncherLog "(Log tail unavailable: $($_.Exception.Message))" }
+                        try {
+                            $logTail = Get-Content $CurrentLog -Tail 40
+                            $logTail | ForEach-Object { Write-Host $_ }
+                        }
+                        catch { Write-LauncherLog "(Log tail unavailable: $($_.Exception.Message))" }
                     }
 
                     # Auto-repair logic for missing dependencies
@@ -508,7 +509,7 @@ function Start-VonServer {
                         if ($logText -match "ModuleNotFoundError" -or $logText -match "ImportError") {
                             Write-LauncherLog "Detected missing dependencies. Attempting auto-repair..."
                             $script:RepairAttempted = $true
-                            
+
                             $setupScript = Join-Path $Root "setup_py.ps1"
                             if (Test-Path $setupScript) {
                                 & $setupScript
@@ -516,7 +517,8 @@ function Start-VonServer {
                                     Write-LauncherLog "Repair completed successfully. Retrying server start..."
                                     Start-VonServer
                                     return
-                                } else {
+                                }
+                                else {
                                     Write-LauncherLog "Repair failed."
                                 }
                             }
@@ -1420,7 +1422,7 @@ function Show-Help {
     @'
 Von Launcher Help
     Usage: .\run.ps1 [action] [options]
-    Actions: start | foreground | stop | status | restart | logs | check | autoupdate | help
+    Actions: start | foreground | stop | status | restart | logs | check | autoupdate | rag-worker | help
     Options:
         -Port <int>            (reserved future multi-instance)
     -NoBrowser             Do not auto open browser
@@ -1579,6 +1581,13 @@ switch ($Action) {
                 Start-Sleep -Seconds 60
             }
         }
+    }
+    'rag-worker' {
+        Write-LauncherLog "Starting RAG Indexing Worker..."
+        $env:PYTHONUNBUFFERED = '1'
+        $env:PYTHONPATH = $Root
+        $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
+        & $pdm run python -u src/backend/utilities/rag_indexing_worker.py
     }
     'help' { Show-Help }
     default { Write-LauncherLog "Unknown action '$Action'"; Show-Help }
