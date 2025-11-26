@@ -493,16 +493,6 @@ case "$ACTION" in
             echo "NOT RUNNING"; exit 3
         fi
         ;;
-    rag-worker)
-        echo "Starting RAG Indexing Worker..."
-        export PYTHONUNBUFFERED=1
-        export PYTHONPATH="$SCRIPT_DIR_ABS"
-        PDM_CMD="pdm"
-        if [ -x "$SCRIPT_DIR_ABS/.venv/bin/pdm" ]; then
-            PDM_CMD="$SCRIPT_DIR_ABS/.venv/bin/pdm"
-        fi
-        "$PDM_CMD" run python -u "$SCRIPT_DIR_ABS/src/backend/utilities/rag_indexing_worker.py"
-        ;;
     *)
         echo "Unknown action: $ACTION"; exit 2
         ;;
