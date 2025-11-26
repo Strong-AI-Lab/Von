@@ -20,6 +20,7 @@ from ..services.concept_service import get_concept_display_name_with_names_fallb
 from ..services.concept_search_service import search_concepts
 from ..services.text_value_service import upsert_text_for_concept
 from ..services.concept_merge_service import merge_concepts
+from ..services.rag_service import get_rag_service, RAGBackendUnavailable
 from ..integrations.internal_mcp.arxiv_proxy import get_arxiv_proxy, ArxivProxyError
 from ..integrations.internal_mcp.search_proxy_mcp import get_search_proxy, SearchProxyError
 
@@ -382,6 +383,43 @@ def mcp_merge_concepts():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/search_knowledge_base', methods=['GET', 'POST'])
+def mcp_search_knowledge_base():
+    """
+    Search the internal knowledge base (RAG).
+    """
+    try:
+        if request.method == 'POST':
+            data = request.get_json() or {}
+        else:
+            data = request.args.to_dict()
+
+        query = data.get('query')
+        if not query:
+            return jsonify({"error": "Missing required parameter: query"}), 400
+
+        top_k = int(data.get('top_k', 5))
+        namespace = data.get('namespace')
+
+        service = get_rag_service()
+        results = service.query(
+            query_text=query,
+            top_k=top_k,
+            namespace=namespace
+        )
+
+        return jsonify({
+            "results": results,
+            "count": len(results),
+            "success": True
+        }), 200
+
+    except RAGBackendUnavailable as e:
+        return jsonify({"error": f"RAG service unavailable: {e}", "success": False}), 500
+    except Exception as e:
+        return jsonify({"error": f"Unexpected error: {e}", "success": False}), 500
 
 
 # Search MCP tool routes

@@ -1043,6 +1043,58 @@ def _merge_concepts_output_schema() -> Schema:
     )
 
 
+# RAG Tool Handlers and Schemas
+def _search_knowledge_base(**kwargs):
+    from ...services.rag_service import get_rag_service, RAGBackendUnavailable
+
+    query_text = kwargs.get("query")
+    if not query_text:
+        return {"error": "Missing required parameter: query", "success": False}
+
+    try:
+        service = get_rag_service()  # Default backend
+        results = service.query(
+            query_text=query_text,
+            top_k=kwargs.get("top_k", 5),
+            namespace=kwargs.get("namespace"),
+        )
+        return {
+            "results": results,
+            "count": len(results),
+            "success": True
+        }
+    except RAGBackendUnavailable as e:
+        return {"error": f"RAG service unavailable: {e}", "success": False}
+    except Exception as e:
+        return {"error": f"Unexpected error: {e}", "success": False}
+
+
+def _search_knowledge_base_input_schema() -> Schema:
+    return Schema(
+        required={"query": str},
+        optional={
+            "top_k": (int,),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=False,
+        description="search_knowledge_base input: query (str), top_k (int, default 5), namespace (str, optional filter)",
+    )
+
+
+def _search_knowledge_base_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "results": (list, type(None)),
+            "count": (int, type(None)),
+            "error": (str, type(None)),
+            "success": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description="search_knowledge_base output: results (list of {id, score, text, metadata}), count (int), or error (str)",
+    )
+
+
 def build_default_catalogue() -> MethodCatalogue:
     """Return a catalogue pre-populated with the baseline method set."""
 
@@ -1241,6 +1293,15 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             timeout_sec=15.0,
             description="Extract and return the main text content from a specific URL. Use when user provides a URL and wants to read, analyse, or extract information from that specific web page. Returns cleaned text content and page title. Useful for reading articles, documentation, or any web page content. Example: 'read this article: https://example.com/article', 'extract content from this URL'.",
+        ),
+        MethodDefinition(
+            name="search_knowledge_base",
+            handler=_search_knowledge_base,
+            input_schema=_search_knowledge_base_input_schema(),
+            output_schema=_search_knowledge_base_output_schema(),
+            category="read",
+            timeout_sec=30.0,
+            description="Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
         ),
     ]
 
