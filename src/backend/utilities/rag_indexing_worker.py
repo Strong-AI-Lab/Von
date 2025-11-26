@@ -12,6 +12,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../.
 
 from src.backend.db.connection_manager import get_db
 from src.backend.models.concept_models import IndexingStatus
+from src.backend.languagemodels.llm_interface import get_llm_client
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -40,24 +41,54 @@ def process_pending_interactions():
 
     logger.info(f"Found {len(pending_items)} pending interactions to index")
 
+    # Initialize LLM client once per batch
+    try:
+        client = get_llm_client()
+    except Exception as e:
+        logger.error(f"Failed to initialize LLM client: {e}")
+        return
+
+    embedding_model = os.getenv("RAG_EMBEDDING_MODEL")
+
     for interaction in pending_items:
         interaction_id = interaction['_id']
         try:
             logger.info(f"Processing interaction {interaction_id}")
 
-            # TODO: Implement actual embedding generation and vector store insertion here
             # 1. Extract text from history (Q&A pairs)
+            text_content = []
+            interactions = interaction.get('interactions', [])
+            for entry in interactions:
+                details = entry.get('details', {})
+                question = details.get('question')
+                answer = details.get('answer') or details.get('answer_preview')
+                if question and answer:
+                    text_content.append(f"Q: {question}\nA: {answer}")
+
+            full_text = "\n\n".join(text_content)
+
+            if not full_text.strip():
+                logger.warning(f"No text content found for interaction {interaction_id}")
+                interactions_coll.update_one(
+                    {"_id": interaction_id},
+                    {
+                        "$set": {
+                            "indexing_status": IndexingStatus.SKIPPED.value,
+                            "indexed_at": datetime.now(timezone.utc)
+                        }
+                    }
+                )
+                continue
+
             # 2. Generate embeddings using LLM/Embedding model
-            # 3. Insert into Vector DB (e.g. Chroma, Pinecone, or Mongo Atlas Vector Search)
+            embedding = client.get_embedding(full_text, model=embedding_model)
 
-            # For now, we simulate success to verify the workflow
-            time.sleep(0.5) # Simulate work
-
-            # Update status to INDEXED
+            # 3. Insert into Vector DB (Store in Mongo document for now)
             interactions_coll.update_one(
                 {"_id": interaction_id},
                 {
                     "$set": {
+                        "embedding": embedding,
                         "indexing_status": IndexingStatus.INDEXED.value,
                         "indexed_at": datetime.now(timezone.utc)
                     }
