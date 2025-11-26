@@ -1,13 +1,3 @@
-# Add this function at the top of the file
-def get_concept_display_name_with_names_fallback(concept):
-    if 'display_name' in concept:
-        return concept['display_name']
-    names = concept.get('names', [])
-    if names:
-        return names[0].get('name', concept.get('concept_id', ''))
-    return concept.get('concept_id', '')
-# filepath: <PROJECT_ROOT>/src/backend/services/concept_service.py
-
 # TODO: ARCHITECTURAL RENAMING NEEDED (Separate from JVNAUTOSCI-320)
 #
 # This service should be renamed to better reflect its current purpose:
@@ -59,6 +49,7 @@ from ..vontology.utils_vontology import (
     set_concept_notes,
     is_thing_id,
     THING_PRIMARY_ID,
+    get_concept_display_name_with_names_fallback,
 ) # Added imports for concept field accessors
 from pymongo.database import Database # For type hinting db
 

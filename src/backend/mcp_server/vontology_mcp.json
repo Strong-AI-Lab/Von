@@ -161,14 +161,24 @@
                     },
                     "include_text_relations_arg1": {
                         "oneOf": [
-                            {"type": "boolean"},
-                            {"type": "string", "enum": ["snippets"], "description": "Use 'snippets' to request short text snippets in addition to raw text."}
+                            {
+                                "type": "boolean"
+                            },
+                            {
+                                "type": "string",
+                                "enum": [
+                                    "snippets"
+                                ],
+                                "description": "Use 'snippets' to request short text snippets in addition to raw text."
+                            }
                         ],
                         "description": "Include text relations (e.g., hasName, hasDescription) where the concept is the subject."
                     },
                     "predicate_filter": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string"
+                        },
                         "description": "Optional whitelist of predicate identifiers to include."
                     },
                     "limit": {
@@ -185,7 +195,9 @@
                         "default": true
                     }
                 },
-                "required": ["concept_id"]
+                "required": [
+                    "concept_id"
+                ]
             }
         },
         {
@@ -194,13 +206,43 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query text"},
-                    "instance_of": {"type": "string", "description": "Filter to instances of a specific type (e.g., '#V#researcher')"},
-                    "filter_kind": {"type": "array", "items": {"type": "string", "enum": ["individual", "type", "predicate"]}, "description": "Filter by concept kind"},
-                    "include_hierarchy_path": {"type": "boolean", "description": "Include full hierarchy path"},
-                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"}
+                    "query": {
+                        "type": "string",
+                        "description": "Search query text"
+                    },
+                    "instance_of": {
+                        "type": "string",
+                        "description": "Filter to instances of a specific type (e.g., '#V#researcher')"
+                    },
+                    "filter_kind": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "individual",
+                                "type",
+                                "predicate"
+                            ]
+                        },
+                        "description": "Filter by concept kind"
+                    },
+                    "include_hierarchy_path": {
+                        "type": "boolean",
+                        "description": "Include full hierarchy path"
+                    },
+                    "match_type": {
+                        "type": "string",
+                        "enum": [
+                            "exact",
+                            "substring",
+                            "similarity"
+                        ],
+                        "description": "Type of matching"
+                    }
                 },
-                "required": ["query"]
+                "required": [
+                    "query"
+                ]
             }
         },
         {
@@ -209,13 +251,43 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query text"},
-                    "instance_of": {"type": "string", "description": "Filter to instances of a specific type"},
-                    "filter_kind": {"type": "array", "items": {"type": "string", "enum": ["individual", "type", "predicate"]}, "description": "Filter by concept kind"},
-                    "include_hierarchy_path": {"type": "boolean", "description": "Include full hierarchy path"},
-                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"}
+                    "query": {
+                        "type": "string",
+                        "description": "Search query text"
+                    },
+                    "instance_of": {
+                        "type": "string",
+                        "description": "Filter to instances of a specific type"
+                    },
+                    "filter_kind": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "individual",
+                                "type",
+                                "predicate"
+                            ]
+                        },
+                        "description": "Filter by concept kind"
+                    },
+                    "include_hierarchy_path": {
+                        "type": "boolean",
+                        "description": "Include full hierarchy path"
+                    },
+                    "match_type": {
+                        "type": "string",
+                        "enum": [
+                            "exact",
+                            "substring",
+                            "similarity"
+                        ],
+                        "description": "Type of matching"
+                    }
                 },
-                "required": ["query"]
+                "required": [
+                    "query"
+                ]
             }
         },
         {
@@ -224,10 +296,18 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "input_text": {"type": "string", "description": "The text content to analyze"},
-                    "context_concept_id": {"type": "string", "description": "Optional context concept ID"}
+                    "input_text": {
+                        "type": "string",
+                        "description": "The text content to analyze"
+                    },
+                    "context_concept_id": {
+                        "type": "string",
+                        "description": "Optional context concept ID"
+                    }
                 },
-                "required": ["input_text"]
+                "required": [
+                    "input_text"
+                ]
             }
         },
         {
@@ -236,11 +316,24 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "source_id": {"type": "string", "description": "Source concept ID (e.g., '#V#nikola_k._kasabov')"},
-                    "predicate": {"type": "string", "description": "Relationship type: 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'"},
-                    "target": {"type": "string", "description": "Target concept ID (e.g., '#V#professor') or text value for text predicates"}
+                    "source_id": {
+                        "type": "string",
+                        "description": "Source concept ID (e.g., '#V#nikola_k._kasabov')"
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Relationship type: 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Target concept ID (e.g., '#V#professor') or text value for text predicates"
+                    }
                 },
-                "required": ["source_id", "predicate", "target"]
+                "required": [
+                    "source_id",
+                    "predicate",
+                    "target"
+                ]
             }
         },
         {
@@ -467,6 +560,27 @@
                 },
                 "required": [
                     "arxiv_id"
+                ]
+            }
+        },
+        {
+            "name": "search_knowledge_base",
+            "description": "Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string"
+                    },
+                    "top_k": {
+                        "type": "integer"
+                    },
+                    "namespace": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "query"
                 ]
             }
         }

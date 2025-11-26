@@ -57,6 +57,7 @@ from src.backend.integrations.internal_mcp.search_proxy_mcp import (
     get_search_proxy,
     SearchProxyError,
 )
+from src.backend.services.rag_service import get_rag_service, RAGBackendUnavailable
 
 # Create MCP server instance
 app = Server("vontology-mcp")
@@ -410,6 +411,19 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["source_id", "target_id"]
+            }
+        ),
+        Tool(
+            name="search_knowledge_base",
+            description="Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query text"},
+                    "top_k": {"type": "integer", "default": 5, "description": "Number of results to return"},
+                    "namespace": {"type": "string", "description": "Optional namespace filter"}
+                },
+                "required": ["query"]
             }
         )
     ]
@@ -935,6 +949,31 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 type="text",
                 text=json.dumps(result, indent=2)
             )]
+
+        elif name == "search_knowledge_base":
+            query = arguments.get("query")
+            if not query:
+                return [TextContent(type="text", text=json.dumps({"error": "Missing query parameter"}))]
+
+            try:
+                service = get_rag_service()
+                results = service.query(
+                    query_text=query,
+                    top_k=arguments.get("top_k", 5),
+                    namespace=arguments.get("namespace")
+                )
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "results": results,
+                        "count": len(results),
+                        "success": True
+                    }, indent=2)
+                )]
+            except RAGBackendUnavailable as e:
+                return [TextContent(type="text", text=json.dumps({"error": f"RAG service unavailable: {e}", "success": False}))]
+            except Exception as e:
+                return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {e}", "success": False}))]
 
         else:
             return [TextContent(
