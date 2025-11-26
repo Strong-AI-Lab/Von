@@ -325,6 +325,7 @@ function startHealthPolling() {
   const publicIpSpan = document.getElementById('serverPublicIpValue');
   const pidSpan = document.getElementById('serverPidValue');
   const uptimeSpan = document.getElementById('serverUptimeValue');
+  const ragSpan = document.getElementById('ragIndexingValue');
   if (!pidSpan) return;
   // Copy-to-clipboard behavior for local IP address
   if (localIpSpan) {
@@ -431,11 +432,28 @@ function startHealthPolling() {
       const newStart = data.start_time || null;
       const newLocalIp = data.local_ip || null;
       const newPublicIp = data.public_ip || null;
+      const ragPending = (typeof data.rag_pending_count !== 'undefined') ? data.rag_pending_count : null;
+
       if (localIpSpan) {
         localIpSpan.textContent = newLocalIp || '?';
       }
       if (publicIpSpan) {
         publicIpSpan.textContent = newPublicIp || '—';
+      }
+      if (ragSpan) {
+        if (ragPending === null || ragPending < 0) {
+          ragSpan.textContent = '?';
+          ragSpan.title = 'RAG status unavailable';
+          ragSpan.classList.remove('rag-active');
+        } else if (ragPending === 0) {
+          ragSpan.textContent = 'Idle';
+          ragSpan.title = 'No pending items to index';
+          ragSpan.classList.remove('rag-active');
+        } else {
+          ragSpan.textContent = `${ragPending} pending`;
+          ragSpan.title = `${ragPending} items waiting for indexing`;
+          ragSpan.classList.add('rag-active');
+        }
       }
       if (newPid !== null) {
         pidSpan.textContent = newPid;

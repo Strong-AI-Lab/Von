@@ -5510,3 +5510,16 @@ body.settings-body {
     color: #212529;
     line-height: 1.5;
 }
+
+/* RAG Indexing Indicator */
+#ragIndexingValue.rag-active {
+    color: #d97706; /* Amber-600 */
+    font-weight: 600;
+    animation: pulse-rag 2s infinite;
+}
+
+@keyframes pulse-rag {
+    0% { opacity: 1; }
+    50% { opacity: 0.6; }
+    100% { opacity: 1; }
+}

@@ -27,7 +27,7 @@ from .routes.annotations_routes import annotations_bp
 from .routes.admin_routes import admin_bp
 from .routes.auth_routes import auth_bp
 from .routes.predicate_routes import predicate_bp
-from ..db.connection_manager import ensure_monitor_started  # start background DB monitor
+from ..db.connection_manager import ensure_monitor_started, get_db  # start background DB monitor
 from ..services.annotation_extraction_service import prompt_concept_health_status, PROMPT_CONCEPT_ID
 
 # Define a version string
@@ -201,13 +201,25 @@ def create_flask_app(
                 print(f"[health] Public IP fetch failed: {e}")
                 public_ip = None
 
+        # RAG Indexing Status
+        rag_pending_count = 0
+        try:
+            db = get_db()
+            if db is not None:
+                # Use string "pending" to avoid importing model class and potential circular deps
+                rag_pending_count = db['interaction_sessions'].count_documents({"indexing_status": "pending"})
+        except Exception as e:
+            print(f"[health] RAG status check failed: {e}")
+            rag_pending_count = -1 # Indicate error
+
         return jsonify(
             status="healthy",
             version=APP_VERSION,
             pid=os.getpid(),
             start_time=app.config['SERVER_START_TIME'],
             local_ip=local_ip,
-            public_ip=public_ip
+            public_ip=public_ip,
+            rag_pending_count=rag_pending_count
         )
 
     @app.route('/diag')
