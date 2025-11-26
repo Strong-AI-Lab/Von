@@ -58,6 +58,7 @@ class ConceptInteraction(BaseModel):
     # RAG Indexing Status
     indexing_status: IndexingStatus = IndexingStatus.PENDING
     indexed_at: Optional[datetime] = None
+    embedding: Optional[List[float]] = None
 
     model_config = ConfigDict(use_enum_values=True)
 
