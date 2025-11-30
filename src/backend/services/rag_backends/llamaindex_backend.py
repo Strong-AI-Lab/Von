@@ -39,7 +39,7 @@ class LlamaIndexRAGService(RAGService):
             # If load fails (e.g. empty dir), start with empty index
             self.index = None
 
-    def _get_or_create_index(self, documents: List[Document] = []) -> VectorStoreIndex:
+    def _get_or_create_index(self, documents: List[Document] = []) -> Any:
         if self.index:
             return self.index
 
@@ -71,9 +71,13 @@ class LlamaIndexRAGService(RAGService):
             if not text:
                 continue
 
-            l_doc = Document(text=text, metadata=metadata)
+            # Use doc_id parameter if present, ensuring it is a string
             if doc_id:
-                l_doc.doc_id = doc_id
+                l_doc = Document(text=text, doc_id=str(doc_id))
+            else:
+                l_doc = Document(text=text)
+
+            l_doc.metadata = metadata
             llama_docs.append(l_doc)
 
         if not llama_docs:

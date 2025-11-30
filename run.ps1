@@ -386,7 +386,7 @@ function Test-VonLogReady {
 
 function Start-RagWorker {
     if (Test-Path $RagPidFile) {
-        $pidContent = Get-Content $RagPidFile -ErrorAction SilentlyContinue
+        $pidContent = Get-Content $RagPidFile -Raw -ErrorAction SilentlyContinue
         if ($pidContent -match 'PID=([0-9]+)') {
             $oldPid = [int]$Matches[1]
             if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
@@ -412,7 +412,7 @@ function Start-RagWorker {
 
 function Stop-RagWorker {
     if (-not (Test-Path $RagPidFile)) { return }
-    $content = Get-Content $RagPidFile -ErrorAction SilentlyContinue
+    $content = Get-Content $RagPidFile -Raw -ErrorAction SilentlyContinue
     if ($content -match 'PID=([0-9]+)') {
         $pidToKill = [int]$Matches[1]
         Write-LauncherLog "Stopping RAG Worker (PID=$pidToKill)..."

@@ -1,14 +1,13 @@
 # AI Notes
 
 ## Current Status
-- **Date**: 2025-11-24
+- **Date**: 2025-11-28
 - **Recent Activity**:
-  - Refactored chat interface to `chat_tab.html`.
-  - Improved chat timestamp formatting in `chatTab.js` (added Today/Yesterday support).
-  - Added unit tests for `chatTab.js`.
-  - Merged PR #14 (`feature/chat-timestamp-and-refactor`).
-  - Cleaned up merged branches (`chore/setup-ensurepip-repair`).
+  - Resolved linting and type errors in `orchestrator.py`, `llm_interface.py`, `llamaindex_backend.py`, and `rag_service.py`.
+  - Verified fixes for strict type checking and library export issues.
 - **Immediate Focus**: Awaiting user instructions.
+- **Reminders**:
+  - **Spelling**: Always use New Zealand English (e.g., "behaviour", "colour", "optimise").
 
 ## Todo
 - [ ] (Add new tasks here)

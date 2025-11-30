@@ -749,6 +749,7 @@ class GeminiClient(LLMInterface):
 
     def generate(self, prompt: str, context: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, llm_params: Optional[Dict[str, Any]] = None) -> str:
         """Generate a response using the Gemini API. Raises RuntimeError on failure."""
+        assert genai is not None
         target_model_name = model or self.default_model
         logger.info(f"Generating response using Gemini model: {target_model_name}")
         print(f"[LLM PROMPT][Gemini][{target_model_name}]: {prompt}")
@@ -810,9 +811,16 @@ class GeminiClient(LLMInterface):
 
     def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
         """Generate an embedding using Gemini."""
+        # Ensure genai is available
+        if genai is None:
+            raise ImportError("google.generativeai package is required for Gemini embeddings")
+
+        # Cast to Any to avoid static analysis errors about exported members
+        genai_any = cast(Any, genai)
+
         target_model = model or "models/embedding-001"
         try:
-            result = genai.embed_content(
+            result = genai_any.embed_content(
                 model=target_model,
                 content=text,
                 task_type="retrieval_document",
@@ -826,6 +834,8 @@ class GeminiClient(LLMInterface):
     def list_models(self) -> List[str]:
         """List available models from Gemini."""
         logger.info("Listing available Gemini models.")
+        assert genai is not None
+
         try:
             model_names = []
             try:
