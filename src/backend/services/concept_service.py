@@ -1456,6 +1456,21 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
         logger.warning(f"concept not found with ID {concept_id} when trying to start interaction session.")
         raise ConceptServiceError(f"concept not found with ID {concept_id}.")
 
+    # Derive namespace for the session (per-user isolation for RAG/search)
+    # Preferred: explicit env override; Fallback: derive from user_id
+    import os
+    default_ns = os.environ.get("VON_DEFAULT_NAMESPACE")
+    derived_ns = None
+    try:
+        if isinstance(user_id, str) and user_id.strip():
+            # Simple deterministic derivation; ensure '#V#' prefix
+            user_slug = user_id.strip().lower().replace(" ", "_")
+            derived_ns = f"#V#{user_slug}"
+    except Exception:
+        derived_ns = None
+
+    session_namespace = default_ns or derived_ns or "#V#default_namespace"
+
     session_doc = {
         "concept_id": ObjectId(actual_concept_id),
         "user_id": user_id,
@@ -1463,7 +1478,8 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
         "last_updated_time": datetime.now(timezone.utc), # Use timezone.utc
         "status": "active",
         "history": [],
-        "indexing_status": "pending"
+        "indexing_status": "pending",
+        "namespace": session_namespace
     }
 
     if initial_notes:

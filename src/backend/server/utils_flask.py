@@ -222,6 +222,129 @@ def create_flask_app(
             rag_pending_count=rag_pending_count
         )
 
+    @app.route('/admin/rag_status')
+    def rag_status():
+        """Return detailed RAG indexing status counts for footer display.
+
+        Response:
+          {
+            "total": int,
+            "indexed": int,
+            "pending": int,
+            "failed": int,
+            "skipped": int
+          }
+        """
+        try:
+            db = get_db()
+            if db is None:
+                return jsonify(error='db_unavailable'), 503
+            sessions_coll = db['interaction_sessions']
+            interactions_coll = db['interactions'] if 'interactions' in db.list_collection_names() else None
+            # Optional namespace filter: expects sessions to store a 'namespace' field
+            ns = request.args.get('namespace')
+            sess_filter = ({'namespace': ns} if ns else {})
+            total_sessions = sessions_coll.count_documents({})
+            indexed = sessions_coll.count_documents({'indexing_status': 'indexed', **sess_filter})
+            pending = sessions_coll.count_documents({'indexing_status': 'pending', **sess_filter})
+            failed = sessions_coll.count_documents({'indexing_status': 'failed', **sess_filter})
+            skipped = sessions_coll.count_documents({'indexing_status': 'skipped', **sess_filter})
+            # Eligible heuristic: sessions with a non-empty 'history' or any interaction with text
+            eligible_sessions = sessions_coll.count_documents({
+                '$or': [
+                    {'history': {'$exists': True, '$ne': []}},
+                    {'summary': {'$exists': True, '$type': 'string', '$ne': ''}}
+                ],
+                **sess_filter
+            })
+            total_interactions = 0
+            eligible_interactions = 0
+            if interactions_coll is not None:
+                total_interactions = interactions_coll.count_documents({})
+                eligible_interactions = interactions_coll.count_documents({
+                    '$or': [
+                        {'text': {'$exists': True, '$type': 'string', '$ne': ''}},
+                        {'message': {'$exists': True, '$type': 'string', '$ne': ''}}
+                    ]
+                })
+            return jsonify({
+                'total': total_sessions,
+                'indexed': indexed,
+                'pending': pending,
+                'failed': failed,
+                'skipped': skipped,
+                'sessions': total_sessions,
+                'interactions': total_interactions,
+                'eligible_sessions': eligible_sessions,
+                'eligible_interactions': eligible_interactions,
+                'namespace': ns
+            })
+        except Exception as e:
+            return jsonify(error='unexpected', detail=str(e)), 500
+
+    @app.route('/admin/rag_integrity', methods=['POST'])
+    def admin_rag_integrity():
+        db = get_db()
+        if db is None:
+            return jsonify({'error': 'db_unavailable'}), 503
+        sessions_coll = db['interaction_sessions']
+        interactions_coll = db['interactions'] if 'interactions' in db.list_collection_names() else None
+        ns = request.args.get('namespace')
+        sess_filter = ({'namespace': ns} if ns else {})
+        result = {
+            'sessions': sessions_coll.count_documents(sess_filter or {}),
+            'interactions': (interactions_coll.count_documents({}) if interactions_coll is not None else 0),
+            'indexed': sessions_coll.count_documents({'indexing_status': 'indexed', **sess_filter}),
+            'pending': sessions_coll.count_documents({'indexing_status': 'pending', **sess_filter}),
+            'failed': sessions_coll.count_documents({'indexing_status': 'failed', **sess_filter}),
+            'skipped': sessions_coll.count_documents({'indexing_status': 'skipped', **sess_filter}),
+            'eligible_sessions': sessions_coll.count_documents({
+                '$or': [
+                    {'history': {'$exists': True, '$ne': []}},
+                    {'summary': {'$exists': True, '$type': 'string', '$ne': ''}}
+                ],
+                **sess_filter
+            }),
+            'eligible_interactions': 0,
+            'anomalies': [],
+            'namespace': ns
+        }
+        if interactions_coll is not None:
+            result['eligible_interactions'] = interactions_coll.count_documents({
+                '$or': [
+                    {'text': {'$exists': True, '$type': 'string', '$ne': ''}},
+                    {'message': {'$exists': True, '$type': 'string', '$ne': ''}}
+                ]
+            })
+            # Anomaly example: interactions with text but session missing pending/indexed
+            sample_with_text = interactions_coll.find({
+                '$or': [
+                    {'text': {'$exists': True, '$type': 'string', '$ne': ''}},
+                    {'message': {'$exists': True, '$type': 'string', '$ne': ''}}
+                ]
+            }, {'session_id': 1}).limit(25)
+            orphan_sessions = []
+            for it in sample_with_text:
+                sid = it.get('session_id')
+                if sid is None:
+                    continue
+                sess = sessions_coll.find_one({'_id': sid}, {'indexing_status': 1})
+                if not sess or sess.get('indexing_status') not in ('pending', 'indexed', 'failed', 'skipped'):
+                    orphan_sessions.append(str(sid))
+            if orphan_sessions:
+                result['anomalies'].append({'type': 'orphan_text_interactions', 'session_ids': orphan_sessions})
+        return jsonify(result)
+
+    @app.route('/admin/rag_sync', methods=['POST'])
+    def admin_rag_sync():
+        from ..services.rag_sync_service import sync_to_chat_store
+        payload = request.get_json(silent=True) or {}
+        namespace = payload.get('namespace')
+        try:
+            result = sync_to_chat_store(namespace=namespace)
+            return jsonify(result)
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
     @app.route('/diag')
     def diagnostics():
         """Lightweight diagnostics endpoint exposing runtime/process/cache info."""

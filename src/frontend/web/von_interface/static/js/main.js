@@ -326,6 +326,11 @@ function startHealthPolling() {
   const pidSpan = document.getElementById('serverPidValue');
   const uptimeSpan = document.getElementById('serverUptimeValue');
   const ragSpan = document.getElementById('ragIndexingValue');
+  const ragDetailsBtn = document.getElementById('ragIndexingValue');
+  const ragModal = document.getElementById('ragStatusModal');
+  const ragModalBody = ragModal ? document.getElementById('ragStatusBody') : null;
+  const ragModalClose = ragModal ? document.getElementById('ragStatusClose') : null;
+  const ragModalCheck = ragModal ? document.getElementById('ragStatusCheck') : null;
   if (!pidSpan) return;
   // Copy-to-clipboard behavior for local IP address
   if (localIpSpan) {
@@ -441,19 +446,185 @@ function startHealthPolling() {
         publicIpSpan.textContent = newPublicIp || '—';
       }
       if (ragSpan) {
-        if (ragPending === null || ragPending < 0) {
-          ragSpan.textContent = '?';
-          ragSpan.title = 'RAG status unavailable';
-          ragSpan.classList.remove('rag-active');
-        } else if (ragPending === 0) {
-          ragSpan.textContent = 'Idle';
-          ragSpan.title = 'No pending items to index';
-          ragSpan.classList.remove('rag-active');
-        } else {
-          ragSpan.textContent = `${ragPending} pending`;
-          ragSpan.title = `${ragPending} items waiting for indexing`;
-          ragSpan.classList.add('rag-active');
+        // Prefer detailed counts from /admin/rag_status; fallback to /health pending only
+        try {
+          const controller2 = new AbortController();
+          const timeout2 = setTimeout(() => controller2.abort(), 5000);
+          const ns = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
+          const res2 = await fetch(ns ? (`/admin/rag_status?namespace=${encodeURIComponent(ns)}`) : '/admin/rag_status', { cache: 'no-store', signal: controller2.signal });
+          clearTimeout(timeout2);
+          if (res2.ok) {
+            const rs = await res2.json();
+            if (typeof rs.pending === 'number' && typeof rs.indexed === 'number') {
+              const p = rs.pending;
+              const i = rs.indexed;
+              const f = (typeof rs.failed === 'number') ? rs.failed : 0;
+              if (p === 0) {
+                ragSpan.textContent = `Indexed ${i}`;
+                ragSpan.title = `Indexed=${i} | Pending=${p} | Failed=${f}`;
+                ragSpan.classList.remove('rag-active');
+              } else {
+                ragSpan.textContent = `Indexed ${i} • ${p} pending`;
+                ragSpan.title = `Indexed=${i} | Pending=${p} | Failed=${f}`;
+                ragSpan.classList.add('rag-active');
+              }
+            }
+          } else {
+            // Fallback to pending-only
+            if (ragPending === null || ragPending < 0) {
+              ragSpan.textContent = '?';
+              ragSpan.title = 'RAG status unavailable';
+              ragSpan.classList.remove('rag-active');
+            } else if (ragPending === 0) {
+              ragSpan.textContent = 'Idle';
+              ragSpan.title = 'No pending items to index';
+              ragSpan.classList.remove('rag-active');
+            } else {
+              ragSpan.textContent = `${ragPending} pending`;
+              ragSpan.title = `${ragPending} items waiting for indexing`;
+              ragSpan.classList.add('rag-active');
+            }
+          }
+        } catch (_) {
+          // Fallback to pending-only
+          if (ragPending === null || ragPending < 0) {
+            ragSpan.textContent = '?';
+            ragSpan.title = 'RAG status unavailable';
+            ragSpan.classList.remove('rag-active');
+          } else if (ragPending === 0) {
+            ragSpan.textContent = 'Idle';
+            ragSpan.title = 'No pending items to index';
+            ragSpan.classList.remove('rag-active');
+          } else {
+            ragSpan.textContent = `${ragPending} pending`;
+            ragSpan.title = `${ragPending} items waiting for indexing`;
+            ragSpan.classList.add('rag-active');
+          }
         }
+      }
+
+      // Hook up View details button once (idempotent)
+      if (ragDetailsBtn && ragModal && ragModalBody && !ragDetailsBtn._wired) {
+        ragDetailsBtn._wired = true;
+        ragDetailsBtn.addEventListener('click', async () => {
+          try {
+            ragModal.classList.add('open');
+            ragModal.setAttribute('aria-hidden', 'false');
+            ragModalBody.innerHTML = '<p>Loading…</p>';
+            const controller3 = new AbortController();
+            const timeout3 = setTimeout(() => controller3.abort(), 8000);
+            const ns2 = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
+            const res3 = await fetch(ns2 ? (`/admin/rag_status?namespace=${encodeURIComponent(ns2)}`) : '/admin/rag_status', { cache: 'no-store', signal: controller3.signal });
+            clearTimeout(timeout3);
+            if (res3.ok) {
+              const rs = await res3.json();
+              const total = (typeof rs.total === 'number') ? rs.total : null;
+              const indexed = (typeof rs.indexed === 'number') ? rs.indexed : 0;
+              const pending = (typeof rs.pending === 'number') ? rs.pending : 0;
+              const failed = (typeof rs.failed === 'number') ? rs.failed : 0;
+              const skipped = (typeof rs.skipped === 'number') ? rs.skipped : 0;
+              const sessions = (typeof rs.sessions === 'number') ? rs.sessions : null;
+              const interactions = (typeof rs.interactions === 'number') ? rs.interactions : null;
+              const eligS = (typeof rs.eligible_sessions === 'number') ? rs.eligible_sessions : null;
+              const eligI = (typeof rs.eligible_interactions === 'number') ? rs.eligible_interactions : null;
+              const html = [
+                '<ul>',
+                `<li><strong>Indexed:</strong> ${indexed}</li>`,
+                `<li><strong>Pending:</strong> ${pending}</li>`,
+                `<li><strong>Failed:</strong> ${failed}</li>`,
+                `<li><strong>Skipped:</strong> ${skipped}</li>`,
+                '</ul>',
+                '<hr/>',
+                '<p>',
+                `Sessions: ${sessions ?? '—'} • Interactions: ${interactions ?? '—'} • Eligible sessions: ${eligS ?? '—'} • Eligible interactions: ${eligI ?? '—'}`,
+                '</p>'
+              ].join('');
+              ragModalBody.innerHTML = html;
+            } else {
+              ragModalBody.innerHTML = '<p>Unable to load detailed status.</p>';
+            }
+          } catch (_) {
+            ragModalBody.innerHTML = '<p>Unable to load detailed status.</p>';
+          }
+        });
+        if (ragModalCheck) {
+          ragModalCheck.addEventListener('click', async () => {
+            try {
+              ragModalCheck.disabled = true;
+              const controller4 = new AbortController();
+              const timeout4 = setTimeout(() => controller4.abort(), 15000);
+              const ns3 = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
+              const url4 = ns3 ? (`/admin/rag_integrity?namespace=${encodeURIComponent(ns3)}`) : '/admin/rag_integrity';
+              const res4 = await fetch(url4, { method: 'POST', cache: 'no-store', signal: controller4.signal });
+              clearTimeout(timeout4);
+              if (res4.ok) {
+                const rr = await res4.json();
+                const anomalies = Array.isArray(rr.anomalies) ? rr.anomalies : [];
+                const details = [
+                  '<h3>Integrity Check</h3>',
+                  '<ul>',
+                  `<li><strong>Sessions:</strong> ${rr.sessions}</li>`,
+                  `<li><strong>Interactions:</strong> ${rr.interactions}</li>`,
+                  `<li><strong>Indexed:</strong> ${rr.indexed}</li>`,
+                  `<li><strong>Pending:</strong> ${rr.pending}</li>`,
+                  `<li><strong>Failed:</strong> ${rr.failed}</li>`,
+                  `<li><strong>Skipped:</strong> ${rr.skipped}</li>`,
+                  `<li><strong>Eligible sessions:</strong> ${rr.eligible_sessions}</li>`,
+                  `<li><strong>Eligible interactions:</strong> ${rr.eligible_interactions}</li>`,
+                  '</ul>'
+                ];
+                if (anomalies.length) {
+                  details.push('<h4>Anomalies</h4>');
+                  details.push('<ul>');
+                  anomalies.forEach(a => {
+                    if (a.type === 'orphan_text_interactions') {
+                      details.push(`<li>Text interactions without session indexing status. Sessions: ${a.session_ids.join(', ')}</li>`);
+                    } else {
+                      details.push(`<li>${a.type}</li>`);
+                    }
+                  });
+                  details.push('</ul>');
+                }
+                // Append below existing content
+                ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/>' + details.join('');
+              } else {
+                ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p>Integrity check failed.</p>';
+              }
+            } catch (e) {
+              ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p>Integrity check error.</p>';
+            } finally {
+              ragModalCheck.disabled = false;
+            }
+          });
+        }
+        // Optional: offer sync to chat RAG store (admin-only)
+        // Uncomment below if you want a UI button:
+        // const syncBtn = document.createElement('button');
+        // syncBtn.textContent = 'Sync to chat RAG store';
+        // syncBtn.className = 'btn-mini';
+        // syncBtn.addEventListener('click', async () => {
+        //   try {
+        //     syncBtn.disabled = true;
+        //     const res = await fetch('/admin/rag_sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+        //     const js = await res.json();
+        //     ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/>' + `<p>Sync result: added ${js.added} of ${js.total_indexed}</p>`;
+        //   } catch (e) { ragModalBody.innerHTML += '<hr/><p>Sync error.</p>'; }
+        //   finally { syncBtn.disabled = false; }
+        // });
+        // ragModalBody.parentElement.querySelector('.modal-actions').appendChild(syncBtn);
+        if (ragModalClose) {
+          ragModalClose.addEventListener('click', () => {
+            ragModal.classList.remove('open');
+            ragModal.setAttribute('aria-hidden', 'true');
+          });
+        }
+        // Close on backdrop click
+        ragModal.addEventListener('click', (ev) => {
+          if (ev.target === ragModal) {
+            ragModal.classList.remove('open');
+            ragModal.setAttribute('aria-hidden', 'true');
+          }
+        });
       }
       if (newPid !== null) {
         pidSpan.textContent = newPid;

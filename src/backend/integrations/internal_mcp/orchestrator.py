@@ -281,6 +281,9 @@ class InternalMCPChatOrchestrator:
         # If we are here, tool_request is valid and has action="call_tool"
         self._logger.debug("[mcp_orchestrator] Extracted tool request: %s", tool_request)
 
+        # Assert tool_request is not None to satisfy type checker (validated by has_valid_tool_call)
+        assert tool_request is not None
+
         try:
             tool_name = tool_request[self._TOOL_FIELD]
             action = tool_request[self._ACTION_FIELD]

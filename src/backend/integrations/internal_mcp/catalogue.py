@@ -1046,6 +1046,7 @@ def _merge_concepts_output_schema() -> Schema:
 # RAG Tool Handlers and Schemas
 def _search_knowledge_base(**kwargs):
     from ...services.rag_service import get_rag_service, RAGBackendUnavailable
+    import os
 
     query_text = kwargs.get("query")
     if not query_text:
@@ -1053,10 +1054,20 @@ def _search_knowledge_base(**kwargs):
 
     try:
         service = get_rag_service()  # Default backend
+        # Resolve effective namespace: prefer explicit, else env, else derive from user.id if provided
+        ns = kwargs.get("namespace")
+        if not ns:
+            ns = os.environ.get("VON_DEFAULT_NAMESPACE")
+        if not ns:
+            user = kwargs.get("user")
+            user_id = user.get("id") if isinstance(user, dict) else None
+            if isinstance(user_id, str) and user_id.strip():
+                ns = f"#V#{user_id.strip().lower().replace(' ', '_')}"
+
         results = service.query(
             query_text=query_text,
             top_k=kwargs.get("top_k", 5),
-            namespace=kwargs.get("namespace"),
+            namespace=ns,
         )
         return {
             "results": results,
@@ -1093,6 +1104,86 @@ def _search_knowledge_base_output_schema() -> Schema:
         allow_unknown=True,
         description="search_knowledge_base output: results (list of {id, score, text, metadata}), count (int), or error (str)",
     )
+
+# RAG metadata/content MCP tools
+def _rag_get_status(**kwargs):
+    import requests
+    import os
+    try:
+        ns = kwargs.get('namespace') or os.environ.get('VON_DEFAULT_NAMESPACE')
+        url = 'http://127.0.0.1:5002/admin/rag_status'
+        if ns:
+            url = f"{url}?namespace={ns}"
+        res = requests.get(url, timeout=5)
+        if res.ok:
+            return res.json()
+        return {"error": f"HTTP {res.status_code}", "success": False}
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+
+def _rag_list_indexed(**kwargs):
+    from ...db.connection_manager import get_db
+    db = get_db()
+    if db is None:
+        return {"error": "db_unavailable", "success": False}
+    coll = db['interaction_sessions']
+    limit = int(kwargs.get('limit', 20))
+    offset = int(kwargs.get('offset', 0))
+    cursor = coll.find({"indexing_status": "indexed"}, {"_id": 1, "indexed_at": 1, "summary": 1, "history": 1}).skip(offset).limit(limit)
+    items = []
+    for doc in cursor:
+        preview_len = 0
+        if isinstance(doc.get('summary'), str):
+            preview_len += len(doc['summary'])
+        history = doc.get('history') or []
+        if isinstance(history, list):
+            for h in history:
+                content = h.get('content')
+                if isinstance(content, str):
+                    preview_len += len(content)
+        items.append({
+            "session_id": str(doc.get('_id')),
+            "indexed_at": str(doc.get('indexed_at')) if doc.get('indexed_at') else None,
+            "preview_length": preview_len
+        })
+    total = coll.count_documents({"indexing_status": "indexed"})
+    return {"items": items, "total": total, "limit": limit, "offset": offset, "success": True}
+
+
+def _rag_get_item(**kwargs):
+    from ...db.connection_manager import get_db
+    from bson import ObjectId
+    db = get_db()
+    if db is None:
+        return {"error": "db_unavailable", "success": False}
+    session_id = kwargs.get('session_id')
+    if not session_id:
+        return {"error": "Missing session_id", "success": False}
+    coll = db['interaction_sessions']
+    try:
+        doc = coll.find_one({"_id": ObjectId(session_id)})
+    except Exception:
+        doc = coll.find_one({"_id": session_id})
+    if not doc:
+        return {"error": "not_found", "success": False}
+    # Build a safe preview
+    preview = []
+    if isinstance(doc.get('summary'), str):
+        preview.append(doc['summary'])
+    history = doc.get('history') or []
+    if isinstance(history, list):
+        for h in history:
+            c = h.get('content')
+            if isinstance(c, str):
+                preview.append(c)
+    return {
+        "session_id": str(doc.get('_id')),
+        "indexing_status": doc.get('indexing_status'),
+        "indexed_at": str(doc.get('indexed_at')) if doc.get('indexed_at') else None,
+        "preview": "\n\n".join(preview)[:4000],
+        "success": True
+    }
 
 
 def build_default_catalogue() -> MethodCatalogue:
@@ -1302,6 +1393,30 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             timeout_sec=30.0,
             description="Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
+        ),
+        MethodDefinition(
+            name="rag_get_status",
+            handler=_rag_get_status,
+            input_schema=Schema(required={}, optional={}, allow_unknown=False, description="No input"),
+            output_schema=None,
+            category="read",
+            description="Get RAG status: totals, eligible counts, indexed/pending/failed/skipped. Mirrors /admin/rag_status."
+        ),
+        MethodDefinition(
+            name="rag_list_indexed",
+            handler=_rag_list_indexed,
+            input_schema=Schema(required={}, optional={"limit": (int,), "offset": (int,)}, allow_unknown=False, description="List indexed sessions"),
+            output_schema=None,
+            category="read",
+            description="List indexed sessions with preview lengths and timestamps."
+        ),
+        MethodDefinition(
+            name="rag_get_item",
+            handler=_rag_get_item,
+            input_schema=Schema(required={"session_id": str}, optional={}, allow_unknown=False, description="Fetch one indexed session"),
+            output_schema=None,
+            category="read",
+            description="Get one indexed item (session) with a safe text preview."
         ),
     ]
 

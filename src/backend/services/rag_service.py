@@ -40,6 +40,7 @@ class RAGService(Protocol):
           - `text`: content
           - optional metadata fields (e.g., `source`, `permissions`)
         """
+        ...
 
     def delete_documents(
         self,
@@ -48,6 +49,7 @@ class RAGService(Protocol):
         namespace: Optional[str] = None,
     ) -> int:
         """Delete documents by id. Returns count removed."""
+        ...
 
     def query(
         self,
@@ -65,12 +67,14 @@ class RAGService(Protocol):
           - `id`, `score`, `text`, `metadata`
         Implementations must honour `permissions_context` to filter results.
         """
+        ...
 
     def embed(
         self,
         texts: Iterable[str],
     ) -> List[List[float]]:
         """Return embeddings for provided texts (backend model-dependent)."""
+        ...
 
 
 class RAGBackendUnavailable(RuntimeError):
@@ -112,14 +116,14 @@ def get_rag_service(backend: Optional[str] = None) -> RAGService:
 # These provide clear errors if called prematurely.
 
 class _NotImplementedRAG(RAGService):
-    def upsert_documents(self, docs: Iterable[Dict[str, Any]], *, namespace: Optional[str] = None, allow_partial_failures: bool = True) -> Tuple[int, int]:
+    def upsert_documents(self, docs: Iterable[Dict[str, Any]], *, namespace: Optional[str] = None, allow_partial_failures: bool = True) -> Tuple[int, int]:  # type: ignore
         raise RAGBackendUnavailable("RAG backend not implemented")
 
-    def delete_documents(self, ids: Iterable[str], *, namespace: Optional[str] = None) -> int:
+    def delete_documents(self, ids: Iterable[str], *, namespace: Optional[str] = None) -> int:  # type: ignore
         raise RAGBackendUnavailable("RAG backend not implemented")
 
-    def query(self, query_text: str, *, top_k: int = 5, namespace: Optional[str] = None, hybrid: bool = True, permissions_context: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def query(self, query_text: str, *, top_k: int = 5, namespace: Optional[str] = None, hybrid: bool = True, permissions_context: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:  # type: ignore
         raise RAGBackendUnavailable("RAG backend not implemented")
 
-    def embed(self, texts: Iterable[str]) -> List[List[float]]:
+    def embed(self, texts: Iterable[str]) -> List[List[float]]:  # type: ignore
         raise RAGBackendUnavailable("RAG backend not implemented")
