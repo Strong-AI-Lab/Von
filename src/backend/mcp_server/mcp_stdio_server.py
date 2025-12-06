@@ -37,6 +37,7 @@ from src.backend.services.concept_service import (
     get_concept_display_name_with_names_fallback,
     get_concept_by_concept_id,
     enrich_concept_with_text_relations,
+    update_concept,
 )
 from src.backend.services.concept_relation_service import build_concept_relations_payload
 from src.backend.services.concept_search_service import search_concepts
@@ -49,6 +50,7 @@ from src.backend.services.settings_service import (
     get_setting,
 )
 from src.backend.integrations.internal_mcp.catalogue import _add_relationship
+from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
 from src.backend.integrations.internal_mcp.arxiv_proxy import (
     get_arxiv_proxy,
     ArxivProxyError,
@@ -78,7 +80,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_concepts",
-            description="Creates one or more concepts (instances, types, or predicates). Each concept needs a name and kind. Use for bulk creation. Supports singleton arrays. After creation, use add_names for alternative names/translations.",
+            description="Creates one or more concepts (instances, types, or predicates). Each concept needs a name and kind. Use for bulk creation. Supports singleton arrays. After creation, use add_names for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -372,6 +374,19 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="remove_relationship",
+            description="Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string", "description": "Source concept ID (e.g., '#V#mjw_work_diary_2025-11-24')"},
+                    "predicate": {"type": "string", "description": "Relationship alias or stored field name (e.g., 'instance_of', 'typeOf')"},
+                    "target": {"type": "string", "description": "Target concept ID (e.g., '#V#diary_entry_about_michael_witbrocks_work')"}
+                },
+                "required": ["source_id", "predicate", "target"]
+            }
+        ),
+        Tool(
             name="delete_concept",
             description="Deletes a concept and handles its relationships. Can simulate the deletion first to see impact.",
             inputSchema={
@@ -411,6 +426,24 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["source_id", "target_id"]
+            }
+        ),
+        Tool(
+            name="update_concept",
+            description="Update specific fields of a concept. Use when you need to modify properties or relationships directly (e.g. fixing ontology errors, changing 'kind' by updating relationships). Supports dot notation in update_data keys for partial updates of nested objects.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to update"
+                    },
+                    "update_data": {
+                        "type": "object",
+                        "description": "Dictionary of fields to update. Use dot notation for nested fields (e.g. {'relationships.is_an_instance_of': [...]})."
+                    }
+                },
+                "required": ["concept_id", "update_data"]
             }
         ),
         Tool(
@@ -904,6 +937,30 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     text=json.dumps({"error": "Missing required parameters: source_id, predicate, and target"})
                 )]
 
+        elif name == "remove_relationship":
+            source_id = arguments.get("source_id")
+            predicate = arguments.get("predicate")
+            target = arguments.get("target")
+
+            if not source_id or not predicate or not target:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Missing required parameters: source_id, predicate, and target"})
+                )]
+
+            try:
+                result = _remove_relationship(
+                    source_id=source_id,
+                    predicate=predicate,
+                    target=target
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": f"Failed to remove relationship: {str(e)}"})
+                )]
+
             try:
                 result = _add_relationship(
                     source_id=source_id,
@@ -949,6 +1006,43 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 type="text",
                 text=json.dumps(result, indent=2)
             )]
+
+        elif name == "update_concept":
+            concept_id = arguments.get("concept_id")
+            update_data = arguments.get("update_data")
+
+            if not concept_id:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Missing concept_id parameter"})
+                )]
+            if not update_data or not isinstance(update_data, dict):
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Missing or invalid update_data dictionary"})
+                )]
+
+            try:
+                result = update_concept(concept_id=concept_id, update_data=update_data)
+                if result:
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "concept_id": concept_id,
+                            "updated_fields": list(update_data.keys())
+                        }, indent=2)
+                    )]
+                else:
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({"error": "Update failed or concept not found", "success": False})
+                    )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": str(e), "success": False})
+                )]
 
         elif name == "search_knowledge_base":
             query = arguments.get("query")

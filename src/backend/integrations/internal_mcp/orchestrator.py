@@ -77,7 +77,7 @@ class InternalMCPChatOrchestrator:
             lines.append(f"- {name}{params}: {description}")
         return "\n".join(lines)
 
-    def _instruction_message(self) -> str:
+    def _instruction_message(self, user_namespace: str | None = None) -> str:
         """Build system instruction emphasizing immediate tool invocation behavior.
 
         Design rationale (JVNAUTOSCI-698): Focus on BEHAVIOR (invoke immediately)
@@ -85,6 +85,19 @@ class InternalMCPChatOrchestrator:
         a description of intent rather than triggering actual execution.
         """
         listing = self._tool_listing()
+
+        # Inform agent about authentication status and tool availability
+        auth_status = ""
+        if user_namespace:
+            auth_status = f"\n\n🔐 AUTHENTICATION STATUS: Authenticated (namespace: {user_namespace})\nRAG tools (search_knowledge_base, rag_list_indexed, rag_get_item) are AVAILABLE.\n"
+        else:
+            auth_status = (
+                "\n\n⚠️ AUTHENTICATION STATUS: NOT AUTHENTICATED\n"
+                "RAG tools (search_knowledge_base, rag_list_indexed, rag_get_item) are UNAVAILABLE.\n"
+                "These tools require user authentication to prevent cross-user data access.\n"
+                "If user asks about their RAG data/sessions/indexed content, explain they need to log in first.\n"
+            )
+
         return (
             "You have access to internal MCP tools.\n\n"
             "⚠️ WHEN TO USE TOOLS (CHECK THESE FIRST) ⚠️\n"
@@ -95,7 +108,10 @@ class InternalMCPChatOrchestrator:
             "If user provides a URL to analyse or extract content from → USE extract_url\n"
             "If user asks a direct factual question needing verification → USE qna_search\n"
             "If searching within specific domain/context (e.g., site:example.com) → USE context_search\n"
-            "If user asks about arXiv papers by author, topic, or ID → USE list_papers or read_paper\n\n"
+            "If user asks about arXiv papers by author, topic, or ID → USE list_papers or read_paper\n"
+            "If user asks about RAG sessions/conversations (\"how many\", \"what's indexed\", \"list sessions\") → USE rag_list_indexed\n"
+            "If user wants to see RAG content from a specific session → USE rag_get_item\n"
+            "If user wants to search their indexed conversations by topic/keyword → USE search_knowledge_base\n\n"
             "CRITICAL: Your training data has a cutoff date. For anything described as current/recent/new, "
             "you MUST use search tools to get up-to-date information.\n\n"
             "HOW TO INVOKE A TOOL:\n"
@@ -143,16 +159,28 @@ class InternalMCPChatOrchestrator:
 
     @staticmethod
     def _extract_json_blob(text: str) -> Optional[MutableMapping[str, Any]]:
-        """Extract JSON object from text, handling code blocks and embedded JSON."""
+        """Extract JSON object from text, handling code blocks and embedded JSON.
+
+        If a JSON list is found, returns the first object in the list to support
+        models that attempt batch execution (the loop will handle subsequent calls).
+        """
         raw = text.strip()
         if not raw:
+            return None
+
+        def _validate(data: Any) -> Optional[MutableMapping[str, Any]]:
+            if isinstance(data, MutableMapping):
+                return data
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], MutableMapping):
+                return data[0]
             return None
 
         # 1. Try parsing the whole text
         try:
             parsed = json.loads(raw)
-            if isinstance(parsed, MutableMapping):
-                return parsed
+            valid = _validate(parsed)
+            if valid:
+                return valid
         except json.JSONDecodeError:
             pass
 
@@ -166,13 +194,13 @@ class InternalMCPChatOrchestrator:
                     chunk = chunk[4:].strip()
                 try:
                     parsed = json.loads(chunk)
-                    if isinstance(parsed, MutableMapping):
-                        return parsed
+                    valid = _validate(parsed)
+                    if valid:
+                        return valid
                 except json.JSONDecodeError:
                     continue
 
         # 3. Try to find a JSON object embedded in text
-        # Look for the first '{' and the last '}'
         first_brace = raw.find('{')
         last_brace = raw.rfind('}')
 
@@ -182,6 +210,20 @@ class InternalMCPChatOrchestrator:
                 parsed = json.loads(candidate)
                 if isinstance(parsed, MutableMapping):
                     return parsed
+            except json.JSONDecodeError:
+                pass
+
+        # 4. Try to find a JSON list embedded in text
+        first_bracket = raw.find('[')
+        last_bracket = raw.rfind(']')
+
+        if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+            candidate = raw[first_bracket : last_bracket + 1]
+            try:
+                parsed = json.loads(candidate)
+                valid = _validate(parsed)
+                if valid:
+                    return valid
             except json.JSONDecodeError:
                 pass
 
@@ -206,13 +248,17 @@ class InternalMCPChatOrchestrator:
                 result["payload"] = str(safe_payload)
             return json.dumps(result, default=str)
 
-    def _build_augmented_context(self, context: Optional[Sequence[Mapping[str, Any]]]) -> List[Mapping[str, Any]]:
+    def _build_augmented_context(
+        self,
+        context: Optional[Sequence[Mapping[str, Any]]],
+        user_namespace: str | None = None
+    ) -> List[Mapping[str, Any]]:
         base: List[Mapping[str, Any]] = []
         if context:
             for msg in context:
                 if isinstance(msg, Mapping):
                     base.append(dict(msg))
-        instruction_msg = self._instruction_message()
+        instruction_msg = self._instruction_message(user_namespace=user_namespace)
 
         # Log the size of the instruction message for diagnostics
         instruction_chars = len(instruction_msg)
@@ -233,12 +279,13 @@ class InternalMCPChatOrchestrator:
         context: Optional[Sequence[Mapping[str, Any]]],
         llm_client: Any,
         model: Optional[str],
+        user_namespace: Optional[str] = None,
     ) -> OrchestratorResult:
         if not self._gateway.enabled or self._max_tool_invocations <= 0:
             response = llm_client.generate(prompt, context=context, model=model)
             return OrchestratorResult(response_text=response, extra_messages=(), tool_invocations=())
 
-        augmented_context = self._build_augmented_context(context)
+        augmented_context = self._build_augmented_context(context, user_namespace=user_namespace)
         response = llm_client.generate(prompt, context=augmented_context, model=model)
 
         # JVNAUTOSCI-698: Detect if response is a JSON action that should trigger tool execution
@@ -332,6 +379,26 @@ class InternalMCPChatOrchestrator:
 
             # Execute the tool
             try:
+                # Inject user_namespace into payload if provided and not already present
+                if user_namespace and "namespace" not in payload:
+                    payload["namespace"] = user_namespace
+                    self._logger.info(
+                        "[mcp_orchestrator] Injected namespace=%s into tool=%s payload",
+                        user_namespace,
+                        tool_name
+                    )
+                elif user_namespace:
+                    self._logger.info(
+                        "[mcp_orchestrator] Tool=%s already has namespace=%s in payload",
+                        tool_name,
+                        payload.get("namespace")
+                    )
+                else:
+                    self._logger.warning(
+                        "[mcp_orchestrator] No user_namespace available for tool=%s (unauthenticated request)",
+                        tool_name
+                    )
+
                 result = self._gateway.invoke(tool_name, payload)
                 tool_payload = self._format_tool_result(tool_name, result.payload, result.duration_ms, "ok")
                 invocations.append({"tool": tool_name, "payload": dict(payload)})

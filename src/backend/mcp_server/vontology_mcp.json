@@ -12,7 +12,7 @@
         },
         {
             "name": "create_concepts",
-            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Supports singleton arrays. Use add_names afterward for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -337,6 +337,32 @@
             }
         },
         {
+            "name": "remove_relationship",
+            "description": "Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_id": {
+                        "type": "string",
+                        "description": "Source concept ID (e.g., '#V#mjw_work_diary_2025-11-24')"
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Relationship alias or stored field name (e.g., 'instance_of', 'typeOf')"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Target concept ID (e.g., '#V#diary_entry_about_michael_witbrocks_work')"
+                    }
+                },
+                "required": [
+                    "source_id",
+                    "predicate",
+                    "target"
+                ]
+            }
+        },
+        {
             "name": "delete_concept",
             "description": "Deletes a concept and handles its relationships. Can simulate the deletion first to see impact. Use when you need to remove a concept from the ontology. Returns a report of operations and warnings.",
             "inputSchema": {
@@ -378,6 +404,27 @@
                 "required": [
                     "source_id",
                     "target_id"
+                ]
+            }
+        },
+        {
+            "name": "update_concept",
+            "description": "Update specific fields of a concept. Use when you need to modify properties or relationships directly (e.g. fixing ontology errors, changing 'kind' by updating relationships). Supports dot notation in update_data keys for partial updates of nested objects.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to update"
+                    },
+                    "update_data": {
+                        "type": "object",
+                        "description": "Dictionary of fields to update. Use dot notation for nested fields (e.g. {'relationships.is_an_instance_of': [...]})."
+                    }
+                },
+                "required": [
+                    "concept_id",
+                    "update_data"
                 ]
             }
         },

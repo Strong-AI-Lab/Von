@@ -16,7 +16,10 @@ from ..vontology.utils_vontology import (
     simulate_or_delete_concept,
 )
 from ..db.repositories.concepts_repository import ConceptsRepository
-from ..services.concept_service import get_concept_display_name_with_names_fallback
+from ..services.concept_service import (
+    get_concept_display_name_with_names_fallback,
+    update_concept
+)
 from ..services.concept_search_service import search_concepts
 from ..services.text_value_service import upsert_text_for_concept
 from ..services.concept_merge_service import merge_concepts
@@ -70,6 +73,7 @@ def mcp_create_concepts():
             ...
         ]
     }
+    Unknown top-level fields (e.g., namespace) are ignored to accommodate orchestrator-added context.
     """
     data = request.get_json()
     if not data:
@@ -383,6 +387,117 @@ def mcp_merge_concepts():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/update_concept', methods=['POST'])
+def mcp_update_concept():
+    """
+    Update specific fields of a concept.
+    Expects JSON: {
+        "concept_id": "#V#...",
+        "update_data": { ... }
+    }
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    concept_id = data.get('concept_id')
+    update_data = data.get('update_data')
+
+    if not concept_id:
+        return jsonify({"error": "Missing 'concept_id'"}), 400
+    if not update_data or not isinstance(update_data, dict):
+        return jsonify({"error": "Missing or invalid 'update_data' dictionary"}), 400
+
+    try:
+        result = update_concept(concept_id=concept_id, update_data=update_data)
+        if result:
+            return jsonify({
+                "success": True,
+                "concept_id": concept_id,
+                "updated_fields": list(update_data.keys())
+            }), 200
+        else:
+            return jsonify({"error": "Update failed or concept not found", "success": False}), 404
+
+    except Exception as e:
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/remove_relationship', methods=['POST'])
+def mcp_remove_relationship():
+    """
+    Remove a relationship between two concepts (concept-to-concept only).
+    JSON body:
+    - source_id: '#V#...'
+    - predicate: alias or field name (e.g., 'instance_of', 'typeOf', '#V#customPredicate')
+    - target: '#V#...'
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    source_id = data.get('source_id')
+    predicate = data.get('predicate')
+    target = data.get('target')
+
+    if not source_id or not predicate or not target:
+        return jsonify({"error": "Missing required parameters: source_id, predicate, target"}), 400
+
+    try:
+        # Map common predicate aliases to stored field names
+        predicate_map = {
+            "instance_of": "is_an_instance_of",
+            "instanceOf": "is_an_instance_of",
+            "type_of": "is_a_type_of",
+            "typeOf": "is_a_type_of",
+            "subtype": "has_subtype",
+            "instance": "has_instance",
+        }
+        rel_kind = predicate_map.get(predicate, predicate)
+
+        # Check source exists
+        src = ConceptsRepository.find_one({"concept_id": source_id})
+        if not src:
+            return jsonify({"error": f"Source concept '{source_id}' not found", "success": False}), 404
+
+        # Determine current list
+        existing = ConceptsRepository.find_one({"concept_id": source_id}, {f"relationships.{rel_kind}": 1}) or {}
+        rels = (existing.get("relationships") or {})
+        curr = rels.get(rel_kind)
+        if isinstance(curr, str):
+            curr_list = [curr] if curr else []
+        elif isinstance(curr, list):
+            curr_list = curr
+        else:
+            curr_list = []
+
+        if target not in curr_list:
+            return jsonify({
+                "success": True,
+                "message": "Relationship not present",
+                "source_id": source_id,
+                "predicate": rel_kind,
+                "target": target,
+                "already_absent": True
+            }), 200
+
+        update_result = ConceptsRepository.update_one(
+            {"concept_id": source_id},
+            {"$pull": {f"relationships.{rel_kind}": target}}
+        )
+
+        removed = update_result.modified_count > 0
+        return jsonify({
+            "success": True,
+            "source_id": source_id,
+            "predicate": rel_kind,
+            "target": target,
+            "removed": removed
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e), "success": False}), 500
 
 
 @app.route('/search_knowledge_base', methods=['GET', 'POST'])
