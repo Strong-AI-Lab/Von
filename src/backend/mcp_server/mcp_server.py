@@ -518,11 +518,24 @@ def mcp_search_knowledge_base():
         top_k = int(data.get('top_k', 5))
         namespace = data.get('namespace')
 
+        # Build permissions context from Flask session for org-scoped RAG filtering
+        permissions_context = None
+        if session:
+            permissions_context = {}
+            if session.get("user_id"):
+                permissions_context["user_id"] = session.get("user_id")
+            if session.get("org_id"):
+                permissions_context["organisation_concept_id"] = session.get("org_id")
+            # Only use permissions_context if it has values
+            if not permissions_context:
+                permissions_context = None
+
         service = get_rag_service()
         results = service.query(
             query_text=query,
             top_k=top_k,
-            namespace=namespace
+            namespace=namespace,
+            permissions_context=permissions_context
         )
 
         return jsonify({

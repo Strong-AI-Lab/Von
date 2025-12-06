@@ -1051,10 +1051,24 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
             try:
                 service = get_rag_service()
+
+                # Build permissions context for org-scoped RAG filtering
+                permissions_context = {}
+                try:
+                    from flask import session as flask_session
+                    if flask_session.get("user_id"):
+                        permissions_context["user_id"] = flask_session.get("user_id")
+                    if flask_session.get("org_id"):
+                        permissions_context["organisation_concept_id"] = flask_session.get("org_id")
+                except (ImportError, RuntimeError):
+                    # Not in Flask context - permissions_context remains empty
+                    pass
+
                 results = service.query(
                     query_text=query,
                     top_k=arguments.get("top_k", 5),
-                    namespace=arguments.get("namespace")
+                    namespace=arguments.get("namespace"),
+                    permissions_context=permissions_context if permissions_context else None
                 )
                 return [TextContent(
                     type="text",
