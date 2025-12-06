@@ -212,6 +212,16 @@ async function ensureUserContext() {
       console.log('[main] Populated von_current_user from settings');
     }
 
+    // Namespace fallback: if server does not provide user info, but a namespace is already
+    // set locally (e.g., via manual selection), propagate it so downstream calls use it.
+    if (!settings.current_user_person_id) {
+      const ns = localStorage.getItem('von_namespace');
+      if (ns && !localStorage.getItem('current_user_namespace')) {
+        localStorage.setItem('current_user_namespace', ns);
+        console.log('[main] Using existing von_namespace as current_user_namespace:', ns);
+      }
+    }
+
     if (settings.current_organisation_id) {
       const org = {
         id: settings.current_organisation_id,
@@ -661,6 +671,14 @@ function startHealthPolling() {
   // Also update busy indicator more responsively
   setInterval(updateBusyIndicator, 1500);
   updateUptimeLoop();
+
+  // Listen for context reset events to trigger immediate RAG status refresh
+  document.addEventListener('von:contextReset', () => {
+    console.log('[health_poll] Context reset detected, triggering immediate RAG status refresh');
+    // Force an immediate poll (will use current localStorage namespace)
+    poll().catch(err => console.warn('[health_poll] Immediate poll failed:', err));
+  });
+
   // Concept link handlers
   document.querySelectorAll('.concept-link').forEach(a => {
     a.addEventListener('click', (ev) => {

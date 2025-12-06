@@ -229,10 +229,17 @@ def generate():
         from ...security.access_control import get_effective_user_concept_id
         user_concept_id = get_effective_user_concept_id()
 
-        # Fallback: If no authenticated user in session, trust the client-provided user_id
-        # This is critical for the research prototype where auth might be loose or client-driven
-        if not user_concept_id and request_user_id:
-            user_concept_id = request_user_id
+        # SECURITY: Do NOT trust client-provided user_id - require proper authentication
+        # User must be authenticated via:
+        # 1. Server-side session (populated during login flow)
+        # 2. Validated headers (X-User-Concept-ID with concept validation)
+        # If no authenticated user, user_concept_id will be None and RAG tools will be unavailable
+        if not user_concept_id:
+            current_app.logger.info(
+                "[AUTH] No authenticated user for this request. RAG and user-scoped tools will be unavailable. "
+                "Client-provided user_id '%s' is ignored for security.",
+                request_user_id or "(none)"
+            )
 
         org_concept_id = session.get('organisation_concept_id') if session else None
 
@@ -312,16 +319,43 @@ def generate():
 
         orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
         tool_messages: list[dict[str, str]] = []
+
+        # Derive user namespace for MCP tool isolation (JVNAUTOSCI-760)
+        user_namespace = None
+        if user_concept_id:
+            # Convert concept ID to namespace format (#V#michael_witbrock)
+            # Handle both full concept ID and person ID formats
+            if user_concept_id.startswith('#V#'):
+                user_namespace = user_concept_id
+            else:
+                # Normalize to namespace format
+                user_id_normalized = user_concept_id.lower().replace(' ', '_').replace('#v#', '').replace('#', '')
+                user_namespace = f"#V#{user_id_normalized}"
+            current_app.logger.info(
+                "[NAMESPACE] Derived user_namespace=%s from user_concept_id=%s",
+                user_namespace,
+                user_concept_id
+            )
+        else:
+            current_app.logger.warning(
+                "[NAMESPACE] No user_concept_id - user_namespace=None (RAG unavailable)"
+            )
+
         if orchestrator is None:
             response_text = llm_client.generate(prompt_text, context=enhanced_context, model=model_name)
             tool_invocations = []
         else:
             try:
+                current_app.logger.info(
+                    "[NAMESPACE] Calling orchestrator.run() with user_namespace=%s",
+                    user_namespace
+                )
                 orchestrator_result = orchestrator.run(
                     prompt=prompt_text,
                     context=enhanced_context,
                     llm_client=llm_client,
                     model=model_name,
+                    user_namespace=user_namespace,
                 )
                 response_text = orchestrator_result.response_text
                 tool_messages = [dict(msg) for msg in orchestrator_result.extra_messages]
