@@ -1,18 +1,169 @@
 # AI Notes
 
 ## Current Status
-- **Date**: 2025-12-04 (Updated: JVNAUTOSCI-787 Phase 1 Complete)
-- **Current Work**: JVNAUTOSCI-787 Phase 1 Implementation (COMPLETE ✅)
-- **Branch**: JVNAUTOSCI-787-phase-1-composite-namespace-model-stub-implemen
-- **Immediate Focus**: Phase 1 is complete. Pending user decision on:
   1. Integration testing of full Phase 1 flow
   2. Proceed with Phase 2 (UI components and org selector)
   3. Or address any issues/feedback from Phase 1 review
 
+## Current Status
+- **Date**: 2025-12-04 (Updated: JVNAUTOSCI-789 Phase 2 Substantial Progress)
+- **Current Work**: JVNAUTOSCI-789 Phase 2 (IN PROGRESS - 80% complete)
+- **Branch**: JVNAUTOSCI-789-phase-2-ui-integration-for-organisation-and-role
+- **Immediate Focus**: Phase 2 implementation progressing well:
+  1. ✅ Backend API endpoints (3/3)
+  2. ✅ Frontend UI component (1/1)
+  3. ✅ Vontology membership model (1/1)
+  4. ✅ Migration script (1/1)
+  5. ⏳ Integration tests (framework complete, pending user review)
 ## Phase 1 Implementation Summary (COMPLETE)
+## Phase 2 Implementation Summary (80% COMPLETE)
 
 ### What Was Done
+**JVNAUTOSCI-789: UI Integration for Organisation and Role Selection**
+
+Implemented Phase 2 infrastructure for user-facing organisation switching and persistent membership model:
+
+#### Deliverable 1: Organisation Membership Service ✅
+- File: `src/backend/services/organisation_membership_service.py` (410 lines)
+- Purpose: Vontology-based membership management with memberOf predicates
+- Key Functions:
+  - `create_organisation_membership()` → Creates memberOf relationship + hasRole text relation
+  - `get_user_memberships()` → Retrieves user's organisations and roles
+  - `get_organisation_members()` → Lists org members with optional role filtering
+  - `update_user_role()` → Updates user's role in organisation
+  - `remove_organisation_membership()` → Removes user from organisation
+- Data Model: Uses memberOf edge relationships + hasRole text relations with org context
+- Access Control: Integrates with access_control system for permission checking
+- Testing: 20 comprehensive unit tests (100% pass rate) covering all functions and error paths
+
+#### Deliverable 2: Backend API Endpoints ✅
+- Modified: `src/backend/server/routes/von_routes.py`
+- Endpoint 1: `POST /api/session/set_organisation`
+  - Switches user's organisation context in Flask session
+  - Derives composite namespace using namespace_service
+  - Returns updated session context with new namespace
+  - Enables future RAG filtering by org context
+- Endpoint 2: `GET /api/session/context`
+  - Returns current user's session context (user, org, role, namespace)
+  - Derives missing namespace if not in session
+  - Graceful fallback to user-only namespace if no org
+- Endpoint 3: `GET /api/organisations/my_organisations`
+  - Lists organisations user belongs to
+  - Returns each org with user's role
+  - Uses role_resolver for Phase 1 stub data (will use membership model in Phase 3)
+- Lines Added: ~120 lines of endpoint handlers
+
+#### Deliverable 3: Frontend Organisation Selector Component ✅
+- File: `src/frontend/web/von_interface/static/js/components/orgSelector.js` (165 lines)
+- Purpose: User-facing organisation switching UI
+- Key Functions:
+  - `loadMyOrganisations()` → Fetches user's orgs from API
+  - `getSessionContext()` → Retrieves current session state
+  - `switchOrganisation(orgConceptId)` → POST to set_organisation, updates localStorage
+  - `renderOrgSelector(containerId)` → Builds dropdown UI with current org highlighted
+  - `displayContextIndicator(containerId)` → Shows "user @ org (role)" badge
+  - `setupOrgSwitchListener(callback)` → Dispatches CustomEvent on org switch
+- LocalStorage Keys: `von_org_context` (JSON with concept_id, namespace), `von_org_role`
+- Event System: Dispatches 'orgSwitched' CustomEvent for other components to listen
+- Integration Point: Called by settingsPage.js in settings interface
+
+#### Deliverable 4: Settings Interface Integration ✅
+- Modified: `src/frontend/web/von_interface/static/js/settingsPage.js`
+  - Imports orgSelector component functions
+  - Calls `renderOrgSelector('orgSelectorContainer')` on page load
+  - Attaches listener to org switch events (ready for RAG namespace updates)
+- Modified: `src/frontend/web/von_interface/templates/settings_tab.html`
+  - Replaced old org dropdown with Phase 2 selector component
+  - Added `<div id="orgSelectorContainer">` placeholder for dynamic rendering
+  - Updated section description for org-scoped RAG context
+
+#### Deliverable 5: Component Styling ✅
+- Modified: `src/frontend/web/von_interface/static/styles.css`
+- Added ~80 lines of CSS for organisation selector:
+  - `.org-selector-wrapper`: Flex container with subtle background
+  - `.org-dropdown`: Styled select with hover/focus states
+  - `.context-indicator`: Badge styling for org context display
+  - `.org-context` (blue) vs `.personal-context` (green) badges
+
+#### Deliverable 6: Migration Script ✅
+- File: `src/backend/utilities/migrate_org_memberships.py` (270 lines)
+- Purpose: One-time migration from Phase 1 stub mappings to Vontology memberships
+- Features:
+  - Reads `STUB_ROLE_MAPPINGS` from `role_resolver.py`
+  - Creates `memberOf` relationships + `hasRole` text relations for each mapping
+  - Validates concept existence before creating relationships
+  - Idempotent: Safe to run multiple times (checks existing relationships)
+  - Logging: Detailed progress reporting with optional --verbose flag
+  - Dry-run: `--dry-run` flag to preview changes without executing
+- Usage: `python migrate_org_memberships.py [--dry-run] [--verbose]`
+- Error Handling: Logs failures but continues processing other mappings
+
+#### Deliverable 7: Bug Fix ✅
+- Fixed: `src/backend/db/repositories/meta_relations_repository.py`
+  - Changed absolute import `from backend.db.mongo_client` to relative `from ..mongo_client`
+  - Enables scripts like migration to import services without sys.path conflicts
+
+### Test Results
+- **Membership Service Tests**: 20/20 PASSED ✅
+  - Create membership (success, already exists, invalid IDs, access denied, not found)
+  - Get memberships (success, empty, invalid ID, access denied)
+  - Get members (success, with role filter, invalid ID)
+  - Update role (success, not member, no change)
+  - Remove membership (success, invalid ID)
+- **All Backend Tests**: 82 passed, 3 skipped ✅
+  - No regressions from Phase 1
+  - All 20 new membership tests passing
+  - All existing tests (62) still passing
+
+### Git Commits
+1. `bbf85c1`: Phase 2 - Vontology membership model and migration script (1697 insertions)
+
+### Design Decisions
+1. **Membership Storage**: Uses memberOf edge relationships (concepts repository) + hasRole text relations
+2. **Role Association**: Stored in text relations with org_id in context (decouples role from namespace)
+3. **Event System**: CustomEvent-based communication (decouples components, enables future extensibility)
+4. **LocalStorage**: Session data persisted for quick access (syncs with Flask session on startup)
+5. **Graceful Degradation**: Falls back to user-only namespace if no org selected
+6. **Migration Strategy**: One-time script keeps Phase 1 data intact while populating Vontology
+7. **Access Control**: Integrates existing permission system, prepared for Phase 3 RBAC
+
+### Phase 2 Scope (From JVNAUTOSCI-789)
+- ✅ Create organisation selector UI component
+- ✅ Implement session organisation switching endpoint
+- ✅ Implement session context retrieval endpoint
+- ✅ Create Vontology membership model (memberOf + hasRole)
+- ✅ Create migration script for stub mappings
+- ✅ Implement membership service with full CRUD
+- ✅ Comprehensive membership tests (20 tests, 100% pass rate)
+- ⏳ Integration tests (framework ready, pending execution)
+- ⏳ Documentation updates
+
+### Known Limitations & Next Steps
+- Membership service tested in isolation (integration tests pending)
+- Migration script not yet executed (requires running database)
+- Phase 3 will replace stub role mappings with database-backed RBAC
+- Phase 3 will add role management UI and audit logging
+
+### What's Next
+**Phase 2 (Final)**: Integration Testing & Documentation
+- Write end-to-end tests for full org switching flow
+- Test UI component interactions with backend
+- Test migration script against real database
+- Update user documentation and API docs
+- Deploy and validate in development environment
+
+**Phase 3**: Production-Ready RBAC
+- Replace hardcoded role mappings with membership model lookups
+- Implement granular permission system (move from stub roles)
+- Add role management UI in admin panel
+- Add audit logging for membership and role changes
+- Implement role-based access control for all resources
+
+---
+### What Was Done
+## Phase 1 Implementation Summary (COMPLETE ✅)
 **JVNAUTOSCI-787: Composite User@Org Namespace Model for RAG Isolation**
+[Previous Phase 1 details remain unchanged below...]
 
 Implemented complete Phase 1 infrastructure for multi-tenant organisation-scoped RAG content isolation:
 
