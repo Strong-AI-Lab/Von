@@ -1,11 +1,17 @@
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 
 class ConceptKind(str, Enum):
     TYPE = "type"
     INDIVIDUAL = "individual"
+
+class IndexingStatus(str, Enum):
+    PENDING = "pending"
+    INDEXED = "indexed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
 
 class UserConceptTrackingModel(BaseModel):
     user_identifier: str
@@ -48,6 +54,16 @@ class ConceptInteraction(BaseModel):
     interactions: List[InteractionEntry] = []
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # Multi-tenant context (Phase 1: Composite Namespace)
+    organisation_concept_id: Optional[str] = None  # e.g., "sail", enables org-scoped content
+    role_in_org: Optional[str] = None  # e.g., "admin", "member" (stubbed in Phase 1)
+    namespace: Optional[str] = None  # Derived namespace: #V#{user_id}@{org_id} or #V#{user_id}
+
+    # RAG Indexing Status
+    indexing_status: IndexingStatus = IndexingStatus.PENDING
+    indexed_at: Optional[datetime] = None
+    embedding: Optional[List[float]] = None
 
     model_config = ConfigDict(use_enum_values=True)
 

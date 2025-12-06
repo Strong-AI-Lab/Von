@@ -190,6 +190,11 @@ class LLMInterface(ABC):
         """List available models for this interface."""
         pass
 
+    @abstractmethod
+    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+        """Generate an embedding for the given text."""
+        pass
+
 class OllamaClient(LLMInterface):
     """Client for interacting with local Ollama models."""
 
@@ -342,6 +347,27 @@ class OllamaClient(LLMInterface):
         # It acts as a final fallback.
         logger.error(f"Failed to generate response with Ollama model {target_model} after all {max_retries} retries.")
         raise RuntimeError(f"Ollama error: Failed after {max_retries} retries for model {target_model}.")
+
+    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+        """Generate an embedding using an Ollama model."""
+        target_model = model or self.default_model
+        # Handle global model format
+        if target_model and " - " in target_model:
+            parts = target_model.split(" - ", 1)
+            if len(parts) == 2:
+                potential_host = parts[0].strip()
+                if ("." in potential_host and not potential_host.startswith("http")) or ":" in potential_host:
+                    target_model = parts[1].strip()
+
+        if not target_model:
+            raise ValueError("No Ollama model specified for embedding.")
+
+        try:
+            response = self.client.embeddings(model=target_model, prompt=text)
+            return response['embedding']
+        except Exception as e:
+            logger.error(f"Failed to generate embedding with Ollama model {target_model}: {e}")
+            raise RuntimeError(f"Ollama embedding error: {str(e)}") from e
 
     def list_models(self) -> List[str]:
         """List available Ollama models (cached with backoff)."""
@@ -611,6 +637,16 @@ class OpenAIClient(LLMInterface):
                 logger.error(msg, exc_info=True)
             raise RuntimeError(msg)
 
+    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+        """Generate an embedding using OpenAI."""
+        target_model = model or "text-embedding-3-small" # Default to a common embedding model
+        try:
+            response = self.client.embeddings.create(input=[text], model=target_model)
+            return response.data[0].embedding
+        except Exception as e:
+            logger.error(f"Failed to generate embedding with OpenAI model {target_model}: {e}")
+            raise RuntimeError(f"OpenAI embedding error: {str(e)}") from e
+
     def list_models(self) -> List[str]:
         """List available models from OpenAI (focus on GPT models) with caching/backoff."""
         cache_key = 'openai:models'
@@ -713,6 +749,7 @@ class GeminiClient(LLMInterface):
 
     def generate(self, prompt: str, context: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, llm_params: Optional[Dict[str, Any]] = None) -> str:
         """Generate a response using the Gemini API. Raises RuntimeError on failure."""
+        assert genai is not None
         target_model_name = model or self.default_model
         logger.info(f"Generating response using Gemini model: {target_model_name}")
         print(f"[LLM PROMPT][Gemini][{target_model_name}]: {prompt}")
@@ -772,9 +809,33 @@ class GeminiClient(LLMInterface):
             logger.error(f"Error generating response with Gemini model {target_model_name}: {e}", exc_info=True)
             raise RuntimeError(f"Gemini error: {str(e)}") from e
 
+    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+        """Generate an embedding using Gemini."""
+        # Ensure genai is available
+        if genai is None:
+            raise ImportError("google.generativeai package is required for Gemini embeddings")
+
+        # Cast to Any to avoid static analysis errors about exported members
+        genai_any = cast(Any, genai)
+
+        target_model = model or "models/embedding-001"
+        try:
+            result = genai_any.embed_content(
+                model=target_model,
+                content=text,
+                task_type="retrieval_document",
+                title="Embedding of text"
+            )
+            return result['embedding']
+        except Exception as e:
+            logger.error(f"Failed to generate embedding with Gemini model {target_model}: {e}")
+            raise RuntimeError(f"Gemini embedding error: {str(e)}") from e
+
     def list_models(self) -> List[str]:
         """List available models from Gemini."""
         logger.info("Listing available Gemini models.")
+        assert genai is not None
+
         try:
             model_names = []
             try:

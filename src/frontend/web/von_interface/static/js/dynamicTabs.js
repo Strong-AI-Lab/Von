@@ -4950,6 +4950,7 @@ async function renderRelationships(conceptId, suffix, kind) {
         // Handle dynamic predicates - both concept relationships and text predicates
         const dynamicConceptKeys = Object.keys(rel)
             .filter(k => !structuralKeys.has(k) && Array.isArray(rel[k]) && rel[k].length && !predicateTypeMap.get(k));
+        console.log('[renderRelationships] dynamicConceptKeys:', dynamicConceptKeys);
 
         // Fetch text predicates that we know are text predicates
         const textPredicatePromises = [];
@@ -4974,6 +4975,7 @@ async function renderRelationships(conceptId, suffix, kind) {
 
         // Combine all dynamic predicates (concept + text)
         const allDynamicKeys = [...dynamicConceptKeys, ...textPredicateKeys].sort();
+        console.log('[renderRelationships] allDynamicKeys:', allDynamicKeys);
 
         for (const dk of allDynamicKeys) {
             const isTextPredicate = predicateTypeMap.get(dk) || false;

@@ -1,13 +1,3 @@
-# Add this function at the top of the file
-def get_concept_display_name_with_names_fallback(concept):
-    if 'display_name' in concept:
-        return concept['display_name']
-    names = concept.get('names', [])
-    if names:
-        return names[0].get('name', concept.get('concept_id', ''))
-    return concept.get('concept_id', '')
-# filepath: <PROJECT_ROOT>/src/backend/services/concept_service.py
-
 # TODO: ARCHITECTURAL RENAMING NEEDED (Separate from JVNAUTOSCI-320)
 #
 # This service should be renamed to better reflect its current purpose:
@@ -59,6 +49,7 @@ from ..vontology.utils_vontology import (
     set_concept_notes,
     is_thing_id,
     THING_PRIMARY_ID,
+    get_concept_display_name_with_names_fallback,
 ) # Added imports for concept field accessors
 from pymongo.database import Database # For type hinting db
 
@@ -1465,13 +1456,57 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
         logger.warning(f"concept not found with ID {concept_id} when trying to start interaction session.")
         raise ConceptServiceError(f"concept not found with ID {concept_id}.")
 
+    # Derive composite namespace for the session (user@org isolation for RAG/search)
+    # Phase 1: Support basic user@org namespace with stubbed roles
+    import os
+    from ..services.namespace_service import derive_namespace
+    from ..security.role_resolver import get_user_role
+
+    # Get org context from session (if available)
+    org_id = None
+    role_in_org = None
+    try:
+        from flask import session as flask_session
+        if flask_session:
+            org_id = flask_session.get('organisation_concept_id')
+            role_in_org = flask_session.get('role_in_org')
+    except Exception:
+        pass
+
+    # Derive namespace using user and org context
+    try:
+        # Clean user_id for namespace
+        user_slug = user_id.strip().lower().replace(" ", "_")
+
+        # If org_id available, derive composite namespace; otherwise user-only
+        if org_id:
+            session_namespace = derive_namespace(user_slug, org_id)
+            # Get role from resolver if not in session
+            if not role_in_org:
+                try:
+                    role_in_org = get_user_role(user_slug, org_id)
+                except Exception:
+                    role_in_org = "member"  # Default fallback
+        else:
+            session_namespace = derive_namespace(user_slug)
+            # No org context, no role
+    except Exception as e:
+        logger.warning(f"Failed to derive composite namespace: {e}, falling back to default")
+        session_namespace = os.environ.get("VON_DEFAULT_NAMESPACE", "#V#default_namespace")
+        org_id = None
+        role_in_org = None
+
     session_doc = {
         "concept_id": ObjectId(actual_concept_id),
         "user_id": user_id,
+        "organisation_concept_id": org_id,  # Phase 1: org context
+        "role_in_org": role_in_org,  # Phase 1: stubbed role
         "start_time": datetime.now(timezone.utc), # Use timezone.utc
         "last_updated_time": datetime.now(timezone.utc), # Use timezone.utc
         "status": "active",
-        "history": []
+        "history": [],
+        "indexing_status": "pending",
+        "namespace": session_namespace  # Composite: #V#user@org or #V#user
     }
 
     if initial_notes:
@@ -2010,7 +2045,8 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
             {
                 "$set": {
                     "history": current_history, # current_history has already been updated
-                    "last_updated_time": datetime.now(timezone.utc)
+                    "last_updated_time": datetime.now(timezone.utc),
+                    "indexing_status": "pending"
                 }
             }
         )

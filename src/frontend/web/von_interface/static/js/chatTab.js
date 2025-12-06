@@ -443,6 +443,12 @@ async function handleResetContext() {
             transcriptTurns.length = 0;
             llmDebugData.clear();
             updateHistoryLength();
+
+            // Trigger immediate health poll to update RAG cartouche with new session context
+            // Dispatch custom event that main.js health polling can listen for
+            document.dispatchEvent(new CustomEvent('von:contextReset', {
+                detail: { trigger: 'chat_reset' }
+            }));
         } else {
             alert('Error resetting context: ' + (data.error || 'Unknown error'));
         }

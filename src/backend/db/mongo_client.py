@@ -139,11 +139,28 @@ def get_db() -> Database | None:
                 print(f"Verify your IP is whitelisted in the CORRECT project: '{os.environ.get('MONGO_PROJECT', 'Unknown')}'")
                 print("Steps: Atlas Console → Select correct Organization → Select correct Project → Security → Network Access")
                 print("Your IP should be listed as Active in the project that contains your cluster.\n")
+
             _mongo_client = None  # Ensure client is None on failure
-            # Attempt local fallback for SRV/DNS issues if allowed
-            if MONGO_ALLOW_LOCAL_FALLBACK and MONGO_URI.startswith("mongodb+srv://"):
+
+            # Check for common SSL/Connection errors that warrant a fallback attempt
+            # WinError 10054: Connection reset by peer (common with IP whitelist blocks)
+            # SSL handshake failed: Generic SSL failure
+            is_ssl_error = "SSL" in str(e) or "10054" in str(e) or "handshake" in str(e).lower()
+
+            # Debug logging for fallback logic
+            print(f"[MongoConnect] Connection failed. is_ssl_error={is_ssl_error}")
+            print(f"[MongoConnect] MONGO_ALLOW_LOCAL_FALLBACK={MONGO_ALLOW_LOCAL_FALLBACK}")
+            print(f"[MongoConnect] MONGO_URI starts with mongodb+srv://: {MONGO_URI.startswith('mongodb+srv://')}")
+
+            # Attempt local fallback for SRV/DNS issues OR SSL blocks if allowed
+            # We relax the srv check if explicit fallback is enabled and we have an SSL error
+            should_try_fallback = MONGO_ALLOW_LOCAL_FALLBACK and (
+                MONGO_URI.strip('"\'').startswith("mongodb+srv://") or is_ssl_error
+            )
+
+            if should_try_fallback:
                 try:
-                    print("Attempting local MongoDB fallback due to SRV connection failure...")
+                    print("Attempting local MongoDB fallback due to connection failure...")
                     _mongo_client = MongoClient(MONGO_LOCAL_URI, serverSelectionTimeoutMS=3000)
                     _mongo_client.admin.command('ismaster')
                     _effective_uri = MONGO_LOCAL_URI
@@ -192,14 +209,18 @@ def get_db() -> Database | None:
                 _mongo_client = None  # Ensure client is None on failure
                 return None
 
+        if _mongo_client:
+            print_connection_info()
+
     if _mongo_client:
-        print_connection_info()
         return _mongo_client[DATABASE_NAME]
     return None
 
 def print_connection_info():
        """Print helpful connection info on startup."""
-       redacted_uri = MONGO_URI
+       global _effective_uri
+       uri_to_use = _effective_uri if _effective_uri else MONGO_URI
+       redacted_uri = uri_to_use
        if "@" in redacted_uri:
            prefix, rest = redacted_uri.split("://", 1)
            if "@" in rest:
@@ -209,14 +230,14 @@ def print_connection_info():
                else:
                    user = creds
                redacted_uri = f"{prefix}://{user}:***@{hostpart}"
-       
+
        host = redacted_uri.split("@")[-1].split("/")[0] if "@" in redacted_uri else redacted_uri.split("://")[1].split("/")[0]
-       
+
        if "localhost" in host or "127.0.0.1" in host:
            print(f"[Von Database] Connecting to LOCAL MongoDB at {host}")
        else:
            print(f"[Von Database] Connecting to REMOTE MongoDB at {host}")
-           
+
 def get_effective_mongo_uri() -> str:
     """Return the URI that was effectively used to create the client (may be fallback)."""
     return _effective_uri

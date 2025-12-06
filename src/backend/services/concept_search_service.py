@@ -361,6 +361,7 @@ def search_concepts(
     per_page: Optional[int] = None,
     use_two_pass: bool = False,
     include_hierarchy_path: bool = False,
+    namespace: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Search for concepts with flexible matching and filtering.
 

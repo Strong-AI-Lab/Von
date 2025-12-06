@@ -9,10 +9,13 @@ export function parseVontologyTokens(text) {
 	if (text == null) return [];
 	const input = String(text);
 	const segments = [];
-	// Conservative regex: start marker #V#, then one or more of allowed id chars
-	// Allow underscores, slashes, hyphens, dots, alphanumerics, and colons
-	// Hyphen placed at the end to avoid "range out of order" errors; exclude '.' so trailing punctuation isn't captured
-	const tokenRe = /#V#([A-Za-z0-9_:\/:-]+)/g;
+	// Regex: start marker #V#, then one or more of allowed id chars, stop at space, quote, backtick, or end
+	// Allow alphanumerics, underscores, hyphens (including en-dash –), periods, slashes, colons, parentheses
+	// Spaces in concept names are normalized to underscores during ID generation, so no spaces in IDs
+	// Quotes and backticks are forbidden in concept names and serve as text boundaries
+	// Using space/quote/backtick as terminators eliminates ambiguity and runaway link concerns
+	// This supports concept IDs like: #V#person, #V#michael_witbrock_business_trip_akl–mel_26-29_nov_2025_(air_nz)
+	const tokenRe = /#V#([A-Za-z0-9_\(\)\./:–\-]+?)(?=[\s"'`]|$)/g;
 
 	let lastIndex = 0;
 	let match;

@@ -120,10 +120,12 @@
 
         <section id="current-organisation-settings">
             <h2>Current Organisation Configuration</h2>
-            <label for="currentOrganisationSelect">Current Organisation:</label>
-            <select id="currentOrganisationSelect" name="current_organisation">
-                <option value="">Loading organisations...</option>
-            </select>
+            <!-- Organisation Selector (Phase 2) -->
+            <div id="orgSelectorContainer" class="org-selector-section">
+                <!-- Org selector will be rendered here by orgSelector.js -->
+            </div>
+            <p class="settings-note">Select your active organisation context. This determines which organisation-scoped
+                content you can access in RAG queries and chat.</p>
 
             <div id="currentOrganisationStatusMessage" class="status-message" role="alert">
                 <!-- Messages will appear here -->

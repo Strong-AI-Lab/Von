@@ -356,6 +356,87 @@ def _add_relationship(**kwargs):
         return {"success": False, "error": f"Exception: {str(e)}"}
 
 
+def _remove_relationship(**kwargs):
+    """Remove a relationship between two concepts. Text relations removal is not supported here."""
+    from ...db.repositories.concepts_repository import ConceptsRepository
+
+    source_id = kwargs.get("source_id")
+    predicate = kwargs.get("predicate")
+    target = kwargs.get("target")
+
+    if not source_id:
+        return {"success": False, "error": "Missing 'source_id' parameter"}
+    if not predicate:
+        return {"success": False, "error": "Missing 'predicate' parameter"}
+    if not target:
+        return {"success": False, "error": "Missing 'target' parameter"}
+
+    try:
+        repo = ConceptsRepository
+        # Verify source concept exists
+        src = repo.find_one({"concept_id": source_id})
+        if not src:
+            return {"success": False, "error": f"Source concept '{source_id}' not found"}
+
+        # Map common predicate aliases to stored field names
+        predicate_map = {
+            "instance_of": "is_an_instance_of",
+            "instanceOf": "is_an_instance_of",
+            "type_of": "is_a_type_of",
+            "typeOf": "is_a_type_of",
+            "subtype": "has_subtype",
+            "instance": "has_instance",
+        }
+        rel_kind = predicate_map.get(predicate, predicate)
+
+        # Ensure the relationship field exists (optional sanity)
+        existing = repo.find_one({"concept_id": source_id}, {f"relationships.{rel_kind}": 1}) or {}
+        rels = (existing.get("relationships") or {})
+        curr = rels.get(rel_kind)
+        # Normalise to list
+        if isinstance(curr, str):
+            curr_list = [curr] if curr else []
+        elif isinstance(curr, list):
+            curr_list = curr
+        else:
+            curr_list = []
+
+        if target not in curr_list:
+            return {
+                "success": True,
+                "message": "Relationship not present",
+                "source_id": source_id,
+                "predicate": rel_kind,
+                "target": target,
+                "already_absent": True,
+            }
+
+        update_result = repo.update_one(
+            {"concept_id": source_id},
+            {"$pull": {f"relationships.{rel_kind}": target}},
+        )
+
+        if update_result.modified_count > 0:
+            return {
+                "success": True,
+                "source_id": source_id,
+                "predicate": rel_kind,
+                "target": target,
+                "removed": True,
+            }
+        else:
+            # Matched but no modification (race or duplicate state)
+            return {
+                "success": True,
+                "source_id": source_id,
+                "predicate": rel_kind,
+                "target": target,
+                "removed": False,
+            }
+    except Exception as e:
+        return {"success": False, "error": f"Exception: {str(e)}"}
+
+
 # arXiv MCP proxy handlers
 def _search_arxiv(**kwargs):
     import asyncio
@@ -569,11 +650,32 @@ def _merge_concepts(**kwargs):
     return merge_concepts(source_id, target_id, simulate=simulate)
 
 
+def _update_concept(**kwargs):
+    from ...services.concept_service import update_concept
+
+    concept_id = kwargs.get("concept_id")
+    update_data = kwargs.get("update_data")
+
+    if not concept_id:
+        return {"error": "Missing required parameter: concept_id"}
+    if not update_data or not isinstance(update_data, dict):
+        return {"error": "Missing or invalid 'update_data' dictionary"}
+
+    try:
+        result = update_concept(concept_id=concept_id, update_data=update_data)
+        if result:
+            return {"success": True, "concept_id": concept_id, "updated_fields": list(update_data.keys())}
+        else:
+            return {"success": False, "error": "Update failed or concept not found"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def _tree_input_schema() -> Schema:
     return Schema(
         required={},
         optional={"root_concept": str},
-        allow_unknown=False,
+        allow_unknown=True,
         description="get_vontology_tree input",
     )
 
@@ -599,7 +701,7 @@ def _concept_fetch_input_schema() -> Schema:
             "offset": (int,),
             "include_concept_preview": (bool,),
         },
-        allow_unknown=False,
+        allow_unknown=True,
         description=(
             "get_concept_by_concept_id input: concept_id (required), plus optional"
             " flags to include structural/text relations (include_relations_arg1,"
@@ -616,8 +718,8 @@ def _concepts_create_input_schema() -> Schema:
             "concepts": list,
         },
         optional={},
-        allow_unknown=False,
-        description="create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships",
+        allow_unknown=True,
+        description="create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. Unknown top-level fields are ignored to accommodate orchestrator-added context (e.g., namespace).",
     )
 
 
@@ -642,7 +744,7 @@ def _annotation_input_schema() -> Schema:
             "use_match": (bool,),
             "return_timings": (bool,),
         },
-        allow_unknown=False,
+        allow_unknown=True,
         description="extract_annotations input",
     )
 
@@ -656,6 +758,7 @@ def _concept_search_input_schema() -> Schema:
             "filter_kind": (list, type(None)),
             "scope_root": (str, type(None)),
             "instance_of": (str, type(None)),
+            "namespace": (str, type(None)),
             "match_type": (str,),
             "exact_match": (bool,),  # Deprecated, use match_type instead
             "min_similarity": (float,),
@@ -663,7 +766,7 @@ def _concept_search_input_schema() -> Schema:
             "include_hierarchy_path": (bool,),
             "limit": (int,),
         },
-        allow_unknown=False,
+        allow_unknown=True,
         description="search_concepts input: query (str, optional - defaults to empty), match_type ('exact'|'substring'|'similarity'|'all'), min_similarity (float 0.0-1.0), filter_kind (list[str]), scope_root (str), instance_of (str concept_id - finds instances of this type), include_description (bool), include_hierarchy_path (bool), limit (int)",
     )
 
@@ -689,7 +792,7 @@ def _add_names_input_schema() -> Schema:
             "names": list,
         },
         optional={},
-        allow_unknown=False,
+        allow_unknown=True,
         description="add_names input: concept_id (str, e.g., '#V#person'), names (list, array of names - each can be a string or dict with {name, language, name_type}). Strings default to en-NZ language and NL type.",
     )
 
@@ -719,7 +822,7 @@ def _add_relationship_input_schema() -> Schema:
             "target": str,
         },
         optional={},
-        allow_unknown=False,
+        allow_unknown=True,
         description="add_relationship input: source_id (str, concept ID like '#V#nikola_k._kasabov'), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'), target (str, target concept ID like '#V#professor' or text value for text predicates like 'Auckland University')",
     )
 
@@ -746,6 +849,38 @@ def _add_relationship_output_schema() -> Schema:
     )
 
 
+def _remove_relationship_input_schema() -> Schema:
+    return Schema(
+        required={
+            "source_id": str,
+            "predicate": str,
+            "target": str,
+        },
+        optional={},
+        allow_unknown=True,
+        description="remove_relationship input: source_id (str), predicate (alias or field name), target (str). Removes concept-to-concept relations only; text relations removal not supported here.",
+    )
+
+
+def _remove_relationship_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+        },
+        optional={
+            "source_id": (str, type(None)),
+            "predicate": (str, type(None)),
+            "target": (str, type(None)),
+            "removed": (bool, type(None)),
+            "already_absent": (bool, type(None)),
+            "message": (str, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="remove_relationship output: success (bool), source_id, predicate, target, removed (bool), already_absent (bool when relation was not present), message, error",
+    )
+
+
 # arXiv MCP tool schemas
 def _search_arxiv_input_schema() -> Schema:
     return Schema(
@@ -756,7 +891,7 @@ def _search_arxiv_input_schema() -> Schema:
             "sort_by": (str,),
             "sort_order": (str,),
         },
-        allow_unknown=False,
+        allow_unknown=True,
         description="search_arxiv input: query (str, search query with boolean operators), max_results (int, default 10), sort_by (str, 'relevance'|'lastUpdatedDate'|'submittedDate'), sort_order (str, 'ascending'|'descending')",
     )
 
@@ -786,7 +921,7 @@ def _download_paper_input_schema() -> Schema:
         optional={
             "filename": (str, type(None)),
         },
-        allow_unknown=False,
+        allow_unknown=True,
         description="download_paper input: arxiv_id (str, e.g., '2506.16596'), filename (str, optional custom name)",
     )
 
@@ -809,7 +944,7 @@ def _list_papers_input_schema() -> Schema:
     return Schema(
         required={},
         optional={},
-        allow_unknown=False,
+        allow_unknown=True,
         description="list_papers input: no parameters required",
     )
 
@@ -834,7 +969,7 @@ def _read_paper_input_schema() -> Schema:
             "arxiv_id": str,
         },
         optional={},
-        allow_unknown=False,
+        allow_unknown=True,
         description="read_paper input: arxiv_id (str, e.g., '1706.03762')",
     )
 
@@ -869,7 +1004,7 @@ def _search_web_input_schema() -> Schema:
             "include_raw_content": (bool,),
             "include_images": (bool,),
         },
-        allow_unknown=False,
+        allow_unknown=True,
         description="search_web input: query (str, required), max_results (int, default 10), search_depth (str, 'basic'|'advanced', default 'basic'), include_domains (list of str, domain whitelist), exclude_domains (list of str, domain blacklist), include_answer (bool, AI-generated answer), include_raw_content (bool, full page content), include_images (bool, image URLs)",
     )
 
@@ -895,7 +1030,7 @@ def _get_paper_metadata_input_schema() -> Schema:
             "arxiv_id": str,
         },
         optional={},
-        allow_unknown=False,
+        allow_unknown=True,
         description="get_paper_metadata input: arxiv_id (str, e.g., '2506.16596' or 'arXiv:2506.16596')",
     )
 
@@ -934,7 +1069,7 @@ def _context_search_input_schema() -> Schema:
             "search_depth": (str,),
             "include_answer": (bool,),
         },
-        allow_unknown=False,
+        allow_unknown=True,
         description="context_search input: query (str, required), context (str, required, contextual information to improve search), max_results (int, default 10), search_depth (str, 'basic'|'advanced', default 'basic'), include_answer (bool, AI-generated answer)",
     )
 
@@ -962,7 +1097,7 @@ def _qna_search_input_schema() -> Schema:
             "max_results": (int,),
             "search_depth": (str,),
         },
-        allow_unknown=False,
+        allow_unknown=True,
         description="qna_search input: query (str, required, question to answer), max_results (int, default 5), search_depth (str, 'basic'|'advanced', default 'advanced')",
     )
 
@@ -987,7 +1122,7 @@ def _extract_url_input_schema() -> Schema:
             "url": str,
         },
         optional={},
-        allow_unknown=False,
+        allow_unknown=True,
         description="extract_url input: url (str, required, URL to extract content from)",
     )
 
@@ -1011,7 +1146,7 @@ def _delete_concept_input_schema() -> Schema:
     return Schema(
         required={"concept_id": str},
         optional={"simulate": (bool,)},
-        allow_unknown=False,
+        allow_unknown=True,
         description="delete_concept input: concept_id (str), simulate (bool, default true)"
     )
 
@@ -1029,7 +1164,7 @@ def _merge_concepts_input_schema() -> Schema:
     return Schema(
         required={"source_id": str, "target_id": str},
         optional={"simulate": (bool,)},
-        allow_unknown=False,
+        allow_unknown=True,
         description="merge_concepts input: source_id (str), target_id (str), simulate (bool, default true)"
     )
 
@@ -1041,6 +1176,236 @@ def _merge_concepts_output_schema() -> Schema:
         allow_unknown=True,
         description="merge_concepts output"
     )
+
+
+def _update_concept_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str, "update_data": dict},
+        optional={},
+        allow_unknown=True,
+        description="update_concept input: concept_id (str), update_data (dict). Use dot notation for nested fields (e.g. {'relationships.is_an_instance_of': [...]}) to avoid overwriting entire objects."
+    )
+
+
+def _update_concept_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={"concept_id": (str,), "updated_fields": (list,), "error": (str,)},
+        allow_unknown=True,
+        description="update_concept output"
+    )
+
+
+# RAG Tool Handlers and Schemas
+def _search_knowledge_base(**kwargs):
+    from ...services.rag_service import get_rag_service, RAGBackendUnavailable
+    import os
+
+    query_text = kwargs.get("query")
+    if not query_text:
+        return {"error": "Missing required parameter: query", "success": False}
+
+    try:
+        service = get_rag_service()  # Default backend
+        # Resolve effective namespace: prefer explicit, else env, else derive from user.id if provided
+        ns = kwargs.get("namespace")
+        if not ns:
+            ns = os.environ.get("VON_DEFAULT_NAMESPACE")
+        if not ns:
+            user = kwargs.get("user")
+            user_id = user.get("id") if isinstance(user, dict) else None
+            if isinstance(user_id, str) and user_id.strip():
+                ns = f"#V#{user_id.strip().lower().replace(' ', '_')}"
+
+        # SECURITY: Require namespace for RAG search - prevents cross-user data leakage
+        if not ns:
+            return {
+                "error": "namespace_required",
+                "message": "RAG search requires authenticated user context (namespace)",
+                "success": False
+            }
+
+        # Build permissions context from Flask session for org-scoped RAG filtering
+        permissions_context = {}
+        try:
+            from flask import session as flask_session
+            if flask_session.get("user_id"):
+                permissions_context["user_id"] = flask_session.get("user_id")
+            if flask_session.get("org_id"):
+                permissions_context["organisation_concept_id"] = flask_session.get("org_id")
+        except (ImportError, RuntimeError):
+            # Not in Flask context - use user_id from kwargs if available
+            if isinstance(user_id, str) and user_id.strip():
+                permissions_context["user_id"] = user_id.strip().lower().replace(' ', '_')
+
+        results = service.query(
+            query_text=query_text,
+            top_k=kwargs.get("top_k", 5),
+            namespace=ns,
+            permissions_context=permissions_context if permissions_context else None,
+        )
+        return {
+            "results": results,
+            "count": len(results),
+            "success": True
+        }
+    except RAGBackendUnavailable as e:
+        return {"error": f"RAG service unavailable: {e}", "success": False}
+    except Exception as e:
+        return {"error": f"Unexpected error: {e}", "success": False}
+
+
+def _search_knowledge_base_input_schema() -> Schema:
+    return Schema(
+        required={"query": str},
+        optional={
+            "top_k": (int,),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="search_knowledge_base input: query (str), top_k (int, default 5), namespace (str, optional filter)",
+    )
+
+
+def _search_knowledge_base_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "results": (list, type(None)),
+            "count": (int, type(None)),
+            "error": (str, type(None)),
+            "success": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description="search_knowledge_base output: results (list of {id, score, text, metadata}), count (int), or error (str)",
+    )
+
+# RAG metadata/content MCP tools
+def _rag_get_status(**kwargs):
+    import requests
+    import os
+    try:
+        ns = kwargs.get('namespace') or os.environ.get('VON_DEFAULT_NAMESPACE')
+        url = 'http://127.0.0.1:5002/admin/rag_status'
+        if ns:
+            url = f"{url}?namespace={ns}"
+        res = requests.get(url, timeout=5)
+        if res.ok:
+            return res.json()
+        return {"error": f"HTTP {res.status_code}", "success": False}
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+
+def _rag_list_indexed(**kwargs):
+    from ...db.connection_manager import get_db
+    import os
+    db = get_db()
+    if db is None:
+        return {"error": "db_unavailable", "success": False}
+    coll = db['interaction_sessions']
+    limit = int(kwargs.get('limit', 20))
+    offset = int(kwargs.get('offset', 0))
+
+    # Resolve effective namespace: prefer explicit, else env, else derive from user.id if provided
+    ns = kwargs.get("namespace")
+    if not ns:
+        ns = os.environ.get("VON_DEFAULT_NAMESPACE")
+    if not ns:
+        user = kwargs.get("user")
+        user_id = user.get("id") if isinstance(user, dict) else None
+        if isinstance(user_id, str) and user_id.strip():
+            ns = f"#V#{user_id.strip().lower().replace(' ', '_')}"
+
+    # SECURITY: Require namespace for RAG access - prevents cross-user data leakage
+    if not ns:
+        return {
+            "error": "namespace_required",
+            "message": "RAG access requires authenticated user context (namespace)",
+            "success": False
+        }
+
+    # Build query with namespace filter
+    query = {"indexing_status": "indexed", "namespace": ns}
+
+    cursor = coll.find(query, {"_id": 1, "indexed_at": 1, "summary": 1, "history": 1, "namespace": 1}).skip(offset).limit(limit)
+    items = []
+    for doc in cursor:
+        preview_len = 0
+        if isinstance(doc.get('summary'), str):
+            preview_len += len(doc['summary'])
+        history = doc.get('history') or []
+        if isinstance(history, list):
+            for h in history:
+                content = h.get('content')
+                if isinstance(content, str):
+                    preview_len += len(content)
+        items.append({
+            "session_id": str(doc.get('_id')),
+            "indexed_at": str(doc.get('indexed_at')) if doc.get('indexed_at') else None,
+            "preview_length": preview_len,
+            "namespace": doc.get('namespace')
+        })
+    total = coll.count_documents(query)
+    return {"items": items, "total": total, "limit": limit, "offset": offset, "namespace": ns, "success": True}
+
+
+def _rag_get_item(**kwargs):
+    from ...db.connection_manager import get_db
+    from bson import ObjectId
+    import os
+    db = get_db()
+    if db is None:
+        return {"error": "db_unavailable", "success": False}
+    session_id = kwargs.get('session_id')
+    if not session_id:
+        return {"error": "Missing session_id", "success": False}
+
+    # Resolve effective namespace: prefer explicit, else env, else derive from user.id if provided
+    ns = kwargs.get("namespace")
+    if not ns:
+        ns = os.environ.get("VON_DEFAULT_NAMESPACE")
+    if not ns:
+        user = kwargs.get("user")
+        user_id = user.get("id") if isinstance(user, dict) else None
+        if isinstance(user_id, str) and user_id.strip():
+            ns = f"#V#{user_id.strip().lower().replace(' ', '_')}"
+
+# SECURITY: Require namespace for RAG access - prevents cross-user data leakage
+    if not ns:
+        return {
+            "error": "namespace_required",
+            "message": "RAG access requires authenticated user context (namespace)",
+            "success": False
+        }
+
+    coll = db['interaction_sessions']
+    try:
+        query = {"_id": ObjectId(session_id), "namespace": ns}
+    except Exception:
+        query = {"_id": session_id, "namespace": ns}
+
+    doc = coll.find_one(query)
+    if not doc:
+        return {"error": "not_found", "success": False}
+    # Build a safe preview
+    preview = []
+    if isinstance(doc.get('summary'), str):
+        preview.append(doc['summary'])
+    history = doc.get('history') or []
+    if isinstance(history, list):
+        for h in history:
+            c = h.get('content')
+            if isinstance(c, str):
+                preview.append(c)
+    return {
+        "session_id": str(doc.get('_id')),
+        "indexing_status": doc.get('indexing_status'),
+        "indexed_at": str(doc.get('indexed_at')) if doc.get('indexed_at') else None,
+        "namespace": doc.get('namespace'),
+        "preview": "\n\n".join(preview)[:4000],
+        "success": True
+    }
 
 
 def build_default_catalogue() -> MethodCatalogue:
@@ -1143,6 +1508,14 @@ def build_default_catalogue() -> MethodCatalogue:
             description="Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' → 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'. Examples: source_id='#V#nikola_k._kasabov', predicate='instance_of', target='#V#professor' OR source_id='#V#nikola_k._kasabov', predicate='#V#hasAffiliation', target='Auckland University of Technology'.",
         ),
         MethodDefinition(
+            name="remove_relationship",
+            handler=_remove_relationship,
+            input_schema=_remove_relationship_input_schema(),
+            output_schema=_remove_relationship_output_schema(),
+            category="write",
+            description="Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates. Text relation removal is not supported in this tool.",
+        ),
+        MethodDefinition(
             name="delete_concept",
             handler=_delete_concept,
             input_schema=_delete_concept_input_schema(),
@@ -1157,6 +1530,14 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=_merge_concepts_output_schema(),
             category="write",
             description="Merges a source concept into a target concept. Moves relationships, names, and text values, then deletes the source. Can simulate first. Use when you have duplicate concepts and want to consolidate them into one.",
+        ),
+        MethodDefinition(
+            name="update_concept",
+            handler=_update_concept,
+            input_schema=_update_concept_input_schema(),
+            output_schema=_update_concept_output_schema(),
+            category="write",
+            description="Update specific fields of a concept. Use when you need to modify properties or relationships directly (e.g. fixing ontology errors, changing 'kind' by updating relationships). Supports dot notation in update_data keys for partial updates of nested objects.",
         ),
         # arXiv MCP tools
         MethodDefinition(
@@ -1242,6 +1623,39 @@ def build_default_catalogue() -> MethodCatalogue:
             timeout_sec=15.0,
             description="Extract and return the main text content from a specific URL. Use when user provides a URL and wants to read, analyse, or extract information from that specific web page. Returns cleaned text content and page title. Useful for reading articles, documentation, or any web page content. Example: 'read this article: https://example.com/article', 'extract content from this URL'.",
         ),
+        MethodDefinition(
+            name="search_knowledge_base",
+            handler=_search_knowledge_base,
+            input_schema=_search_knowledge_base_input_schema(),
+            output_schema=_search_knowledge_base_output_schema(),
+            category="read",
+            timeout_sec=30.0,
+            description="Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
+        ),
+        MethodDefinition(
+            name="rag_get_status",
+            handler=_rag_get_status,
+            input_schema=Schema(required={}, optional={}, allow_unknown=True, description="No input"),
+            output_schema=None,
+            category="read",
+            description="Get RAG status: totals, eligible counts, indexed/pending/failed/skipped. Mirrors /admin/rag_status."
+        ),
+        MethodDefinition(
+            name="rag_list_indexed",
+            handler=_rag_list_indexed,
+            input_schema=Schema(required={}, optional={"limit": (int,), "offset": (int,), "namespace": (str, type(None))}, allow_unknown=True, description="List indexed sessions with optional namespace filter"),
+            output_schema=None,
+            category="read",
+            description="List all RAG-indexed chat sessions/conversations for the current user. Returns total count and session metadata. Use this to answer 'how many RAG sessions' or 'what conversations are indexed'. Namespace filtered automatically."
+        ),
+        MethodDefinition(
+            name="rag_get_item",
+            handler=_rag_get_item,
+            input_schema=Schema(required={"session_id": str}, optional={"namespace": (str, type(None))}, allow_unknown=True, description="Fetch one indexed session with optional namespace filter"),
+            output_schema=None,
+            category="read",
+            description="Get one indexed item (session) with a safe text preview. Respects namespace isolation."
+        )
     ]
 
     for definition in definitions:

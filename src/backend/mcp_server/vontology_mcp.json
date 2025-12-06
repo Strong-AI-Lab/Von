@@ -12,7 +12,7 @@
         },
         {
             "name": "create_concepts",
-            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Supports singleton arrays. Use add_names afterward for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -161,14 +161,24 @@
                     },
                     "include_text_relations_arg1": {
                         "oneOf": [
-                            {"type": "boolean"},
-                            {"type": "string", "enum": ["snippets"], "description": "Use 'snippets' to request short text snippets in addition to raw text."}
+                            {
+                                "type": "boolean"
+                            },
+                            {
+                                "type": "string",
+                                "enum": [
+                                    "snippets"
+                                ],
+                                "description": "Use 'snippets' to request short text snippets in addition to raw text."
+                            }
                         ],
                         "description": "Include text relations (e.g., hasName, hasDescription) where the concept is the subject."
                     },
                     "predicate_filter": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string"
+                        },
                         "description": "Optional whitelist of predicate identifiers to include."
                     },
                     "limit": {
@@ -185,7 +195,9 @@
                         "default": true
                     }
                 },
-                "required": ["concept_id"]
+                "required": [
+                    "concept_id"
+                ]
             }
         },
         {
@@ -194,13 +206,50 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query text"},
-                    "instance_of": {"type": "string", "description": "Filter to instances of a specific type (e.g., '#V#researcher')"},
-                    "filter_kind": {"type": "array", "items": {"type": "string", "enum": ["individual", "type", "predicate"]}, "description": "Filter by concept kind"},
-                    "include_hierarchy_path": {"type": "boolean", "description": "Include full hierarchy path"},
-                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"}
+                    "query": {
+                        "type": "string",
+                        "description": "Search query text"
+                    },
+                    "instance_of": {
+                        "type": "string",
+                        "description": "Filter to instances of a specific type (e.g., '#V#researcher')"
+                    },
+                    "filter_kind": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "individual",
+                                "type",
+                                "predicate"
+                            ]
+                        },
+                        "description": "Filter by concept kind"
+                    },
+                    "include_hierarchy_path": {
+                        "type": "boolean",
+                        "description": "Include full hierarchy path"
+                    },
+                    "match_type": {
+                        "type": "string",
+                        "enum": [
+                            "exact",
+                            "substring",
+                            "similarity"
+                        ],
+                        "description": "Type of matching"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Optional namespace for future isolation; accepted but not required"
+                    }
                 },
-                "required": ["query"]
+                "required": [
+                    "query"
+                ]
             }
         },
         {
@@ -209,13 +258,50 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query text"},
-                    "instance_of": {"type": "string", "description": "Filter to instances of a specific type"},
-                    "filter_kind": {"type": "array", "items": {"type": "string", "enum": ["individual", "type", "predicate"]}, "description": "Filter by concept kind"},
-                    "include_hierarchy_path": {"type": "boolean", "description": "Include full hierarchy path"},
-                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"}
+                    "query": {
+                        "type": "string",
+                        "description": "Search query text"
+                    },
+                    "instance_of": {
+                        "type": "string",
+                        "description": "Filter to instances of a specific type"
+                    },
+                    "filter_kind": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "individual",
+                                "type",
+                                "predicate"
+                            ]
+                        },
+                        "description": "Filter by concept kind"
+                    },
+                    "include_hierarchy_path": {
+                        "type": "boolean",
+                        "description": "Include full hierarchy path"
+                    },
+                    "match_type": {
+                        "type": "string",
+                        "enum": [
+                            "exact",
+                            "substring",
+                            "similarity"
+                        ],
+                        "description": "Type of matching"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Optional namespace for future isolation; accepted but not required"
+                    }
                 },
-                "required": ["query"]
+                "required": [
+                    "query"
+                ]
             }
         },
         {
@@ -224,10 +310,18 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "input_text": {"type": "string", "description": "The text content to analyze"},
-                    "context_concept_id": {"type": "string", "description": "Optional context concept ID"}
+                    "input_text": {
+                        "type": "string",
+                        "description": "The text content to analyze"
+                    },
+                    "context_concept_id": {
+                        "type": "string",
+                        "description": "Optional context concept ID"
+                    }
                 },
-                "required": ["input_text"]
+                "required": [
+                    "input_text"
+                ]
             }
         },
         {
@@ -236,11 +330,50 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "source_id": {"type": "string", "description": "Source concept ID (e.g., '#V#nikola_k._kasabov')"},
-                    "predicate": {"type": "string", "description": "Relationship type: 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'"},
-                    "target": {"type": "string", "description": "Target concept ID (e.g., '#V#professor') or text value for text predicates"}
+                    "source_id": {
+                        "type": "string",
+                        "description": "Source concept ID (e.g., '#V#nikola_k._kasabov')"
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Relationship type: 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Target concept ID (e.g., '#V#professor') or text value for text predicates"
+                    }
                 },
-                "required": ["source_id", "predicate", "target"]
+                "required": [
+                    "source_id",
+                    "predicate",
+                    "target"
+                ]
+            }
+        },
+        {
+            "name": "remove_relationship",
+            "description": "Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_id": {
+                        "type": "string",
+                        "description": "Source concept ID (e.g., '#V#mjw_work_diary_2025-11-24')"
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Relationship alias or stored field name (e.g., 'instance_of', 'typeOf')"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Target concept ID (e.g., '#V#diary_entry_about_michael_witbrocks_work')"
+                    }
+                },
+                "required": [
+                    "source_id",
+                    "predicate",
+                    "target"
+                ]
             }
         },
         {
@@ -285,6 +418,27 @@
                 "required": [
                     "source_id",
                     "target_id"
+                ]
+            }
+        },
+        {
+            "name": "update_concept",
+            "description": "Update specific fields of a concept. Use when you need to modify properties or relationships directly (e.g. fixing ontology errors, changing 'kind' by updating relationships). Supports dot notation in update_data keys for partial updates of nested objects.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to update"
+                    },
+                    "update_data": {
+                        "type": "object",
+                        "description": "Dictionary of fields to update. Use dot notation for nested fields (e.g. {'relationships.is_an_instance_of': [...]})."
+                    }
+                },
+                "required": [
+                    "concept_id",
+                    "update_data"
                 ]
             }
         },
@@ -467,6 +621,27 @@
                 },
                 "required": [
                     "arxiv_id"
+                ]
+            }
+        },
+        {
+            "name": "search_knowledge_base",
+            "description": "Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string"
+                    },
+                    "top_k": {
+                        "type": "integer"
+                    },
+                    "namespace": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "query"
                 ]
             }
         }
