@@ -132,14 +132,25 @@ class LlamaIndexRAGService(RAGService):
             return []
 
         filters = None
-        if permissions_context and "user_id" in permissions_context:
+        if permissions_context:
             try:
                 from llama_index.vector_stores.types import MetadataFilters, MetadataFilter
-                filters = MetadataFilters(
-                    filters=[
+                filter_list = []
+
+                # Filter by user_id if present
+                if "user_id" in permissions_context:
+                    filter_list.append(
                         MetadataFilter(key="user_id", value=permissions_context["user_id"])
-                    ]
-                )
+                    )
+
+                # Filter by organisation_concept_id if present (org-scoped access)
+                if "organisation_concept_id" in permissions_context and permissions_context["organisation_concept_id"]:
+                    filter_list.append(
+                        MetadataFilter(key="organisation_concept_id", value=permissions_context["organisation_concept_id"])
+                    )
+
+                if filter_list:
+                    filters = MetadataFilters(filters=filter_list)
             except ImportError:
                 # Fallback or log warning if types cannot be imported (unlikely given check)
                 pass

@@ -13,7 +13,7 @@ def collect_indexed_sessions(limit: int = 1000) -> List[dict]:
     if db is None:
         return []
     coll = db['interaction_sessions']
-    cursor = coll.find({"indexing_status": "indexed"}, {"_id": 1, "embedding": 1, "summary": 1, "history": 1, "indexed_at": 1}).limit(limit)
+    cursor = coll.find({"indexing_status": "indexed"}, {"_id": 1, "embedding": 1, "summary": 1, "history": 1, "indexed_at": 1, "user_id": 1, "organisation_concept_id": 1, "role_in_org": 1}).limit(limit)
     items = []
     for doc in cursor:
         text_parts = []
@@ -26,14 +26,24 @@ def collect_indexed_sessions(limit: int = 1000) -> List[dict]:
                 if isinstance(c, str):
                     text_parts.append(c)
         text = "\n\n".join(text_parts)
+
+        # Build metadata with organisation context if available
+        metadata = {
+            "indexed_at": str(doc.get('indexed_at')) if doc.get('indexed_at') else None,
+            "source": "interaction_session",
+        }
+        if doc.get('user_id'):
+            metadata["user_id"] = doc['user_id']
+        if doc.get('organisation_concept_id'):
+            metadata["organisation_concept_id"] = doc['organisation_concept_id']
+        if doc.get('role_in_org'):
+            metadata["role_in_org"] = doc['role_in_org']
+
         items.append({
             "id": str(doc.get('_id')),
             "text": text,
             "embedding": doc.get('embedding'),
-            "metadata": {
-                "indexed_at": str(doc.get('indexed_at')) if doc.get('indexed_at') else None,
-                "source": "interaction_session",
-            }
+            "metadata": metadata
         })
     return items
 
@@ -65,7 +75,7 @@ def sync_one_session(session_id: str, namespace: Optional[str] = None) -> dict:
     if db is None:
         return {"success": False, "error": "DB unavailable"}
     coll = db['interaction_sessions']
-    doc = coll.find_one({"_id": ObjectId(session_id), "indexing_status": "indexed"}, {"_id": 1, "embedding": 1, "summary": 1, "history": 1, "indexed_at": 1})
+    doc = coll.find_one({"_id": ObjectId(session_id), "indexing_status": "indexed"}, {"_id": 1, "embedding": 1, "summary": 1, "history": 1, "indexed_at": 1, "user_id": 1, "organisation_concept_id": 1, "role_in_org": 1})
     if not doc:
         return {"success": False, "error": "Session not found or not indexed", "session_id": session_id}
     try:
@@ -84,13 +94,22 @@ def sync_one_session(session_id: str, namespace: Optional[str] = None) -> dict:
                 text_parts.append(c)
     text = "\n\n".join(text_parts)
 
+    # Build metadata with organisation context if available
+    metadata = {
+        "indexed_at": str(doc.get('indexed_at')) if doc.get('indexed_at') else None,
+        "source": "interaction_session",
+    }
+    if doc.get('user_id'):
+        metadata["user_id"] = doc['user_id']
+    if doc.get('organisation_concept_id'):
+        metadata["organisation_concept_id"] = doc['organisation_concept_id']
+    if doc.get('role_in_org'):
+        metadata["role_in_org"] = doc['role_in_org']
+
     upsert_doc = {
         "id": str(doc['_id']),
         "text": text,
-        "metadata": {
-            "indexed_at": str(doc.get('indexed_at')) if doc.get('indexed_at') else None,
-            "source": "interaction_session",
-        }
+        "metadata": metadata
     }
     embedding = doc.get('embedding')
     ns = namespace or "chat_history"

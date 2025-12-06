@@ -1461,7 +1461,7 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
     import os
     from ..services.namespace_service import derive_namespace
     from ..security.role_resolver import get_user_role
-    
+
     # Get org context from session (if available)
     org_id = None
     role_in_org = None
@@ -1472,12 +1472,12 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
             role_in_org = flask_session.get('role_in_org')
     except Exception:
         pass
-    
+
     # Derive namespace using user and org context
     try:
         # Clean user_id for namespace
         user_slug = user_id.strip().lower().replace(" ", "_")
-        
+
         # If org_id available, derive composite namespace; otherwise user-only
         if org_id:
             session_namespace = derive_namespace(user_slug, org_id)

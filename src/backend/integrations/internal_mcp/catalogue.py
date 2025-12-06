@@ -1224,10 +1224,24 @@ def _search_knowledge_base(**kwargs):
                 "success": False
             }
 
+        # Build permissions context from Flask session for org-scoped RAG filtering
+        permissions_context = {}
+        try:
+            from flask import session as flask_session
+            if flask_session.get("user_id"):
+                permissions_context["user_id"] = flask_session.get("user_id")
+            if flask_session.get("org_id"):
+                permissions_context["organisation_concept_id"] = flask_session.get("org_id")
+        except (ImportError, RuntimeError):
+            # Not in Flask context - use user_id from kwargs if available
+            if isinstance(user_id, str) and user_id.strip():
+                permissions_context["user_id"] = user_id.strip().lower().replace(' ', '_')
+
         results = service.query(
             query_text=query_text,
             top_k=kwargs.get("top_k", 5),
             namespace=ns,
+            permissions_context=permissions_context if permissions_context else None,
         )
         return {
             "results": results,

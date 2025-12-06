@@ -17,6 +17,22 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def get_session_context() -> Dict[str, Any]:
+    """
+    Get organisation and role context from Flask session.
+    Returns dict with org_id and role keys (may be None if not in context).
+    """
+    try:
+        from flask import session as flask_session
+        return {
+            "org_id": flask_session.get("org_id"),
+            "role_in_org": flask_session.get("role_in_org")
+        }
+    except (ImportError, RuntimeError):
+        # Not in Flask context or session not available
+        return {"org_id": None, "role_in_org": None}
+
+
 class ChatHistoryServiceError(Exception):
     """Exception raised for chat history service errors."""
     pass
@@ -161,21 +177,32 @@ def add_message_to_history(user_id: str, session_id: str, message: Dict[str, Any
                 content = message.get("content", "")
                 # Only index string content that isn't empty
                 if isinstance(content, str) and content.strip():
-                    # Skip indexing tool outputs that are just "truncated" markers or very short
+                    # Skip indexing tool outputs that are just "truncated" markers or very small
                     if len(content) > 5000:  # Truncate for indexing if huge
                         content = content[:5000]
 
+                    # Get session context for organisation and role
+                    session_context = get_session_context()
+
                     doc_id = str(uuid.uuid4())
+                    metadata = {
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "role": message.get("role", "unknown"),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "type": "chat_message"
+                    }
+
+                    # Include organisation and role metadata if available
+                    if session_context.get("org_id"):
+                        metadata["organisation_concept_id"] = session_context["org_id"]
+                    if session_context.get("role_in_org"):
+                        metadata["role_in_org"] = session_context["role_in_org"]
+
                     doc = {
                         "id": doc_id,
                         "text": content,
-                        "metadata": {
-                            "user_id": user_id,
-                            "session_id": session_id,
-                            "role": message.get("role", "unknown"),
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "type": "chat_message"
-                        }
+                        "metadata": metadata
                     }
                     # Use a specific namespace for chat history to allow filtered queries later
                     rag.upsert_documents([doc], namespace="chat_history")

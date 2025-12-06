@@ -195,7 +195,7 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
         _log.info("[access_filter] Access control disabled - no filtering applied")
         return None
     user_id = get_effective_user_concept_id()
-    
+
     # Get user's current organisation context (Phase 1)
     user_org_id = None
     try:
@@ -219,7 +219,7 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
         {"relationships.specific_to_user": {"$eq": None}},
         {"relationships.specific_to_user": {"$size": 0}},
     ]
-    
+
     # User-specific visibility
     if user_id:
         clauses.append({"relationships.specific_to_user": {"$in": [user_id]}})
@@ -235,12 +235,12 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
             )
         except Exception:
             pass
-    
+
     # Organisation-specific visibility (Phase 1)
     if user_org_id:
         clauses.append({"relationships.specific_to_org": {"$in": [user_org_id]}})
         _log.info(f"[access_filter] Including org-specific concepts for org={user_org_id}")
-    
+
     return {"$or": clauses}
 
 
