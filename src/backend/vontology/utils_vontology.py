@@ -77,6 +77,31 @@ def build_salient_instance_compat_list(scopes_map: Dict[str, List[str]]) -> List
     return _ordered_unique_identifiers(list(instance_vals) + list(unclassified_vals))
 
 
+def validate_concept_name_for_id(name: str) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that a concept name can be safely converted to a concept ID.
+
+    Constraints:
+    - No quotes (\" or ') — reserved for text boundaries in linkification
+    - Spaces are allowed and will be normalized to underscores in the ID
+
+    Args:
+        name: Raw concept name from user
+
+    Returns:
+        Tuple of (is_valid, error_message)
+        - (True, None) if valid
+        - (False, error_message) if invalid
+    """
+    if not name or not isinstance(name, str):
+        return False, "Concept name must be a non-empty string"
+
+    if '"' in name or "'" in name:
+        return False, "Concept names cannot contain quotes (\" or '). These are reserved for text boundaries."
+
+    return True, None
+
+
 def extract_salient_scope_lists(document: Dict[str, Any] | None) -> Dict[str, List[str]]:
     """Extract instance/type salient predicate identifiers with legacy fallbacks."""
     if not isinstance(document, dict):
@@ -3003,8 +3028,19 @@ def create_vontology_concept(
     try:
         # Local import to avoid circular dependency at module import time
         from ..services.concept_service import create_concept  # type: ignore
+
+        # Validate concept name constraints upfront
+        is_valid, error_msg = validate_concept_name_for_id(new_concept_name)
+        if not is_valid:
+            return {
+                "success": False,
+                "message": error_msg,
+                "concept": None
+            }
+
         # Generate a base slug from the provided name (very lightweight normalisation)
-        base_slug = new_concept_name.lower().strip().replace(' ', '_')
+        # Collapse space sequences to single underscores (defensive; spaces are rejected by validator)
+        base_slug = re.sub(r'\s+', '_', new_concept_name).lower().strip()
         if not base_slug:
             return {
                 "success": False,
