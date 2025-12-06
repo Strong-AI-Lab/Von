@@ -234,7 +234,8 @@ async def list_tools() -> list[Tool]:
                     "instance_of": {"type": "string", "description": "Filter to instances of a specific type (e.g., '#V#researcher')"},
                     "filter_kind": {"type": "array", "items": {"type": "string", "enum": ["individual", "type", "predicate"]}, "description": "Filter by concept kind"},
                     "include_hierarchy_path": {"type": "boolean", "description": "Include full hierarchy path"},
-                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"}
+                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"},
+                    "namespace": {"type": ["string", "null"], "description": "Optional namespace for future isolation; currently accepted but not required"}
                 },
                 "required": ["query"]
             }
@@ -249,7 +250,8 @@ async def list_tools() -> list[Tool]:
                     "instance_of": {"type": "string", "description": "Filter to instances of a specific type"},
                     "filter_kind": {"type": "array", "items": {"type": "string", "enum": ["individual", "type", "predicate"]}, "description": "Filter by concept kind"},
                     "include_hierarchy_path": {"type": "boolean", "description": "Include full hierarchy path"},
-                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"}
+                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"},
+                    "namespace": {"type": ["string", "null"], "description": "Optional namespace for future isolation; currently accepted but not required"}
                 },
                 "required": ["query"]
             }

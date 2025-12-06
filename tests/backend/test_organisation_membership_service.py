@@ -104,7 +104,8 @@ class TestCreateOrganisationMembership:
         mock_text_value_service.assert_called_once()
         call_args = mock_text_value_service.call_args
         assert call_args[1]["subject_concept_id"] == user_id
-        assert call_args[1]["predicate"] == "hasRole"
+        # Predicate is stored as namespaced concept identifier
+        assert call_args[1]["predicate"] == "#V#hasRole"
         assert call_args[1]["text"] == role
 
     def test_create_membership_already_exists(

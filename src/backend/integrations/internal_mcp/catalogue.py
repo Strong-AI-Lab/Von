@@ -758,6 +758,7 @@ def _concept_search_input_schema() -> Schema:
             "filter_kind": (list, type(None)),
             "scope_root": (str, type(None)),
             "instance_of": (str, type(None)),
+            "namespace": (str, type(None)),
             "match_type": (str,),
             "exact_match": (bool,),  # Deprecated, use match_type instead
             "min_similarity": (float,),

@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Constants for relationship kinds
 MEMBERSHIP_RELATIONSHIP_KIND = "memberOf"
+ROLE_PREDICATE = "#V#hasRole"
 
 
 def create_organisation_membership(
@@ -90,7 +91,7 @@ def create_organisation_membership(
     # Store the role via text relation (hasRole predicate with context)
     role_result = upsert_text_for_concept(
         subject_concept_id=user_concept_id,
-        predicate="hasRole",
+        predicate=ROLE_PREDICATE,
         text=role,
         lang="en",
         context={"organisation_id": organisation_concept_id}
@@ -137,7 +138,7 @@ def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
     from ..db.repositories.text_value_repository import TextRelationsRepository
     role_relations = TextRelationsRepository.find({
         "subject_concept_id": user_concept_id,
-        "predicate": "hasRole"
+        "predicate": ROLE_PREDICATE
     })
 
     # Build map of org_id -> role (from context)
@@ -205,7 +206,7 @@ def get_organisation_members(
 
     # Find all text relations with this org in the context (role associations)
     role_relations = TextRelationsRepository.find({
-        "predicate": "hasRole",
+        "predicate": ROLE_PREDICATE,
         "context.organisation_id": organisation_concept_id
     })
 
@@ -289,7 +290,7 @@ def update_user_role(
     from ..db.repositories.text_value_repository import TextRelationsRepository
     current_role_rel = TextRelationsRepository.find_one({
         "subject_concept_id": user_concept_id,
-        "predicate": "hasRole",
+        "predicate": ROLE_PREDICATE,
         "context.organisation_id": organisation_concept_id
     })
 
@@ -314,7 +315,7 @@ def update_user_role(
     # Update role via upsert
     upsert_text_for_concept(
         subject_concept_id=user_concept_id,
-        predicate="hasRole",
+        predicate=ROLE_PREDICATE,
         text=new_role,
         lang="en",
         context={"organisation_id": organisation_concept_id}
@@ -373,7 +374,7 @@ def remove_organisation_membership(
     from ..db.repositories.text_value_repository import TextRelationsRepository
     role_relation = TextRelationsRepository.find_one({
         "subject_concept_id": user_concept_id,
-        "predicate": "hasRole",
+        "predicate": ROLE_PREDICATE,
         "context.organisation_id": organisation_concept_id
     })
 
