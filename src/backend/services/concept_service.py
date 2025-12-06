@@ -1456,30 +1456,57 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
         logger.warning(f"concept not found with ID {concept_id} when trying to start interaction session.")
         raise ConceptServiceError(f"concept not found with ID {concept_id}.")
 
-    # Derive namespace for the session (per-user isolation for RAG/search)
-    # Preferred: explicit env override; Fallback: derive from user_id
+    # Derive composite namespace for the session (user@org isolation for RAG/search)
+    # Phase 1: Support basic user@org namespace with stubbed roles
     import os
-    default_ns = os.environ.get("VON_DEFAULT_NAMESPACE")
-    derived_ns = None
+    from ..services.namespace_service import derive_namespace
+    from ..security.role_resolver import get_user_role
+    
+    # Get org context from session (if available)
+    org_id = None
+    role_in_org = None
     try:
-        if isinstance(user_id, str) and user_id.strip():
-            # Simple deterministic derivation; ensure '#V#' prefix
-            user_slug = user_id.strip().lower().replace(" ", "_")
-            derived_ns = f"#V#{user_slug}"
+        from flask import session as flask_session
+        if flask_session:
+            org_id = flask_session.get('organisation_concept_id')
+            role_in_org = flask_session.get('role_in_org')
     except Exception:
-        derived_ns = None
-
-    session_namespace = default_ns or derived_ns or "#V#default_namespace"
+        pass
+    
+    # Derive namespace using user and org context
+    try:
+        # Clean user_id for namespace
+        user_slug = user_id.strip().lower().replace(" ", "_")
+        
+        # If org_id available, derive composite namespace; otherwise user-only
+        if org_id:
+            session_namespace = derive_namespace(user_slug, org_id)
+            # Get role from resolver if not in session
+            if not role_in_org:
+                try:
+                    role_in_org = get_user_role(user_slug, org_id)
+                except Exception:
+                    role_in_org = "member"  # Default fallback
+        else:
+            session_namespace = derive_namespace(user_slug)
+            # No org context, no role
+    except Exception as e:
+        logger.warning(f"Failed to derive composite namespace: {e}, falling back to default")
+        session_namespace = os.environ.get("VON_DEFAULT_NAMESPACE", "#V#default_namespace")
+        org_id = None
+        role_in_org = None
 
     session_doc = {
         "concept_id": ObjectId(actual_concept_id),
         "user_id": user_id,
+        "organisation_concept_id": org_id,  # Phase 1: org context
+        "role_in_org": role_in_org,  # Phase 1: stubbed role
         "start_time": datetime.now(timezone.utc), # Use timezone.utc
         "last_updated_time": datetime.now(timezone.utc), # Use timezone.utc
         "status": "active",
         "history": [],
         "indexing_status": "pending",
-        "namespace": session_namespace
+        "namespace": session_namespace  # Composite: #V#user@org or #V#user
     }
 
     if initial_notes:
