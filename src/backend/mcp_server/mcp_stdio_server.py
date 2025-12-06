@@ -37,6 +37,7 @@ from src.backend.services.concept_service import (
     get_concept_display_name_with_names_fallback,
     get_concept_by_concept_id,
     enrich_concept_with_text_relations,
+    update_concept,
 )
 from src.backend.services.concept_relation_service import build_concept_relations_payload
 from src.backend.services.concept_search_service import search_concepts
@@ -49,6 +50,7 @@ from src.backend.services.settings_service import (
     get_setting,
 )
 from src.backend.integrations.internal_mcp.catalogue import _add_relationship
+from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
 from src.backend.integrations.internal_mcp.arxiv_proxy import (
     get_arxiv_proxy,
     ArxivProxyError,
@@ -57,6 +59,7 @@ from src.backend.integrations.internal_mcp.search_proxy_mcp import (
     get_search_proxy,
     SearchProxyError,
 )
+from src.backend.services.rag_service import get_rag_service, RAGBackendUnavailable
 
 # Create MCP server instance
 app = Server("vontology-mcp")
@@ -77,7 +80,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_concepts",
-            description="Creates one or more concepts (instances, types, or predicates). Each concept needs a name and kind. Use for bulk creation. Supports singleton arrays. After creation, use add_names for alternative names/translations.",
+            description="Creates one or more concepts (instances, types, or predicates). Each concept needs a name and kind. Use for bulk creation. Supports singleton arrays. After creation, use add_names for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -231,7 +234,8 @@ async def list_tools() -> list[Tool]:
                     "instance_of": {"type": "string", "description": "Filter to instances of a specific type (e.g., '#V#researcher')"},
                     "filter_kind": {"type": "array", "items": {"type": "string", "enum": ["individual", "type", "predicate"]}, "description": "Filter by concept kind"},
                     "include_hierarchy_path": {"type": "boolean", "description": "Include full hierarchy path"},
-                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"}
+                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"},
+                    "namespace": {"type": ["string", "null"], "description": "Optional namespace for future isolation; currently accepted but not required"}
                 },
                 "required": ["query"]
             }
@@ -246,7 +250,8 @@ async def list_tools() -> list[Tool]:
                     "instance_of": {"type": "string", "description": "Filter to instances of a specific type"},
                     "filter_kind": {"type": "array", "items": {"type": "string", "enum": ["individual", "type", "predicate"]}, "description": "Filter by concept kind"},
                     "include_hierarchy_path": {"type": "boolean", "description": "Include full hierarchy path"},
-                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"}
+                    "match_type": {"type": "string", "enum": ["exact", "substring", "similarity"], "description": "Type of matching"},
+                    "namespace": {"type": ["string", "null"], "description": "Optional namespace for future isolation; currently accepted but not required"}
                 },
                 "required": ["query"]
             }
@@ -371,6 +376,19 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="remove_relationship",
+            description="Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string", "description": "Source concept ID (e.g., '#V#mjw_work_diary_2025-11-24')"},
+                    "predicate": {"type": "string", "description": "Relationship alias or stored field name (e.g., 'instance_of', 'typeOf')"},
+                    "target": {"type": "string", "description": "Target concept ID (e.g., '#V#diary_entry_about_michael_witbrocks_work')"}
+                },
+                "required": ["source_id", "predicate", "target"]
+            }
+        ),
+        Tool(
             name="delete_concept",
             description="Deletes a concept and handles its relationships. Can simulate the deletion first to see impact.",
             inputSchema={
@@ -410,6 +428,37 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["source_id", "target_id"]
+            }
+        ),
+        Tool(
+            name="update_concept",
+            description="Update specific fields of a concept. Use when you need to modify properties or relationships directly (e.g. fixing ontology errors, changing 'kind' by updating relationships). Supports dot notation in update_data keys for partial updates of nested objects.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to update"
+                    },
+                    "update_data": {
+                        "type": "object",
+                        "description": "Dictionary of fields to update. Use dot notation for nested fields (e.g. {'relationships.is_an_instance_of': [...]})."
+                    }
+                },
+                "required": ["concept_id", "update_data"]
+            }
+        ),
+        Tool(
+            name="search_knowledge_base",
+            description="Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query text"},
+                    "top_k": {"type": "integer", "default": 5, "description": "Number of results to return"},
+                    "namespace": {"type": "string", "description": "Optional namespace filter"}
+                },
+                "required": ["query"]
             }
         )
     ]
@@ -890,6 +939,30 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     text=json.dumps({"error": "Missing required parameters: source_id, predicate, and target"})
                 )]
 
+        elif name == "remove_relationship":
+            source_id = arguments.get("source_id")
+            predicate = arguments.get("predicate")
+            target = arguments.get("target")
+
+            if not source_id or not predicate or not target:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Missing required parameters: source_id, predicate, and target"})
+                )]
+
+            try:
+                result = _remove_relationship(
+                    source_id=source_id,
+                    predicate=predicate,
+                    target=target
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": f"Failed to remove relationship: {str(e)}"})
+                )]
+
             try:
                 result = _add_relationship(
                     source_id=source_id,
@@ -935,6 +1008,82 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 type="text",
                 text=json.dumps(result, indent=2)
             )]
+
+        elif name == "update_concept":
+            concept_id = arguments.get("concept_id")
+            update_data = arguments.get("update_data")
+
+            if not concept_id:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Missing concept_id parameter"})
+                )]
+            if not update_data or not isinstance(update_data, dict):
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Missing or invalid update_data dictionary"})
+                )]
+
+            try:
+                result = update_concept(concept_id=concept_id, update_data=update_data)
+                if result:
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({
+                            "success": True,
+                            "concept_id": concept_id,
+                            "updated_fields": list(update_data.keys())
+                        }, indent=2)
+                    )]
+                else:
+                    return [TextContent(
+                        type="text",
+                        text=json.dumps({"error": "Update failed or concept not found", "success": False})
+                    )]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": str(e), "success": False})
+                )]
+
+        elif name == "search_knowledge_base":
+            query = arguments.get("query")
+            if not query:
+                return [TextContent(type="text", text=json.dumps({"error": "Missing query parameter"}))]
+
+            try:
+                service = get_rag_service()
+
+                # Build permissions context for org-scoped RAG filtering
+                permissions_context = {}
+                try:
+                    from flask import session as flask_session
+                    if flask_session.get("user_id"):
+                        permissions_context["user_id"] = flask_session.get("user_id")
+                    if flask_session.get("org_id"):
+                        permissions_context["organisation_concept_id"] = flask_session.get("org_id")
+                except (ImportError, RuntimeError):
+                    # Not in Flask context - permissions_context remains empty
+                    pass
+
+                results = service.query(
+                    query_text=query,
+                    top_k=arguments.get("top_k", 5),
+                    namespace=arguments.get("namespace"),
+                    permissions_context=permissions_context if permissions_context else None
+                )
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "results": results,
+                        "count": len(results),
+                        "success": True
+                    }, indent=2)
+                )]
+            except RAGBackendUnavailable as e:
+                return [TextContent(type="text", text=json.dumps({"error": f"RAG service unavailable: {e}", "success": False}))]
+            except Exception as e:
+                return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {e}", "success": False}))]
 
         else:
             return [TextContent(

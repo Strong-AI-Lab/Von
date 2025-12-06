@@ -5510,3 +5510,100 @@ body.settings-body {
     color: #212529;
     line-height: 1.5;
 }
+
+/* RAG Indexing Indicator */
+#ragIndexingValue.rag-active {
+    color: #d97706;
+    /* Amber-600 */
+    font-weight: 600;
+    animation: pulse-rag 2s infinite;
+}
+
+/* Organisation Selector Component */
+.org-selector-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background-color: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+.org-label {
+    font-weight: 500;
+    color: #4b5563;
+    margin: 0;
+}
+
+.org-dropdown {
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background-color: white;
+    font-size: 13px;
+    cursor: pointer;
+    min-width: 180px;
+}
+
+.org-dropdown:hover {
+    border-color: #9ca3af;
+    background-color: #f3f4f6;
+}
+
+.org-dropdown:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.org-role {
+    color: #6b7280;
+    font-size: 12px;
+}
+
+.org-info {
+    color: #9ca3af;
+    font-size: 13px;
+}
+
+.org-error {
+    color: #dc2626;
+    font-size: 13px;
+}
+
+/* Context Indicator in Navigation */
+.context-indicator {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: 'Courier New', monospace;
+}
+
+.context-indicator.org-context {
+    background-color: #dbeafe;
+    color: #1e40af;
+    border: 1px solid #93c5fd;
+}
+
+.context-indicator.personal-context {
+    background-color: #f0fdf4;
+    color: #166534;
+    border: 1px solid #bbf7d0;
+}
+
+@keyframes pulse-rag {
+    0% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.6;
+    }
+
+    100% {
+        opacity: 1;
+    }
+}

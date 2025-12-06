@@ -129,6 +129,8 @@ PID_FILE="$RUN_DIR/von.pid"
 CURRENT_LOG="$LOGS_DIR/von_current.log"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S 2>/dev/null || date +%Y%m%d_%H%M%S)
 NEW_LOG="$LOGS_DIR/von_${TIMESTAMP}.log"
+RAG_LOG="$LOGS_DIR/rag_worker_${TIMESTAMP}.log"
+RAG_PID_FILE="$RUN_DIR/rag_worker.pid"
 
 # Defaults
 ACTION=${1:-start}
@@ -177,6 +179,29 @@ PY
     echo "$tok"
 }
 
+start_rag_worker_bg() {
+    echo "Starting RAG Indexing Worker in background..."
+    PDM_CMD="pdm"
+    if [ -x "$SCRIPT_DIR_ABS/.venv/bin/pdm" ]; then
+        PDM_CMD="$SCRIPT_DIR_ABS/.venv/bin/pdm"
+    fi
+    nohup "$PDM_CMD" run python -u "$SCRIPT_DIR_ABS/src/backend/utilities/rag_indexing_worker.py" > "$RAG_LOG" 2>&1 &
+    rag_pid=$!
+    echo "$rag_pid" > "$RAG_PID_FILE"
+    echo "RAG Worker started (PID=$rag_pid). Log: $RAG_LOG"
+}
+
+stop_rag_worker() {
+    if [ -f "$RAG_PID_FILE" ]; then
+        rpid=$(cat "$RAG_PID_FILE")
+        if [ -n "$rpid" ]; then
+            echo "Stopping RAG Worker PID=$rpid..."
+            kill "$rpid" 2>/dev/null || true
+            rm -f "$RAG_PID_FILE"
+        fi
+    fi
+}
+
 start_bg() {
     # Safety check: prevent running server with test database
     if [ "$VON_DB_NAME" = "test_von_db" ]; then
@@ -197,6 +222,10 @@ start_bg() {
     else
         export VON_SKIP_BROWSER_LAUNCH=0
     fi
+        # Start RAG worker
+        start_rag_worker_bg
+
+
     if [ "$FORCE_BROWSER" -eq 1 ]; then
         export VON_FORCE_BROWSER=1
     else
@@ -212,6 +241,14 @@ start_bg() {
     # Start in background via nohup so it detaches; write pid
     nohup $PDM_CMD run python -u "$SCRIPT_DIR_ABS/src/workflows/von/main.py" --port "$PORT" > "$NEW_LOG" 2>&1 &
     child=$!
+
+    # Start RAG worker
+    WORKER_LOG="$LOGS_DIR/von_rag_worker.log"
+    nohup $PDM_CMD run python -u "$SCRIPT_DIR_ABS/src/backend/utilities/rag_indexing_worker.py" > "$WORKER_LOG" 2>&1 &
+    worker_pid=$!
+    echo "$worker_pid" > "$RUN_DIR/von_worker.pid"
+    echo "Started RAG Worker (PID=$worker_pid). Log: $WORKER_LOG"
+
     # Give short time for process to start
     sleep 0.4
     if ps -p $child > /dev/null 2>&1; then
@@ -289,6 +326,13 @@ start_foreground() {
     fi
     ADM_TOKEN=$(read_admin_token)
     export VON_ADMIN_TOKEN="$ADM_TOKEN"
+
+    # Start RAG worker
+    WORKER_LOG="$LOGS_DIR/von_rag_worker.log"
+    "$PDM_CMD" run python -u "$SCRIPT_DIR_ABS/src/backend/utilities/rag_indexing_worker.py" > "$WORKER_LOG" 2>&1 &
+    worker_child=$!
+    echo "$worker_child" > "$RUN_DIR/von_worker.pid"
+
     PDM_CMD="pdm"
     if [ -x "$SCRIPT_DIR_ABS/.venv/bin/pdm" ]; then
         PDM_CMD="$SCRIPT_DIR_ABS/.venv/bin/pdm"
@@ -335,6 +379,7 @@ start_foreground() {
             sleep 0.5
         done
         if [ $attempts -ge 60 ]; then
+            kill -TERM $worker_child 2>/dev/null || true;
             echo "Warning: service did not become ready within timeout; browser not opened."
         fi
     fi
@@ -384,6 +429,7 @@ stop_server() {
         echo "Process still running; force killing..."
         kill -9 "$pid" 2>/dev/null || true
     fi
+    stop_rag_worker
     remove_pid
     echo "Stopped."
 }
@@ -405,6 +451,17 @@ show_logs() {
     fi
 }
 
+start_rag_worker() {
+    echo "Starting RAG Indexing Worker..."
+    export PYTHONUNBUFFERED=1
+    export PYTHONPATH="$SCRIPT_DIR_ABS"
+    PDM_CMD="pdm"
+    if [ -x "$SCRIPT_DIR_ABS/.venv/bin/pdm" ]; then
+        PDM_CMD="$SCRIPT_DIR_ABS/.venv/bin/pdm"
+    fi
+    "$PDM_CMD" run python -u "$SCRIPT_DIR_ABS/src/backend/utilities/rag_indexing_worker.py"
+}
+
 case "$ACTION" in
     start)
         start_bg
@@ -424,6 +481,9 @@ case "$ACTION" in
         ;;
     logs)
         show_logs
+        ;;
+    rag-worker)
+        start_rag_worker
         ;;
     check)
         # Simple health check: run_governance_scan is separate; check PID and exit code 0 if running

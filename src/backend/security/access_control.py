@@ -196,6 +196,14 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
         return None
     user_id = get_effective_user_concept_id()
 
+    # Get user's current organisation context (Phase 1)
+    user_org_id = None
+    try:
+        if has_request_context():
+            user_org_id = session.get('organisation_concept_id')
+    except Exception:
+        pass
+
     # Get user email for detailed logging
     user_email = "unknown"
     try:
@@ -204,13 +212,15 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
     except Exception:
         pass
 
-    _log.info(f"[access_filter] Building visibility filter - authenticated_user={user_id} email={user_email}")
+    _log.info(f"[access_filter] Building visibility filter - authenticated_user={user_id} org={user_org_id} email={user_email}")
 
     clauses: List[Dict[str, Any]] = [
         {"relationships.specific_to_user": {"$exists": False}},
         {"relationships.specific_to_user": {"$eq": None}},
         {"relationships.specific_to_user": {"$size": 0}},
     ]
+
+    # User-specific visibility
     if user_id:
         clauses.append({"relationships.specific_to_user": {"$in": [user_id]}})
         _log.info(f"[access_filter] Including user-specific concepts for user={user_id}")
@@ -225,6 +235,12 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
             )
         except Exception:
             pass
+
+    # Organisation-specific visibility (Phase 1)
+    if user_org_id:
+        clauses.append({"relationships.specific_to_org": {"$in": [user_org_id]}})
+        _log.info(f"[access_filter] Including org-specific concepts for org={user_org_id}")
+
     return {"$or": clauses}
 
 

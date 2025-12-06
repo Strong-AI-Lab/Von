@@ -120,6 +120,32 @@ Security / Scope:
 
 This section operationalises the expectation that well-understood, low‑risk integrations proceed automatically, further reducing user cognitive load while preserving safety through clearly bounded exception triggers.
 
+### JIRA Issue Hierarchy (CRITICAL - Verified December 2025)
+
+**Tasks CAN have Subtasks.** Previous agent notes incorrectly stated otherwise.
+
+**Verified Hierarchy:**
+- **Epic** → Story → Task (traditional hierarchy)
+- **Task** → Subtask ✅ **CONFIRMED WORKING**
+
+**Creating Subtasks under a Task:**
+```python
+mcp_atlassian_createJiraIssue(
+    cloudId="...",
+    projectKey="JVNAUTOSCI",
+    issueTypeName="Subtask",  # Use "Subtask" type
+    summary="...",
+    description="...",
+    parent="JVNAUTOSCI-XXX"  # Parent task key in additional_fields
+)
+```
+
+**Key Points:**
+- Use `issueTypeName="Subtask"` (capital S)
+- Pass parent task key via `parent` field (not nested in `additional_fields`)
+- Do NOT assume Tasks cannot have subtasks - this is incorrect
+- The `parent` field is a top-level parameter in `createJiraIssue`
+
 ## 🖥️ CRITICAL SHELL ENVIRONMENT: POWERSHELL FIRST (NOT BASH)
 
 **AI AGENTS MUST ASSUME THE PRIMARY INTERACTIVE SHELL IS WINDOWS POWERSHELL (`pwsh`).** Many habitual Linux / macOS Bash idioms **WILL FAIL** here and MUST NOT be emitted unless the user explicitly asks for a Bash script (e.g., inside `setup_py.sh`). Provide PowerShell-safe commands by default.
