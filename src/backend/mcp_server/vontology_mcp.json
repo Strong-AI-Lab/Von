@@ -238,6 +238,13 @@
                             "similarity"
                         ],
                         "description": "Type of matching"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Optional namespace for future isolation; accepted but not required"
                     }
                 },
                 "required": [
@@ -283,6 +290,13 @@
                             "similarity"
                         ],
                         "description": "Type of matching"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Optional namespace for future isolation; accepted but not required"
                     }
                 },
                 "required": [

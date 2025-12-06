@@ -6,10 +6,10 @@ from backend.services.rag_service import get_rag_service, RAGService
 # Mock LlamaIndex components to avoid real API calls and dependencies during unit tests
 @pytest.fixture
 def mock_llamaindex():
-    with patch("backend.services.rag_backends.llamaindex_backend.VectorStoreIndex") as mock_index_cls, \
-         patch("backend.services.rag_backends.llamaindex_backend.ServiceContext") as mock_service_context, \
-         patch("backend.services.rag_backends.llamaindex_backend.StorageContext") as mock_storage_context, \
-         patch("backend.services.rag_backends.llamaindex_backend.load_index_from_storage") as mock_load:
+        with patch("src.backend.services.rag_backends.llamaindex_backend.VectorStoreIndex") as mock_index_cls, \
+            patch("src.backend.services.rag_backends.llamaindex_backend.ServiceContext") as mock_service_context, \
+            patch("src.backend.services.rag_backends.llamaindex_backend.StorageContext") as mock_storage_context, \
+            patch("src.backend.services.rag_backends.llamaindex_backend.load_index_from_storage") as mock_load:
 
         # Setup mock index instance
         mock_index_instance = MagicMock()

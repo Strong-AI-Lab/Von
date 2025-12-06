@@ -24,10 +24,10 @@ from typing import Dict, Optional, Set
 # These will be replaced with database-backed resolution in Phase 3
 STUB_ROLE_MAPPINGS = {
     "michael_witbrock": {
-        "sail": "admin",
+        "university_of_auckland_strong_ai_lab": "admin",
     },
     "von_archivist": {
-        "sail": "member",
+        "university_of_auckland_strong_ai_lab": "member",
     },
 }
 
