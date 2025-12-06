@@ -1,4 +1,5 @@
 import { postJson } from './apiService.js';
+import { renderOrgSelector, setupOrgSwitchListener } from './components/orgSelector.js';
 import { populateLanguageSelect } from './languageConfig.js';
 import {
   loadAndRenderOllamaHosts,
@@ -287,6 +288,18 @@ async function loadAndDisplaySettings() {
     } catch { }
     // Override with stored local selection if present
     applyStoredSelection('currentOrganisationSelect', getStoredJson(LS_ORG_KEY));
+
+    // Phase 2: Render organisation selector (Phase 2 UI integration)
+    try {
+      await renderOrgSelector('orgSelectorContainer');
+      // Set up listener for org switches (triggers RAG namespace update)
+      setupOrgSwitchListener((orgId, namespace) => {
+        console.log(`Organisation switched: ${orgId || 'personal'}, namespace: ${namespace}`);
+        // TODO: Trigger RAG namespace update when org switches
+      });
+    } catch (error) {
+      console.error('Error initializing organisation selector:', error);
+    }
 
     // Populate OpenAI settings
     const envVarInput = document.getElementById('openaiApiKeyEnvVar');

@@ -546,3 +546,151 @@ def reset_context():
     except Exception as e:
         print(f"Error resetting context: {e}") # Log error server-side
         return jsonify({"error": f"Failed to reset context: {str(e)}"}), 500
+
+
+# Phase 2: Organisation and Role Selection Endpoints
+@von_bp.route("/api/session/set_organisation", methods=["POST"])
+def set_organisation():
+    """
+    Set the current organisation context in the session.
+
+    Request body: {organisation_concept_id: str}
+    Returns: {user_id, organisation_id, role, namespace, status: 'updated'}
+    """
+    try:
+        from ...services.namespace_service import derive_namespace
+        from ...security.role_resolver import get_user_role
+
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json() or {}
+        org_id = data.get("organisation_concept_id")
+
+        if not org_id:
+            return jsonify({"error": "organisation_concept_id required"}), 400
+
+        # TODO: Validate user is member of org (once membership model exists)
+        # For now, allow any org switch
+
+        # Get role for this user in this org
+        user_slug = user_id.strip().lower().replace(" ", "_")
+        try:
+            role_in_org = get_user_role(user_slug, org_id)
+        except Exception:
+            role_in_org = "member"  # Default fallback
+
+        # Derive composite namespace
+        namespace = derive_namespace(user_slug, org_id)
+
+        # Update session
+        session["organisation_concept_id"] = org_id
+        session["role_in_org"] = role_in_org
+        session["namespace"] = namespace
+        session.modified = True
+
+        return jsonify({
+            "status": "updated",
+            "user_id": user_id,
+            "organisation_id": org_id,
+            "role": role_in_org,
+            "namespace": namespace
+        }), 200
+
+    except Exception as e:
+        print(f"Error setting organisation: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/session/context", methods=["GET"])
+def get_session_context():
+    """
+    Get current session context (user, organisation, role, namespace).
+
+    Returns: {user_id, organisation_id, role, namespace, authenticated}
+    """
+    try:
+        from ...services.namespace_service import derive_namespace
+        from ...security.role_resolver import get_user_role
+
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({
+                "authenticated": False,
+                "user_id": None,
+                "organisation_id": None,
+                "role": None,
+                "namespace": None
+            }), 200
+
+        org_id = session.get("organisation_concept_id")
+        role_in_org = session.get("role_in_org")
+        namespace = session.get("namespace")
+
+        # If no namespace in session, derive it
+        if not namespace:
+            user_slug = user_id.strip().lower().replace(" ", "_")
+            if org_id:
+                # Get role if not in session
+                if not role_in_org:
+                    try:
+                        role_in_org = get_user_role(user_slug, org_id)
+                    except Exception:
+                        role_in_org = "member"
+                namespace = derive_namespace(user_slug, org_id)
+            else:
+                namespace = derive_namespace(user_slug)
+
+        return jsonify({
+            "authenticated": True,
+            "user_id": user_id,
+            "organisation_id": org_id,
+            "role": role_in_org,
+            "namespace": namespace
+        }), 200
+
+    except Exception as e:
+        print(f"Error getting session context: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/organisations/my_organisations", methods=["GET"])
+def get_my_organisations():
+    """
+    Get list of organisations the user is member of.
+
+    Returns: {organisations: [{concept_id, name, role}, ...], total_count}
+    """
+    try:
+        from ...security.role_resolver import get_all_user_organisations
+
+        user_id = session.get("user_id")
+        if not user_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        user_slug = user_id.strip().lower().replace(" ", "_")
+
+        # Get orgs from role resolver (Phase 1 hardcoded mappings)
+        # Returns dict: {org_id: role_name}
+        org_roles = get_all_user_organisations(user_slug)
+
+        # TODO: Once organisation concepts exist in Vontology, fetch their names
+        # For now, use concept_id as name
+        organisations = [
+            {
+                "concept_id": org_id,
+                "name": org_id.replace("_", " ").title(),  # Simple formatting
+                "role": role
+            }
+            for org_id, role in org_roles.items()
+        ]
+
+        return jsonify({
+            "organisations": organisations,
+            "total_count": len(organisations)
+        }), 200
+
+    except Exception as e:
+        print(f"Error getting organisations: {e}")
+        return jsonify({"error": str(e)}), 500

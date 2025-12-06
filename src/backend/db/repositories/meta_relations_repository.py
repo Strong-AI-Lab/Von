@@ -5,7 +5,7 @@ from pymongo.collection import Collection
 from pymongo.database import Database
 import logging
 
-from backend.db.mongo_client import get_db, get_meta_relations_collection
+from ..mongo_client import get_db, get_meta_relations_collection
 
 logger = logging.getLogger(__name__)
 
