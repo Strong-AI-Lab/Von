@@ -13,9 +13,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.session import ClientSession
-from mcp import types as mcp_types
+from .mcp_proxy_base import MCPServerConfig, MCPStdIOClient, MCPToolClientError
 
 logger = logging.getLogger(__name__)
 _LOG_TAG = "[search_proxy]"
@@ -66,21 +64,18 @@ class SearchMCPProxy:
 
     def __init__(self, config: SearchProxyConfig):
         self._config = config
-        self._call_count = 0
-        self._error_count = 0
+        self._client = self._build_client()
 
-    def _get_server_params(self) -> StdioServerParameters:
-        """Get server parameters for stdio client."""
-        return StdioServerParameters(
+    def _build_client(self) -> MCPStdIOClient:
+        env = {"TAVILY_API_KEY": self._config.api_key}
+        config = MCPServerConfig(
             command=self._config.command,
-            args=[
-                "-y",
-                "tavily-mcp@latest",
-            ],
-            env={
-                "TAVILY_API_KEY": self._config.api_key,
-            },
+            args=["-y", "tavily-mcp@latest"],
+            env=env,
+            timeout_sec=self._config.timeout_sec,
+            log_tag=_LOG_TAG,
         )
+        return MCPStdIOClient(config)
 
     async def _call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """Call an MCP tool and return the result.
@@ -97,57 +92,14 @@ class SearchMCPProxy:
         Raises:
             SearchProxyError: If tool call fails
         """
-        server_params = self._get_server_params()
-
-        logger.info(
-            "%s Calling tool %s with arguments %s",
-            _LOG_TAG,
-            tool_name,
-            arguments,
-        )
-
         try:
-            # Create a new session for this call
-            async with stdio_client(server_params) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    # Initialize session
-                    await session.initialize()
-
-                    # Call the tool
-                    result = await session.call_tool(tool_name, arguments)
-
-                    self._call_count += 1
-
-                    # Extract content from response
-                    if result.content:
-                        for item in result.content:
-                            if isinstance(item, mcp_types.TextContent):
-                                text_data = item.text
-
-                                # Check if it's tavily-formatted text response
-                                if 'Title:' in text_data and 'URL:' in text_data:
-                                    return _parse_tavily_text_response(text_data)
-
-                                # Try to parse as JSON if it looks like structured data
-                                if text_data.strip().startswith("{"):
-                                    try:
-                                        import json
-                                        return json.loads(text_data)
-                                    except json.JSONDecodeError:
-                                        return {"text": text_data}
-
-                                return {"text": text_data}
-                            elif isinstance(item, mcp_types.ImageContent):
-                                return {"image": item.data, "mimeType": item.mimeType}
-                            elif isinstance(item, mcp_types.EmbeddedResource):
-                                return {"resource": item.resource, "type": item.type}
-
-                    return {}
-
-        except Exception as e:
-            self._error_count += 1
-            logger.error("%s Tool call failed: %s", _LOG_TAG, e)
-            raise SearchProxyError(f"Request failed: {e}") from e
+            return await self._client.call_tool(
+                tool_name,
+                arguments,
+                text_parser=_parse_tavily_text_response,
+            )
+        except MCPToolClientError as exc:
+            raise SearchProxyError(f"Request failed: {exc}") from exc
 
     async def search(
         self,
@@ -233,10 +185,7 @@ class SearchMCPProxy:
         # Use tavily-search with context embedded in query
         combined_query = f"{query} (context: {context})"
         arguments["query"] = combined_query
-        return await self._call_tool(
-            "tavily-search",
-            arguments,
-        )
+        return await self._call_tool("tavily-search", arguments)
 
     async def qna_search(
         self,
@@ -286,12 +235,7 @@ class SearchMCPProxy:
         Returns:
             Dict with extracted content
         """
-        return await self._call_tool(
-            "tavily-extract",
-            {
-                "urls": [url],  # tavily-extract expects 'urls' array
-            },
-        )
+        return await self._call_tool("tavily-extract", {"urls": [url]})
 
     def get_stats(self) -> Dict[str, int]:
         """Get proxy statistics.
@@ -300,8 +244,8 @@ class SearchMCPProxy:
             Dict with call_count and error_count
         """
         return {
-            "call_count": self._call_count,
-            "error_count": self._error_count,
+            "call_count": self._client.call_count,
+            "error_count": self._client.error_count,
         }
 
 
