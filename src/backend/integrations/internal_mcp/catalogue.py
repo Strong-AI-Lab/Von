@@ -1280,6 +1280,63 @@ def _search_knowledge_base_output_schema() -> Schema:
         description="search_knowledge_base output: results (list of {id, score, text, metadata}), count (int), or error (str)",
     )
 
+
+# Jira schema helpers
+def _jira_search_input_schema() -> Schema:
+    return Schema(
+        required={"jql": str},
+        optional={
+            "max_results": (int,),
+            "start_at": (int,),
+            "fields": (list,),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_search input: jql (str, required) plus optional max_results, start_at, and fields (list of field names)."
+        ),
+    )
+
+
+def _jira_get_issue_input_schema() -> Schema:
+    return Schema(
+        required={"issue_key": str},
+        optional={"fields": (list,)},
+        allow_unknown=True,
+        description="jira_get_issue input: issue_key (str, required), optional fields (list of field names)",
+    )
+
+
+def _jira_add_comment_input_schema() -> Schema:
+    return Schema(
+        required={"issue_key": str, "comment": str},
+        optional={},
+        allow_unknown=True,
+        description="jira_add_comment input: issue_key (str) and comment (str) both required",
+    )
+
+
+def _jira_transition_input_schema() -> Schema:
+    return Schema(
+        required={"issue_key": str, "transition_id": str},
+        optional={},
+        allow_unknown=True,
+        description="jira_transition input: issue_key (str) and transition_id (str) required",
+    )
+
+
+def _jira_generic_output_schema(action: str) -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "error": (str, type(None)),
+            "success": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            f"jira_{action} output: passes through Jira API response and optional error/success fields."
+        ),
+    )
+
 # RAG metadata/content MCP tools
 def _rag_get_status(**kwargs):
     import requests
@@ -1408,12 +1465,96 @@ def _rag_get_item(**kwargs):
     }
 
 
+# Jira MCP handlers
+def _jira_search(**kwargs):
+    import asyncio
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    jql = kwargs.get("jql")
+    if not jql:
+        return {"error": "Missing required parameter: jql", "success": False}
+
+    async def _async_search():
+        proxy = await get_jira_proxy()
+        return await proxy.search(
+            jql=jql,
+            max_results=kwargs.get("max_results"),
+            start_at=kwargs.get("start_at"),
+            fields=kwargs.get("fields"),
+        )
+
+    try:
+        return asyncio.run(_async_search())
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
+def _jira_get_issue(**kwargs):
+    import asyncio
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    issue_key = kwargs.get("issue_key")
+    if not issue_key:
+        return {"error": "Missing required parameter: issue_key", "success": False}
+
+    async def _async_get_issue():
+        proxy = await get_jira_proxy()
+        return await proxy.get_issue(issue_key=issue_key, fields=kwargs.get("fields"))
+
+    try:
+        return asyncio.run(_async_get_issue())
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
+def _jira_add_comment(**kwargs):
+    import asyncio
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    issue_key = kwargs.get("issue_key")
+    comment = kwargs.get("comment")
+    if not issue_key or not comment:
+        return {"error": "Missing required parameters: issue_key and comment", "success": False}
+
+    async def _async_comment():
+        proxy = await get_jira_proxy()
+        return await proxy.add_comment(issue_key=issue_key, comment=comment)
+
+    try:
+        return asyncio.run(_async_comment())
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
+def _jira_transition_issue(**kwargs):
+    import asyncio
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    issue_key = kwargs.get("issue_key")
+    transition_id = kwargs.get("transition_id")
+    if not issue_key or not transition_id:
+        return {"error": "Missing required parameters: issue_key and transition_id", "success": False}
+
+    async def _async_transition():
+        proxy = await get_jira_proxy()
+        return await proxy.transition_issue(issue_key=issue_key, transition_id=transition_id)
+
+    try:
+        return asyncio.run(_async_transition())
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
 def build_default_catalogue() -> MethodCatalogue:
     """Return a catalogue pre-populated with the baseline method set."""
 
     catalogue = MethodCatalogue()
     concept_search_input_schema = _concept_search_input_schema()
     concept_search_output_schema = _concept_search_output_schema()
+    jira_search_output_schema = _jira_generic_output_schema("search")
+    jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
+    jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
+    jira_transition_output_schema = _jira_generic_output_schema("transition")
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="get_context",
@@ -1631,6 +1772,43 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             timeout_sec=30.0,
             description="Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
+        ),
+        # Jira MCP tools
+        MethodDefinition(
+            name="jira_search",
+            handler=_jira_search,
+            input_schema=_jira_search_input_schema(),
+            output_schema=jira_search_output_schema,
+            category="read",
+            timeout_sec=20.0,
+            description="Run a JQL query against Jira. Use when you need to find issues by status, assignee, project, or other fields. Requires valid ATLASSIAN_BASE_URL, ATLASSIAN_EMAIL, and ATLASSIAN_API_TOKEN in the environment. Returns the Jira search response including issues array.",
+        ),
+        MethodDefinition(
+            name="jira_get_issue",
+            handler=_jira_get_issue,
+            input_schema=_jira_get_issue_input_schema(),
+            output_schema=jira_get_issue_output_schema,
+            category="read",
+            timeout_sec=15.0,
+            description="Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). Use when you need fields or transitions for a specific issue.",
+        ),
+        MethodDefinition(
+            name="jira_add_comment",
+            handler=_jira_add_comment,
+            input_schema=_jira_add_comment_input_schema(),
+            output_schema=jira_add_comment_output_schema,
+            category="write",
+            timeout_sec=15.0,
+            description="Add a comment to a Jira issue. Use to log investigation notes or status updates. Requires issue key and comment text.",
+        ),
+        MethodDefinition(
+            name="jira_transition",
+            handler=_jira_transition_issue,
+            input_schema=_jira_transition_input_schema(),
+            output_schema=jira_transition_output_schema,
+            category="write",
+            timeout_sec=15.0,
+            description="Transition a Jira issue using a transition ID. Use when you need to move an issue through workflow states after retrieving available transitions in Jira.",
         ),
         MethodDefinition(
             name="rag_get_status",
