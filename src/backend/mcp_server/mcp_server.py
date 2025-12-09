@@ -17,12 +17,23 @@ import mcp.types as types
 
 load_dotenv()
 
-JIRA_BASE_URL = os.getenv("ATLASSIAN_BASE_URL", "https://naoinstitute.atlassian.net")
-JIRA_EMAIL = os.getenv("ATLASSIAN_EMAIL")
-JIRA_API_TOKEN = os.getenv("ATLASSIAN_API_TOKEN")
+def _get_env(key: str, fallback: str | None = None) -> str | None:
+    value = os.getenv(key)
+    if value:
+        return value
+    return fallback
+
+
+# Prefer ATLASSIAN_* but fall back to legacy JIRA_MCP_* to reduce configuration errors
+JIRA_BASE_URL = _get_env("ATLASSIAN_BASE_URL", os.getenv("JIRA_MCP_BASE_URL")) or "https://naoinstitute.atlassian.net"
+JIRA_EMAIL = _get_env("ATLASSIAN_EMAIL", os.getenv("JIRA_MCP_EMAIL"))
+JIRA_API_TOKEN = _get_env("ATLASSIAN_API_TOKEN", os.getenv("JIRA_MCP_API_TOKEN"))
 
 if not (JIRA_EMAIL and JIRA_API_TOKEN):
-    raise RuntimeError("Missing ATLASSIAN_EMAIL or ATLASSIAN_API_TOKEN in environment")
+    raise RuntimeError(
+        "Missing Atlassian credentials. Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN "
+        "(or legacy JIRA_MCP_EMAIL/JIRA_MCP_API_TOKEN) in the environment."
+    )
 
 auth_header = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
 
