@@ -1006,6 +1006,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     query=arguments.get("query"),
                     label_ids=arguments.get("label_ids"),
                     max_results=arguments.get("max_results", 25),
+                    audit_context={
+                        "source": "mcp_stdio",
+                        "tool": name,
+                    },
                 )
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
             except Exception as e:
@@ -1022,6 +1026,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     profile_id=profile,
                     message_id=message_id,
                     format=arguments.get("format", "metadata"),
+                    audit_context={
+                        "source": "mcp_stdio",
+                        "tool": name,
+                    },
                 )
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
             except Exception as e:
@@ -1039,6 +1047,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     profile_id=profile,
                     message_id=message_id,
                     attachment_id=attachment_id,
+                    audit_context={
+                        "source": "mcp_stdio",
+                        "tool": name,
+                    },
                 )
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
             except Exception as e:
@@ -1050,7 +1062,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: profile"}))]
 
             try:
-                result = gmail_service.list_labels(profile_id=profile)
+                result = gmail_service.list_labels(
+                    profile_id=profile,
+                    audit_context={
+                        "source": "mcp_stdio",
+                        "tool": name,
+                    },
+                )
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
             except Exception as e:
                 return [TextContent(type="text", text=json.dumps({"error": f"Gmail list labels failed: {e}"}))]
@@ -1071,6 +1089,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     add_labels=arguments.get("add_labels"),
                     remove_labels=arguments.get("remove_labels"),
                     allow_mutation=allow_mutation,
+                    audit_context={
+                        "source": "mcp_stdio",
+                        "tool": name,
+                    },
                 )
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
             except Exception as e:

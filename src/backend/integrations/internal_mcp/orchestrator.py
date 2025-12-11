@@ -76,21 +76,6 @@ class InternalMCPChatOrchestrator:
             else:
                 params = ""
 
-                    # Inject Gmail profile if applicable and missing
-                    if tool_name.startswith("gmail_"):
-                        if not payload.get("profile") and selected_gmail_profile:
-                            payload["profile"] = selected_gmail_profile
-                            self._logger.info(
-                                "[mcp_orchestrator] Injected gmail_profile=%s into tool=%s payload",
-                                selected_gmail_profile,
-                                tool_name,
-                            )
-                        elif not payload.get("profile"):
-                            self._logger.warning(
-                                "[mcp_orchestrator] Gmail tool=%s invoked without profile and no default configured",
-                                tool_name,
-                            )
-
             lines.append(f"- {name}{params}: {description}")
         return "\n".join(lines)
 
@@ -398,6 +383,20 @@ class InternalMCPChatOrchestrator:
 
             # Execute the tool
             try:
+                if tool_name.startswith("gmail_"):
+                    if not payload.get("profile") and selected_gmail_profile:
+                        payload["profile"] = selected_gmail_profile
+                        self._logger.info(
+                            "[mcp_orchestrator] Injected gmail_profile=%s into tool=%s payload",
+                            selected_gmail_profile,
+                            tool_name,
+                        )
+                    elif not payload.get("profile"):
+                        self._logger.warning(
+                            "[mcp_orchestrator] Gmail tool=%s invoked without profile and no default configured",
+                            tool_name,
+                        )
+
                 # Inject user_namespace into payload if provided and not already present
                 if user_namespace and "namespace" not in payload:
                     payload["namespace"] = user_namespace
