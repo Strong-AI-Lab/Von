@@ -56,18 +56,32 @@ def sync_to_chat_store(namespace: Optional[str] = None, limit: int = 1000) -> di
 
     indexed = collect_indexed_sessions(limit=limit)
     added = 0
+    failed = 0
     for item in indexed:
+        doc = {
+            "id": item.get("id"),
+            "text": item.get("text", ""),
+            "metadata": item.get("metadata", {}),
+        }
+        if item.get("embedding"):
+            doc["embedding"] = item["embedding"]
+
         try:
-            service.upsert(id=item['id'], text=item['text'], metadata=item['metadata'], namespace=namespace, embedding=item.get('embedding'))
-            added += 1
+            success_count, failure_count = service.upsert_documents([doc], namespace=namespace)
         except Exception:
-            # Fallback: if embedding is not compatible, let backend compute it
-            try:
-                service.upsert(id=item['id'], text=item['text'], metadata=item['metadata'], namespace=namespace)
-                added += 1
-            except Exception:
-                pass
-    return {"success": True, "added": added, "total_indexed": len(indexed)}
+            # Retry without embedding if backend rejects it
+            doc.pop("embedding", None)
+            success_count, failure_count = service.upsert_documents([doc], namespace=namespace)
+
+        added += success_count
+        failed += failure_count
+
+    return {
+        "success": failed == 0,
+        "added": added,
+        "failed": failed,
+        "total_indexed": len(indexed),
+    }
 
 def sync_one_session(session_id: str, namespace: Optional[str] = None) -> dict:
     """Synchronise a single already-indexed interaction_session into the chat RAG store."""
@@ -109,15 +123,26 @@ def sync_one_session(session_id: str, namespace: Optional[str] = None) -> dict:
     upsert_doc = {
         "id": str(doc['_id']),
         "text": text,
-        "metadata": metadata
+        "metadata": metadata,
     }
     embedding = doc.get('embedding')
+    if isinstance(embedding, list) and embedding:
+        upsert_doc["embedding"] = embedding
+
     ns = namespace or "chat_history"
     try:
-        if isinstance(embedding, list) and embedding:
-            service.upsert(id=upsert_doc['id'], text=upsert_doc['text'], metadata=upsert_doc['metadata'], namespace=ns, embedding=embedding)
-        else:
-            service.upsert(id=upsert_doc['id'], text=upsert_doc['text'], metadata=upsert_doc['metadata'], namespace=ns)
+        success_count, failure_count = service.upsert_documents([upsert_doc], namespace=ns)
     except Exception as e:
-        return {"success": False, "error": f"Upsert failed: {e}", "session_id": session_id}
-    return {"success": True, "upserted": 1, "namespace": ns, "session_id": session_id}
+        if "embedding" in upsert_doc:
+            upsert_doc.pop("embedding", None)
+            try:
+                success_count, failure_count = service.upsert_documents([upsert_doc], namespace=ns)
+            except Exception as nested_e:
+                return {"success": False, "error": f"Upsert failed: {nested_e}", "session_id": session_id}
+        else:
+            return {"success": False, "error": f"Upsert failed: {e}", "session_id": session_id}
+
+    if failure_count > 0 or success_count == 0:
+        return {"success": False, "error": "Upsert failed", "session_id": session_id}
+
+    return {"success": True, "upserted": success_count, "namespace": ns, "session_id": session_id}
