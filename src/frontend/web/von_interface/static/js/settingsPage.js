@@ -18,6 +18,7 @@ const LS_USER_KEY = 'von_current_user';
 const LS_ORG_KEY = 'von_current_org';
 const LS_LANG_KEY = 'von_preferred_language';
 const LS_AUTO_RELOAD = 'von:autoReloadOnRestart';
+const LS_GMAIL_PROFILE = 'von_gmail_profile';
 
 function getStoredJson(key) {
   try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; }
@@ -119,6 +120,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Persist language preference (with current organisation if available)
     persistCurrentUserPreferences();
   });
+
+  const gmailProfileInput = document.getElementById('gmailProfileInput');
+  if (gmailProfileInput) {
+    try { gmailProfileInput.value = localStorage.getItem(LS_GMAIL_PROFILE) || ''; } catch { gmailProfileInput.value = ''; }
+    gmailProfileInput.addEventListener('input', () => {
+      try {
+        const val = gmailProfileInput.value.trim();
+        if (val) localStorage.setItem(LS_GMAIL_PROFILE, val); else localStorage.removeItem(LS_GMAIL_PROFILE);
+      } catch { /* ignore localStorage errors */ }
+    });
+  }
 });
 
 // Auto Reload on Restart toggle
@@ -195,10 +207,12 @@ document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () =
     localStorage.removeItem(LS_USER_KEY);
     localStorage.removeItem(LS_ORG_KEY);
     localStorage.removeItem(LS_LANG_KEY);
+    localStorage.removeItem(LS_GMAIL_PROFILE);
     // Reset selects visually
     const userSel = document.getElementById('currentUserSelect'); if (userSel) userSel.selectedIndex = 0;
     const orgSel = document.getElementById('currentOrganisationSelect'); if (orgSel) orgSel.selectedIndex = 0;
     const langSel = document.getElementById('preferredLanguageSelect'); if (langSel) langSel.value = 'en-NZ';
+    const gmailProfileInput = document.getElementById('gmailProfileInput'); if (gmailProfileInput) gmailProfileInput.value = '';
     if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
     showStatusMessage('settingsStatusMessage', 'Local preferences cleared');
   } catch (e) {

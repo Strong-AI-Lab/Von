@@ -59,6 +59,7 @@ from src.backend.integrations.internal_mcp.search_proxy_mcp import (
     get_search_proxy,
     SearchProxyError,
 )
+from src.backend.integrations.google import gmail_service
 from src.backend.services.rag_service import get_rag_service, RAGBackendUnavailable
 
 # Create MCP server instance
@@ -360,6 +361,72 @@ async def list_tools() -> list[Tool]:
                     "url": {"type": "string", "description": "URL to extract content from"}
                 },
                 "required": ["url"]
+            }
+        ),
+        Tool(
+            name="gmail_list_messages",
+            description="List Gmail messages for a profile with optional label and query filters (read-only).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "profile": {"type": "string", "description": "Profile ID configured via env"},
+                    "query": {"type": "string", "description": "Optional Gmail search query"},
+                    "label_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional label IDs to filter"},
+                    "max_results": {"type": "integer", "description": "Maximum results to return"}
+                },
+                "required": ["profile"]
+            }
+        ),
+        Tool(
+            name="gmail_get_message",
+            description="Fetch a Gmail message by ID for a profile (formats: metadata|full|raw).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "profile": {"type": "string", "description": "Profile ID configured via env"},
+                    "message_id": {"type": "string", "description": "Gmail message ID"},
+                    "format": {"type": "string", "enum": ["metadata", "full", "raw", "minimal"], "default": "metadata", "description": "Gmail API format"}
+                },
+                "required": ["profile", "message_id"]
+            }
+        ),
+        Tool(
+            name="gmail_get_attachment",
+            description="Fetch a Gmail attachment by message and attachment ID for a profile (base64 payload).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "profile": {"type": "string", "description": "Profile ID configured via env"},
+                    "message_id": {"type": "string", "description": "Gmail message ID"},
+                    "attachment_id": {"type": "string", "description": "Gmail attachment ID"}
+                },
+                "required": ["profile", "message_id", "attachment_id"]
+            }
+        ),
+        Tool(
+            name="gmail_list_labels",
+            description="List Gmail labels for a profile (read-only).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "profile": {"type": "string", "description": "Profile ID configured via env"}
+                },
+                "required": ["profile"]
+            }
+        ),
+        Tool(
+            name="gmail_modify_labels",
+            description="Add/remove labels on a Gmail message for a profile. Requires allow_mutation=true and gmail.modify scope.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "profile": {"type": "string", "description": "Profile ID configured via env"},
+                    "message_id": {"type": "string", "description": "Gmail message ID"},
+                    "add_labels": {"type": "array", "items": {"type": "string"}, "description": "Labels to add"},
+                    "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "Labels to remove"},
+                    "allow_mutation": {"type": "boolean", "description": "Must be true to permit mutation"}
+                },
+                "required": ["profile", "message_id", "allow_mutation"]
             }
         ),
         Tool(
@@ -928,6 +995,109 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             except Exception as e:
                 return [TextContent(type="text", text=json.dumps({"error": f"Unexpected error: {e}"}))]
 
+        elif name == "gmail_list_messages":
+            profile = arguments.get("profile") or arguments.get("profile_id")
+            if not profile:
+                return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: profile"}))]
+
+            try:
+                result = gmail_service.list_messages(
+                    profile_id=profile,
+                    query=arguments.get("query"),
+                    label_ids=arguments.get("label_ids"),
+                    max_results=arguments.get("max_results", 25),
+                    audit_context={
+                        "source": "mcp_stdio",
+                        "tool": name,
+                    },
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            except Exception as e:
+                return [TextContent(type="text", text=json.dumps({"error": f"Gmail list failed: {e}"}))]
+
+        elif name == "gmail_get_message":
+            profile = arguments.get("profile") or arguments.get("profile_id")
+            message_id = arguments.get("message_id")
+            if not profile or not message_id:
+                return [TextContent(type="text", text=json.dumps({"error": "Missing required parameters: profile and message_id"}))]
+
+            try:
+                result = gmail_service.get_message(
+                    profile_id=profile,
+                    message_id=message_id,
+                    format=arguments.get("format", "metadata"),
+                    audit_context={
+                        "source": "mcp_stdio",
+                        "tool": name,
+                    },
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            except Exception as e:
+                return [TextContent(type="text", text=json.dumps({"error": f"Gmail get message failed: {e}"}))]
+
+        elif name == "gmail_get_attachment":
+            profile = arguments.get("profile") or arguments.get("profile_id")
+            message_id = arguments.get("message_id")
+            attachment_id = arguments.get("attachment_id")
+            if not profile or not message_id or not attachment_id:
+                return [TextContent(type="text", text=json.dumps({"error": "Missing required parameters: profile, message_id, attachment_id"}))]
+
+            try:
+                result = gmail_service.get_attachment(
+                    profile_id=profile,
+                    message_id=message_id,
+                    attachment_id=attachment_id,
+                    audit_context={
+                        "source": "mcp_stdio",
+                        "tool": name,
+                    },
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            except Exception as e:
+                return [TextContent(type="text", text=json.dumps({"error": f"Gmail get attachment failed: {e}"}))]
+
+        elif name == "gmail_list_labels":
+            profile = arguments.get("profile") or arguments.get("profile_id")
+            if not profile:
+                return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: profile"}))]
+
+            try:
+                result = gmail_service.list_labels(
+                    profile_id=profile,
+                    audit_context={
+                        "source": "mcp_stdio",
+                        "tool": name,
+                    },
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            except Exception as e:
+                return [TextContent(type="text", text=json.dumps({"error": f"Gmail list labels failed: {e}"}))]
+
+        elif name == "gmail_modify_labels":
+            profile = arguments.get("profile") or arguments.get("profile_id")
+            message_id = arguments.get("message_id")
+            allow_mutation = bool(arguments.get("allow_mutation"))
+            if not profile or not message_id:
+                return [TextContent(type="text", text=json.dumps({"error": "Missing required parameters: profile and message_id"}))]
+            if not allow_mutation:
+                return [TextContent(type="text", text=json.dumps({"error": "allow_mutation must be true to modify labels"}))]
+
+            try:
+                result = gmail_service.modify_labels(
+                    profile_id=profile,
+                    message_id=message_id,
+                    add_labels=arguments.get("add_labels"),
+                    remove_labels=arguments.get("remove_labels"),
+                    allow_mutation=allow_mutation,
+                    audit_context={
+                        "source": "mcp_stdio",
+                        "tool": name,
+                    },
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            except Exception as e:
+                return [TextContent(type="text", text=json.dumps({"error": f"Gmail modify labels failed: {e}"}))]
+
         elif name == "add_relationship":
             source_id = arguments.get("source_id")
             predicate = arguments.get("predicate")
@@ -937,6 +1107,19 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=json.dumps({"error": "Missing required parameters: source_id, predicate, and target"})
+                )]
+
+            try:
+                result = _add_relationship(
+                    source_id=source_id,
+                    predicate=predicate,
+                    target=target
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": f"Failed to add relationship: {str(e)}"})
                 )]
 
         elif name == "remove_relationship":
@@ -961,19 +1144,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=json.dumps({"error": f"Failed to remove relationship: {str(e)}"})
-                )]
-
-            try:
-                result = _add_relationship(
-                    source_id=source_id,
-                    predicate=predicate,
-                    target=target
-                )
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
-            except Exception as e:
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"Failed to add relationship: {str(e)}"})
                 )]
 
         elif name == "delete_concept":

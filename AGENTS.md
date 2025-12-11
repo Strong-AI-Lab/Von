@@ -2,11 +2,12 @@
 
 This document provides an overview of key files within the `docs` directory that are primarily intended for use by AI systems (like GitHub Copilot or other automated agents) working on the Von-Private project. Understanding the purpose of these files will help AI agents contribute more effectively and maintain project context.
 
-**All AI agents must read this file and the `docs/engineering/software_engineering.md` and `docs/engineering/JIRA_issue_management.md` files before starting any work.**
+**All AI agents must read this file and the `docs/engineering/security_considerations.md` file before starting any work.**
 
 > **TL;DR FOR AGENTS (READ FIRST)**
 > 1. Use **New Zealand English** spelling always (behaviour, colour, organisation, realise).
 > 2. **PowerShell is the default shell**. Do **NOT** emit Bash heredocs (`<<EOF`), `export VAR=`, `$(cmd)` substitution, or `source venv/bin/activate` unless the user explicitly asks for a Bash variant. Provide `$env:VAR = 'value'`, here-strings, or `pdm run` patterns.
+- **Pre-commit guardrails**: enable hooks with `git config core.hooksPath .githooks` to block committing runtime data (e.g., `data/rag_storage`, `data/raw`, `logs`).
 > 3. Never auto-start the server; wait for explicit user instruction.
 > 4. Prefer clarity over clever chaining: separate lines instead of `&&` unless failure short‑circuit is required.
 > 5. Large multi-line Python → use a here-string variable then `python -c $code` (PowerShell) or propose a committed script.
