@@ -119,7 +119,12 @@ def get_user_id(namespace: str) -> str:
     Raises:
         ValueError: If namespace format is invalid
     """
-    return parse_namespace(namespace)["user_id"]
+    parsed = parse_namespace(namespace)
+    user_id = parsed.get("user_id")
+    if not user_id:
+        raise ValueError(f"Namespace missing user_id: {namespace}")
+
+    return user_id
 
 
 def get_org_id(namespace: str) -> Optional[str]:
@@ -152,4 +157,8 @@ def normalize_namespace(namespace: str) -> str:
         ValueError: If namespace format is invalid
     """
     parsed = parse_namespace(namespace)
-    return derive_namespace(parsed["user_id"], parsed.get("org_id"))
+    user_id = parsed.get("user_id")
+    if not user_id:
+        raise ValueError(f"Namespace missing user_id: {namespace}")
+
+    return derive_namespace(user_id, parsed.get("org_id"))

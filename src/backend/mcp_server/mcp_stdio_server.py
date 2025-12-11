@@ -1109,6 +1109,19 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     text=json.dumps({"error": "Missing required parameters: source_id, predicate, and target"})
                 )]
 
+            try:
+                result = _add_relationship(
+                    source_id=source_id,
+                    predicate=predicate,
+                    target=target
+                )
+                return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            except Exception as e:
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({"error": f"Failed to add relationship: {str(e)}"})
+                )]
+
         elif name == "remove_relationship":
             source_id = arguments.get("source_id")
             predicate = arguments.get("predicate")
@@ -1131,19 +1144,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 return [TextContent(
                     type="text",
                     text=json.dumps({"error": f"Failed to remove relationship: {str(e)}"})
-                )]
-
-            try:
-                result = _add_relationship(
-                    source_id=source_id,
-                    predicate=predicate,
-                    target=target
-                )
-                return [TextContent(type="text", text=json.dumps(result, indent=2))]
-            except Exception as e:
-                return [TextContent(
-                    type="text",
-                    text=json.dumps({"error": f"Failed to add relationship: {str(e)}"})
                 )]
 
         elif name == "delete_concept":
