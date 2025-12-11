@@ -16,15 +16,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Strong-AI-Lab/Von-Private.git"
+    "url": "git+https://github.com/Strong-AI-Lab/Von.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/Strong-AI-Lab/Von-Private/issues"
+    "url": "https://github.com/Strong-AI-Lab/Von/issues"
   },
-  "homepage": "https://github.com/Strong-AI-Lab/Von-Private#readme",
+  "homepage": "https://github.com/Strong-AI-Lab/Von#readme",
   "devDependencies": {
     "@babel/core": "^7.28.0",
     "@babel/preset-env": "^7.28.0",
