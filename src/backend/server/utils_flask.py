@@ -119,6 +119,7 @@ def create_flask_app(
                 gateway=gateway_instance,
                 logger=app.logger.getChild("mcp_orchestrator") if app.logger else None,
                 max_tool_invocations=8,  # JVNAUTOSCI-699: Allow complex chained workflows
+                default_gmail_profile=os.getenv("VON_GMAIL_DEFAULT_PROFILE") or None,
             )
         except Exception as exc:  # pragma: no cover - defensive bootstrap
             try:
