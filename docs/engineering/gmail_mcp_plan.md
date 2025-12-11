@@ -33,6 +33,7 @@
   - `VON_GMAIL_TOKEN_PATH` (required)
   - `VON_GMAIL_CLIENT_SECRET_PATH` or `GOOGLE_CLIENT_SECRET_PATH` (optional, refresh only)
   - `VON_GMAIL_USER`, `VON_GMAIL_LABELS` (comma-separated), `VON_GMAIL_QUERY_PREFIX`, `VON_GMAIL_MUTATION` (boolean)
+- Optional default: `VON_GMAIL_DEFAULT_PROFILE` can be set to auto-fill Gmail tool calls when UI/local profile is not provided. The settings page now allows a "Gmail profile ID" text field stored in the browser (localStorage key `von_gmail_profile`).
 
 ## Phases
 1) **Service layer (done)**: Profile loader + Gmail helpers with tests.
