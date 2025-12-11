@@ -208,6 +208,7 @@ def generate():
     request_user_id = data.get("user_id")
     request_org_id = data.get("org_id")
     request_language = data.get("language", "en-NZ")
+    request_gmail_profile = data.get("gmail_profile")
 
     # Session management
     if "session_id" not in session:
@@ -356,6 +357,7 @@ def generate():
                     llm_client=llm_client,
                     model=model_name,
                     user_namespace=user_namespace,
+                    gmail_profile=request_gmail_profile,
                 )
                 response_text = orchestrator_result.response_text
                 tool_messages = [dict(msg) for msg in orchestrator_result.extra_messages]

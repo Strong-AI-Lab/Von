@@ -355,7 +355,8 @@ async function handleSendPrompt() {
                 prompt: promptText,
                 user_id: userContext.user_id,
                 org_id: userContext.org_id,
-                language: userContext.language
+                language: userContext.language,
+                gmail_profile: userContext.gmail_profile
             })
         });
 

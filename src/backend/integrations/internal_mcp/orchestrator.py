@@ -37,10 +37,12 @@ class InternalMCPChatOrchestrator:
         gateway: InternalMCPGateway,
         logger: logging.Logger | None = None,
         max_tool_invocations: int = 1,
+        default_gmail_profile: str | None = None,
     ) -> None:
         self._gateway = gateway
         self._logger = logger or logging.getLogger(__name__)
         self._max_tool_invocations = max(0, int(max_tool_invocations))
+        self._default_gmail_profile = default_gmail_profile
 
     def _tool_listing(self) -> str:
         """Generate a concise listing of available tools for the system prompt.
@@ -73,6 +75,21 @@ class InternalMCPChatOrchestrator:
                 params = f" (params: {', '.join(params_list)})"
             else:
                 params = ""
+
+                    # Inject Gmail profile if applicable and missing
+                    if tool_name.startswith("gmail_"):
+                        if not payload.get("profile") and selected_gmail_profile:
+                            payload["profile"] = selected_gmail_profile
+                            self._logger.info(
+                                "[mcp_orchestrator] Injected gmail_profile=%s into tool=%s payload",
+                                selected_gmail_profile,
+                                tool_name,
+                            )
+                        elif not payload.get("profile"):
+                            self._logger.warning(
+                                "[mcp_orchestrator] Gmail tool=%s invoked without profile and no default configured",
+                                tool_name,
+                            )
 
             lines.append(f"- {name}{params}: {description}")
         return "\n".join(lines)
@@ -280,6 +297,7 @@ class InternalMCPChatOrchestrator:
         llm_client: Any,
         model: Optional[str],
         user_namespace: Optional[str] = None,
+        gmail_profile: Optional[str] = None,
     ) -> OrchestratorResult:
         if not self._gateway.enabled or self._max_tool_invocations <= 0:
             response = llm_client.generate(prompt, context=context, model=model)
@@ -349,6 +367,7 @@ class InternalMCPChatOrchestrator:
 
         invocations: List[Mapping[str, Any]] = []
         tool_messages: List[Mapping[str, Any]] = []
+        selected_gmail_profile = gmail_profile or self._default_gmail_profile
 
         # Support chained tool calls up to max_tool_invocations limit (JVNAUTOSCI-699)
         iteration_count = 0

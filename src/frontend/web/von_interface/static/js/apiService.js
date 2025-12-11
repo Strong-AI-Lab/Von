@@ -88,6 +88,12 @@ export function getUserContext() {
     ctx.language = 'en-NZ';
   }
 
+  try {
+    ctx.gmail_profile = localStorage.getItem('von_gmail_profile') || null;
+  } catch (e) {
+    ctx.gmail_profile = null;
+  }
+
   return ctx;
 }
 
