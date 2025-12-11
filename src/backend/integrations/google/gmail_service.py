@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import json
 import os
+import logging
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Mapping, Optional
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SCOPES: List[str] = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -70,6 +73,44 @@ class GmailProfile:
 def _persist_credentials(token_path: str, creds: Credentials) -> None:
     with open(token_path, "w", encoding="utf-8") as token_file:
         token_file.write(creds.to_json())
+
+
+def _log_gmail_audit(
+    action: str,
+    *,
+    profile_id: str,
+    audit_context: Optional[Mapping[str, object]] = None,
+    query: Optional[str] = None,
+    label_ids: Optional[List[str]] = None,
+    message_id: Optional[str] = None,
+    attachment_id: Optional[str] = None,
+    allow_mutation: Optional[bool] = None,
+    max_results: Optional[int] = None,
+) -> None:
+    """Record a minimal audit trail for Gmail tool calls without leaking content.
+
+    Only structural identifiers and small metadata are logged; message bodies and
+    attachments are never logged.
+    """
+
+    try:
+        safe_labels = list(label_ids[:10]) if label_ids else None
+        trimmed_query = (query or "")[:100] if query else None
+        record: Dict[str, object] = {
+            "profile_id": profile_id,
+            "query_preview": trimmed_query,
+            "label_ids": safe_labels,
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "allow_mutation": allow_mutation,
+            "max_results": max_results,
+        }
+        record = {k: v for k, v in record.items() if v is not None}
+        if audit_context:
+            record["audit_context"] = {k: v for k, v in audit_context.items() if v is not None}
+        logger.info("[gmail_audit] action=%s payload=%s", action, record)
+    except Exception:  # pragma: no cover - audit should never break callers
+        logger.exception("[gmail_audit] Failed to log Gmail action: %s", action)
 
 
 def _parse_profiles(raw: str) -> Dict[str, GmailProfile]:
@@ -192,8 +233,17 @@ def list_messages(
     label_ids: Optional[List[str]] = None,
     max_results: int = 25,
     profiles: Optional[Dict[str, GmailProfile]] = None,
+    audit_context: Optional[Mapping[str, object]] = None,
 ) -> Dict:
     profile = get_profile(profile_id, profiles)
+    _log_gmail_audit(
+        "list_messages",
+        profile_id=profile.profile_id,
+        audit_context=audit_context,
+        query=query,
+        label_ids=label_ids,
+        max_results=max_results,
+    )
     service = get_service(profile_id, profiles)
 
     label_ids = label_ids or profile.label_filter or None
@@ -212,8 +262,15 @@ def get_message(
     message_id: str,
     format: str = "metadata",
     profiles: Optional[Dict[str, GmailProfile]] = None,
+    audit_context: Optional[Mapping[str, object]] = None,
 ) -> Dict:
     profile = get_profile(profile_id, profiles)
+    _log_gmail_audit(
+        "get_message",
+        profile_id=profile.profile_id,
+        audit_context=audit_context,
+        message_id=message_id,
+    )
     service = get_service(profile_id, profiles)
 
     request = (
@@ -229,8 +286,16 @@ def get_attachment(
     message_id: str,
     attachment_id: str,
     profiles: Optional[Dict[str, GmailProfile]] = None,
+    audit_context: Optional[Mapping[str, object]] = None,
 ) -> Dict:
     profile = get_profile(profile_id, profiles)
+    _log_gmail_audit(
+        "get_attachment",
+        profile_id=profile.profile_id,
+        audit_context=audit_context,
+        message_id=message_id,
+        attachment_id=attachment_id,
+    )
     service = get_service(profile_id, profiles)
 
     request = (
@@ -245,8 +310,14 @@ def get_attachment(
 def list_labels(
     profile_id: str,
     profiles: Optional[Dict[str, GmailProfile]] = None,
+    audit_context: Optional[Mapping[str, object]] = None,
 ) -> Dict:
     profile = get_profile(profile_id, profiles)
+    _log_gmail_audit(
+        "list_labels",
+        profile_id=profile.profile_id,
+        audit_context=audit_context,
+    )
     service = get_service(profile_id, profiles)
 
     request = service.users().labels().list(userId=profile.user_id)
@@ -260,6 +331,7 @@ def modify_labels(
     remove_labels: Optional[List[str]] = None,
     allow_mutation: bool = False,
     profiles: Optional[Dict[str, GmailProfile]] = None,
+    audit_context: Optional[Mapping[str, object]] = None,
 ) -> Dict:
     """Modify labels on a message when mutation is explicitly enabled.
 
@@ -273,6 +345,14 @@ def modify_labels(
         raise ValueError("Label mutation requires allow_mutation=True")
 
     profile = get_profile(profile_id, profiles)
+    _log_gmail_audit(
+        "modify_labels",
+        profile_id=profile.profile_id,
+        audit_context=audit_context,
+        message_id=message_id,
+        label_ids=(add_labels or []) + (remove_labels or []),
+        allow_mutation=allow_mutation,
+    )
     if MUTATION_SCOPE not in profile.scopes:
         raise PermissionError("Profile scopes do not include gmail.modify")
 

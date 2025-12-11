@@ -1479,6 +1479,11 @@ def _gmail_list_messages(**kwargs):
             query=kwargs.get("query"),
             label_ids=kwargs.get("label_ids"),
             max_results=kwargs.get("max_results") or 25,
+            audit_context={
+                "namespace": kwargs.get("namespace"),
+                "source": "internal_mcp_gateway",
+                "tool": "gmail_list_messages",
+            },
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Gmail list failed: {exc}", "success": False}
@@ -1497,6 +1502,11 @@ def _gmail_get_message(**kwargs):
             profile_id=profile,
             message_id=message_id,
             format=kwargs.get("format", "metadata"),
+            audit_context={
+                "namespace": kwargs.get("namespace"),
+                "source": "internal_mcp_gateway",
+                "tool": "gmail_get_message",
+            },
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Gmail get message failed: {exc}", "success": False}
@@ -1516,6 +1526,11 @@ def _gmail_get_attachment(**kwargs):
             profile_id=profile,
             message_id=message_id,
             attachment_id=attachment_id,
+            audit_context={
+                "namespace": kwargs.get("namespace"),
+                "source": "internal_mcp_gateway",
+                "tool": "gmail_get_attachment",
+            },
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Gmail get attachment failed: {exc}", "success": False}
@@ -1529,7 +1544,14 @@ def _gmail_list_labels(**kwargs):
         return {"error": "Missing required parameter: profile", "success": False}
 
     try:
-        return gs.list_labels(profile_id=profile)
+        return gs.list_labels(
+            profile_id=profile,
+            audit_context={
+                "namespace": kwargs.get("namespace"),
+                "source": "internal_mcp_gateway",
+                "tool": "gmail_list_labels",
+            },
+        )
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Gmail list labels failed: {exc}", "success": False}
 
@@ -1552,6 +1574,11 @@ def _gmail_modify_labels(**kwargs):
             add_labels=kwargs.get("add_labels"),
             remove_labels=kwargs.get("remove_labels"),
             allow_mutation=allow_mutation,
+            audit_context={
+                "namespace": kwargs.get("namespace"),
+                "source": "internal_mcp_gateway",
+                "tool": "gmail_modify_labels",
+            },
         )
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Gmail modify labels failed: {exc}", "success": False}
