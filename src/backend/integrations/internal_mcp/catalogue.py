@@ -1465,6 +1465,98 @@ def _rag_get_item(**kwargs):
     }
 
 
+# Gmail MCP handlers (read-only surface)
+def _gmail_list_messages(**kwargs):
+    from ...integrations.google import gmail_service as gs
+
+    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    if not profile:
+        return {"error": "Missing required parameter: profile", "success": False}
+
+    try:
+        return gs.list_messages(
+            profile_id=profile,
+            query=kwargs.get("query"),
+            label_ids=kwargs.get("label_ids"),
+            max_results=kwargs.get("max_results") or 25,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Gmail list failed: {exc}", "success": False}
+
+
+def _gmail_get_message(**kwargs):
+    from ...integrations.google import gmail_service as gs
+
+    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    message_id = kwargs.get("message_id")
+    if not profile or not message_id:
+        return {"error": "Missing required parameters: profile and message_id", "success": False}
+
+    try:
+        return gs.get_message(
+            profile_id=profile,
+            message_id=message_id,
+            format=kwargs.get("format", "metadata"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Gmail get message failed: {exc}", "success": False}
+
+
+def _gmail_get_attachment(**kwargs):
+    from ...integrations.google import gmail_service as gs
+
+    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    message_id = kwargs.get("message_id")
+    attachment_id = kwargs.get("attachment_id")
+    if not profile or not message_id or not attachment_id:
+        return {"error": "Missing required parameters: profile, message_id, attachment_id", "success": False}
+
+    try:
+        return gs.get_attachment(
+            profile_id=profile,
+            message_id=message_id,
+            attachment_id=attachment_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Gmail get attachment failed: {exc}", "success": False}
+
+
+def _gmail_list_labels(**kwargs):
+    from ...integrations.google import gmail_service as gs
+
+    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    if not profile:
+        return {"error": "Missing required parameter: profile", "success": False}
+
+    try:
+        return gs.list_labels(profile_id=profile)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Gmail list labels failed: {exc}", "success": False}
+
+
+def _gmail_modify_labels(**kwargs):
+    from ...integrations.google import gmail_service as gs
+
+    profile = kwargs.get("profile") or kwargs.get("profile_id")
+    message_id = kwargs.get("message_id")
+    allow_mutation = bool(kwargs.get("allow_mutation"))
+    if not profile or not message_id:
+        return {"error": "Missing required parameters: profile and message_id", "success": False}
+    if not allow_mutation:
+        return {"error": "allow_mutation must be true to modify labels", "success": False}
+
+    try:
+        return gs.modify_labels(
+            profile_id=profile,
+            message_id=message_id,
+            add_labels=kwargs.get("add_labels"),
+            remove_labels=kwargs.get("remove_labels"),
+            allow_mutation=allow_mutation,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"Gmail modify labels failed: {exc}", "success": False}
+
+
 # Jira MCP handlers
 def _jira_search(**kwargs):
     import asyncio
@@ -1555,6 +1647,43 @@ def build_default_catalogue() -> MethodCatalogue:
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
     jira_transition_output_schema = _jira_generic_output_schema("transition")
+    gmail_list_messages_input_schema = Schema(
+        required={"profile": str},
+        optional={
+            "query": str,
+            "label_ids": list,
+            "max_results": (int, type(None)),
+        },
+        allow_unknown=False,
+        description="List Gmail messages for a profile with optional query/labels (read-only)."
+    )
+    gmail_get_message_input_schema = Schema(
+        required={"profile": str, "message_id": str},
+        optional={"format": str},
+        allow_unknown=False,
+        description="Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal)."
+    )
+    gmail_get_attachment_input_schema = Schema(
+        required={"profile": str, "message_id": str, "attachment_id": str},
+        optional={},
+        allow_unknown=False,
+        description="Fetch a Gmail attachment for a profile (base64 payload)."
+    )
+    gmail_list_labels_input_schema = Schema(
+        required={"profile": str},
+        optional={},
+        allow_unknown=False,
+        description="List Gmail labels for a profile (read-only)."
+    )
+    gmail_modify_labels_input_schema = Schema(
+        required={"profile": str, "message_id": str, "allow_mutation": bool},
+        optional={
+            "add_labels": list,
+            "remove_labels": list,
+        },
+        allow_unknown=False,
+        description="Add/remove labels on a Gmail message. Requires allow_mutation=true and gmail.modify scope."
+    )
     definitions: List[MethodDefinition] = [
         MethodDefinition(
             name="get_context",
@@ -1763,6 +1892,52 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             timeout_sec=15.0,
             description="Extract and return the main text content from a specific URL. Use when user provides a URL and wants to read, analyse, or extract information from that specific web page. Returns cleaned text content and page title. Useful for reading articles, documentation, or any web page content. Example: 'read this article: https://example.com/article', 'extract content from this URL'.",
+        ),
+        # Gmail MCP tools (read-only surface)
+        MethodDefinition(
+            name="gmail_list_messages",
+            handler=_gmail_list_messages,
+            input_schema=gmail_list_messages_input_schema,
+            output_schema=Schema(required={}, optional={}, allow_unknown=True, description="Gmail API list response"),
+            category="read",
+            timeout_sec=20.0,
+            description="List Gmail messages for a profile with optional query and label filters. Read-only; relies on pre-provisioned tokens per profile.",
+        ),
+        MethodDefinition(
+            name="gmail_get_message",
+            handler=_gmail_get_message,
+            input_schema=gmail_get_message_input_schema,
+            output_schema=Schema(required={}, optional={}, allow_unknown=True, description="Gmail API message response"),
+            category="read",
+            timeout_sec=20.0,
+            description="Fetch a Gmail message for a profile. Supports Gmail API formats metadata|full|raw|minimal. Read-only; profile token required.",
+        ),
+        MethodDefinition(
+            name="gmail_get_attachment",
+            handler=_gmail_get_attachment,
+            input_schema=gmail_get_attachment_input_schema,
+            output_schema=Schema(required={}, optional={}, allow_unknown=True, description="Gmail API attachment response"),
+            category="read",
+            timeout_sec=20.0,
+            description="Fetch a Gmail attachment for a profile (base64 data). Read-only; profile token required.",
+        ),
+        MethodDefinition(
+            name="gmail_list_labels",
+            handler=_gmail_list_labels,
+            input_schema=gmail_list_labels_input_schema,
+            output_schema=Schema(required={}, optional={}, allow_unknown=True, description="Gmail API labels response"),
+            category="read",
+            timeout_sec=15.0,
+            description="List Gmail labels for a profile. Read-only; useful to discover label IDs for queries.",
+        ),
+        MethodDefinition(
+            name="gmail_modify_labels",
+            handler=_gmail_modify_labels,
+            input_schema=gmail_modify_labels_input_schema,
+            output_schema=Schema(required={}, optional={}, allow_unknown=True, description="Gmail API modify response"),
+            category="write",
+            timeout_sec=20.0,
+            description="Add/remove labels on a Gmail message. Requires allow_mutation=true and profile with gmail.modify scope.",
         ),
         MethodDefinition(
             name="search_knowledge_base",
