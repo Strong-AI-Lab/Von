@@ -561,6 +561,151 @@
             }
         },
         {
+            "name": "gmail_list_messages",
+            "description": "List Gmail messages for a profile with optional query and label filters (read-only). Profile must be configured via environment.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "description": "Profile ID configured via env"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional Gmail search query"
+                    },
+                    "label_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Optional Gmail label IDs"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of messages to return"
+                    }
+                },
+                "required": [
+                    "profile"
+                ]
+            }
+        },
+        {
+            "name": "gmail_get_message",
+            "description": "Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal). Read-only; profile token required.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "description": "Profile ID configured via env"
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "Gmail message ID"
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": [
+                            "metadata",
+                            "full",
+                            "raw",
+                            "minimal"
+                        ],
+                        "default": "metadata",
+                        "description": "Gmail API format"
+                    }
+                },
+                "required": [
+                    "profile",
+                    "message_id"
+                ]
+            }
+        },
+        {
+            "name": "gmail_get_attachment",
+            "description": "Fetch a Gmail attachment for a profile (base64 payload). Read-only; profile token required.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "description": "Profile ID configured via env"
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "Gmail message ID"
+                    },
+                    "attachment_id": {
+                        "type": "string",
+                        "description": "Gmail attachment ID"
+                    }
+                },
+                "required": [
+                    "profile",
+                    "message_id",
+                    "attachment_id"
+                ]
+            }
+        },
+        {
+            "name": "gmail_list_labels",
+            "description": "List Gmail labels for a profile. Read-only; useful to discover label IDs for filtering.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "description": "Profile ID configured via env"
+                    }
+                },
+                "required": [
+                    "profile"
+                ]
+            }
+        },
+        {
+            "name": "gmail_modify_labels",
+            "description": "Add/remove labels on a Gmail message for a profile. Requires allow_mutation=true and gmail.modify scope.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "description": "Profile ID configured via env"
+                    },
+                    "message_id": {
+                        "type": "string",
+                        "description": "Gmail message ID"
+                    },
+                    "add_labels": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Labels to add"
+                    },
+                    "remove_labels": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Labels to remove"
+                    },
+                    "allow_mutation": {
+                        "type": "boolean",
+                        "description": "Must be true to permit mutation"
+                    }
+                },
+                "required": [
+                    "profile",
+                    "message_id",
+                    "allow_mutation"
+                ]
+            }
+        },
+        {
             "name": "search_arxiv",
             "description": "Search arXiv.org for scholarly articles. Use when user asks to find papers by author, keyword, topic, or date range. Returns list of papers with id, title, authors, summary, and publication date. Supports boolean operators in query (AND, OR, NOT). Example: 'causal reasoning AND neural networks'. Results can be sorted by relevance, submission date, or last updated date.",
             "inputSchema": {
