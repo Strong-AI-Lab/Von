@@ -28,6 +28,18 @@
             </div>
         </section>
 
+        <section id="google-oauth-settings">
+            <h2>Google OAuth</h2>
+            <p class="settings-note">Use this to refresh Gmail tokens for the agent mailbox. This does not change your
+                app user selection.</p>
+            <div class="inline-form inline-form-tight">
+                <button type="button" class="btn-primary" onclick="loginWithGoogle()">Start Google OAuth</button>
+                <span class="settings-note ml-2">Ensure popups are allowed for this site.</span>
+            </div>
+            <div id="googleOauthStatus" class="settings-note mt-1">Gmail OAuth session: unknown</div>
+            <div id="gmailProfileStatus" class="settings-note">Gmail profile target: unknown</div>
+        </section>
+
         <section id="ollima-settings">
             <h2>Ollama Model Configuration</h2>
 
@@ -92,7 +104,7 @@
             <div id="authenticationStatus">
                 <!-- Will be populated by JavaScript -->
                 <button onclick="loginWithGoogle()" class="btn-primary">Login with Google</button>
-                <button onclick="testPopupMessage()" class="btn-secondary" style="margin-left: 10px;">Test
+                <button onclick="testPopupMessage()" class="btn-secondary ml-2">Test
                     Popup</button>
             </div>
 
@@ -167,8 +179,7 @@
                 current counts.</p>
             <div class="inline-form inline-form-tight">
                 <button type="button" id="refreshDeprecationMetricsButton" class="btn-info">Refresh Metrics</button>
-                <span id="deprecationMetricsStatus" class="status-message ml-2" role="alert"
-                    style="display:none"></span>
+                <span id="deprecationMetricsStatus" class="status-message ml-2 hidden" role="alert"></span>
             </div>
             <div id="deprecationMetricsContent" class="metrics-grid mt-2">
                 <!-- Populated dynamically -->
@@ -194,7 +205,7 @@
                 <small id="fetchCountsOnLoadHelp" class="settings-note">Disabling this can make initial tree display
                     faster; counts will still appear shortly after as they are loaded lazily.</small>
             </div>
-            <div id="vontologyPerformanceStatus" class="status-message" role="alert" style="display:none"></div>
+            <div id="vontologyPerformanceStatus" class="status-message hidden" role="alert"></div>
         </section>
 
         <section id="server-controls">
@@ -246,10 +257,34 @@
             }
         }
 
+        function setGoogleOauthStatus(authStatus) {
+            const el = document.getElementById('googleOauthStatus');
+            if (!el) return;
+            if (authStatus?.authenticated) {
+                el.textContent = `Gmail OAuth session: ${authStatus.email || '(unknown email)'}`;
+            } else {
+                el.textContent = 'Gmail OAuth session: not authenticated';
+            }
+        }
+
+        function updateGmailProfileStatus() {
+            try {
+                const el = document.getElementById('gmailProfileStatus');
+                if (!el) return;
+                const profileId = localStorage.getItem('von_gmail_profile') || '';
+                el.textContent = profileId ? `Gmail profile target: ${profileId}` : 'Gmail profile target: none (disabled)';
+            } catch (e) {
+                console.warn('Failed to update Gmail profile status', e);
+            }
+        }
+
         // Update authentication display based on status
         async function updateAuthenticationDisplay(authStatus) {
             const authContainer = document.getElementById('authenticationStatus');
             console.log('Updating authentication display. Container found:', !!authContainer, 'Status:', authStatus);
+
+            // Reflect status in Google OAuth section too
+            setGoogleOauthStatus(authStatus);
 
             if (authStatus.authenticated) {
                 // User is logged in - show status and logout button
@@ -261,25 +296,7 @@
                     </div>
                 `;
 
-                // After successful login, merge auth data with existing localStorage data
-                if (authStatus.user_id || authStatus.user_concept_id || authStatus.user_full_name || authStatus.name || authStatus.email) {
-                    // Read existing user info to preserve concept_id set by settings interface
-                    const existingUserInfo = JSON.parse(localStorage.getItem('von_current_user') || '{}');
-
-                    const userInfo = {
-                        // Preserve existing concept_id if it exists (set by settings interface)
-                        concept_id: existingUserInfo.concept_id || authStatus.user_concept_id,
-                        // Update auth-related fields
-                        id: authStatus.user_id || existingUserInfo.id,
-                        name: authStatus.user_full_name || authStatus.name || existingUserInfo.name,
-                        email: authStatus.email || existingUserInfo.email
-                    };
-                    localStorage.setItem('von_current_user', JSON.stringify(userInfo));
-                    console.log('Merged localStorage with auth data, preserving existing concept_id:', userInfo);
-                }
-
-                // Note: Organization info would need to be fetched separately if needed
-                // as it's not part of the Google OAuth flow
+                // Do not overwrite current user selection with auth email; keep user selection independent of Gmail auth
 
                 // Immediately add authentication highlighting to footer
                 const userSegments = [...document.querySelectorAll('.footer-segment')]
@@ -315,6 +332,7 @@
                 authContainer.innerHTML = `
                     <button onclick="loginWithGoogle()" class="btn-primary">Login with Google</button>
                 `;
+                setGoogleOauthStatus({ authenticated: false });
             }
         }
 
@@ -328,20 +346,7 @@
                 if (response.ok) {
                     console.log('Logout successful');
 
-                    // Clear authentication data from localStorage while preserving concept_id set by settings
-                    const existingUserInfo = JSON.parse(localStorage.getItem('von_current_user') || '{}');
-                    const clearedUserInfo = {
-                        // Preserve concept_id set by settings interface
-                        concept_id: existingUserInfo.concept_id,
-                        // Clear authentication-related fields
-                        id: null,
-                        name: null,
-                        email: null
-                    };
-                    localStorage.setItem('von_current_user', JSON.stringify(clearedUserInfo));
-                    console.log('Cleared auth data from localStorage, preserved concept_id:', clearedUserInfo);
-
-                    // Update display to show login button
+                    // Do not touch stored user selection on logout; only update auth display
                     await updateAuthenticationDisplay({ authenticated: false });
 
                     // Immediately remove authentication highlighting from footer
@@ -577,12 +582,14 @@
         document.addEventListener('DOMContentLoaded', function () {
             console.log('Settings tab DOMContentLoaded - checking authentication status');
             checkAuthenticationStatus();
+            updateGmailProfileStatus();
         });
 
         // Also check when settings tab becomes visible (for dynamic tab loading)
         function initializeSettingsAuthentication() {
             console.log('Settings tab initialized - checking authentication status');
             checkAuthenticationStatus();
+            updateGmailProfileStatus();
         }
 
         // Export function for external tab management to call when settings tab is activated

@@ -397,25 +397,34 @@ class InternalMCPChatOrchestrator:
                             tool_name,
                         )
 
-                # Inject user_namespace into payload if provided and not already present
-                if user_namespace and "namespace" not in payload:
-                    payload["namespace"] = user_namespace
-                    self._logger.info(
-                        "[mcp_orchestrator] Injected namespace=%s into tool=%s payload",
-                        user_namespace,
-                        tool_name
-                    )
-                elif user_namespace:
-                    self._logger.info(
-                        "[mcp_orchestrator] Tool=%s already has namespace=%s in payload",
-                        tool_name,
-                        payload.get("namespace")
-                    )
+                # Inject user_namespace into payload for non-Gmail tools only; Gmail MCP rejects unexpected fields
+                if not tool_name.startswith("gmail_"):
+                    if user_namespace and "namespace" not in payload:
+                        payload["namespace"] = user_namespace
+                        self._logger.info(
+                            "[mcp_orchestrator] Injected namespace=%s into tool=%s payload",
+                            user_namespace,
+                            tool_name
+                        )
+                    elif user_namespace:
+                        self._logger.info(
+                            "[mcp_orchestrator] Tool=%s already has namespace=%s in payload",
+                            tool_name,
+                            payload.get("namespace")
+                        )
+                    else:
+                        self._logger.warning(
+                            "[mcp_orchestrator] No user_namespace available for tool=%s (unauthenticated request)",
+                            tool_name
+                        )
                 else:
-                    self._logger.warning(
-                        "[mcp_orchestrator] No user_namespace available for tool=%s (unauthenticated request)",
-                        tool_name
-                    )
+                    # Gmail tools must not receive namespace; profile is sufficient for routing
+                    if "namespace" in payload:
+                        payload.pop("namespace", None)
+                        self._logger.info(
+                            "[mcp_orchestrator] Removed namespace from Gmail tool=%s payload to satisfy MCP schema",
+                            tool_name
+                        )
 
                 result = self._gateway.invoke(tool_name, payload)
                 tool_payload = self._format_tool_result(tool_name, result.payload, result.duration_ms, "ok")
