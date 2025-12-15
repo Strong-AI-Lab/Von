@@ -124,10 +124,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   const gmailProfileInput = document.getElementById('gmailProfileInput');
   if (gmailProfileInput) {
     try { gmailProfileInput.value = localStorage.getItem(LS_GMAIL_PROFILE) || ''; } catch { gmailProfileInput.value = ''; }
+    updateGmailProfileStatus();
     gmailProfileInput.addEventListener('input', () => {
       try {
         const val = gmailProfileInput.value.trim();
         if (val) localStorage.setItem(LS_GMAIL_PROFILE, val); else localStorage.removeItem(LS_GMAIL_PROFILE);
+        updateGmailProfileStatus();
       } catch { /* ignore localStorage errors */ }
     });
   }
@@ -347,6 +349,9 @@ async function loadAndDisplaySettings() {
       populateLanguageSelect(languageSelect, storedLang);
       if (storedLang) localStorage.setItem(LS_LANG_KEY, storedLang);
     }
+
+    // Update Gmail profile status line
+    updateGmailProfileStatus();
 
     // Check if the API key exists and verify it to load models
     if (await checkOpenAiEnvVar()) {
