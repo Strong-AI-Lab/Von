@@ -79,7 +79,11 @@ class InternalMCPChatOrchestrator:
             lines.append(f"- {name}{params}: {description}")
         return "\n".join(lines)
 
-    def _instruction_message(self, user_namespace: str | None = None) -> str:
+    def _instruction_message(
+        self,
+        user_namespace: str | None = None,
+        auxiliary_system_prompt: str | None = None,
+    ) -> str:
         """Build system instruction emphasizing immediate tool invocation behavior.
 
         Design rationale (JVNAUTOSCI-698): Focus on BEHAVIOR (invoke immediately)
@@ -100,7 +104,7 @@ class InternalMCPChatOrchestrator:
                 "If user asks about their RAG data/sessions/indexed content, explain they need to log in first.\n"
             )
 
-        return (
+        base_message = (
             "You have access to internal MCP tools.\n\n"
             "⚠️ WHEN TO USE TOOLS (CHECK THESE FIRST) ⚠️\n"
             "If user asks for RECENT, CURRENT, LATEST, NEW, or BREAKING information → USE search_web\n"
@@ -131,6 +135,15 @@ class InternalMCPChatOrchestrator:
             "Available tools:\n"
             f"{listing}"
         )
+
+        if auxiliary_system_prompt and isinstance(auxiliary_system_prompt, str) and auxiliary_system_prompt.strip():
+            base_message += (
+                "\n\n"
+                "USER-SPECIFIC SYSTEM PROMPT (from Vontology):\n"
+                f"{auxiliary_system_prompt.strip()}\n"
+            )
+
+        return base_message
 
     def _is_json_action_response(self, response: str) -> bool:
         """Detect if response is ONLY a JSON action object (common LLM failure mode).
@@ -296,14 +309,18 @@ class InternalMCPChatOrchestrator:
     def _build_augmented_context(
         self,
         context: Optional[Sequence[Mapping[str, Any]]],
-        user_namespace: str | None = None
+        user_namespace: str | None = None,
+        auxiliary_system_prompt: str | None = None,
     ) -> List[Mapping[str, Any]]:
         base: List[Mapping[str, Any]] = []
         if context:
             for msg in context:
                 if isinstance(msg, Mapping):
                     base.append(dict(msg))
-        instruction_msg = self._instruction_message(user_namespace=user_namespace)
+        instruction_msg = self._instruction_message(
+            user_namespace=user_namespace,
+            auxiliary_system_prompt=auxiliary_system_prompt,
+        )
 
         # Log the size of the instruction message for diagnostics
         instruction_chars = len(instruction_msg)
@@ -326,12 +343,17 @@ class InternalMCPChatOrchestrator:
         model: Optional[str],
         user_namespace: Optional[str] = None,
         gmail_profile: Optional[str] = None,
+        auxiliary_system_prompt: str | None = None,
     ) -> OrchestratorResult:
         if not self._gateway.enabled or self._max_tool_invocations <= 0:
             response = llm_client.generate(prompt, context=context, model=model)
             return OrchestratorResult(response_text=response, extra_messages=(), tool_invocations=())
 
-        augmented_context = self._build_augmented_context(context, user_namespace=user_namespace)
+        augmented_context = self._build_augmented_context(
+            context,
+            user_namespace=user_namespace,
+            auxiliary_system_prompt=auxiliary_system_prompt,
+        )
         response = llm_client.generate(prompt, context=augmented_context, model=model)
 
         # JVNAUTOSCI-698: Detect if response is a JSON action that should trigger tool execution
