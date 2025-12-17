@@ -1723,6 +1723,232 @@ def _jira_get_auth_config(**kwargs):
     return inspect_jira_auth_config()
 
 
+def _chat_get_prompt_context(
+    *,
+    namespace: str | None = None,
+    include_content: bool = False,
+    max_chars: int | None = 2000,
+    **_kwargs,
+):
+    """Return user-specific prompt context that affects chat.
+
+    This is intended for debugging/inspection: which `#V#von_llm_prompt` concepts
+    are linked to the authenticated user (namespace) and what content they
+    contribute.
+    """
+
+    if not namespace or not isinstance(namespace, str) or not namespace.strip():
+        return {"success": False, "error": "namespace is required"}
+
+    if not isinstance(include_content, bool):
+        include_content = False
+
+    if max_chars is None:
+        max_chars_int = 2000
+    else:
+        try:
+            max_chars_int = int(max_chars)
+        except (TypeError, ValueError):
+            max_chars_int = 2000
+    max_chars_int = max(0, min(max_chars_int, 20000))
+
+    from src.backend.services.chat_auxiliary_prompt_service import (
+        build_user_specific_system_prompt,
+        get_user_specific_prompt_fragments,
+    )
+
+    fragments = get_user_specific_prompt_fragments(namespace)
+    prompt_concept_ids = [f.get("concept_id") for f in fragments if isinstance(f.get("concept_id"), str)]
+
+    prompt_text = build_user_specific_system_prompt(namespace)
+    if isinstance(prompt_text, str) and max_chars_int and len(prompt_text) > max_chars_int:
+        prompt_text = prompt_text[:max_chars_int] + f"\n... [truncated {len(prompt_text) - max_chars_int} chars]"
+
+    prompt_concepts = []
+    for fragment in fragments:
+        concept_id = fragment.get("concept_id")
+        if not isinstance(concept_id, str):
+            continue
+        item = {"concept_id": concept_id}
+        if include_content:
+            content = fragment.get("content")
+            item["content"] = content if isinstance(content, str) else ""
+        prompt_concepts.append(item)
+
+    return {
+        "success": True,
+        "namespace": namespace,
+        "prompt_concept_ids": prompt_concept_ids,
+        "prompt_concepts": prompt_concepts,
+        "prompt_text": prompt_text or "",
+        "prompt_count": len(prompt_concept_ids),
+    }
+
+
+def _settings_get_public(*, user_concept_id: str | None = None, organisation_concept_id: str | None = None, **_kwargs):
+    """Return a safe subset of settings (no secrets).
+
+    This intentionally excludes any secret values (API tokens, passwords). It may
+    include *names* of env vars (e.g., which env var holds a key) as that is not
+    a secret.
+    """
+
+    from src.backend.server.routes.settings_routes import get_all_settings_data
+    from src.backend.services.settings_service import resolve_llm_setting
+
+    settings = get_all_settings_data() or {}
+    try:
+        settings["resolved_llm"] = resolve_llm_setting(
+            user_concept_id=user_concept_id,
+            org_concept_id=organisation_concept_id,
+        )
+    except Exception:
+        settings["resolved_llm"] = None
+
+    return {"success": True, "settings": settings}
+
+
+def _chat_introspect(
+    *,
+    namespace: str | None = None,
+    organisation_concept_id: str | None = None,
+    include_prompt_content: bool = False,
+    include_tool_guidance_preview: bool = False,
+    max_preview_chars: int | None = 800,
+    include_runtime_status: bool = True,
+    **_kwargs,
+):
+    """Return a compact description of what influences chat context.
+
+    Primary goal: allow the assistant (via MCP) to determine what system prompt
+    influences are active (including Vontology-stored prompts) and what model
+    configuration is in effect, without exposing secrets.
+    """
+
+    import hashlib
+
+    from src.backend.integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
+    from src.backend.languagemodels.llm_interface import get_active_model_name
+    from src.backend.services.settings_service import get_active_llm_setting, resolve_llm_setting
+
+    if not namespace or not isinstance(namespace, str) or not namespace.strip():
+        return {"success": False, "error": "namespace is required"}
+
+    # Clamp preview size
+    if max_preview_chars is None:
+        max_preview_chars_int = 800
+    else:
+        try:
+            max_preview_chars_int = int(max_preview_chars)
+        except (TypeError, ValueError):
+            max_preview_chars_int = 800
+    max_preview_chars_int = max(0, min(max_preview_chars_int, 5000))
+
+    # User-specific prompt fragments (JVNAUTOSCI-797)
+    from src.backend.services.chat_auxiliary_prompt_service import (
+        build_user_specific_system_prompt,
+        get_user_specific_prompt_fragments,
+    )
+
+    fragments = get_user_specific_prompt_fragments(namespace)
+    prompt_concept_ids = [f.get("concept_id") for f in fragments if isinstance(f.get("concept_id"), str)]
+    auxiliary_prompt_text = build_user_specific_system_prompt(namespace) or ""
+
+    prompt_concepts: list[dict] = []
+    for fragment in fragments:
+        concept_id = fragment.get("concept_id")
+        if not isinstance(concept_id, str):
+            continue
+        item = {"concept_id": concept_id}
+        if include_prompt_content:
+            content = fragment.get("content")
+            item["content"] = content if isinstance(content, str) else ""
+        prompt_concepts.append(item)
+
+    # Model / provider information
+    try:
+        active_model_name = get_active_model_name()
+    except Exception:
+        active_model_name = None
+
+    try:
+        active_llm = get_active_llm_setting()
+    except Exception:
+        active_llm = None
+
+    try:
+        resolved_llm = resolve_llm_setting(user_concept_id=namespace, org_concept_id=organisation_concept_id)
+    except Exception:
+        resolved_llm = None
+
+    gateway_enabled = None
+    orchestrator_max_tool_invocations = None
+    if include_runtime_status:
+        try:
+            from flask import current_app
+
+            gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
+            orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
+            gateway_enabled = getattr(gateway, "enabled", None)
+            orchestrator_max_tool_invocations = getattr(orchestrator, "_max_tool_invocations", None)
+        except Exception:
+            gateway_enabled = None
+            orchestrator_max_tool_invocations = None
+
+    # Tool-guidance fingerprint (stable-ish) without dumping full text by default
+    tool_guidance_text = ""
+    tool_guidance_hash = None
+    tool_guidance_preview = None
+
+    try:
+        # Prefer the live orchestrator (includes the real tool listing) when available.
+        live_orchestrator = None
+        try:
+            from flask import current_app
+
+            live_orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
+        except Exception:
+            live_orchestrator = None
+
+        if live_orchestrator is not None and hasattr(live_orchestrator, "_instruction_message"):
+            tool_guidance_text = live_orchestrator._instruction_message(  # type: ignore[attr-defined]
+                user_namespace=namespace,
+                auxiliary_system_prompt=auxiliary_prompt_text,
+            )
+        else:
+            class _StubGateway:
+                def describe_methods(self):
+                    return {}
+
+            dummy_orchestrator = InternalMCPChatOrchestrator(gateway=_StubGateway())  # type: ignore[arg-type]
+            tool_guidance_text = dummy_orchestrator._instruction_message(
+                user_namespace=namespace,
+                auxiliary_system_prompt=auxiliary_prompt_text,
+            )
+
+        tool_guidance_hash = hashlib.sha256(tool_guidance_text.encode("utf-8")).hexdigest()
+        if include_tool_guidance_preview and max_preview_chars_int:
+            tool_guidance_preview = tool_guidance_text[:max_preview_chars_int]
+    except Exception:
+        tool_guidance_hash = None
+
+    return {
+        "success": True,
+        "namespace": namespace,
+        "organisation_concept_id": organisation_concept_id,
+        "active_model_name": active_model_name,
+        "active_llm": active_llm,
+        "resolved_llm": resolved_llm,
+        "prompt_concept_ids": prompt_concept_ids,
+        "prompt_concepts": prompt_concepts,
+        "prompt_count": len(prompt_concept_ids),
+        "tool_guidance_hash": tool_guidance_hash,
+        "tool_guidance_preview": tool_guidance_preview,
+        "gateway_enabled": gateway_enabled,
+        "orchestrator_max_tool_invocations": orchestrator_max_tool_invocations,
+    }
+
+
 def build_default_catalogue() -> MethodCatalogue:
     """Return a catalogue pre-populated with the baseline method set."""
 
@@ -1800,6 +2026,113 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             category="read",
             description="Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
+        ),
+        MethodDefinition(
+            name="chat_get_prompt_context",
+            handler=_chat_get_prompt_context,
+            input_schema=Schema(
+                required={"namespace": str},
+                optional={
+                    "include_content": bool,
+                    "max_chars": (int, type(None)),
+                },
+                allow_unknown=False,
+                description=(
+                    "Return the effective user-specific prompt context derived from Vontology "
+                    "for the given authenticated namespace (concept ID), including which prompt "
+                    "concept IDs are contributing to chat. Use for debugging what influences chat."
+                ),
+            ),
+            output_schema=Schema(
+                required={
+                    "success": bool,
+                    "namespace": str,
+                    "prompt_concept_ids": list,
+                    "prompt_concepts": list,
+                    "prompt_text": str,
+                    "prompt_count": int,
+                },
+                optional={"error": str},
+                allow_unknown=False,
+                description="User-specific chat prompt context for debugging and transparency.",
+            ),
+            category="read",
+            description=(
+                "Report which Vontology `#V#von_llm_prompt` concepts (linked via `#V#specific_to_von_user`) "
+                "apply to the authenticated user namespace and optionally include their content."
+            ),
+        ),
+        MethodDefinition(
+            name="chat_introspect",
+            handler=_chat_introspect,
+            input_schema=Schema(
+                required={"namespace": str},
+                optional={
+                    "organisation_concept_id": (str, type(None)),
+                    "include_prompt_content": bool,
+                    "include_tool_guidance_preview": bool,
+                    "max_preview_chars": (int, type(None)),
+                    "include_runtime_status": bool,
+                },
+                allow_unknown=False,
+                description=(
+                    "Return a compact snapshot of what influences chat for an authenticated namespace, "
+                    "including active model information, user-specific prompt concept IDs, and a tool-guidance "
+                    "fingerprint (hash)."
+                ),
+            ),
+            output_schema=Schema(
+                required={
+                    "success": bool,
+                    "namespace": str,
+                    "organisation_concept_id": (str, type(None)),
+                    "active_model_name": (str, type(None)),
+                    "active_llm": (dict, type(None)),
+                    "resolved_llm": (dict, type(None)),
+                    "prompt_concept_ids": list,
+                    "prompt_concepts": list,
+                    "prompt_count": int,
+                    "tool_guidance_hash": (str, type(None)),
+                    "tool_guidance_preview": (str, type(None)),
+                    "gateway_enabled": (bool, type(None)),
+                    "orchestrator_max_tool_invocations": (int, type(None)),
+                },
+                optional={"error": str},
+                allow_unknown=False,
+                description="Chat context introspection snapshot (safe, no secrets).",
+            ),
+            category="read",
+            description=(
+                "Introspect chat context influences for a user: model configuration, Vontology prompt concepts, "
+                "and tool-guidance fingerprint. Useful for debugging and transparency."
+            ),
+        ),
+        MethodDefinition(
+            name="settings_get_public",
+            handler=_settings_get_public,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "user_concept_id": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                },
+                allow_unknown=False,
+                description="Return non-secret settings and resolved LLM config for optional user/org scope.",
+            ),
+            output_schema=Schema(
+                required={
+                    "success": bool,
+                    "settings": dict,
+                },
+                optional={"error": str},
+                allow_unknown=True,
+                description="Public settings snapshot (no secrets).",
+            ),
+            category="read",
+            description=(
+                "Return a safe subset of settings (no secrets), including the active LLM and resolved LLM when "
+                "user/org IDs are provided."
+            ),
         ),
         MethodDefinition(
             name="get_tree",

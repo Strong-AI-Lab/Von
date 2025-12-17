@@ -264,6 +264,28 @@ def generate():
         # Build system message with user and organization context from request
         system_message_parts = []
 
+        # ---------------------------------------------------------
+        # JVNAUTOSCI-797: user-specific system prompt from Vontology
+        # ---------------------------------------------------------
+        auxiliary_system_prompt = None
+        if user_concept_id:
+            try:
+                from ...services.chat_auxiliary_prompt_service import build_user_specific_system_prompt
+
+                auxiliary_system_prompt = build_user_specific_system_prompt(user_concept_id)
+                if auxiliary_system_prompt:
+                    current_app.logger.info(
+                        "[CHAT_PROMPT] Loaded %d chars of user-specific prompt for %s",
+                        len(auxiliary_system_prompt),
+                        user_concept_id,
+                    )
+            except Exception as e:
+                current_app.logger.warning(
+                    "[CHAT_PROMPT] Failed loading user-specific prompt for %s: %s",
+                    user_concept_id,
+                    e,
+                )
+
         # Try to get user name from concept if user_id provided
         if request_user_id:
             try:
@@ -312,6 +334,18 @@ def generate():
                 existing_system = enhanced_context[0]["content"]
                 if not any(part in existing_system for part in system_message_parts):
                     enhanced_context[0]["content"] = f"{existing_system} | {' | '.join(system_message_parts)}"
+
+        # Ensure user-specific system prompt is included even when the orchestrator
+        # is disabled/unavailable.
+        if auxiliary_system_prompt:
+            user_prompt_message = {
+                "role": "system",
+                "content": "USER-SPECIFIC SYSTEM PROMPT (from Vontology):\n" + auxiliary_system_prompt,
+            }
+            if not enhanced_context or enhanced_context[0].get("role") != "system":
+                enhanced_context.insert(0, user_prompt_message)
+            else:
+                enhanced_context.insert(1, user_prompt_message)
 
         # Log the enhanced context being sent to the model for debugging
         current_app.logger.info(f"Enhanced context being sent to model: {len(enhanced_context)} messages")
@@ -447,6 +481,7 @@ def generate():
                     model=model_name,
                     user_namespace=user_namespace,
                     gmail_profile=request_gmail_profile,
+                    auxiliary_system_prompt=auxiliary_system_prompt,
                 )
                 response_text = orchestrator_result.response_text
                 tool_messages = [dict(msg) for msg in orchestrator_result.extra_messages]
