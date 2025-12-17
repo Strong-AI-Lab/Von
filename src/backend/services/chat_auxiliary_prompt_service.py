@@ -15,10 +15,69 @@ from typing import Any, Dict, List, Optional
 
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.services.concept_service import get_concept_by_concept_id
+from src.backend.services.text_value_service import get_texts_for_concept
 
 
 _VON_LLM_PROMPT_TYPE = "#V#von_llm_prompt"
 _SPECIFIC_TO_USER_PREDICATE = "#V#specific_to_von_user"
+
+
+def _get_prompt_content_for_concept(concept_id: str) -> Optional[str]:
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return None
+
+    concept_id = concept_id.strip()
+
+    try:
+        concept = get_concept_by_concept_id(concept_id)
+    except Exception:
+        concept = None
+
+    if isinstance(concept, dict):
+        content = concept.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    try:
+        texts = get_texts_for_concept(concept_id)
+    except Exception:
+        texts = None
+
+    if not isinstance(texts, list):
+        return None
+
+    content_candidates: List[Dict[str, Any]] = []
+    for text in texts:
+        if not isinstance(text, dict):
+            continue
+        if text.get("predicate") not in {"hasContent", "hasDescription"}:
+            continue
+        text_value = text.get("text")
+        if not isinstance(text_value, str):
+            continue
+        if not text_value.strip():
+            continue
+        content_candidates.append(text)
+
+    if not content_candidates:
+        return None
+
+    def _sort_key(item: Dict[str, Any]) -> tuple[int, int, str]:
+        predicate = item.get("predicate")
+        lang = item.get("lang")
+        text_value_id = item.get("text_value_id")
+
+        predicate_rank = 0 if predicate == "hasContent" else 1
+        lang_rank = 0 if lang in {"en-NZ", "en"} else 1
+        text_id = text_value_id if isinstance(text_value_id, str) else ""
+
+        return (predicate_rank, lang_rank, text_id)
+
+    content_candidates.sort(key=_sort_key)
+
+    joined = "\n\n".join(candidate["text"].strip() for candidate in content_candidates)
+    joined = joined.strip()
+    return joined if joined else None
 
 
 def build_user_specific_system_prompt(user_concept_id: str) -> Optional[str]:
@@ -77,15 +136,7 @@ def get_user_specific_prompt_fragments(user_concept_id: str) -> List[Dict[str, A
 
     fragments: List[Dict[str, Any]] = []
     for concept_id in prompt_ids:
-        try:
-            concept = get_concept_by_concept_id(concept_id)
-        except Exception:
-            continue
-
-        if not isinstance(concept, dict):
-            continue
-
-        content = concept.get("content")
+        content = _get_prompt_content_for_concept(concept_id)
         if isinstance(content, str) and content.strip():
             fragments.append({"concept_id": concept_id, "content": content.strip()})
 

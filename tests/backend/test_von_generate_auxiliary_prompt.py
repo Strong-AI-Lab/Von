@@ -35,10 +35,10 @@ def app(monkeypatch):
         lambda: "#V#michael_witbrock",
     )
 
-    # Stub auxiliary prompt builder.
+    # Stub auxiliary prompt loader.
     monkeypatch.setattr(
-        "src.backend.services.chat_auxiliary_prompt_service.build_user_specific_system_prompt",
-        lambda _user_id: "Please be terse.",
+        "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
+        lambda _user_id: [{"concept_id": "#V#test_prompt", "content": "Please be terse."}],
     )
 
     llm = _CapturingLLM()

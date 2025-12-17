@@ -27,7 +27,11 @@ def test_extract_json_blob_pure_json():
 def test_extract_json_blob_code_block():
     text = 'Here is the tool call:\n```json\n{"action": "call_tool", "tool": "test", "payload": {}}\n```'
     orchestrator = InternalMCPChatOrchestrator(gateway=None)  # type: ignore[arg-type]
-    assert orchestrator._extract_json_blob(text) is None
+    assert orchestrator._extract_json_blob(text) == {
+        "action": "call_tool",
+        "tool": "test",
+        "payload": {},
+    }
 
 def test_extract_json_blob_embedded():
     text = 'I will call the tool now.\n{"action": "call_tool", "tool": "test", "payload": {}}\nThis should work.'
@@ -52,8 +56,18 @@ def test_extract_json_blob_malformed_json():
         orchestrator._extract_json_blob(text)
 
 
-def test_extract_json_blob_rejects_trailing_characters():
+def test_extract_json_blob_accepts_trailing_characters():
     text = '{"action": "call_tool", "tool": "test", "payload": {}}x'
+    orchestrator = InternalMCPChatOrchestrator(gateway=None)  # type: ignore[arg-type]
+    result = orchestrator._extract_json_blob(text)
+    assert result == {"action": "call_tool", "tool": "test", "payload": {}}
+
+
+def test_extract_json_blob_accepts_trailing_prose_after_tool_call():
+    text = (
+        '{"action": "call_tool", "tool": "test", "payload": {}}\n'
+        "I will now execute this tool to gather the facts before answering."
+    )
     orchestrator = InternalMCPChatOrchestrator(gateway=None)  # type: ignore[arg-type]
     result = orchestrator._extract_json_blob(text)
     assert result == {"action": "call_tool", "tool": "test", "payload": {}}
