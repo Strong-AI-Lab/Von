@@ -1324,6 +1324,45 @@ def _jira_transition_input_schema() -> Schema:
     )
 
 
+def _jira_get_myself_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={},
+        allow_unknown=True,
+        description="jira_get_myself input: no arguments",
+    )
+
+
+def _jira_get_auth_config_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={},
+        allow_unknown=False,
+        description="jira_get_auth_config input: no arguments",
+    )
+
+
+def _jira_get_auth_config_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "token_present": bool,
+            "token_length": int,
+            "env_keys_used": dict,
+            "notes": str,
+        },
+        optional={
+            "base_url": (str, type(None)),
+            "email": (str, type(None)),
+        },
+        allow_unknown=False,
+        description=(
+            "jira_get_auth_config output: base_url/email/token_present/token_length and which env keys were used. "
+            "Never returns the token."
+        ),
+    )
+
+
 def _jira_generic_output_schema(action: str) -> Schema:
     return Schema(
         required={},
@@ -1664,6 +1703,26 @@ def _jira_transition_issue(**kwargs):
         return {"error": str(exc), "success": False}
 
 
+def _jira_get_myself(**kwargs):
+    import asyncio
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    async def _async_get_myself():
+        proxy = await get_jira_proxy()
+        return await proxy.get_myself()
+
+    try:
+        return asyncio.run(_async_get_myself())
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
+def _jira_get_auth_config(**kwargs):
+    from .jira_proxy_mcp import inspect_jira_auth_config
+
+    return inspect_jira_auth_config()
+
+
 def build_default_catalogue() -> MethodCatalogue:
     """Return a catalogue pre-populated with the baseline method set."""
 
@@ -1674,6 +1733,8 @@ def build_default_catalogue() -> MethodCatalogue:
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
     jira_transition_output_schema = _jira_generic_output_schema("transition")
+    jira_get_myself_output_schema = _jira_generic_output_schema("get_myself")
+    jira_get_auth_config_output_schema = _jira_get_auth_config_output_schema()
     gmail_list_messages_input_schema = Schema(
         required={"profile": str},
         optional={
@@ -2011,6 +2072,29 @@ def build_default_catalogue() -> MethodCatalogue:
             category="write",
             timeout_sec=15.0,
             description="Transition a Jira issue using a transition ID. Use when you need to move an issue through workflow states after retrieving available transitions in Jira.",
+        ),
+        MethodDefinition(
+            name="jira_get_myself",
+            handler=_jira_get_myself,
+            input_schema=_jira_get_myself_input_schema(),
+            output_schema=jira_get_myself_output_schema,
+            category="read",
+            timeout_sec=10.0,
+            description=(
+                "Return the Jira user profile for the currently configured Atlassian credentials. "
+                "Useful for diagnosing permission-related 404s (different accounts see different issues)."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_get_auth_config",
+            handler=_jira_get_auth_config,
+            input_schema=_jira_get_auth_config_input_schema(),
+            output_schema=jira_get_auth_config_output_schema,
+            category="read",
+            description=(
+                "Inspect Jira auth configuration (base URL, email, whether a token is present) from environment variables. "
+                "Does not contact Jira and never returns the token. Use when Jira calls return 401 and you need to confirm which account is configured."
+            ),
         ),
         MethodDefinition(
             name="rag_get_status",

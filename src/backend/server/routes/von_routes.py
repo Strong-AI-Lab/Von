@@ -319,6 +319,7 @@ def generate():
             current_app.logger.info(f"Message {i}: role={msg.get('role')}, content_preview={msg.get('content', '')[:100]}...")
 
         orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
+        gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
         tool_messages: list[dict[str, str]] = []
 
         # Derive user namespace for MCP tool isolation (JVNAUTOSCI-760)
@@ -342,6 +343,94 @@ def generate():
                 "[NAMESPACE] No user_concept_id - user_namespace=None (RAG unavailable)"
             )
 
+        # ---------------------------------------------------------
+        # Optional debug mode: allow user-issued tool calls
+        # ---------------------------------------------------------
+        # This is disabled by default because it bypasses the LLM's behavioural
+        # guardrails. When enabled, only read-category tools are permitted.
+        allow_user_tool_calls = os.getenv("VON_INTERNAL_MCP_ALLOW_USER_TOOL_CALLS", "0").lower() in {"1", "true"}
+        if allow_user_tool_calls and orchestrator is not None and gateway is not None:
+            try:
+                direct_request = orchestrator._extract_json_blob(prompt_text)  # type: ignore[attr-defined]
+            except ToolCallParsingError:
+                direct_request = None
+
+            if direct_request and isinstance(direct_request, dict):
+                action = direct_request.get("action")
+                tool_name = direct_request.get("tool")
+                payload = direct_request.get("payload") or {}
+
+                if action == "call_tool" and isinstance(tool_name, str) and isinstance(payload, dict):
+                    try:
+                        meta = gateway.describe_methods().get(tool_name)  # type: ignore[union-attr]
+                        category = meta.get("category") if isinstance(meta, dict) else None
+                    except Exception:
+                        category = None
+
+                    if category != "read":
+                        response_text = (
+                            "Direct tool calls are restricted to read-only tools. "
+                            "Ask Von normally if you need write actions."
+                        )
+                        tool_invocations = []
+                    else:
+                        # Direct tool-call mode should not mutate payloads except for
+                        # Gmail profile convenience (namespace injection can break
+                        # strict schemas like Jira tools).
+                        if tool_name.startswith("gmail_"):
+                            if request_gmail_profile and not payload.get("profile"):
+                                payload["profile"] = request_gmail_profile
+                            payload.pop("namespace", None)
+
+                        try:
+                            result = gateway.invoke(tool_name, payload)  # type: ignore[union-attr]
+                            tool_payload = orchestrator._format_tool_result(tool_name, result.payload, result.duration_ms, "ok")  # type: ignore[attr-defined]
+                            response_text = tool_payload
+                            tool_messages = [{"role": "tool", "content": tool_payload}]
+                            tool_invocations = [{"tool": tool_name, "payload": dict(payload), "direct_user_call": True}]
+                        except Exception as exc:
+                            tool_payload = orchestrator._format_tool_result(tool_name, None, None, "error", str(exc))  # type: ignore[attr-defined]
+                            response_text = tool_payload
+                            tool_messages = [{"role": "tool", "content": tool_payload}]
+                            tool_invocations = [{"tool": tool_name, "payload": dict(payload), "error": str(exc), "direct_user_call": True}]
+
+                    # Skip LLM generation for direct tool calls
+                    if user_concept_id:
+                        chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "user", "content": prompt_text})
+                        for tool_msg in _truncate_large_tool_results(tool_messages, max_tool_content_chars=5000):
+                            chat_history_service.add_message_to_history(user_concept_id, session_id, tool_msg)
+                        chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "assistant", "content": response_text})
+                    else:
+                        current_app.config["CONTEXT"].append({"role": "user", "content": prompt_text})
+                        for tool_msg in _truncate_large_tool_results(tool_messages, max_tool_content_chars=5000):
+                            current_app.config["CONTEXT"].append(tool_msg)
+                        current_app.config["CONTEXT"].append({"role": "assistant", "content": response_text})
+
+                    current_app.config["CONTEXT"] = _limit_context_size(current_app.config["CONTEXT"], max_messages=20)
+
+                    # Return immediately with debug info
+                    current_turn_messages = [{"role": "user", "content": prompt_text}] + tool_messages
+                    context_stats = _calculate_context_stats(enhanced_context)
+                    current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
+                    tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
+
+                    llm_debug_info = {
+                        "model": model_name,
+                        "messages": current_turn_messages,
+                        "response": response_text,
+                        "context_stats": {
+                            "sent_to_llm": context_stats,
+                            "stored_context": current_context_stats,
+                        },
+                        "tool_stats": tool_stats,
+                        "tool_invocations": tool_invocations,
+                    }
+
+                    return jsonify({
+                        "response": response_text,
+                        "llm_debug": llm_debug_info,
+                    })
+
         if orchestrator is None:
             response_text = llm_client.generate(prompt_text, context=enhanced_context, model=model_name)
             tool_invocations = []
@@ -364,7 +453,11 @@ def generate():
                 tool_invocations = list(orchestrator_result.tool_invocations)
             except ToolCallParsingError as exc:
                 current_app.logger.warning("[mcp_orchestrator] Invalid tool request payload: %s", exc)
-                response_text = llm_client.generate(prompt_text, context=enhanced_context, model=model_name)
+                response_text = (
+                    "Tool call was not executed due to an MCP serialisation error. "
+                    f"({exc})\n\n"
+                    "Please try again. If this keeps happening, copy the LLM debug output so we can reproduce it."
+                )
                 tool_invocations = []
 
         if tool_invocations:

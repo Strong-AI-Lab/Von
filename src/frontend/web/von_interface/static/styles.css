@@ -2624,6 +2624,51 @@ footer {
     margin-bottom: 12px;
 }
 
+.loading-indicator-sep {
+    width: 1px;
+    height: 14px;
+    background: #cbd5e1;
+    opacity: 0.9;
+    margin-left: 6px;
+    margin-right: 2px;
+}
+
+.abort-thinking-btn {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    border-radius: 8px;
+    line-height: 1;
+    background: transparent;
+    border: none;
+    color: #b91c1c;
+    transform: none;
+    box-shadow: none;
+}
+
+.abort-thinking-btn[aria-hidden="false"] {
+    display: inline-flex;
+}
+
+.abort-thinking-btn:hover:not(:disabled) {
+    background-color: rgba(185, 28, 28, 0.10);
+    color: #991b1b;
+}
+
+.abort-thinking-btn:focus-visible {
+    outline: 2px solid #ef4444;
+    outline-offset: 2px;
+}
+
+.abort-thinking-btn .abort-thinking-icon {
+    width: 11px;
+    height: 11px;
+    background-color: currentColor;
+    border-radius: 3px;
+    display: inline-block;
+}
+
 .history-banner {
     display: flex;
     align-items: center;
@@ -2820,10 +2865,12 @@ footer {
     font-size: 0.8rem;
     color: #475569;
     background-color: #eef2ff;
+    border: 1px solid #dbeafe;
     border-radius: 999px;
     padding: 4px 8px;
     white-space: nowrap;
     transition: opacity 0.2s ease;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
 .loading-indicator[aria-hidden="true"] {

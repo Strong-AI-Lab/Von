@@ -10,6 +10,8 @@ const transcriptTurns = [];
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 
+let activeChatRequest = null;
+
 // Persist sender/message pairs for transcript exports
 function recordTranscriptTurn(sender, message, options = {}) {
     if (!sender && !message) {
@@ -289,6 +291,8 @@ export function initializeChatTab() {
     sendButton.addEventListener('click', handleSendPrompt);
     resetButton.addEventListener('click', handleResetContext);
 
+    ensureAbortButtonBound();
+
     // Add Enter key support for prompt input
     promptInput.addEventListener('keypress', function (event) {
         if (event.key === 'Enter' && !event.shiftKey) {
@@ -302,13 +306,99 @@ export function initializeChatTab() {
     console.log("Chat tab initialized successfully");
 }
 
+function setThinkingState(isThinking) {
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    const abortButton = document.getElementById('abortButton');
+    const sendButton = document.getElementById('sendButton');
+
+    if (loadingIndicator) {
+        loadingIndicator.style.display = isThinking ? 'inline-flex' : 'none';
+        loadingIndicator.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+    }
+
+    if (sendButton) {
+        sendButton.disabled = !!isThinking;
+    }
+
+    if (abortButton) {
+        abortButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+    }
+}
+
+function restorePromptEditingState(request) {
+    const promptInput = document.getElementById('promptInput');
+    if (!promptInput || !request) {
+        return;
+    }
+
+    promptInput.value = request.promptRaw || '';
+
+    try {
+        const valueLength = promptInput.value.length;
+        const start = Number.isInteger(request.selectionStart) ? request.selectionStart : valueLength;
+        const end = Number.isInteger(request.selectionEnd) ? request.selectionEnd : start;
+        promptInput.setSelectionRange(Math.min(start, valueLength), Math.min(end, valueLength));
+    } catch (err) {
+        // Selection range is best-effort; some environments may not support it.
+    }
+
+    try {
+        promptInput.focus();
+    } catch (_) {
+        // Ignore focus errors.
+    }
+}
+
+function abortActiveChatRequest() {
+    if (!activeChatRequest) {
+        return;
+    }
+
+    const request = activeChatRequest;
+    request.aborted = true;
+    activeChatRequest = null;
+
+    try {
+        request.abortController?.abort();
+    } catch (_) {
+        // Ignore abort errors.
+    }
+
+    setThinkingState(false);
+    restorePromptEditingState(request);
+}
+
+function ensureAbortButtonBound() {
+    const abortButton = document.getElementById('abortButton');
+    if (!abortButton) {
+        return;
+    }
+
+    if (abortButton.dataset.bound === '1') {
+        return;
+    }
+    abortButton.dataset.bound = '1';
+
+    abortButton.addEventListener('click', () => {
+        abortActiveChatRequest();
+    });
+}
+
 async function handleSendPrompt() {
     const promptInput = document.getElementById('promptInput');
     const scrollableField = document.getElementById('scrollableField');
-    const loadingIndicator = document.getElementById('loadingIndicator');
     const sendButton = document.getElementById('sendButton');
 
-    const promptText = promptInput.value.trim();
+    if (activeChatRequest) {
+        return;
+    }
+
+    ensureAbortButtonBound();
+
+    const promptRaw = promptInput.value;
+    const selectionStart = typeof promptInput.selectionStart === 'number' ? promptInput.selectionStart : null;
+    const selectionEnd = typeof promptInput.selectionEnd === 'number' ? promptInput.selectionEnd : null;
+    const promptText = promptRaw.trim();
 
     if (!promptText) {
         alert('Please enter a prompt.');
@@ -316,11 +406,7 @@ async function handleSendPrompt() {
     }
 
     // Show loading indicator and disable send button
-    if (loadingIndicator) {
-        loadingIndicator.style.display = 'inline-flex';
-        loadingIndicator.setAttribute('aria-hidden', 'false');
-    }
-    sendButton.disabled = true;
+    setThinkingState(true);
 
     // Create turn IDs for user and assistant
     const userTurnId = `u-${Date.now()}`;
@@ -342,7 +428,18 @@ async function handleSendPrompt() {
     }
 
     // Clear input
-    promptInput.value = ''; try {
+    promptInput.value = '';
+    let request = null;
+    try {
+        request = {
+            abortController: new AbortController(),
+            promptRaw,
+            selectionStart,
+            selectionEnd,
+            aborted: false
+        };
+        activeChatRequest = request;
+
         // Get user context from localStorage to send to backend
         const userContext = getUserContext();
 
@@ -351,6 +448,7 @@ async function handleSendPrompt() {
             headers: {
                 'Content-Type': 'application/json',
             },
+            signal: request.abortController.signal,
             body: JSON.stringify({
                 prompt: promptText,
                 user_id: userContext.user_id,
@@ -371,6 +469,10 @@ async function handleSendPrompt() {
 
         const data = await response.json();
         console.log('[chatTab] fetch response.ok=', response.ok, 'data=', data);
+
+        if (request.aborted) {
+            return;
+        }
 
         if (response.ok) {
             // Store LLM debug data if available
@@ -408,14 +510,17 @@ async function handleSendPrompt() {
             appendMessage('Error', data.error || 'An error occurred', errorTurnId, !!data.llm_debug);
         }
     } catch (error) {
+        if (request && (request.aborted || (error && error.name === 'AbortError'))) {
+            return;
+        }
         console.error('Error:', error);
         appendMessage('Error', 'Network error occurred');
     } finally {
-        if (loadingIndicator) {
-            loadingIndicator.style.display = 'none';
-            loadingIndicator.setAttribute('aria-hidden', 'true');
+        const isStillActive = activeChatRequest === request;
+        if (isStillActive) {
+            activeChatRequest = null;
+            setThinkingState(false);
         }
-        sendButton.disabled = false;
         updateHistoryLength();
     }
 }

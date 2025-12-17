@@ -20,6 +20,8 @@ def test_jira_methods_registered_in_catalogue():
     assert "jira_get_issue" in names
     assert "jira_add_comment" in names
     assert "jira_transition" in names
+    assert "jira_get_myself" in names
+    assert "jira_get_auth_config" in names
 
 
 def test_jira_handlers_require_minimum_fields():

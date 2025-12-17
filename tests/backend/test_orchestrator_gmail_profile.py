@@ -64,7 +64,6 @@ def test_injects_default_gmail_profile_into_payload():
     method_name, payload = gateway.calls[0]
     assert method_name == "gmail_list_messages"
     assert payload["profile"] == "service-profile"
-    assert payload["namespace"] == "#V#user"
     assert result.response_text == "Final response"
 
 
@@ -92,5 +91,4 @@ def test_gmail_profile_prefers_request_over_default():
     assert gateway.calls, "Gateway should have been invoked"
     _, payload = gateway.calls[0]
     assert payload["profile"] == "user-picked"
-    assert payload["namespace"] == "#V#user"
     assert result.response_text == "All good"

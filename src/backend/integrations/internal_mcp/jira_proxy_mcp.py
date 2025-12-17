@@ -83,6 +83,9 @@ class JiraMCPProxy:
     async def transition_issue(self, *, issue_key: str, transition_id: str) -> Dict[str, Any]:
         return await self._call("jira_transition", {"issue_key": issue_key, "transition_id": transition_id})
 
+    async def get_myself(self) -> Dict[str, Any]:
+        return await self._call("jira_get_myself", {})
+
     def get_stats(self) -> Dict[str, int]:
         return {
             "call_count": self._client.call_count,
@@ -92,9 +95,21 @@ class JiraMCPProxy:
 
 def _build_jira_env() -> Dict[str, str]:
     env = os.environ.copy()
-    base_url = env.get("ATLASSIAN_BASE_URL") or env.get("ATLASSIAN_SITE_BASE")
-    email = env.get("ATLASSIAN_EMAIL") or env.get("ATLASSIAN_API_EMAIL")
-    token = env.get("ATLASSIAN_API_TOKEN")
+
+    def _clean(value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
+            cleaned = cleaned[1:-1].strip()
+        return cleaned or None
+
+    base_url = _clean(env.get("ATLASSIAN_BASE_URL") or env.get("ATLASSIAN_SITE_BASE"))
+    email = _clean(env.get("ATLASSIAN_EMAIL") or env.get("ATLASSIAN_API_EMAIL"))
+    token = _clean(env.get("ATLASSIAN_API_TOKEN"))
+
+    if base_url:
+        base_url = base_url.rstrip("/")
 
     missing = [name for name, value in {
         "ATLASSIAN_BASE_URL": base_url,
@@ -115,6 +130,57 @@ def _build_jira_env() -> Dict[str, str]:
     env["ATLASSIAN_EMAIL"] = cast(str, email)
     env["ATLASSIAN_API_TOKEN"] = cast(str, token)
     return env
+
+
+def inspect_jira_auth_config() -> Dict[str, Any]:
+    """Return the Jira auth configuration currently visible to the process.
+
+    This is a diagnostics helper for debugging authentication issues. It does
+    not contact Jira and it never returns the API token.
+    """
+
+    env = os.environ.copy()
+
+    def _clean(value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
+            cleaned = cleaned[1:-1].strip()
+        return cleaned or None
+
+    base_url_key = "ATLASSIAN_BASE_URL" if env.get("ATLASSIAN_BASE_URL") else (
+        "ATLASSIAN_SITE_BASE" if env.get("ATLASSIAN_SITE_BASE") else None
+    )
+    email_key = "ATLASSIAN_EMAIL" if env.get("ATLASSIAN_EMAIL") else (
+        "ATLASSIAN_API_EMAIL" if env.get("ATLASSIAN_API_EMAIL") else None
+    )
+    token_key = "ATLASSIAN_API_TOKEN" if env.get("ATLASSIAN_API_TOKEN") else None
+
+    base_url = _clean(env.get(base_url_key)) if base_url_key else None
+    email = _clean(env.get(email_key)) if email_key else None
+    token_raw = env.get(token_key) if token_key else None
+    token = _clean(token_raw)
+
+    if base_url:
+        base_url = base_url.rstrip("/")
+
+    return {
+        "success": True,
+        "base_url": base_url,
+        "email": email,
+        "token_present": bool(token),
+        "token_length": len(token) if token else 0,
+        "env_keys_used": {
+            "base_url": base_url_key,
+            "email": email_key,
+            "token": token_key,
+        },
+        "notes": (
+            "This output reflects environment variables read by the Von process. "
+            "It does not prove Jira authentication is valid."
+        ),
+    }
 
 
 def _build_jira_config() -> JiraProxyConfig:
