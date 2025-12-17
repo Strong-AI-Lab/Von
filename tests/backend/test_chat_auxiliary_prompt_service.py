@@ -55,3 +55,27 @@ def test_build_user_specific_system_prompt_skips_missing_content(monkeypatch):
     monkeypatch.setattr(service, "get_concept_by_concept_id", _fake_get)
 
     assert service.build_user_specific_system_prompt("#V#michael_witbrock") is None
+
+
+def test_get_user_specific_prompt_fragments_returns_ids_and_content(monkeypatch):
+    from src.backend.services import chat_auxiliary_prompt_service as service
+
+    monkeypatch.setattr(
+        service.ConceptsRepository,
+        "find",
+        lambda *_args, **_kwargs: [
+            {"concept_id": "#V#prompt_a"},
+            {"concept_id": "#V#prompt_b"},
+        ],
+    )
+
+    def _fake_get(concept_id):
+        return {"concept_id": concept_id, "content": f"Content for {concept_id}"}
+
+    monkeypatch.setattr(service, "get_concept_by_concept_id", _fake_get)
+
+    fragments = service.get_user_specific_prompt_fragments("#V#michael_witbrock")
+    assert fragments == [
+        {"concept_id": "#V#prompt_a", "content": "Content for #V#prompt_a"},
+        {"concept_id": "#V#prompt_b", "content": "Content for #V#prompt_b"},
+    ]
