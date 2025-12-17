@@ -123,6 +123,7 @@ class InternalMCPChatOrchestrator:
             "- DO NOT explain what you're going to do - just do it\n"
             "- DO NOT output JSON as an example or description - only output JSON when you want to invoke a tool NOW\n"
             "- DO NOT say 'I will call' or 'Let me call' - just call it\n"
+            "- Output EXACTLY ONE tool call per message (no batching)\n"
             "- After you receive the tool result (role 'tool'), respond naturally to the user\n\n"
             "If you output JSON, the system will execute that tool call immediately.\n\n"
             "IMPORTANT: arXiv paper conversions (PDF to markdown) can take 5-10 minutes.\n"
@@ -151,85 +152,127 @@ class InternalMCPChatOrchestrator:
                 return False
 
             # Exact match for tool call pattern
-            has_action = parsed.get('action') == self._CALL_ACTION
-            has_tool = 'tool' in parsed and isinstance(parsed['tool'], str)
-            has_payload = 'payload' in parsed and isinstance(parsed['payload'], dict)
+            has_action = parsed.get(self._ACTION_FIELD) == self._CALL_ACTION
+            has_tool = self._TOOL_FIELD in parsed and isinstance(parsed[self._TOOL_FIELD], str)
+            has_payload = self._PAYLOAD_FIELD in parsed and isinstance(parsed[self._PAYLOAD_FIELD], dict)
 
-            return has_action and has_tool and has_payload
+            # Some models omit the action field even when they are clearly
+            # attempting a tool call. Treat this as a likely tool call response
+            # for diagnostics (execution is handled separately).
+            missing_action_but_tool_shape = (
+                self._ACTION_FIELD not in parsed
+                and has_tool
+                and has_payload
+                and set(parsed.keys()) <= {self._TOOL_FIELD, self._PAYLOAD_FIELD}
+            )
+
+            return (has_action and has_tool and has_payload) or missing_action_but_tool_shape
         except (json.JSONDecodeError, TypeError):
             return False
 
-    @staticmethod
-    def _extract_json_blob(text: str) -> Optional[MutableMapping[str, Any]]:
-        """Extract JSON object from text, handling code blocks and embedded JSON.
+    def _extract_json_blob(self, text: str) -> Optional[MutableMapping[str, Any]]:
+        """Parse a single JSON object from the model response.
 
-        If a JSON list is found, returns the first object in the list to support
-        models that attempt batch execution (the loop will handle subsequent calls).
+        Tool calls must be emitted as a *pure* JSON object with no surrounding
+        text (including Markdown fences) and no trailing non-whitespace
+        characters.
+
+        This strictness prevents silent failures where malformed output (e.g.
+        trailing characters like `}x`) or multiple JSON objects are treated as a
+        valid tool call (JVNAUTOSCI-798).
         """
         raw = text.strip()
         if not raw:
             return None
 
-        def _validate(data: Any) -> Optional[MutableMapping[str, Any]]:
-            if isinstance(data, MutableMapping):
-                return data
-            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], MutableMapping):
-                return data[0]
+        looks_like_tool_call = any(token in raw for token in (f'"{self._ACTION_FIELD}"', f'"{self._TOOL_FIELD}"'))
+
+        # Only consider a tool call if the model output begins with a JSON
+        # object. This avoids false positives when the model discusses tool
+        # calls or the user has pasted JSON in the conversation.
+        if not raw.startswith("{"):
             return None
 
-        # 1. Try parsing the whole text
+        decoder = json.JSONDecoder()
         try:
-            parsed = json.loads(raw)
-            valid = _validate(parsed)
-            if valid:
-                return valid
-        except json.JSONDecodeError:
-            pass
+            parsed, end = decoder.raw_decode(raw)
+        except json.JSONDecodeError as exc:
+            raise ToolCallParsingError(
+                "Tool call was not executed: invalid JSON in tool call response."
+            ) from exc
 
-        # 2. Handle fenced code blocks (```json ... ```)
-        if "```" in raw:
-            chunks = raw.split("```")
-            # Iterate through chunks to find valid JSON
-            for i in range(1, len(chunks), 2):  # Code blocks are usually at odd indices
-                chunk = chunks[i].strip()
-                if chunk.startswith("json"):
-                    chunk = chunk[4:].strip()
-                try:
-                    parsed = json.loads(chunk)
-                    valid = _validate(parsed)
-                    if valid:
-                        return valid
-                except json.JSONDecodeError:
-                    continue
+        is_tool_call = False
+        if isinstance(parsed, MutableMapping):
+            has_tool = isinstance(parsed.get(self._TOOL_FIELD), str)
+            has_payload = isinstance(parsed.get(self._PAYLOAD_FIELD, {}), MutableMapping)
 
-        # 3. Try to find a JSON object embedded in text
-        first_brace = raw.find('{')
-        last_brace = raw.rfind('}')
+            has_action = parsed.get(self._ACTION_FIELD) == self._CALL_ACTION
 
-        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-            candidate = raw[first_brace : last_brace + 1]
-            try:
-                parsed = json.loads(candidate)
-                if isinstance(parsed, MutableMapping):
-                    return parsed
-            except json.JSONDecodeError:
-                pass
+            # Backwards/robust parsing: accept missing action if the payload is
+            # a strict tool-call shape ({tool, payload}) and the tool name is
+            # recognised. This avoids treating arbitrary JSON responses as tool
+            # calls.
+            missing_action = self._ACTION_FIELD not in parsed
+            strict_shape = set(parsed.keys()) <= {self._TOOL_FIELD, self._PAYLOAD_FIELD}
 
-        # 4. Try to find a JSON list embedded in text
-        first_bracket = raw.find('[')
-        last_bracket = raw.rfind(']')
+            if missing_action and has_tool and has_payload and strict_shape:
+                catalogue = None
+                describe_methods = getattr(self._gateway, "describe_methods", None)
+                if callable(describe_methods):
+                    catalogue = describe_methods()
+                tool_name = parsed.get(self._TOOL_FIELD)
+                if isinstance(catalogue, Mapping):
+                    if tool_name in catalogue:
+                        parsed[self._ACTION_FIELD] = self._CALL_ACTION
+                        has_action = True
+                    else:
+                        # Treat unknown {tool, payload} JSON as a normal response.
+                        # This prevents arbitrary JSON from being misclassified as
+                        # a tool call (JVNAUTOSCI-798).
+                        return None
 
-        if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
-            candidate = raw[first_bracket : last_bracket + 1]
-            try:
-                parsed = json.loads(candidate)
-                valid = _validate(parsed)
-                if valid:
-                    return valid
-            except json.JSONDecodeError:
-                pass
+            is_tool_call = has_action and has_tool and has_payload
 
-        return None
+        trailing = raw[end:].strip()
+        if trailing and is_tool_call:
+            if trailing.startswith("{") or trailing.startswith("["):
+                raise ToolCallParsingError(
+                    "Tool call was not executed: multiple tool calls were emitted in one response."
+                )
+
+            # Some models occasionally emit a single stray non-JSON token after an
+            # otherwise valid JSON tool call (e.g. `}졟`). Prefer a safe recovery
+            # that preserves the single-tool-call contract while avoiding a hard
+            # failure for harmless trailing noise.
+            if len(trailing) <= 4:
+                self._logger.warning(
+                    "[mcp_orchestrator] Stripping trailing non-JSON characters after tool call: %r (codepoints=%s)",
+                    trailing,
+                    [ord(ch) for ch in trailing],
+                )
+                trailing = ""
+            else:
+                raise ToolCallParsingError(
+                    "Tool call was not executed: tool call JSON had trailing non-whitespace characters."
+                )
+
+        if trailing:
+            # If it's not a tool call, treat the message as a normal response.
+            return None
+
+        if not isinstance(parsed, MutableMapping):
+            if looks_like_tool_call:
+                raise ToolCallParsingError(
+                    "Tool call was not executed: tool call must be a JSON object."
+                )
+            return None
+
+        # Only surface parsed JSON when it is a valid tool call. This avoids
+        # accidentally treating arbitrary JSON responses as tool requests.
+        if not is_tool_call:
+            return None
+
+        return parsed
 
     def _format_tool_result(self, tool_name: str, payload: Any, duration_ms: float | None, status: str, error: str | None = None) -> str:
         result: Dict[str, Any] = {
@@ -363,12 +406,9 @@ class InternalMCPChatOrchestrator:
 
             # Re-parse the current response if this is a chained call
             if iteration_count > 1:
-                if not self._is_json_action_response(current_response):
-                    # Not a tool call, this is the final natural language response
-                    break
-
                 tool_request = self._extract_json_blob(current_response)
                 if tool_request is None:
+                    # Not a tool call, this is the final natural language response.
                     break
 
                 try:
