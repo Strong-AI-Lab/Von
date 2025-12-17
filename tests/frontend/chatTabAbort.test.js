@@ -1,20 +1,24 @@
-import { formatChatTimestamp, sendMessage } from '../chatTab';
+/** @jest-environment jsdom */
 
-// Mock dependencies to avoid import errors
-jest.mock('../apiService.js', () => ({
+const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTab.js';
+
+jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     annotateTurn: jest.fn(),
     getUserContext: jest.fn()
 }));
-jest.mock('../domUtils.js', () => ({
+
+jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
     elements: {},
     renderSpanSuggestions: jest.fn()
 }));
-jest.mock('../utils/textDecorator.js', () => ({
+
+jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js', () => ({
     annotateElementText: jest.fn()
 }));
 
+const { formatChatTimestamp, sendMessage } = require(chatTabModulePath);
+
 describe('formatChatTimestamp', () => {
-    // Helper to create a date relative to now
     const createDate = (daysAgo, hours = 12, minutes = 0) => {
         const date = new Date();
         date.setDate(date.getDate() - daysAgo);
@@ -42,7 +46,6 @@ describe('formatChatTimestamp', () => {
         const result = formatChatTimestamp(isoString);
         expect(result).not.toContain('Today');
         expect(result).not.toContain('Yesterday');
-        // Check for day name (Mon, Tue, etc.)
         const dayName = threeDaysAgo.toLocaleString([], { weekday: 'short' });
         expect(result).toContain(dayName);
     });
@@ -64,7 +67,7 @@ describe('chat abort behaviour', () => {
             <div id="scrollableField"></div>
             <div id="loadingIndicator" aria-hidden="true"></div>
             <button id="sendButton"></button>
-            <button id="abortButton" style="display:none" aria-hidden="true"></button>
+            <button id="abortButton" aria-hidden="true"></button>
             <textarea id="promptInput"></textarea>
             <input type="checkbox" id="annotationToggle" />
         `;
@@ -76,7 +79,7 @@ describe('chat abort behaviour', () => {
     });
 
     test('abort restores prompt text and re-enables sending', async () => {
-        const { getUserContext } = require('../apiService.js');
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         getUserContext.mockReturnValue({
             user_id: 'user',
             org_id: 'org',
@@ -122,20 +125,18 @@ describe('chat abort behaviour', () => {
         const sendPromise = sendMessage();
 
         expect(document.getElementById('sendButton').disabled).toBe(true);
-        expect(document.getElementById('abortButton').style.display).toBe('inline-flex');
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
 
         document.getElementById('abortButton').click();
 
-        // Let abort propagate through promise chain
         await new Promise((r) => setTimeout(r, 0));
 
         expect(generateSignal).not.toBeNull();
         expect(generateSignal.aborted).toBe(true);
         expect(document.getElementById('sendButton').disabled).toBe(false);
-        expect(document.getElementById('abortButton').style.display).toBe('none');
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('true');
         expect(promptInput.value).toBe("since we'\n");
 
-        // Ensure the sendMessage promise resolves without throwing
         await expect(sendPromise).resolves.toBeUndefined();
     });
 });

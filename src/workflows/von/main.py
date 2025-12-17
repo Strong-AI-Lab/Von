@@ -74,6 +74,71 @@ root_logger.addHandler(console_handler)  # Add to root logger
 logger = logging.getLogger(__name__)
 logger.info("Logging initialized for von. File output to: %s", LOG_FILE_PATH)
 
+
+def _clean_env_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
+        cleaned = cleaned[1:-1].strip()
+    return cleaned or None
+
+
+def _apply_dotenv_overrides(keys: set[str]) -> None:
+    """Load repo-root .env and override specific keys in os.environ.
+
+    This keeps behaviour predictable on Windows, where editing .env is a common
+    way to update credentials, but the parent PowerShell environment may still
+    contain stale values.
+    """
+
+    try:
+        from dotenv import dotenv_values  # type: ignore
+    except Exception:
+        return
+
+    env_path = PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        return
+
+    try:
+        values = dotenv_values(env_path)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Failed to read .env for overrides: %s", exc)
+        return
+
+    applied = 0
+    for key in keys:
+        raw = values.get(key)
+        if raw is None:
+            continue
+        cleaned = _clean_env_value(str(raw))
+        if cleaned is None:
+            continue
+        os.environ[key] = cleaned
+        applied += 1
+
+    if applied:
+        token_len = len(os.environ.get("ATLASSIAN_API_TOKEN", ""))
+        logger.info(
+            "Applied .env overrides for %s key(s). Jira token present=%s length=%s.",
+            applied,
+            bool(os.environ.get("ATLASSIAN_API_TOKEN")),
+            token_len,
+        )
+
+
+# Ensure Atlassian credentials can be updated via .env + restart
+_apply_dotenv_overrides(
+    {
+        "ATLASSIAN_BASE_URL",
+        "ATLASSIAN_SITE_BASE",
+        "ATLASSIAN_EMAIL",
+        "ATLASSIAN_API_EMAIL",
+        "ATLASSIAN_API_TOKEN",
+    }
+)
+
 # Enable faulthandler early for low-level crash diagnostics
 try:
     faulthandler.enable()
