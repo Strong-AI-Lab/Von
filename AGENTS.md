@@ -398,6 +398,12 @@ To ensure consistency and maintain a clean history, all agents must follow this 
     *   Pull latest changes: `git pull`.
     *   Delete local branch: `git branch -d JVNAUTOSCI-XXX-short-description`.
 
+### Multi-Machine Development: Always Push to Remote
+
+**CRITICAL:** This project is actively developed across multiple machines. When committing directly to `main` (or merging a PR), **always push to remote immediately** unless explicitly told otherwise. Consistent git state across machines is essential.
+
+**Rule:** `git commit` → `git push` as a single action. Do not leave commits unpushed on main, even temporarily.
+
 ## Technical Standards & Constraints
 
 **All AI agents must adhere to these technical standards. Deviations require explicit user approval.**
