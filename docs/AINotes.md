@@ -1,5 +1,14 @@
 # AI Notes
 
+## Agent Reminder (Config Lookup)
+
+If you need values from `.env`, prefer the allowlisted helper script instead of reading the file directly:
+
+- Script: `utilities/get_safe_env.py`
+- Example: `pdm run python utilities/get_safe_env.py VON_DB_NAME`
+
+It only prints allowlisted keys and redacts secret-like values (tokens, passwords, etc.).
+
 ## Current Status
   1. Integration testing of full Phase 1 flow
   2. Proceed with Phase 2 (UI components and org selector)

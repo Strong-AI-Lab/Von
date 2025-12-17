@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 import pytest
 from flask import Flask
@@ -91,6 +92,8 @@ def test_generate_executes_direct_read_tool_call(app):
 
     body = resp.get_json()
     assert "llm_debug" in body
+    assert "interaction_timestamp_utc" in body["llm_debug"]
+    datetime.fromisoformat(body["llm_debug"]["interaction_timestamp_utc"].replace("Z", "+00:00"))
     assert body["llm_debug"]["tool_invocations"], "expected a recorded tool invocation"
 
     invocation = body["llm_debug"]["tool_invocations"][0]
@@ -118,4 +121,6 @@ def test_generate_rejects_direct_write_tool_call(app):
 
     body = resp.get_json()
     assert "restricted to read-only tools" in body["response"]
+    assert "interaction_timestamp_utc" in body["llm_debug"]
+    datetime.fromisoformat(body["llm_debug"]["interaction_timestamp_utc"].replace("Z", "+00:00"))
     assert body["llm_debug"]["tool_invocations"] == []

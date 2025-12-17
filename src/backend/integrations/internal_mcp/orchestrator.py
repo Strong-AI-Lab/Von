@@ -186,9 +186,12 @@ class InternalMCPChatOrchestrator:
     def _extract_json_blob(self, text: str) -> Optional[MutableMapping[str, Any]]:
         """Parse a single JSON object from the model response.
 
-        Tool calls must be emitted as a *pure* JSON object with no surrounding
-        text (including Markdown fences) and no trailing non-whitespace
-        characters.
+        Tool calls should be emitted as a *pure* JSON object with no surrounding
+        text (including Markdown fences).
+
+        In practice, some models occasionally append explanatory prose after an
+        otherwise valid tool-call JSON object. We tolerate that trailing text as
+        long as it does not begin another JSON value.
 
         This strictness prevents silent failures where malformed output (e.g.
         trailing characters like `}x`) or multiple JSON objects are treated as a
@@ -198,11 +201,43 @@ class InternalMCPChatOrchestrator:
         if not raw:
             return None
 
+        post_fence_trailing: str = ""
+        normalised = raw.replace("\r\n", "\n")
+
+        fence_idx = normalised.find("```")
+        if fence_idx != -1:
+            prefix = normalised[:fence_idx]
+            # Some models add a short one-line preface before the fenced tool
+            # call. Tolerate that as long as it is small and does not itself
+            # contain JSON-like openers.
+            prefix_ok = (
+                not prefix.strip()
+                or (
+                    len(prefix) <= 200
+                    and prefix.count("\n") <= 2
+                    and all(token not in prefix for token in ("{", "[", "}"))
+                )
+            )
+            if prefix_ok:
+                fenced = normalised[fence_idx:]
+                if fenced.startswith("```"):
+                    open_line_end = fenced.find("\n")
+                    if open_line_end != -1:
+                        close_marker = "\n```"
+                        close_idx = fenced.find(close_marker, open_line_end + 1)
+                        if close_idx != -1:
+                            close_line_end = fenced.find("\n", close_idx + 1)
+                            if close_line_end == -1:
+                                close_line_end = len(fenced)
+                            post_fence_trailing = fenced[close_line_end:].strip()
+                            raw = fenced[open_line_end + 1 : close_idx].strip()
+
         looks_like_tool_call = any(token in raw for token in (f'"{self._ACTION_FIELD}"', f'"{self._TOOL_FIELD}"'))
 
         # Only consider a tool call if the model output begins with a JSON
-        # object. This avoids false positives when the model discusses tool
-        # calls or the user has pasted JSON in the conversation.
+        # object (or a fenced block containing one). This avoids false
+        # positives when the model discusses tool calls or the user has pasted
+        # JSON in the conversation.
         if not raw.startswith("{"):
             return None
 
@@ -253,23 +288,39 @@ class InternalMCPChatOrchestrator:
                     "Tool call was not executed: multiple tool calls were emitted in one response."
                 )
 
-            # Some models occasionally emit a single stray non-JSON token after an
-            # otherwise valid JSON tool call (e.g. `}졟`). Prefer a safe recovery
-            # that preserves the single-tool-call contract while avoiding a hard
-            # failure for harmless trailing noise.
-            if len(trailing) <= 4:
-                self._logger.warning(
-                    "[mcp_orchestrator] Stripping trailing non-JSON characters after tool call: %r (codepoints=%s)",
-                    trailing,
-                    [ord(ch) for ch in trailing],
-                )
-                trailing = ""
-            else:
+            # Some models append explanatory prose after a valid JSON tool call.
+            # Prefer a safe recovery that preserves the single-tool-call contract
+            # while avoiding hard failures for harmless trailing text.
+            snippet = trailing
+            if len(snippet) > 120:
+                snippet = snippet[:117] + "..."
+            self._logger.warning(
+                "[mcp_orchestrator] Stripping trailing non-JSON text after tool call (len=%d): %r",
+                len(trailing),
+                snippet,
+            )
+            trailing = ""
+
+        if post_fence_trailing and is_tool_call:
+            if post_fence_trailing.startswith("{") or post_fence_trailing.startswith("["):
                 raise ToolCallParsingError(
-                    "Tool call was not executed: tool call JSON had trailing non-whitespace characters."
+                    "Tool call was not executed: multiple tool calls were emitted in one response."
                 )
+            snippet = post_fence_trailing
+            if len(snippet) > 120:
+                snippet = snippet[:117] + "..."
+            self._logger.warning(
+                "[mcp_orchestrator] Stripping trailing non-JSON text after fenced tool call (len=%d): %r",
+                len(post_fence_trailing),
+                snippet,
+            )
+            post_fence_trailing = ""
 
         if trailing:
+            # If it's not a tool call, treat the message as a normal response.
+            return None
+
+        if post_fence_trailing:
             # If it's not a tool call, treat the message as a normal response.
             return None
 

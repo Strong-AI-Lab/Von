@@ -481,8 +481,10 @@ async function handleSendPrompt() {
                 console.log('[chatTab] Stored LLM debug data for turn:', assistantTurnId);
             }
 
+            const fastpathMeta = data.fastpath || (data.llm_debug && data.llm_debug.fastpath) || null;
+
             // Append assistant message with turnId and llm_debug flag
-            appendMessage('Von', data.response, assistantTurnId, !!data.llm_debug);
+            appendMessage('Von', data.response, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta);
             // Annotate assistant turn and render suggestions when returned - only if toggle is enabled
             const annotationToggle = document.getElementById('annotationToggle');
             if (annotationToggle && annotationToggle.checked) {
@@ -598,7 +600,7 @@ function formatChatTimestamp(isoString) {
     }
 }
 
-function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null) {
+function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null, fastpathMeta = null) {
     const scrollableField = document.getElementById('scrollableField');
     if (!scrollableField) {
         console.error('[chatTab] appendMessage: scrollableField not found!');
@@ -607,6 +609,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
     try {
         const displayTimestamp = formatChatTimestamp(timestampStr);
+        const historySuffix = isHistory ? ' (history)' : '';
 
         if (sender === 'Von' || (isHistory && sender === 'assistant')) {
             // Create a container for Von's response with image
@@ -627,8 +630,19 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; align-items: center; gap: 8px;';
 
             const headerText = document.createElement('span');
-            headerText.textContent = `Von • ${displayTimestamp}`;
+            headerText.textContent = `Von • ${displayTimestamp}${historySuffix}`;
             messageHeader.appendChild(headerText);
+
+            // Add fast-path indicator if the server bypassed the LLM.
+            const fastpath = fastpathMeta;
+            if (fastpath && fastpath.bypassed_llm) {
+                const badge = document.createElement('span');
+                const fastpathName = fastpath.name ? String(fastpath.name) : 'fast-path';
+                badge.textContent = `Fast-path: ${fastpathName}`;
+                badge.title = 'Deterministic fast-path used; LLM was bypassed.';
+                badge.style.cssText = 'display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 10px; font-size: 0.8em; background: #fff3cd; border: 1px solid #ffeeba; color: #856404;';
+                messageHeader.appendChild(badge);
+            }
 
             // Add LLM debug button if debug data available
             if (hasLlmDebug && turnId) {
@@ -672,7 +686,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageHeader.style.color = sender === 'Error' ? '#dc3545' : '#28a745';
 
             const headerText = document.createElement('span');
-            headerText.textContent = `${sender} • ${displayTimestamp}`;
+            headerText.textContent = `${sender} • ${displayTimestamp}${historySuffix}`;
             messageHeader.appendChild(headerText);
 
             // Add LLM debug button for errors if debug data available
