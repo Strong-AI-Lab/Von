@@ -90,6 +90,41 @@ The agent receives authentication status in system prompt:
 - Implement audit logging for sensitive tool calls (RAG access, concept mutations)
 - Clearly document which MCP tools are namespace-aware vs global
 
+### 6. Jira (Atlassian) Authentication Diagnostics
+
+Von’s internal Jira tools authenticate using Atlassian credentials from environment variables:
+
+- `ATLASSIAN_BASE_URL` (e.g. `https://naoinstitute.atlassian.net`)
+- `ATLASSIAN_EMAIL`
+- `ATLASSIAN_API_TOKEN`
+
+**Important (Windows gotcha):** editing `.env` does not necessarily update the environment seen by a running Von process. Von now applies targeted `.env` overrides for the Atlassian keys during startup (see `src/workflows/von/main.py`). If you update the token in `.env`, you still need to restart Von.
+
+#### Debug tools
+
+Use these tools to confirm what account Von is using and whether Jira auth is actually working.
+
+1) `jira_get_auth_config` (no network call)
+- Shows which `base_url` and `email` Von is configured with.
+- Reports `token_present` and `token_length` only (never returns the token).
+
+2) `jira_get_myself` (calls Jira `/rest/api/3/myself`)
+- Returns identity details (`displayName`, `emailAddress`, `accountId`, etc.) when auth is valid.
+
+#### Copy/paste-safe tool calls
+
+Put tool calls in fenced code blocks to avoid the UI linkifying them.
+
+```json
+{"action":"call_tool","tool":"jira_get_auth_config","payload":{}}
+```
+
+```json
+{"action":"call_tool","tool":"jira_get_myself","payload":{}}
+```
+
+If `jira_get_myself` returns `401 Unauthorised`, confirm the configured email/base URL with `jira_get_auth_config`, then rotate the API token (Atlassian API tokens are per-account) and restart Von.
+
 ### 5. Admin Endpoints
 
 **Endpoints**: `/admin/rag_status`, `/admin/rag_integrity`, `/admin/rag_sync`
