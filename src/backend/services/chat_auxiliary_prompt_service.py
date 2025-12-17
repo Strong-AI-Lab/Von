@@ -11,7 +11,7 @@ This module keeps the logic small and testable.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.services.concept_service import get_concept_by_concept_id
@@ -31,8 +31,26 @@ def build_user_specific_system_prompt(user_concept_id: str) -> Optional[str]:
     If multiple prompts exist, we concatenate them in a deterministic order.
     """
 
-    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+    fragments = get_user_specific_prompt_fragments(user_concept_id)
+    prompt_texts = [fragment["content"] for fragment in fragments if fragment.get("content")]
+    if not prompt_texts:
         return None
+
+    return "\n\n".join(prompt_texts)
+
+
+def get_user_specific_prompt_fragments(user_concept_id: str) -> List[Dict[str, Any]]:
+    """Return the list of Vontology prompt fragments for a user.
+
+    Each fragment is a dict with:
+    - concept_id: str
+    - content: str
+
+    The list is returned in deterministic order.
+    """
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return []
 
     user_concept_id = user_concept_id.strip()
 
@@ -55,9 +73,9 @@ def build_user_specific_system_prompt(user_concept_id: str) -> Optional[str]:
             prompt_ids.append(concept_id)
 
     if not prompt_ids:
-        return None
+        return []
 
-    prompt_texts: List[str] = []
+    fragments: List[Dict[str, Any]] = []
     for concept_id in prompt_ids:
         try:
             concept = get_concept_by_concept_id(concept_id)
@@ -69,9 +87,6 @@ def build_user_specific_system_prompt(user_concept_id: str) -> Optional[str]:
 
         content = concept.get("content")
         if isinstance(content, str) and content.strip():
-            prompt_texts.append(content.strip())
+            fragments.append({"concept_id": concept_id, "content": content.strip()})
 
-    if not prompt_texts:
-        return None
-
-    return "\n\n".join(prompt_texts)
+    return fragments
