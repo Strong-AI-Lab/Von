@@ -1,6 +1,7 @@
 {
-  "mcpServers": {
+  "servers": {
     "vontology": {
+      "type": "stdio",
       "command": "pdm",
       "args": [
         "run",
@@ -10,6 +11,7 @@
       "cwd": "${workspaceFolder}"
     },
     "arxiv": {
+      "type": "stdio",
       "command": "uv",
       "args": [
         "tool",
@@ -18,24 +20,6 @@
         "--storage-path",
         "${workspaceFolder}/data/arxiv_papers"
       ]
-    },
-    "mongodb": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "mongodb-mcp-server"
-      ],
-      "type": "stdio"
-    },
-    "github": {
-      "url": "https://api.githubcopilot.com/mcp/",
-      "type": "http"
-    },
-    "atlassian": {
-      "type": "http",
-      "url": "https://mcp.atlassian.com/v1/sse",
-      "gallery": true,
-      "version": "0.0.1"
     }
   }
 }

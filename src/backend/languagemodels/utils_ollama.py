@@ -2,8 +2,12 @@ try:  # Optional dependency
     import ollama  # type: ignore
 except ImportError:  # pragma: no cover
     ollama = None  # type: ignore
+import logging
 import re
 import requests
+
+
+logger = logging.getLogger(__name__)
 
 def ollama_generate(prompt: str, context=None, model: str = "granite3.3:2b") -> str:
     """
@@ -57,7 +61,7 @@ def list_local_ollama_models_details(host: str = "http://localhost:11434") -> li
         models = response.json().get("models", [])
         return models
     except requests.RequestException as e:
-        print(f"Error contacting Ollama API: {e}")
+        logger.warning("Error contacting Ollama API: %s", e)
         return []
 
 def extract_model_names(models: list) -> list:
@@ -77,7 +81,7 @@ def list_local_ollama_models() -> list:
         model_names = extract_model_names(models)
         return model_names
     except Exception as e:
-        print(f"Error listing local Ollama models: {e}")
+        logger.warning("Error listing local Ollama models: %s", e)
         return []
 
 

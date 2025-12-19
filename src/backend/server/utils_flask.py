@@ -11,6 +11,17 @@ if os.path.isdir(src_path) and src_path not in sys.path:
     sys.path.insert(0, src_path)
 # print("\n".join(sys.path)) # Keep for debugging if needed
 
+# Load repo-root .env early so feature flags like VON_INTERNAL_MCP_ENABLE take effect
+# when running via run.ps1/Flask (JVNAUTOSCI-xxx).
+try:  # pragma: no cover - exercised implicitly in dev runs
+    from dotenv import load_dotenv
+
+    env_path = os.path.join(project_root, ".env")
+    if os.path.isfile(env_path):
+        load_dotenv(env_path, override=False)
+except Exception:
+    pass
+
 from flask import Flask, jsonify, redirect, url_for, request # Added request for shutdown endpoint
 import os
 # --- Updated Typing Imports ---

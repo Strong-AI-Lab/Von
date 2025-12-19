@@ -11,6 +11,7 @@ import re
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .mcp_proxy_base import MCPServerConfig, MCPStdIOClient, MCPToolClientError
@@ -93,10 +94,15 @@ class SearchMCPProxy:
             SearchProxyError: If tool call fails
         """
         try:
+            # Only apply Tavily's formatted-text parser to `tavily-search`.
+            # `tavily-extract` frequently returns JSON; forcing the search parser can
+            # incorrectly yield empty results (e.g., {"results": []}) and mask the
+            # underlying content.
+            text_parser = _parse_tavily_text_response if tool_name == "tavily-search" else None
             return await self._client.call_tool(
                 tool_name,
                 arguments,
-                text_parser=_parse_tavily_text_response,
+                text_parser=text_parser,
             )
         except MCPToolClientError as exc:
             raise SearchProxyError(f"Request failed: {exc}") from exc
@@ -235,7 +241,65 @@ class SearchMCPProxy:
         Returns:
             Dict with extracted content
         """
-        return await self._call_tool("tavily-extract", {"urls": [url]})
+        raw = await self._call_tool("tavily-extract", {"urls": [url]})
+
+        # Normalise common Tavily extract shapes into Von's expected output.
+        # We keep this tolerant because different MCP versions may return slightly
+        # different JSON structures.
+        content: str | None = None
+        title: str | None = None
+
+        if isinstance(raw, dict):
+            if "results" in raw and isinstance(raw.get("results"), list):
+                results = raw.get("results")
+                if results:
+                    first = results[0] if isinstance(results[0], dict) else {}
+                    if isinstance(first, dict):
+                        title = first.get("title") or first.get("page_title")
+                        content = (
+                            first.get("content")
+                            or first.get("raw_content")
+                            or first.get("text")
+                        )
+            else:
+                title = raw.get("title") if isinstance(raw.get("title"), str) else None
+                content = (
+                    raw.get("content")
+                    or raw.get("raw_content")
+                    or raw.get("text")
+                )
+
+        if content is not None and not isinstance(content, str):
+            content = str(content)
+
+        if title is not None and not isinstance(title, str):
+            title = str(title)
+
+        if content:
+            stripped = content.strip()
+            # Tavily sometimes returns a header like "Detailed Results:" with no body.
+            # Treat that as an empty extraction.
+            if stripped.lower() in {"detailed results:", "detailed results"}:
+                content = None
+            elif stripped.lower().startswith("detailed results:") and len(stripped) <= 40:
+                content = None
+
+        if content:
+            return {
+                "success": True,
+                "url": url,
+                "title": title,
+                "content": content,
+            }
+
+        # Treat empty extraction as a failure so callers don't mistake it for success.
+        return {
+            "success": False,
+            "url": url,
+            "title": title,
+            "content": None,
+            "error": "No extractable content returned for URL (page may be JavaScript-rendered or restrict automated extraction).",
+        }
 
     def get_stats(self) -> Dict[str, int]:
         """Get proxy statistics.
@@ -264,12 +328,50 @@ async def get_search_proxy() -> SearchMCPProxy:
 
     async with _proxy_lock:
         if _proxy_instance is None:
-            # Get API key from environment
+            def _try_load_tavily_key_from_dotenv() -> str | None:
+                """Attempt to load TAVILY_API_KEY from repo-root .env.
+
+                This is a pragmatic fallback for Windows workflows where `.env` is the source
+                of truth but the current process environment may not have been initialised
+                from it (process-boundary issues, restarts, alternate entrypoints).
+                """
+
+                try:
+                    from dotenv import dotenv_values  # type: ignore
+                except Exception:
+                    return None
+
+                try:
+                    repo_root = Path(__file__).resolve().parents[4]
+                except Exception:
+                    repo_root = Path.cwd()
+
+                env_path = repo_root / ".env"
+                if not env_path.exists():
+                    return None
+
+                try:
+                    values = dotenv_values(env_path)
+                except Exception:
+                    return None
+
+                raw = values.get("TAVILY_API_KEY")
+                if not raw:
+                    return None
+                return str(raw).strip() or None
+
+            # Get API key from environment, with .env fallback.
             api_key = os.environ.get("TAVILY_API_KEY")
+            if not api_key:
+                api_key = _try_load_tavily_key_from_dotenv()
+                if api_key:
+                    os.environ["TAVILY_API_KEY"] = api_key
+
             if not api_key:
                 raise SearchProxyError(
                     "TAVILY_API_KEY environment variable not set. "
-                    "Set with: $env:TAVILY_API_KEY = 'your-key-here'"
+                    "If you have it in your repo-root .env, restart the server (or ensure the process loads .env). "
+                    "Set in PowerShell with: $env:TAVILY_API_KEY = 'your-key-here'"
                 )
 
             config = SearchProxyConfig(api_key=api_key)

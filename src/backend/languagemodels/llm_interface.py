@@ -26,6 +26,21 @@ from collections import defaultdict
 # Configure logging
 logger = logging.getLogger(__name__)
 
+
+def _should_log_llm_io() -> bool:
+    """Return True if LLM prompt/response debug logging is enabled."""
+
+    value = os.environ.get("VON_DEBUG_LLM_IO", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _truncate_for_log(text: str, *, max_chars: int = 2000) -> str:
+    if not isinstance(text, str):
+        return str(text)
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n... [truncated {len(text) - max_chars} chars]"
+
 #############################################
 # Global client and settings state
 #############################################
@@ -286,7 +301,8 @@ class OllamaClient(LLMInterface):
             raise ValueError(error_msg)
 
         logger.info(f"Generating response using Ollama model: {target_model}")
-        print(f"[LLM PROMPT][Ollama][{target_model}]: {prompt}")
+        if _should_log_llm_io():
+            logger.debug("[LLM PROMPT][Ollama][%s]: %s", target_model, _truncate_for_log(prompt))
 
         conv = build_conversation(prompt, context)
         messages = to_ollama_messages(conv)
@@ -320,7 +336,8 @@ class OllamaClient(LLMInterface):
                 )
                 logger.debug(f"Ollama raw response: {response}")
                 content = response['message']['content']
-                print(f"[LLM RESPONSE][Ollama][{target_model}]: {content}")
+                if _should_log_llm_io():
+                    logger.debug("[LLM RESPONSE][Ollama][%s]: %s", target_model, _truncate_for_log(content))
                 return content
             except Exception as e:
                 # Handle known Ollama ResponseError distinctly if library present
@@ -566,7 +583,8 @@ class OpenAIClient(LLMInterface):
         target_model = model or self.DEFAULT_MODEL
 
         logger.info(f"Generating response using OpenAI model: {target_model}")
-        print(f"[LLM PROMPT][OpenAI][{target_model}]: {prompt}")
+        if _should_log_llm_io():
+            logger.debug("[LLM PROMPT][OpenAI][%s]: %s", target_model, _truncate_for_log(prompt))
         try:
             conv = build_conversation(prompt, context)
             messages = to_openai_messages(conv)
@@ -604,7 +622,8 @@ class OpenAIClient(LLMInterface):
                     warnings.warn(f"Model mismatch - Requested: {target_model}, Used: {actual_model}")
 
             content = self.validate_model_response(response, actual_model)
-            print(f"[LLM RESPONSE][OpenAI][{actual_model}]: {content}")
+            if _should_log_llm_io():
+                logger.debug("[LLM RESPONSE][OpenAI][%s]: %s", actual_model, _truncate_for_log(content))
 
             # Log token usage if available
             if hasattr(response, 'usage'):
@@ -752,7 +771,8 @@ class GeminiClient(LLMInterface):
         assert genai is not None
         target_model_name = model or self.default_model
         logger.info(f"Generating response using Gemini model: {target_model_name}")
-        print(f"[LLM PROMPT][Gemini][{target_model_name}]: {prompt}")
+        if _should_log_llm_io():
+            logger.debug("[LLM PROMPT][Gemini][%s]: %s", target_model_name, _truncate_for_log(prompt))
 
         try:
             # Select the model - re-initialize if different from default
@@ -795,7 +815,8 @@ class GeminiClient(LLMInterface):
             # Handle potential safety blocks or empty responses
             if response.parts:
                 content = response.text
-                print(f"[LLM RESPONSE][Gemini][{target_model_name}]: {content}")
+                if _should_log_llm_io():
+                    logger.debug("[LLM RESPONSE][Gemini][%s]: %s", target_model_name, _truncate_for_log(content))
                 return content
             elif response.prompt_feedback and response.prompt_feedback.block_reason:
                 block_reason = response.prompt_feedback.block_reason

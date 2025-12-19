@@ -9,12 +9,35 @@ import sys
 import os
 import asyncio
 import json
+import logging
 from typing import Any
+
+# Avoid UnicodeEncodeError on Windows consoles (default cp1252) when any
+# dependency logs Unicode (e.g. checkmarks). MCP runs over stdio; we must not
+# crash on encode.
+try:
+    stdout_reconfigure = getattr(sys.stdout, "reconfigure", None)
+    stderr_reconfigure = getattr(sys.stderr, "reconfigure", None)
+    if callable(stdout_reconfigure):
+        stdout_reconfigure(encoding="utf-8", errors="backslashreplace")
+    if callable(stderr_reconfigure):
+        stderr_reconfigure(encoding="utf-8", errors="backslashreplace")
+except Exception:  # pragma: no cover
+    pass
 
 # Adjust path to import from the project root
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+
+# Load repo-root .env for MCP stdio runs (VS Code MCP launches may not source .env).
+try:
+    from dotenv import load_dotenv  # type: ignore
+
+    load_dotenv(dotenv_path=os.path.join(project_root, ".env"), override=False)
+except Exception:
+    # Safe no-op if python-dotenv isn't installed or .env isn't present.
+    pass
 
 try:
     from mcp.server import Server
@@ -59,11 +82,140 @@ from src.backend.integrations.internal_mcp.search_proxy_mcp import (
     get_search_proxy,
     SearchProxyError,
 )
+from src.backend.integrations.internal_mcp import (
+    InternalMCPGateway,
+    InternalMCPTransport,
+    InternalMCPChatOrchestrator,
+    ToolCallParsingError,
+    build_default_catalogue,
+)
 from src.backend.integrations.google import gmail_service
 from src.backend.services.rag_service import get_rag_service, RAGBackendUnavailable
+from src.backend.languagemodels.llm_interface import get_llm_client, get_active_model_name
 
 # Create MCP server instance
 app = Server("vontology-mcp")
+
+
+_LOG = logging.getLogger(__name__)
+
+
+def _truthy_env(var_name: str) -> bool:
+    return os.getenv(var_name, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+_SENSITIVE_KEY_FRAGMENTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "password",
+    "secret",
+    "client_secret",
+    "access_token",
+    "refresh_token",
+    "token",
+)
+
+
+def _truncate_string(value: str, *, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars] + f"\n... [truncated {len(value) - max_chars} chars]"
+
+
+def _redact_debug_value(value: Any, *, max_string_chars: int) -> Any:
+    if isinstance(value, str):
+        return _truncate_string(value, max_chars=max_string_chars)
+    if isinstance(value, list):
+        return [_redact_debug_value(item, max_string_chars=max_string_chars) for item in value]
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, inner in value.items():
+            key_str = str(key)
+            key_lower = key_str.lower()
+            if any(fragment in key_lower for fragment in _SENSITIVE_KEY_FRAGMENTS):
+                redacted[key_str] = "[redacted]"
+            else:
+                redacted[key_str] = _redact_debug_value(inner, max_string_chars=max_string_chars)
+        return redacted
+    return value
+
+
+class VonChatRunTimeout(TimeoutError):
+    def __init__(self, *, timeout_seconds: float, pid: int, thread_id: int | None) -> None:
+        super().__init__(f"Timed out after {timeout_seconds:.0f}s.")
+        self.timeout_seconds = timeout_seconds
+        self.pid = pid
+        self.thread_id = thread_id
+
+
+async def _run_blocking_with_timeout(func, *, timeout_seconds: float):
+    """Run a blocking callable in a worker thread with an overall timeout.
+
+    Returns the callable's result. On timeout, raises VonChatRunTimeout carrying
+    the current process PID and the worker thread ID (if captured).
+
+    Export for testing.
+    """
+
+    import asyncio
+    import concurrent.futures
+    import os
+    import threading
+
+    pid = os.getpid()
+    thread_id_holder: dict[str, int | None] = {"thread_id": None}
+
+    def _wrapped():
+        thread_id_holder["thread_id"] = threading.get_ident()
+        return func()
+
+    # Use a dedicated executor so we can reliably capture the worker thread ID.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="von_chat_run") as executor:
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(executor, _wrapped)
+        try:
+            if timeout_seconds <= 0:
+                return await future
+            return await asyncio.wait_for(future, timeout=timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise VonChatRunTimeout(
+                timeout_seconds=timeout_seconds,
+                pid=pid,
+                thread_id=thread_id_holder["thread_id"],
+            ) from exc
+
+
+class _RestrictedGateway:
+    """Gateway wrapper used by `von_chat_run`.
+
+    When writes are not allowed, blocks non-read-category tools.
+    """
+
+    def __init__(self, *, gateway: InternalMCPGateway, allow_writes: bool) -> None:
+        self._gateway = gateway
+        self._allow_writes = bool(allow_writes)
+
+    @property
+    def enabled(self) -> bool:
+        return self._gateway.enabled
+
+    def describe_methods(self) -> dict[str, dict[str, Any]]:
+        return self._gateway.describe_methods()
+
+    def invoke(self, method_name: str, payload: dict[str, Any] | None = None):
+        if not self._allow_writes:
+            meta = self._gateway.describe_methods().get(method_name) or {}
+            category = meta.get("category")
+            if category != "read":
+                raise PermissionError(
+                    "Write tools are disabled for von_chat_run. "
+                    "Re-run with allow_writes=true and set VON_MCP_ALLOW_WRITES=1."
+                )
+        return self._gateway.invoke(method_name, payload)
 
 
 @app.list_tools()
@@ -527,6 +679,62 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["query"]
             }
+        ),
+        Tool(
+            name="von_chat_run",
+            description=(
+                "Run the Von chat orchestrator (LLM + internal MCP tools) and return a redacted trace. "
+                "By default, this runs in dry-run mode (read-only tools only). "
+                "To allow write tools, set VON_INTERNAL_MCP_ENABLE=1 and VON_MCP_ALLOW_WRITES=1 and pass allow_writes=true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "User prompt text"},
+                    "context": {
+                        "type": "array",
+                        "description": "Optional prior messages [{role, content}]",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "role": {"type": "string", "description": "system|user|assistant|tool"},
+                                "content": {"type": "string"}
+                            },
+                            "required": ["role", "content"]
+                        }
+                    },
+                    "model": {"type": "string", "description": "Optional model override"},
+                    "user_namespace": {"type": "string", "description": "Optional namespace (e.g., #V#michael_witbrock) injected into tool payloads"},
+                    "gmail_profile": {"type": "string", "description": "Optional Gmail profile name"},
+                    "auxiliary_system_prompt": {"type": "string", "description": "Optional user-specific system prompt"},
+                    "max_tool_invocations": {"type": "integer", "default": 8, "description": "Maximum number of tool calls in one run"},
+                    "dry_run": {"type": "boolean", "default": True, "description": "If true, block write-category tools"},
+                    "allow_writes": {"type": "boolean", "default": False, "description": "If true, allow write-category tools (requires VON_MCP_ALLOW_WRITES=1)"},
+                    "timeout_seconds": {
+                        "type": "number",
+                        "default": 90,
+                        "description": "Overall wall-clock timeout for the orchestrator run. If exceeded, returns an error rather than hanging."
+                    },
+                    "max_string_chars": {"type": "integer", "default": 8000, "description": "Max characters retained for any string in the trace"}
+                    ,
+                    "max_context_chars": {
+                        "type": "integer",
+                        "default": 120000,
+                        "description": "Maximum total characters of chat context forwarded to the LLM (approximate char budget; system prompt is always retained)."
+                    },
+                    "max_tool_result_chars": {
+                        "type": "integer",
+                        "default": 20000,
+                        "description": "Maximum characters allowed for a single tool-result message added back into LLM context."
+                    },
+                    "max_tool_result_field_chars": {
+                        "type": "integer",
+                        "default": 8000,
+                        "description": "Maximum characters for any single string field inside a tool result forwarded to the LLM."
+                    }
+                },
+                "required": ["prompt"]
+            }
         )
     ]
 
@@ -649,6 +857,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             )
 
             matching_concepts = []
+
             for result in search_result.get('results', []):
                 matching_concepts.append({
                     "id": result.get('concept_id'),
@@ -660,6 +869,185 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 type="text",
                 text=json.dumps(matching_concepts, indent=2)
             )]
+
+        elif name == "von_chat_run":
+            prompt = (arguments or {}).get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                return [TextContent(type="text", text=json.dumps({"success": False, "error": "Missing required parameter: prompt"}))]
+
+            if not _truthy_env("VON_INTERNAL_MCP_ENABLE"):
+                return [
+                    TextContent(
+                        type="text",
+                        text=json.dumps(
+                            {
+                                "success": False,
+                                "error": "Internal MCP is disabled. Set VON_INTERNAL_MCP_ENABLE=1 to use von_chat_run.",
+                            },
+                            indent=2,
+                        ),
+                    )
+                ]
+
+            model_override = (arguments or {}).get("model")
+            model_name = model_override if isinstance(model_override, str) and model_override.strip() else get_active_model_name()
+
+            user_namespace = (arguments or {}).get("user_namespace")
+            if not isinstance(user_namespace, str):
+                user_namespace = None
+
+            gmail_profile = (arguments or {}).get("gmail_profile")
+            if not isinstance(gmail_profile, str):
+                gmail_profile = None
+
+            auxiliary_system_prompt = (arguments or {}).get("auxiliary_system_prompt")
+            if not isinstance(auxiliary_system_prompt, str):
+                auxiliary_system_prompt = None
+
+            try:
+                max_tool_invocations = int((arguments or {}).get("max_tool_invocations", 8))
+            except Exception:
+                max_tool_invocations = 8
+            max_tool_invocations = max(0, min(16, max_tool_invocations))
+
+            dry_run = bool((arguments or {}).get("dry_run", True))
+            allow_writes = bool((arguments or {}).get("allow_writes", False))
+
+            if allow_writes:
+                if not _truthy_env("VON_MCP_ALLOW_WRITES"):
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps(
+                                {
+                                    "success": False,
+                                    "error": "Write tools are not enabled. Set VON_MCP_ALLOW_WRITES=1 (and ensure VON_INTERNAL_MCP_ENABLE=1) to use allow_writes=true.",
+                                },
+                                indent=2,
+                            ),
+                        )
+                    ]
+            effective_allow_writes = allow_writes and not dry_run
+
+            try:
+                max_string_chars = int((arguments or {}).get("max_string_chars", 8000))
+            except Exception:
+                max_string_chars = 8000
+            max_string_chars = max(256, min(20000, max_string_chars))
+
+            try:
+                max_context_chars = int((arguments or {}).get("max_context_chars", 120000))
+            except Exception:
+                max_context_chars = 120000
+            max_context_chars = max(4000, min(2_000_000, max_context_chars))
+
+            try:
+                max_tool_result_chars = int((arguments or {}).get("max_tool_result_chars", 20000))
+            except Exception:
+                max_tool_result_chars = 20000
+            max_tool_result_chars = max(2000, min(1_000_000, max_tool_result_chars))
+
+            try:
+                max_tool_result_field_chars = int((arguments or {}).get("max_tool_result_field_chars", 8000))
+            except Exception:
+                max_tool_result_field_chars = 8000
+            max_tool_result_field_chars = max(1000, min(200_000, max_tool_result_field_chars))
+
+            try:
+                timeout_seconds = float((arguments or {}).get("timeout_seconds", 90))
+            except Exception:
+                timeout_seconds = 90.0
+            timeout_seconds = max(1.0, min(600.0, timeout_seconds))
+
+            raw_context = (arguments or {}).get("context")
+            context = raw_context if isinstance(raw_context, list) else None
+
+            llm_client = get_llm_client()
+
+            catalogue = build_default_catalogue()
+            transport = InternalMCPTransport()
+            base_gateway = InternalMCPGateway(
+                catalogue=catalogue,
+                transport=transport,
+                enabled=True,
+            )
+            gateway = _RestrictedGateway(gateway=base_gateway, allow_writes=effective_allow_writes)
+            orchestrator = InternalMCPChatOrchestrator(
+                gateway=gateway,
+                logger=_LOG.getChild("von_chat_run"),
+                max_tool_invocations=max_tool_invocations,
+                default_gmail_profile=None,
+                max_context_chars=max_context_chars,
+                max_tool_result_chars=max_tool_result_chars,
+                max_tool_result_field_chars=max_tool_result_field_chars,
+            )
+
+            try:
+                def _run_orchestrator_sync():
+                    return orchestrator.run(
+                        prompt=prompt,
+                        context=context,
+                        llm_client=llm_client,
+                        model=model_name,
+                        user_namespace=user_namespace,
+                        gmail_profile=gmail_profile,
+                        auxiliary_system_prompt=auxiliary_system_prompt,
+                    )
+
+                orchestrator_result = await _run_blocking_with_timeout(
+                    _run_orchestrator_sync,
+                    timeout_seconds=timeout_seconds,
+                )
+                payload = {
+                    "success": True,
+                    "model": model_name,
+                    "dry_run": dry_run,
+                    "allow_writes": effective_allow_writes,
+                    "timeout_seconds": timeout_seconds,
+                    "response_text": _truncate_string(orchestrator_result.response_text, max_chars=max_string_chars),
+                    "tool_invocations": _redact_debug_value(
+                        list(orchestrator_result.tool_invocations),
+                        max_string_chars=max_string_chars,
+                    ),
+                    "tool_messages": _redact_debug_value(
+                        list(orchestrator_result.extra_messages),
+                        max_string_chars=max_string_chars,
+                    ),
+                }
+            except VonChatRunTimeout as exc:
+                payload = {
+                    "success": False,
+                    "model": model_name,
+                    "dry_run": dry_run,
+                    "allow_writes": effective_allow_writes,
+                    "timeout_seconds": timeout_seconds,
+                    "error": str(exc),
+                    "timeout_debug": {
+                        "pid": exc.pid,
+                        "thread_id": exc.thread_id,
+                        "note": "If this remains stuck, terminate the MCP server process by PID. Python threads cannot be safely killed directly.",
+                    },
+                }
+            except ToolCallParsingError as exc:
+                payload = {
+                    "success": False,
+                    "model": model_name,
+                    "dry_run": dry_run,
+                    "allow_writes": effective_allow_writes,
+                    "timeout_seconds": timeout_seconds,
+                    "error": f"Tool call parsing error: {exc}",
+                }
+            except Exception as exc:
+                payload = {
+                    "success": False,
+                    "model": model_name,
+                    "dry_run": dry_run,
+                    "allow_writes": effective_allow_writes,
+                    "timeout_seconds": timeout_seconds,
+                    "error": str(exc),
+                }
+
+            return [TextContent(type="text", text=json.dumps(payload, indent=2, default=str))]
 
         elif name == "add_names":
             concept_id = arguments.get("concept_id")

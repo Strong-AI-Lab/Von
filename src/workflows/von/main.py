@@ -128,7 +128,7 @@ def _apply_dotenv_overrides(keys: set[str]) -> None:
         )
 
 
-# Ensure Atlassian credentials can be updated via .env + restart
+# Ensure selected credentials can be updated via .env + restart
 _apply_dotenv_overrides(
     {
         "ATLASSIAN_BASE_URL",
@@ -136,6 +136,7 @@ _apply_dotenv_overrides(
         "ATLASSIAN_EMAIL",
         "ATLASSIAN_API_EMAIL",
         "ATLASSIAN_API_TOKEN",
+        "TAVILY_API_KEY",
     }
 )
 

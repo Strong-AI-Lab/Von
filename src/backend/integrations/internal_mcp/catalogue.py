@@ -8,6 +8,27 @@ from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema
 
 
+def _run_async_compat(async_fn):
+    """Run an async function from sync code.
+
+    If we're already inside a running event loop (e.g. when called via the
+    internal chat orchestrator), running `asyncio.run()` would raise.
+    In that case, we execute the coroutine in a fresh event loop in a worker
+    thread and block until completion.
+    """
+
+    import asyncio
+    import concurrent.futures
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_fn())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(async_fn())).result()
+
+
 def _get_vontology_tree(**kwargs):
     from ...vontology.utils_vontology import get_vontology_tree
 
@@ -109,7 +130,7 @@ def _get_paper_metadata(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_metadata())
+    return _run_async_compat(_async_metadata)
 
 
 def _create_concepts(**kwargs):
@@ -456,7 +477,7 @@ def _search_arxiv(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_search())
+    return _run_async_compat(_async_search)
 
 
 
@@ -482,7 +503,7 @@ def _download_paper(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_download())
+    return _run_async_compat(_async_download)
 
 
 def _list_papers(**kwargs):
@@ -498,7 +519,7 @@ def _list_papers(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_list())
+    return _run_async_compat(_async_list)
 
 
 def _read_paper(**kwargs):
@@ -518,7 +539,7 @@ def _read_paper(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_read())
+    return _run_async_compat(_async_read)
 
 
 # Search MCP handlers
@@ -548,7 +569,7 @@ def _search_web(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_search())
+    return _run_async_compat(_async_search)
 
 
 def _context_search(**kwargs):
@@ -578,7 +599,7 @@ def _context_search(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_context_search())
+    return _run_async_compat(_async_context_search)
 
 
 def _qna_search(**kwargs):
@@ -602,7 +623,7 @@ def _qna_search(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_qna_search())
+    return _run_async_compat(_async_qna_search)
 
 
 def _extract_url(**kwargs):
@@ -622,7 +643,200 @@ def _extract_url(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_extract())
+    return _run_async_compat(_async_extract)
+
+
+def _resilient_extract_url(**kwargs):
+    """Extract content from a URL with deterministic fallbacks.
+
+    This is intended to handle common failure modes of `extract_url`, especially
+    JavaScript-rendered profile pages that return empty/blocked content. The
+    handler first attempts direct extraction. If that fails, it performs a web
+    search and attempts extraction on a small number of candidate URLs.
+    """
+
+    from urllib.parse import unquote, urlparse
+    import re
+
+    primary_url = kwargs.get("url")
+    if not primary_url:
+        return {"error": "Missing required parameter: url", "success": False}
+
+    fallback_query = kwargs.get("fallback_query")
+    context = kwargs.get("context")
+
+    max_fallback_results = int(kwargs.get("max_fallback_results", 5) or 5)
+    max_extracts = int(kwargs.get("max_extracts", 4) or 4)
+    max_chars = int(kwargs.get("max_chars", 12000) or 12000)
+    min_content_chars = int(kwargs.get("min_content_chars", 200) or 200)
+    search_depth = kwargs.get("search_depth", "basic")
+    include_domains = kwargs.get("include_domains")
+    exclude_domains = kwargs.get("exclude_domains")
+
+    def _safe_text(value):
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            return str(value)
+        return value
+
+    def _truncate(text: str) -> str:
+        if max_chars <= 0:
+            return text
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars]
+
+    def _summarise_attempt(result: dict, attempted_url: str) -> dict:
+        content = _safe_text(result.get("content"))
+        title = result.get("title")
+        return {
+            "url": attempted_url,
+            "success": bool(result.get("success")) and bool(content.strip()),
+            "title": title,
+            "content_chars": len(content),
+            "error": result.get("error"),
+        }
+
+    def _derive_query(url: str) -> str:
+        parsed = urlparse(url)
+        host = parsed.netloc or ""
+        last_segment = parsed.path.rstrip("/").split("/")[-1]
+        last_segment = unquote(last_segment)
+        last_segment = re.sub(r"[-_]+", " ", last_segment)
+        last_segment = re.sub(r"\s+", " ", last_segment).strip()
+        if last_segment and host:
+            return f"{last_segment} {host}"
+        if last_segment:
+            return last_segment
+        return host or url
+
+    attempted: list[dict] = []
+
+    primary_result = _extract_url(url=primary_url)
+    attempted.append(_summarise_attempt(primary_result, primary_url))
+    primary_content = _safe_text(primary_result.get("content"))
+    if bool(primary_result.get("success")) and primary_content.strip():
+        return {
+            "success": True,
+            "primary_url": primary_url,
+            "extracted_from_url": primary_url,
+            "title": primary_result.get("title"),
+            "content": _truncate(primary_content),
+            "attempted": attempted,
+            "search": {
+                "attempted": False,
+                "query": None,
+                "used_context": False,
+                "results_count": 0,
+                "candidate_urls": [],
+            },
+        }
+
+    if not isinstance(fallback_query, str) or not fallback_query.strip():
+        fallback_query = _derive_query(primary_url)
+
+    if context:
+        search_result = _context_search(
+            query=fallback_query,
+            context=context,
+            max_results=max_fallback_results,
+            search_depth=search_depth,
+            include_answer=False,
+        )
+        used_context = True
+    else:
+        search_result = _search_web(
+            query=fallback_query,
+            max_results=max_fallback_results,
+            search_depth=search_depth,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            include_answer=False,
+            include_raw_content=False,
+            include_images=False,
+        )
+        used_context = False
+
+    results = search_result.get("results") or []
+    candidate_urls: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        candidate_url = item.get("url")
+        if not isinstance(candidate_url, str) or not candidate_url:
+            continue
+        if candidate_url == primary_url:
+            continue
+        if candidate_url in candidate_urls:
+            continue
+        candidate_urls.append(candidate_url)
+
+    best_payload: dict | None = None
+    best_score: float | None = None
+
+    for candidate_url in candidate_urls[: max(0, max_extracts)]:
+        candidate_result = _extract_url(url=candidate_url)
+        attempted.append(_summarise_attempt(candidate_result, candidate_url))
+        candidate_content = _safe_text(candidate_result.get("content")).strip()
+        if not (bool(candidate_result.get("success")) and candidate_content):
+            continue
+        if len(candidate_content) < min_content_chars:
+            continue
+
+        score = float(len(candidate_content))
+        lowered = candidate_content.lower()
+        for needle in ("biography", "research", "publications", "education", "university"):
+            if needle in lowered:
+                score += 250.0
+
+        if best_score is None or score > best_score:
+            best_score = score
+            best_payload = {
+                "url": candidate_url,
+                "title": candidate_result.get("title"),
+                "content": candidate_content,
+            }
+
+    if best_payload is not None:
+        return {
+            "success": True,
+            "primary_url": primary_url,
+            "extracted_from_url": best_payload.get("url"),
+            "title": best_payload.get("title"),
+            "content": _truncate(_safe_text(best_payload.get("content"))),
+            "attempted": attempted,
+            "search": {
+                "attempted": True,
+                "query": fallback_query,
+                "used_context": used_context,
+                "results_count": len(results) if isinstance(results, list) else 0,
+                "candidate_urls": candidate_urls,
+            },
+        }
+
+    error_message = primary_result.get("error")
+    if not error_message and isinstance(search_result, dict):
+        error_message = search_result.get("error")
+    if not error_message:
+        error_message = "No extractable fallback sources found"
+
+    return {
+        "success": False,
+        "primary_url": primary_url,
+        "extracted_from_url": None,
+        "title": None,
+        "content": None,
+        "attempted": attempted,
+        "search": {
+            "attempted": True,
+            "query": fallback_query,
+            "used_context": used_context,
+            "results_count": len(results) if isinstance(results, list) else 0,
+            "candidate_urls": candidate_urls,
+        },
+        "error": error_message,
+    }
 
 
 def _delete_concept(**kwargs):
@@ -833,19 +1047,19 @@ def _add_relationship_output_schema() -> Schema:
             "success": bool,
         },
         optional={
+            "relationship_type": (str, type(None)),
+            "message": (str, type(None)),
             "source_id": (str, type(None)),
             "predicate": (str, type(None)),
             "target": (str, type(None)),
-            "relationship_type": (str, type(None)),
+            "already_existed": (bool, type(None)),
+            "added": (bool, type(None)),
             "text_value_id": (str, type(None)),
             "relation_id": (str, type(None)),
-            "added": (bool, type(None)),
-            "already_existed": (bool, type(None)),
-            "message": (str, type(None)),
             "error": (str, type(None)),
         },
         allow_unknown=True,
-        description="add_relationship output: success (bool), source_id, predicate, target, and optional fields: relationship_type ('text_relation' or omitted for concept relations), text_value_id/relation_id (for text predicates), added (bool, false if already existed), already_existed (bool), message, error",
+        description="add_relationship output: success (bool), relationship_type (str), message (str), source_id (str), predicate (str), target (str), already_existed (bool), added (bool), text_value_id (str), relation_id (str), error (str)",
     )
 
 
@@ -858,7 +1072,7 @@ def _remove_relationship_input_schema() -> Schema:
         },
         optional={},
         allow_unknown=True,
-        description="remove_relationship input: source_id (str), predicate (alias or field name), target (str). Removes concept-to-concept relations only; text relations removal not supported here.",
+        description="remove_relationship input: source_id (str, concept ID), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate), target (str, target concept ID). Only concept-to-concept relationships are supported.",
     )
 
 
@@ -1139,6 +1353,52 @@ def _extract_url_output_schema() -> Schema:
         },
         allow_unknown=True,
         description="extract_url output: content (str, extracted text), title (str, page title), url (str, source URL), or error (str) if failed",
+    )
+
+
+def _resilient_extract_url_input_schema() -> Schema:
+    return Schema(
+        required={
+            "url": str,
+        },
+        optional={
+            "fallback_query": (str,),
+            "context": (str,),
+            "max_fallback_results": (int,),
+            "max_extracts": (int,),
+            "search_depth": (str,),
+            "max_chars": (int,),
+            "min_content_chars": (int,),
+            "include_domains": (list,),
+            "exclude_domains": (list,),
+        },
+        allow_unknown=True,
+        description=(
+            "resilient_extract_url input: url (str, required), optional fallback_query (str, overrides derived search query), "
+            "context (str, optional context for context_search), max_fallback_results (int, default 5), max_extracts (int, default 4), "
+            "search_depth ('basic'|'advanced', default 'basic'), max_chars (int, default 12000), min_content_chars (int, default 200), "
+            "include_domains/exclude_domains (list of domains)."
+        ),
+    )
+
+
+def _resilient_extract_url_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "primary_url": (str, type(None)),
+            "extracted_from_url": (str, type(None)),
+            "title": (str, type(None)),
+            "content": (str, type(None)),
+            "attempted": (list, type(None)),
+            "search": (dict, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "resilient_extract_url output: best-effort extraction with fallbacks. Returns content/title plus attempted extractions and search provenance."
+        ),
     )
 
 
@@ -1642,7 +1902,7 @@ def _jira_search(**kwargs):
         )
 
     try:
-        return asyncio.run(_async_search())
+        return _run_async_compat(_async_search)
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -1660,7 +1920,7 @@ def _jira_get_issue(**kwargs):
         return await proxy.get_issue(issue_key=issue_key, fields=kwargs.get("fields"))
 
     try:
-        return asyncio.run(_async_get_issue())
+        return _run_async_compat(_async_get_issue)
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -1679,7 +1939,7 @@ def _jira_add_comment(**kwargs):
         return await proxy.add_comment(issue_key=issue_key, comment=comment)
 
     try:
-        return asyncio.run(_async_comment())
+        return _run_async_compat(_async_comment)
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -1698,7 +1958,7 @@ def _jira_transition_issue(**kwargs):
         return await proxy.transition_issue(issue_key=issue_key, transition_id=transition_id)
 
     try:
-        return asyncio.run(_async_transition())
+        return _run_async_compat(_async_transition)
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -1712,7 +1972,7 @@ def _jira_get_myself(**kwargs):
         return await proxy.get_myself()
 
     try:
-        return asyncio.run(_async_get_myself())
+        return _run_async_compat(_async_get_myself)
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -2313,6 +2573,19 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             timeout_sec=15.0,
             description="Extract and return the main text content from a specific URL. Use when user provides a URL and wants to read, analyse, or extract information from that specific web page. Returns cleaned text content and page title. Useful for reading articles, documentation, or any web page content. Example: 'read this article: https://example.com/article', 'extract content from this URL'.",
+        ),
+        MethodDefinition(
+            name="resilient_extract_url",
+            handler=_resilient_extract_url,
+            input_schema=_resilient_extract_url_input_schema(),
+            output_schema=_resilient_extract_url_output_schema(),
+            category="read",
+            timeout_sec=30.0,
+            description=(
+                "Extract main text from a URL with deterministic fallbacks. First tries direct extraction; if the page is empty/blocked "
+                "(common for JavaScript-rendered profile pages), it falls back to web search and attempts extraction from a small set of "
+                "candidate URLs. Returns content plus provenance (attempted URLs and search query)."
+            ),
         ),
         # Gmail MCP tools (read-only surface)
         MethodDefinition(
