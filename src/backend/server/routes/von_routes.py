@@ -965,9 +965,48 @@ def generate():
         if tool_messages:
             current_turn_messages.extend(tool_messages)
 
-        # Calculate context statistics for visibility
-        context_stats = _calculate_context_stats(enhanced_context)
-        current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
+        # Calculate context statistics for visibility.
+        # If the internal orchestrator is enabled, it augments and trims the context
+        # before sending it to the LLM, so report stats for the *actual* sent context.
+        sent_context_for_stats = enhanced_context
+        if orchestrator is not None:
+            build_augmented = getattr(orchestrator, "_build_augmented_context", None)
+            if callable(build_augmented):
+                try:
+                    sent_context_for_stats = build_augmented(
+                        enhanced_context,
+                        user_namespace=user_namespace,
+                        auxiliary_system_prompt=auxiliary_system_prompt,
+                    )
+                except Exception:
+                    sent_context_for_stats = enhanced_context
+
+        sent_context_stats_messages: list[dict] = enhanced_context
+        if isinstance(sent_context_for_stats, list):
+            normalised_messages: list[dict] = []
+            for msg in sent_context_for_stats:
+                if isinstance(msg, dict):
+                    normalised_messages.append(msg)
+                    continue
+                try:
+                    normalised_messages.append(dict(msg))
+                except Exception:
+                    continue
+            if normalised_messages:
+                sent_context_stats_messages = normalised_messages
+
+        context_stats = _calculate_context_stats(sent_context_stats_messages)
+
+        # stored_context should reflect the persisted user/session history when authenticated,
+        # not the unauthenticated in-memory CONTEXT list.
+        if user_concept_id:
+            try:
+                persisted_history = chat_history_service.get_chat_history(user_concept_id, session_id)
+            except Exception:
+                persisted_history = []
+            current_context_stats = _calculate_context_stats(persisted_history)
+        else:
+            current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
 
         # Calculate tool statistics if tools were used
         tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
@@ -978,6 +1017,11 @@ def generate():
             "messages": current_turn_messages,
             "response": response_text,
             "user_prompt": user_prompt_debug,
+            "internal_mcp": {
+                "gateway_present": gateway is not None,
+                "gateway_enabled": bool(getattr(gateway, "enabled", False)) if gateway is not None else False,
+                "orchestrator_present": orchestrator is not None,
+            },
             "context_stats": {
                 "sent_to_llm": context_stats,  # What was actually sent this turn
                 "stored_context": current_context_stats  # Current state after this turn

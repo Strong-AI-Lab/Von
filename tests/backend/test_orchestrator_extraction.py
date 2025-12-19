@@ -18,6 +18,60 @@ class _DummyGateway:
     def describe_methods(self):
         return {"test": {"description": "dummy"}}
 
+
+def test_extract_tool_calls_accepts_single_tool_call():
+    text = '{"action": "call_tool", "tool": "test", "payload": {}}'
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    calls = orchestrator._extract_tool_calls(text)
+    assert calls == [{"action": "call_tool", "tool": "test", "payload": {}}]
+
+
+def test_extract_tool_calls_accepts_json_array_batch():
+    text = (
+        '[{"action":"call_tool","tool":"test","payload":{}},'
+        '{"action":"call_tool","tool":"test","payload":{"a":1}}]'
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    calls = orchestrator._extract_tool_calls("".join(text))
+    assert calls is not None
+    assert len(calls) == 2
+    assert calls[0]["tool"] == "test"
+    assert calls[1]["payload"]["a"] == 1
+
+
+def test_extract_tool_calls_accepts_fenced_json_array_batch():
+    text = (
+        "Here is the tool batch:\n"
+        "```json\n"
+        "[{\"action\":\"call_tool\",\"tool\":\"test\",\"payload\":{}},"
+        "{\"action\":\"call_tool\",\"tool\":\"test\",\"payload\":{}}]\n"
+        "```"
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    calls = orchestrator._extract_tool_calls(text)
+    assert calls is not None
+    assert len(calls) == 2
+
+
+def test_extract_tool_calls_accepts_missing_action_when_tool_is_known_in_batch():
+    text = '[{"tool": "test", "payload": {}}, {"tool": "test", "payload": {"x": 2}}]'
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    calls = orchestrator._extract_tool_calls(text)
+    assert calls is not None
+    assert calls[0]["action"] == "call_tool"
+    assert calls[1]["action"] == "call_tool"
+    assert calls[1]["payload"]["x"] == 2
+
+
+def test_extract_tool_calls_rejects_concatenated_json_objects():
+    text = (
+        '{"action": "call_tool", "tool": "a", "payload": {}}\n'
+        '{"action": "call_tool", "tool": "b", "payload": {}}'
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    with pytest.raises(ToolCallParsingError):
+        orchestrator._extract_tool_calls(text)
+
 def test_extract_json_blob_pure_json():
     text = '{"action": "call_tool", "tool": "test", "payload": {}}'
     orchestrator = InternalMCPChatOrchestrator(gateway=None)  # type: ignore[arg-type]

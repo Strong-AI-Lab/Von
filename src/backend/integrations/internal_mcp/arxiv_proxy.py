@@ -102,7 +102,6 @@ class ArxivMCPProxy:
                 # Send request
                 request_json = json.dumps(request) + "\n"
                 logger.debug("%s Sending request: %s", _LOG_TAG, request_json.strip())
-                print(f"[ARXIV DEBUG] Sending: {request_json.strip()}", flush=True)  # DEBUG
 
                 if self._process.stdin is None:
                     raise ArxivProxyError("Process stdin is None")
@@ -119,7 +118,6 @@ class ArxivMCPProxy:
                     raise ArxivProxyError("No response from arxiv-mcp-server")
 
                 logger.debug("%s Received response: %s", _LOG_TAG, response_line.strip())
-                print(f"[ARXIV DEBUG] Received: {response_line.strip()}", flush=True)  # DEBUG
                 response = json.loads(response_line)
 
                 # Check for error

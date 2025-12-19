@@ -9,6 +9,31 @@ import datetime # Added for type hinting and __main__ example
 
 logger = logging.getLogger(__name__)
 
+
+def _debug_mongo_enabled() -> bool:
+    return os.environ.get("VON_DEBUG_MONGO", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _redact_mongo_uri_for_log(uri: str) -> str:
+    redacted = uri
+    if "@" in redacted:
+        prefix, rest = redacted.split("://", 1)
+        if "@" in rest:
+            creds, hostpart = rest.split("@", 1)
+            user = creds.split(":", 1)[0] if ":" in creds else creds
+            redacted = f"{prefix}://{user}:***@{hostpart}"
+    return redacted
+
+
+def _host_display_from_uri(uri: str) -> str:
+    # Best-effort host display, safe for logs.
+    redacted = _redact_mongo_uri_for_log(uri)
+    if "@" in redacted:
+        return redacted.split("@")[-1].split("/")[0]
+    if "://" in redacted:
+        return redacted.split("://", 1)[1].split("/")[0]
+    return redacted.split("/")[0]
+
 USE_MOCK_DB = os.environ.get("VON_USE_MOCK_DB", "0").lower() in {"1", "true", "yes"}
 mongomock = None
 if USE_MOCK_DB:
@@ -112,33 +137,27 @@ def get_db() -> Database | None:
             _mongo_client.admin.command('ismaster')
             _effective_uri = MONGO_URI
             _using_fallback = False
-            if os.environ.get("VON_DEBUG_MONGO"):
+            if _debug_mongo_enabled():
                 try:
-                    redacted = MONGO_URI
-                    if "@" in redacted:
-                        # Remove credentials between protocol and @
-                        prefix, rest = redacted.split("://", 1)
-                        if "@" in rest:
-                            creds, hostpart = rest.split("@", 1)
-                            # keep only username
-                            if ":" in creds:
-                                user = creds.split(":", 1)[0]
-                            else:
-                                user = creds
-                            redacted = f"{prefix}://{user}:***@{hostpart}"
-                    host_display = redacted.split("@")[-1].split("/")[0]
-                    print(f"[MongoConnect] Connected primary URI host(s): {host_display}")
-                except Exception as _e:
-                    print(f"[MongoConnect] Debug logging failed: {_e}")
+                    logger.debug(
+                        "[MongoConnect] Connected primary URI host(s): %s",
+                        _host_display_from_uri(MONGO_URI),
+                    )
+                except Exception:
+                    # Never allow debug logging failures to affect connection behaviour.
+                    pass
         except ConnectionFailure as e:
-            print(f"Error connecting to MongoDB (ConnectionFailure): {e}")
+            logger.warning("Error connecting to MongoDB (ConnectionFailure): %s", e)
             if "SSL" in str(e) and "TLSV1_ALERT_INTERNAL_ERROR" in str(e):
-                print(f"\n{Fore.BLUE}[VON_ASSISTANT_SUGGESTION]{Style.RESET_ALL} This appears to be an SSL/TLS handshake error.")
-                print("This commonly occurs when the current IP address is not whitelisted in MongoDB Atlas.")
-                print("IMPORTANT: IP whitelists are PER-PROJECT, not per-organization!")
-                print(f"Verify your IP is whitelisted in the CORRECT project: '{os.environ.get('MONGO_PROJECT', 'Unknown')}'")
-                print("Steps: Atlas Console → Select correct Organization → Select correct Project → Security → Network Access")
-                print("Your IP should be listed as Active in the project that contains your cluster.\n")
+                logger.warning(
+                    "[VON_ASSISTANT_SUGGESTION] This appears to be an SSL/TLS handshake error. "
+                    "This commonly occurs when the current IP address is not whitelisted in MongoDB Atlas. "
+                    "IMPORTANT: IP whitelists are per-project, not per-organisation. "
+                    "Verify your IP is whitelisted in the correct project: '%s'. "
+                    "Steps: Atlas Console → Select correct Organisation → Select correct Project → Security → Network Access."
+                    " Your IP should be listed as Active in the project that contains your cluster.",
+                    os.environ.get("MONGO_PROJECT", "Unknown"),
+                )
 
             _mongo_client = None  # Ensure client is None on failure
 
@@ -148,9 +167,13 @@ def get_db() -> Database | None:
             is_ssl_error = "SSL" in str(e) or "10054" in str(e) or "handshake" in str(e).lower()
 
             # Debug logging for fallback logic
-            print(f"[MongoConnect] Connection failed. is_ssl_error={is_ssl_error}")
-            print(f"[MongoConnect] MONGO_ALLOW_LOCAL_FALLBACK={MONGO_ALLOW_LOCAL_FALLBACK}")
-            print(f"[MongoConnect] MONGO_URI starts with mongodb+srv://: {MONGO_URI.startswith('mongodb+srv://')}")
+            if _debug_mongo_enabled():
+                logger.debug("[MongoConnect] Connection failed. is_ssl_error=%s", is_ssl_error)
+                logger.debug("[MongoConnect] MONGO_ALLOW_LOCAL_FALLBACK=%s", MONGO_ALLOW_LOCAL_FALLBACK)
+                logger.debug(
+                    "[MongoConnect] MONGO_URI starts with mongodb+srv://: %s",
+                    MONGO_URI.startswith("mongodb+srv://"),
+                )
 
             # Attempt local fallback for SRV/DNS issues OR SSL blocks if allowed
             # We relax the srv check if explicit fallback is enabled and we have an SSL error
@@ -160,7 +183,9 @@ def get_db() -> Database | None:
 
             if should_try_fallback:
                 try:
-                    print("Attempting local MongoDB fallback due to connection failure...")
+                    logger.warning(
+                        "[mongo_fallback] Attempting local MongoDB fallback due to connection failure."
+                    )
                     _mongo_client = MongoClient(MONGO_LOCAL_URI, serverSelectionTimeoutMS=3000)
                     _mongo_client.admin.command('ismaster')
                     _effective_uri = MONGO_LOCAL_URI
@@ -169,24 +194,28 @@ def get_db() -> Database | None:
                         logger.warning("[mongo_fallback] Using local fallback Mongo URI instead of primary (connection failure).")
                     except Exception:
                         pass
-                    if os.environ.get("VON_DEBUG_MONGO"):
+                    if _debug_mongo_enabled():
                         try:
-                            host_display = MONGO_LOCAL_URI.split("@")[-1].split("/")[0]
-                            print(f"[MongoConnect] Local fallback host: {host_display}")
-                        except Exception as _e:
-                            print(f"[MongoConnect] Debug logging (fallback) failed: {_e}")
+                            logger.debug(
+                                "[MongoConnect] Local fallback host: %s",
+                                _host_display_from_uri(MONGO_LOCAL_URI),
+                            )
+                        except Exception:
+                            pass
                 except Exception as fe:
-                    print(f"Local fallback connection failed: {fe}")
+                    logger.warning("Local fallback connection failed: %s", fe)
                     _mongo_client = None
                     return None
             else:
                 return None
         except Exception as e:
-            print(f"An unexpected error occurred during MongoDB client initialization: {e}")
+            logger.warning("An unexpected error occurred during MongoDB client initialisation: %s", e)
             # Attempt local fallback for DNS resolution errors (common with SRV)
             if MONGO_ALLOW_LOCAL_FALLBACK and ("resolution" in str(e).lower() or "dns" in str(e).lower() or MONGO_URI.startswith("mongodb+srv://")):
                 try:
-                    print("Attempting local MongoDB fallback due to DNS/SRV error...")
+                    logger.warning(
+                        "[mongo_fallback] Attempting local MongoDB fallback due to DNS/SRV error."
+                    )
                     _mongo_client = MongoClient(MONGO_LOCAL_URI, serverSelectionTimeoutMS=3000)
                     _mongo_client.admin.command('ismaster')
                     _effective_uri = MONGO_LOCAL_URI
@@ -195,14 +224,16 @@ def get_db() -> Database | None:
                         logger.warning("[mongo_fallback] Using local fallback Mongo URI instead of primary (DNS/SRV error).")
                     except Exception:
                         pass
-                    if os.environ.get("VON_DEBUG_MONGO"):
+                    if _debug_mongo_enabled():
                         try:
-                            host_display = MONGO_LOCAL_URI.split("@")[-1].split("/")[0]
-                            print(f"[MongoConnect] Local fallback host: {host_display}")
-                        except Exception as _e:
-                            print(f"[MongoConnect] Debug logging (fallback) failed: {_e}")
+                            logger.debug(
+                                "[MongoConnect] Local fallback host: %s",
+                                _host_display_from_uri(MONGO_LOCAL_URI),
+                            )
+                        except Exception:
+                            pass
                 except Exception as fe:
-                    print(f"Local fallback connection failed: {fe}")
+                    logger.warning("Local fallback connection failed: %s", fe)
                     _mongo_client = None
                     return None
             else:
@@ -217,26 +248,14 @@ def get_db() -> Database | None:
     return None
 
 def print_connection_info():
-       """Print helpful connection info on startup."""
-       global _effective_uri
-       uri_to_use = _effective_uri if _effective_uri else MONGO_URI
-       redacted_uri = uri_to_use
-       if "@" in redacted_uri:
-           prefix, rest = redacted_uri.split("://", 1)
-           if "@" in rest:
-               creds, hostpart = rest.split("@", 1)
-               if ":" in creds:
-                   user = creds.split(":", 1)[0]
-               else:
-                   user = creds
-               redacted_uri = f"{prefix}://{user}:***@{hostpart}"
-
-       host = redacted_uri.split("@")[-1].split("/")[0] if "@" in redacted_uri else redacted_uri.split("://")[1].split("/")[0]
-
-       if "localhost" in host or "127.0.0.1" in host:
-           print(f"[Von Database] Connecting to LOCAL MongoDB at {host}")
-       else:
-           print(f"[Von Database] Connecting to REMOTE MongoDB at {host}")
+    """Log helpful connection info on startup."""
+    global _effective_uri
+    uri_to_use = _effective_uri if _effective_uri else MONGO_URI
+    host = _host_display_from_uri(uri_to_use)
+    if "localhost" in host or "127.0.0.1" in host:
+        logger.info("[Von Database] Connecting to LOCAL MongoDB at %s", host)
+    else:
+        logger.info("[Von Database] Connecting to REMOTE MongoDB at %s", host)
 
 def get_effective_mongo_uri() -> str:
     """Return the URI that was effectively used to create the client (may be fallback)."""
@@ -258,22 +277,22 @@ def test_connection(verbose: bool = False) -> bool:
     db = get_db()
     if db is None:
         if verbose:
-            print("MongoDB client is not initialized or connection failed.")
+            logger.warning("MongoDB client is not initialised or connection failed.")
         return False
 
     try:
         # Test the connection with a simple ping
         db.command('ping')
         if verbose:
-            print("MongoDB connection successful.")
+            logger.info("MongoDB connection successful.")
         return True
     except ConnectionFailure as e:
         if verbose:
-            print(f"MongoDB connection failed (ConnectionFailure): {e}")
+            logger.warning("MongoDB connection failed (ConnectionFailure): %s", e)
         return False
     except Exception as e:
         if verbose:
-            print(f"MongoDB connection test failed: {e}")
+            logger.warning("MongoDB connection test failed: %s", e)
         return False
 
 # --- Collection Access ---
@@ -387,9 +406,17 @@ def get_entities_collection() -> Collection | None:
             entities_coll.create_index([("linked_entities.target_entity_id", ASCENDING)])
             # print(f"Indexes for \'{ENTITIES_COLLECTION_NAME}\' ensured.")
         except OperationFailure as e:
-            print(f"Error creating indexes for \'{ENTITIES_COLLECTION_NAME}\': {e}. This might happen with certain MongoDB configurations (e.g., free tier Atlas).")
+            logger.warning(
+                "Error creating indexes for '%s': %s. This might happen with certain MongoDB configurations (e.g., free tier Atlas).",
+                ENTITIES_COLLECTION_NAME,
+                e,
+            )
         except Exception as e:
-            print(f"An unexpected error occurred during index creation for \'{ENTITIES_COLLECTION_NAME}\': {e}")
+            logger.warning(
+                "An unexpected error occurred during index creation for '%s': %s",
+                ENTITIES_COLLECTION_NAME,
+                e,
+            )
         return entities_coll
     return None
 
@@ -445,9 +472,17 @@ def get_application_settings_collection() -> Collection | None:
             settings_coll.create_index([("setting_name", ASCENDING)], unique=True)
             # print(f"Indexes for '{APPLICATION_SETTINGS_COLLECTION_NAME}' ensured.")
         except OperationFailure as e:
-            print(f"Error creating indexes for '{APPLICATION_SETTINGS_COLLECTION_NAME}': {e}.")
+            logger.warning(
+                "Error creating indexes for '%s': %s",
+                APPLICATION_SETTINGS_COLLECTION_NAME,
+                e,
+            )
         except Exception as e:
-            print(f"An unexpected error occurred during index creation for '{APPLICATION_SETTINGS_COLLECTION_NAME}': {e}")
+            logger.warning(
+                "An unexpected error occurred during index creation for '%s': %s",
+                APPLICATION_SETTINGS_COLLECTION_NAME,
+                e,
+            )
         return settings_coll
     return None
 

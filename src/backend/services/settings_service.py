@@ -78,7 +78,7 @@ def update_setting(setting_name: str, setting_value: Any) -> bool:
         settings_collection = get_application_settings_collection()
         if settings_collection is None:
             # For test_update_setting_collection_unavailable
-            print(f"Error: Could not access the '{APPLICATION_SETTINGS_COLLECTION_NAME}' collection.") # Use imported constant
+            logger.error("Could not access the '%s' collection.", APPLICATION_SETTINGS_COLLECTION_NAME)
             return False
 
         # Pre-check for existing setting with the same value
@@ -500,14 +500,17 @@ def get_openai_env_var() -> Optional[str]:
     if env_var is None:
         return "OPENAI_API_KEY"  # Default value
     if not isinstance(env_var, str):
-        print(f"Warning: OpenAI env var setting is not a string: {type(env_var)}. Using default.")
+        logger.warning(
+            "OpenAI env var setting is not a string: %s. Using default.",
+            type(env_var),
+        )
         return "OPENAI_API_KEY"
     return env_var
 
 def set_openai_env_var(env_var: str) -> bool:
     """Set the environment variable name for OpenAI API key."""
     if not isinstance(env_var, str):
-        print(f"Error: env_var must be a string. Got: {type(env_var)}")
+        logger.error("env_var must be a string. Got: %s", type(env_var))
         return False
     return update_setting(OPENAI_ENV_VAR_SETTING_NAME, env_var)
 

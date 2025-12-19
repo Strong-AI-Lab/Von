@@ -10,6 +10,9 @@ from typing import Optional, Dict, Any, List
 
 from ..db.mongo_client import get_interaction_log_collection, INTERACTION_LOG_COLLECTION_NAME
 
+
+logger = logging.getLogger(__name__)
+
 def log_knowledge_interaction(
     interaction_type: str,
     target_entity_id: str, # For individuals: their _id from 'entities'. For types: their vontology_path string.
@@ -33,7 +36,12 @@ def log_knowledge_interaction(
     try:
         log_collection = get_interaction_log_collection()
         if log_collection is None:
-            print(f"Error: Could not get {INTERACTION_LOG_COLLECTION_NAME}. Interaction of type '{interaction_type}' for entity '{target_entity_id}' not logged.")
+            logger.error(
+                "Could not get %s. Interaction of type '%s' for entity '%s' not logged.",
+                INTERACTION_LOG_COLLECTION_NAME,
+                interaction_type,
+                target_entity_id,
+            )
             return
 
         user_identifier = user_identifier_override if user_identifier_override else request.headers.get('X-User-Client-ID', 'unknown_client')
@@ -53,6 +61,11 @@ def log_knowledge_interaction(
         }
         log_collection.insert_one(log_entry)
     except Exception as e:  # pragma: no cover
-        print(f"Error logging knowledge interaction (type: {interaction_type}, entity: {target_entity_id}): {e}")
+        logger.exception(
+            "Error logging knowledge interaction (type: %s, entity: %s): %s",
+            interaction_type,
+            target_entity_id,
+            e,
+        )
         # Optionally, implement more robust error handling here (e.g., retry, log to file)
         # For now, we don't want logging failure to break the main operation.
