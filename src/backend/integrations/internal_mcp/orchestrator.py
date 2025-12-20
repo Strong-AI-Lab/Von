@@ -29,6 +29,16 @@ class OrchestratorResult:
     tool_invocations: Sequence[Mapping[str, Any]]
 
 
+@dataclass(frozen=True)
+class _MissingToolCallDetectorSpec:
+    """Declarative definition of the missing-tool-call detector."""
+
+    action_id: str
+    prompt_id: Optional[str]
+    prompt_text: str
+    model: Optional[str]
+
+
 class ToolCallParsingError(Exception):
     """Raised when a model returns an invalid tool call payload."""
 
@@ -40,6 +50,7 @@ class InternalMCPChatOrchestrator:
     _CALL_ACTION = "call_tool"
     _TOOL_FIELD = "tool"
     _PAYLOAD_FIELD = "payload"
+    _MISSING_TOOL_CALL_ACTION_ID = "#V#detect_missing_tool_call_action"
 
     def __init__(
         self,
@@ -56,6 +67,10 @@ class InternalMCPChatOrchestrator:
         self._logger = logger or logging.getLogger(__name__)
         self._max_tool_invocations = max(0, int(max_tool_invocations))
         self._default_gmail_profile = default_gmail_profile
+
+        # Vontology-backed missing-tool-call detector (lazy loaded)
+        self._missing_tool_call_detector: Optional[_MissingToolCallDetectorSpec] = None
+        self._missing_tool_call_detector_loaded: bool = False
 
         # Guardrails against context/tool-result bloat.
         # These are expressed in characters (not tokens) to avoid model-specific tokenisers.
@@ -375,6 +390,218 @@ class InternalMCPChatOrchestrator:
                 return True
 
         return False
+
+    def _first_relationship_value(
+        self, concept: Mapping[str, Any] | None, predicate: str
+    ) -> Optional[str]:
+        """Return the first string relationship target for a predicate."""
+
+        if not concept:
+            return None
+
+        relationships = concept.get("relationships") if isinstance(concept, Mapping) else None
+        if not isinstance(relationships, Mapping):
+            return None
+
+        raw = relationships.get(predicate)
+        if isinstance(raw, str):
+            return raw.strip() or None
+        if isinstance(raw, Iterable):
+            for candidate in raw:
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+        return None
+
+    def _get_text_content_for_concept(self, concept_id: str) -> Optional[str]:
+        """Resolve content for a concept using preserved fields or text relations."""
+
+        if not isinstance(concept_id, str) or not concept_id.strip():
+            return None
+
+        concept_id = concept_id.strip()
+
+        try:
+            from src.backend.services.concept_service import get_concept_by_concept_id
+        except Exception:
+            return None
+
+        try:
+            concept = get_concept_by_concept_id(concept_id)
+        except Exception:
+            concept = None
+
+        candidate_texts: List[Dict[str, Any]] = []
+
+        def _add_candidate(text_value: str, *, predicate: str = "hasContent", lang: str = "") -> None:
+            if isinstance(text_value, str) and text_value.strip():
+                candidate_texts.append({"text": text_value.strip(), "predicate": predicate, "lang": lang})
+
+        if isinstance(concept, Mapping):
+            direct_content = concept.get("content")
+            if isinstance(direct_content, str):
+                _add_candidate(direct_content, predicate="direct", lang="")
+
+            preserved = (
+                concept.get("concept_data", {})
+                if isinstance(concept.get("concept_data"), Mapping)
+                else {}
+            )
+            preserved_fields = (
+                preserved.get("preserved_fields", {})
+                if isinstance(preserved.get("preserved_fields"), Mapping)
+                else {}
+            )
+            preserved_content = preserved_fields.get("content")
+            if isinstance(preserved_content, str):
+                _add_candidate(preserved_content, predicate="preserved_content", lang="")
+
+        try:
+            from src.backend.services.text_value_service import get_texts_for_concept
+
+            texts = get_texts_for_concept(concept_id)
+        except Exception:
+            texts = None
+
+        if isinstance(texts, list):
+            for text in texts:
+                if not isinstance(text, dict):
+                    continue
+                predicate = text.get("predicate")
+                if predicate not in {"hasContent", "hasDescription"}:
+                    continue
+                text_value = text.get("text")
+                if not isinstance(text_value, str) or not text_value.strip():
+                    continue
+                lang = text.get("lang") if isinstance(text.get("lang"), str) else ""
+                _add_candidate(text_value, predicate=predicate, lang=lang)
+
+        if not candidate_texts:
+            return None
+
+        def _sort_key(item: Dict[str, Any]) -> tuple[int, int, str]:
+            predicate = item.get("predicate")
+            lang = item.get("lang")
+
+            predicate_rank = 0 if predicate == "hasContent" else 1
+            lang_rank = 0 if lang in {"en-NZ", "en"} else 1
+            # Stable ordering
+            return (predicate_rank, lang_rank, item.get("predicate", ""))
+
+        candidate_texts.sort(key=_sort_key)
+        best = candidate_texts[0].get("text")
+        return best if isinstance(best, str) else None
+
+    def _get_missing_tool_call_detector(self) -> Optional[_MissingToolCallDetectorSpec]:
+        """Load the missing-tool-call detector spec from the Vontology (best effort)."""
+
+        if self._missing_tool_call_detector_loaded:
+            return self._missing_tool_call_detector
+
+        self._missing_tool_call_detector_loaded = True
+
+        try:
+            from src.backend.services.concept_service import get_concept_by_concept_id
+        except Exception as exc:  # pragma: no cover - defensive
+            self._logger.info(
+                "[mcp_orchestrator] Missing tool-call detector unavailable (concept_service import failed): %s",
+                exc,
+            )
+            self._missing_tool_call_detector = None
+            return None
+
+        try:
+            action = get_concept_by_concept_id(self._MISSING_TOOL_CALL_ACTION_ID)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._logger.info(
+                "[mcp_orchestrator] Missing tool-call detector action not found (%s): %s",
+                self._MISSING_TOOL_CALL_ACTION_ID,
+                exc,
+            )
+            action = None
+
+        if not isinstance(action, Mapping):
+            self._missing_tool_call_detector = None
+            return None
+
+        prompt_id = self._first_relationship_value(action, "uses_prompt")
+        model_id = self._first_relationship_value(action, "uses_llm_model")
+
+        prompt_text: Optional[str] = None
+        if isinstance(prompt_id, str):
+            prompt_text = self._get_text_content_for_concept(prompt_id)
+
+        if not prompt_text:
+            self._logger.info(
+                "[mcp_orchestrator] Missing tool-call detector prompt unavailable for action=%s (prompt_id=%s)",
+                self._MISSING_TOOL_CALL_ACTION_ID,
+                prompt_id or "",
+            )
+            self._missing_tool_call_detector = None
+            return None
+
+        self._missing_tool_call_detector = _MissingToolCallDetectorSpec(
+            action_id=self._MISSING_TOOL_CALL_ACTION_ID,
+            prompt_id=prompt_id,
+            prompt_text=prompt_text,
+            model=model_id or None,
+        )
+        return self._missing_tool_call_detector
+
+    def _llm_detects_missing_tool_call(
+        self,
+        response: str,
+        llm_client: Any,
+        *,
+        fallback_model: Optional[str],
+    ) -> Optional[bool]:
+        """Run the Vontology-configured detector LLM to classify the response.
+
+        Returns True if the classifier says the model promised a tool call but
+        didn't emit one, False if the classifier says no, and None if detection
+        could not be performed (missing prompt/model or errors).
+        """
+
+        if not isinstance(response, str) or not response.strip():
+            return None
+
+        detector = self._get_missing_tool_call_detector()
+        if not detector or not detector.prompt_text:
+            return None
+
+        # Avoid ballooning the classifier input; we only need the last response.
+        truncated_response = response.strip()
+        max_chars = 4000
+        if len(truncated_response) > max_chars:
+            truncated_response = (
+                truncated_response[:max_chars]
+                + f"\n... [truncated {len(truncated_response) - max_chars} chars]"
+            )
+
+        model_name = detector.model or fallback_model
+        prompt_text = detector.prompt_text.replace("{response}", truncated_response)
+
+        try:
+            classifier_output = llm_client.generate(
+                prompt_text, context=None, model=model_name
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            self._logger.warning(
+                "[mcp_orchestrator] Missing tool-call classifier failed (model=%s): %s",
+                model_name or "default",
+                exc,
+            )
+            return None
+
+        if not isinstance(classifier_output, str):
+            return None
+
+        verdict = classifier_output.strip().lower()
+        if verdict.startswith("yes"):
+            return True
+        if verdict.startswith("no"):
+            return False
+
+        return None
 
     @staticmethod
     def _contains_fenced_tool_call_json(response: str) -> bool:
@@ -935,21 +1162,25 @@ class InternalMCPChatOrchestrator:
                     model or "default",
                 )
 
-            # Recovery: if the model strongly indicates it intended to perform a
-            # tool-backed action but did not emit a tool call, ask once more for
-            # the actual tool-call JSON.
-            should_retry = self._looks_like_missing_tool_call(
-                response
-            ) or self._contains_fenced_tool_call_json(response)
-            if should_retry:
-                reason = (
-                    "fenced JSON detected"
-                    if self._contains_fenced_tool_call_json(response)
-                    else "missing tool call language"
+            retry_reason: Optional[str] = None
+            if self._contains_fenced_tool_call_json(response):
+                retry_reason = "fenced tool-call JSON detected"
+            else:
+                llm_flag = self._llm_detects_missing_tool_call(
+                    response, llm_client, fallback_model=model
                 )
+
+                if llm_flag is True:
+                    retry_reason = "LLM classifier flagged missing tool call"
+                elif llm_flag is None:
+                    # Fallback to legacy heuristic only when classifier unavailable
+                    if self._looks_like_missing_tool_call(response):
+                        retry_reason = "heuristic missing tool call"
+
+            if retry_reason:
                 self._logger.info(
                     "[mcp_orchestrator] Model response looks like a missing tool call (%s); retrying once (model=%s).",
-                    reason,
+                    retry_reason,
                     model or "default",
                 )
                 retry_prompt = (
@@ -968,7 +1199,6 @@ class InternalMCPChatOrchestrator:
                     tool_calls = retry_calls
                     has_valid_tool_call = True
                 else:
-                    # Fall back to returning the original response.
                     return OrchestratorResult(
                         response_text=response, extra_messages=(), tool_invocations=()
                     )
