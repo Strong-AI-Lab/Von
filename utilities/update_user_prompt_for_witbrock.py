@@ -76,12 +76,14 @@ def main() -> int:
                 continue
 
             # Fallback for unexpected legacy rows missing relation_id.
-            delete_text_relation_by_predicate_and_text(
-                PROMPT_CONCEPT_ID,
-                predicate=t.get("predicate"),
-                text=t.get("text") or "",
-                lang=t.get("lang") or "en",
-            )
+            predicate = t.get("predicate")
+            if predicate:  # Type guard: only delete if predicate exists
+                delete_text_relation_by_predicate_and_text(
+                    PROMPT_CONCEPT_ID,
+                    predicate=predicate,
+                    text=t.get("text") or "",
+                    lang=t.get("lang") or "en",
+                )
 
         res = upsert_text_for_concept(
             subject_concept_id=PROMPT_CONCEPT_ID,

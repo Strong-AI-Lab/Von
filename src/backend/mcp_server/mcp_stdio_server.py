@@ -1002,7 +1002,7 @@ async def list_tools() -> list[Tool]:
 
 
 @app.call_tool()
-async def call_tool(name: str, arguments: Any) -> list[TextContent]:
+async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ignore[misc]
     """Handle tool calls by delegating to existing functions."""
 
     try:
