@@ -23,7 +23,7 @@ class _CapturingOrchestrator:
         )
 
         return OrchestratorResult(
-            response_text="ok", extra_messages=[], tool_invocations=[]
+            response_text="ok", extra_messages=[], tool_invocations=[], aux_llm_calls=[]
         )
 
 
