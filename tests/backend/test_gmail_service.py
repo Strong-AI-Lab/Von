@@ -69,7 +69,7 @@ def test_get_service_uses_existing_credentials(
     monkeypatch.setenv("VON_GMAIL_TOKEN_PATH", "/tmp/token.json")
     profiles = gs.load_profiles_from_env()
 
-    service = gs.get_service("von-service", profiles)
+    service = gs.get_service(list(profiles.keys())[0], profiles)
 
     assert service == mock_build.return_value
     mock_build.assert_called_once()
@@ -94,7 +94,7 @@ def test_get_service_refreshes_and_persists(
     monkeypatch.setenv("VON_GMAIL_TOKEN_PATH", "/tmp/token.json")
     profiles = gs.load_profiles_from_env()
 
-    gs.get_service("von-service", profiles)
+    gs.get_service(list(profiles.keys())[0], profiles)
 
     creds.refresh.assert_called_once()
     mock_persist.assert_called_once()
@@ -105,7 +105,10 @@ def test_get_service_refreshes_and_persists(
 @patch("src.backend.integrations.google.gmail_service.get_profile")
 def test_list_and_get_message(mock_get_profile, mock_get_service):
     mock_profile = SimpleNamespace(
-        user_id="me", label_filter=["INBOX"], query_prefix="from:someone"
+        profile_id="test",
+        user_id="me",
+        label_filter=["INBOX"],
+        query_prefix="from:someone",
     )
     mock_get_profile.return_value = mock_profile
 
