@@ -2883,6 +2883,122 @@ export async function loadConceptNames(conceptId, suffix = '') {
 }
 
 /**
+ * Load and display text relation attributes for a concept (excluding names)
+ * @param {string} conceptId - The concept ID
+ * @param {string} suffix - Optional suffix for dynamic tabs
+ */
+export async function loadConceptAttributes(conceptId, suffix = '') {
+  console.log('loadConceptAttributes called with conceptId:', conceptId, 'suffix:', suffix);
+
+  const getSuffixElement = (baseId) => {
+    const id = suffix ? `${baseId}_${suffix}` : baseId;
+    return document.getElementById(id);
+  };
+
+  const attributesList = getSuffixElement('attributesList');
+  if (!attributesList) {
+    console.warn('Attributes list element not found');
+    return;
+  }
+
+  // Clear existing attributes
+  attributesList.innerHTML = '';
+
+  if (!conceptId) {
+    const empty = document.createElement('div');
+    empty.className = 'attributes-empty-state';
+    empty.style.color = '#6b7280';
+    empty.style.fontStyle = 'italic';
+    empty.textContent = 'No attributes to display.';
+    attributesList.appendChild(empty);
+    return;
+  }
+
+  try {
+    const response = await fetch(`/vontology/api/vontology/text_relations?concept_id=${encodeURIComponent(conceptId)}&limit=200`);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    console.log('Text relations data:', data);
+
+    // Filter out hasName predicates (those are shown in Names section)
+    const attributes = (data.text_relations || []).filter(
+      rel => rel.predicate && rel.predicate !== 'hasName' && rel.predicate !== '#V#hasName'
+    );
+
+    console.log('Filtered attributes (excluding names):', attributes);
+
+    if (attributes.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'attributes-empty-state';
+      empty.style.color = '#6b7280';
+      empty.style.fontStyle = 'italic';
+      empty.textContent = 'No attributes defined yet.';
+      attributesList.appendChild(empty);
+      return;
+    }
+
+    // Display each attribute
+    attributes.forEach(attr => {
+      const cartouche = document.createElement('div');
+      cartouche.className = 'attribute-cartouche';
+      cartouche.style.display = 'flex';
+      cartouche.style.alignItems = 'center';
+      cartouche.style.gap = '8px';
+      cartouche.style.padding = '6px 12px';
+      cartouche.style.backgroundColor = '#f3f4f6';
+      cartouche.style.borderRadius = '4px';
+      cartouche.style.marginBottom = '6px';
+
+      // Predicate label
+      const predicateLabel = document.createElement('span');
+      predicateLabel.className = 'attribute-predicate';
+      predicateLabel.style.fontWeight = '600';
+      predicateLabel.style.color = '#374151';
+      predicateLabel.style.minWidth = '120px';
+      // Remove #V# prefix for display
+      const displayPredicate = attr.predicate.replace(/^#V#/, '');
+      predicateLabel.textContent = displayPredicate + ':';
+
+      // Text value
+      const textValue = document.createElement('span');
+      textValue.className = 'attribute-text';
+      textValue.style.flex = '1';
+      textValue.style.color = '#1f2937';
+      textValue.textContent = attr.text || '';
+      textValue.title = attr.text || '';
+
+      // Language badge (if not default)
+      const langBadge = document.createElement('span');
+      langBadge.className = 'attribute-language-badge';
+      langBadge.style.fontSize = '0.75rem';
+      langBadge.style.padding = '2px 6px';
+      langBadge.style.borderRadius = '3px';
+      langBadge.style.backgroundColor = '#e5e7eb';
+      langBadge.style.color = '#6b7280';
+      if (attr.language && attr.language !== 'en-NZ') {
+        langBadge.textContent = attr.language;
+      }
+
+      cartouche.appendChild(predicateLabel);
+      cartouche.appendChild(textValue);
+      if (langBadge.textContent) {
+        cartouche.appendChild(langBadge);
+      }
+
+      attributesList.appendChild(cartouche);
+    });
+
+  } catch (error) {
+    console.error('Error loading concept attributes:', error);
+    attributesList.innerHTML = '<div style="color: #dc2626; font-style: italic;">Error loading attributes</div>';
+  }
+}
+
+/**
  * Handle creating a new subtype from the concept tab
  * @param {string} suffix - The tab suffix
  */

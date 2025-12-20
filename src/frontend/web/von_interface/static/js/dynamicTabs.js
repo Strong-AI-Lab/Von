@@ -4,7 +4,7 @@
 // Removed imported populateContentSection to avoid duplicate with local implementation below
 
 import { initializeAnnotationTab } from './annotationTab.js';
-import { fetchConceptListWithSuffix, fetchSubtypesWithSuffix, initializeNamesForm, loadConceptNames, selectConceptWithSuffix } from './conceptTab.js';
+import { fetchConceptListWithSuffix, fetchSubtypesWithSuffix, initializeNamesForm, loadConceptAttributes, loadConceptNames, selectConceptWithSuffix } from './conceptTab.js';
 import { getCurrentUserConceptId } from './domUtils.js';
 import { DEFAULT_LANGUAGE } from './languageConfig.js';
 import { detectMarkdown, renderSmartText } from './markdownUtils.js';
@@ -1281,6 +1281,9 @@ async function reloadConceptTab(conceptId) {
 
         // Reload names explicitly to ensure they're fresh
         await loadConceptNames(conceptId, suffix);
+        
+        // Reload attributes explicitly
+        await loadConceptAttributes(conceptId, suffix);
 
         // Refresh lists for Type tabs (Instances and Subtypes)
         const kind = (dynamicConceptTabs.get(conceptId) || {}).kind;
@@ -1556,6 +1559,8 @@ async function initializeDynamicConceptTab(conceptId, uniqueIdSuffix) {
         try {
             await initializeNamesForm(uniqueIdSuffix);
             namesOutcome = await loadConceptNames(conceptId, uniqueIdSuffix);
+            // Load attributes (text relations excluding names)
+            await loadConceptAttributes(conceptId, uniqueIdSuffix);
         } catch (e) {
             console.warn('[dynamicTabs] Failed to initialize names form for tab', conceptId, e);
         }
