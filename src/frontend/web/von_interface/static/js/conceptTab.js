@@ -2916,7 +2916,7 @@ export async function loadConceptAttributes(conceptId, suffix = '') {
 
   try {
     const response = await fetch(`/vontology/api/vontology/text_relations?concept_id=${encodeURIComponent(conceptId)}&limit=200`);
-    
+
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
