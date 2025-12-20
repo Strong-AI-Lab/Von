@@ -38,8 +38,8 @@ def test_extract_does_not_use_search_text_parser_and_normalises_output():
 
     result = asyncio.run(proxy.extract(url="https://example.com"))
 
-    assert proxy._client.calls[0]["tool_name"] == "tavily-extract"
-    assert proxy._client.calls[0]["text_parser_is_none"] is True
+    assert proxy._client.calls[0]["tool_name"] == "tavily-extract"  # type: ignore[attr-defined]
+    assert proxy._client.calls[0]["text_parser_is_none"] is True  # type: ignore[attr-defined]
     assert result["success"] is True
     assert result["url"] == "https://example.com"
     assert result["title"] == "Example Title"
@@ -52,8 +52,8 @@ def test_search_uses_search_text_parser():
 
     _ = asyncio.run(proxy.search(query="hello"))
 
-    assert proxy._client.calls[0]["tool_name"] == "tavily-search"
-    assert proxy._client.calls[0]["text_parser_is_none"] is False
+    assert proxy._client.calls[0]["tool_name"] == "tavily-search"  # type: ignore[attr-defined]
+    assert proxy._client.calls[0]["text_parser_is_none"] is False  # type: ignore[attr-defined]
 
 
 def test_catalogue_extract_url_works_inside_running_event_loop(monkeypatch):

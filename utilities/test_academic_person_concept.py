@@ -146,7 +146,7 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
             concept_id=None,
             parent_id=person_type_id,
             person_type_id=person_type_id,
-            top_urls=top_urls,
+            top_urls=[u for u in top_urls if u is not None],
             primary_extract=primary_url,
             error=f"Extract failed: {extract.get('error')}",
         )
@@ -200,7 +200,7 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
             concept_id=None,
             parent_id=person_type_id,
             person_type_id=person_type_id,
-            top_urls=top_urls,
+            top_urls=[u for u in top_urls if u is not None],
             primary_extract=primary_url,
         )
 
@@ -218,13 +218,25 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
             concept_id=None,
             parent_id=person_type_id,
             person_type_id=person_type_id,
-            top_urls=top_urls,
+            top_urls=[u for u in top_urls if u is not None],
             primary_extract=primary_url,
             error=f"Concept creation failed: {create_result}",
         )
 
     concept = create_result.get("concept") or {}
     concept_id = concept.get("concept_id")
+
+    # Type guard: concept_id must be a string to proceed with names
+    if not isinstance(concept_id, str):
+        return RunResult(
+            success=False,
+            concept_id=None,
+            parent_id=person_type_id,
+            person_type_id=person_type_id,
+            top_urls=[u for u in top_urls if u is not None],
+            primary_extract=primary_url,
+            error="Concept creation succeeded but returned invalid concept_id",
+        )
 
     for name in proposed_names:
         upsert_text_for_concept(
@@ -245,7 +257,7 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
         concept_id=concept_id,
         parent_id=person_type_id,
         person_type_id=person_type_id,
-        top_urls=top_urls,
+        top_urls=[u for u in top_urls if u is not None],
         primary_extract=primary_url,
     )
 
