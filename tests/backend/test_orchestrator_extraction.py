@@ -154,3 +154,40 @@ def test_extract_json_blob_ignores_missing_action_when_tool_is_unknown():
     text = '{"tool": "not_a_tool", "payload": {"a": 1}}'
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     assert orchestrator._extract_json_blob(text) is None
+
+
+def test_looks_like_missing_tool_call_detects_promise_to_search():
+    """Test that 'I'm going to search...' without actual tool call is detected."""
+    text = "I'm going to search the web for authoritative information about you."
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    assert orchestrator._looks_like_missing_tool_call(text)
+
+
+def test_looks_like_missing_tool_call_detects_promise_to_execute_tools():
+    """Test that 'I'll execute the tools' without actual tool call is detected."""
+    text = "I'll fix that now and actually execute the tools."
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    assert orchestrator._looks_like_missing_tool_call(text)
+
+
+def test_looks_like_missing_tool_call_detects_promise_to_fetch():
+    """Test that 'Let me fetch...' without actual tool call is detected."""
+    text = "Let me fetch the concept details now."
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    assert orchestrator._looks_like_missing_tool_call(text)
+
+
+def test_looks_like_missing_tool_call_ignores_short_explanatory_text():
+    """Test that normal explanatory text without tool promises is not detected."""
+    text = "I'll help you with that. What would you like to know?"
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    assert not orchestrator._looks_like_missing_tool_call(text)
+
+
+def test_looks_like_missing_tool_call_ignores_long_prose():
+    """Test that long prose responses (>500 chars) don't trigger false positives."""
+    text = (
+        "I'm going to explain this carefully. " * 20  # Makes it > 500 chars
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    assert not orchestrator._looks_like_missing_tool_call(text)

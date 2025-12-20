@@ -344,6 +344,29 @@ class InternalMCPChatOrchestrator:
         if any(t in lowered for t in triggers):
             return True
 
+        # Detect "promise to do" pattern when combined with tool-related keywords
+        # This catches "I'm going to search..." or "I'll execute the tools now"
+        toolish_keywords = ("search", "web", "fetch", "execute", "tool", "ontology", "mcp", "operation", "concept", "relationship")
+        promise_patterns = (
+            "i'm going to",
+            "i am going to", 
+            "i'll",
+            "i will",
+            "let me",
+            "i'll fix that now",
+            "i'll do that now",
+            "i'll start",
+        )
+        
+        has_promise = any(p in lowered for p in promise_patterns)
+        has_toolish = any(k in lowered for k in toolish_keywords)
+        
+        if has_promise and has_toolish:
+            # Additional check: the response should be relatively short (< 500 chars)
+            # to avoid triggering on long explanatory responses
+            if len(text) < 500:
+                return True
+
         # Secondary trigger: explicit step-by-step change description without any tool JSON.
         # Only count as missing-tool-call if the assistant also uses tool-y language.
         toolish = ("ontology", "mcp", "tool", "operation")
