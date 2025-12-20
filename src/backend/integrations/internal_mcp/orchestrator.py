@@ -307,6 +307,64 @@ class InternalMCPChatOrchestrator:
 
         return False
 
+    @staticmethod
+    def _contains_fenced_tool_call_json(response: str) -> bool:
+        """Detect if response contains a fenced JSON block with tool-call structure.
+
+        This catches the pattern where the model outputs prose followed by a
+        fenced code block containing valid tool-call JSON, but the strict
+        extraction logic rejected it (due to too much leading prose).
+
+        Only triggers if the fenced content parses to a dict/list with tool-call shape.
+        """
+
+        if not isinstance(response, str):
+            return False
+
+        # Look for ```json or ``` fences
+        fence_patterns = [
+            ("```json\n", "\n```"),
+            ("```\n", "\n```"),
+        ]
+
+        for open_fence, close_fence in fence_patterns:
+            start = response.find(open_fence)
+            if start == -1:
+                continue
+            content_start = start + len(open_fence)
+            end = response.find(close_fence, content_start)
+            if end == -1:
+                continue
+
+            fenced_content = response[content_start:end].strip()
+            if not fenced_content:
+                continue
+
+            # Try to parse as JSON
+            try:
+                parsed = json.loads(fenced_content)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            # Check if it looks like a tool call (single object or array)
+            if isinstance(parsed, dict):
+                if "tool" in parsed and "payload" in parsed:
+                    return True
+                if "action" in parsed and parsed.get("action") == "call_tool":
+                    return True
+            elif isinstance(parsed, list):
+                if not parsed:
+                    continue
+                # Check if it's an array of tool calls
+                first = parsed[0]
+                if isinstance(first, dict):
+                    if "tool" in first and "payload" in first:
+                        return True
+                    if "action" in first and first.get("action") == "call_tool":
+                        return True
+
+        return False
+
     def _is_json_action_response(self, response: str) -> bool:
         """Detect if response is ONLY a JSON action object (common LLM failure mode).
 
@@ -778,9 +836,15 @@ class InternalMCPChatOrchestrator:
             # Recovery: if the model strongly indicates it intended to perform a
             # tool-backed action but did not emit a tool call, ask once more for
             # the actual tool-call JSON.
-            if self._looks_like_missing_tool_call(response):
+            should_retry = (
+                self._looks_like_missing_tool_call(response)
+                or self._contains_fenced_tool_call_json(response)
+            )
+            if should_retry:
+                reason = "fenced JSON detected" if self._contains_fenced_tool_call_json(response) else "missing tool call language"
                 self._logger.info(
-                    "[mcp_orchestrator] Model response looks like a missing tool call; retrying once (model=%s).",
+                    "[mcp_orchestrator] Model response looks like a missing tool call (%s); retrying once (model=%s).",
+                    reason,
                     model or "default",
                 )
                 retry_prompt = (
