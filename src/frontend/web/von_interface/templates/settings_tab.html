@@ -28,18 +28,6 @@
             </div>
         </section>
 
-        <section id="google-oauth-settings">
-            <h2>Google OAuth</h2>
-            <p class="settings-note">Use this to refresh Gmail tokens for the agent mailbox. This does not change your
-                app user selection.</p>
-            <div class="inline-form inline-form-tight">
-                <button type="button" class="btn-primary" onclick="loginWithGoogle()">Start Google OAuth</button>
-                <span class="settings-note ml-2">Ensure popups are allowed for this site.</span>
-            </div>
-            <div id="googleOauthStatus" class="settings-note mt-1">Gmail OAuth session: unknown</div>
-            <div id="gmailProfileStatus" class="settings-note">Gmail profile target: unknown</div>
-        </section>
-
         <section id="ollima-settings">
             <h2>Ollama Model Configuration</h2>
 
@@ -120,10 +108,23 @@
                 <!-- Options populated by languageConfig.js -->
             </select>
             <small>This will be the default language for new names and text entries.</small>
-            <label for="gmailProfileInput" class="mt-2">Gmail profile ID (for MCP tools):</label>
+
+            <h3 class="mt-3">Gmail Configuration</h3>
+            <label for="gmailProfileInput">Gmail profile ID (for MCP tools):</label>
             <input type="text" id="gmailProfileInput" placeholder="e.g., von-mail" />
             <small class="settings-note">Profile IDs must match the backend Gmail profiles configured via environment
                 (VON_GMAIL_PROFILES). Leave blank to disable Gmail calls.</small>
+
+            <h4 class="mt-2">Google OAuth</h4>
+            <p class="settings-note">Use this to refresh Gmail tokens for the agent mailbox. This does not change your
+                app user selection.</p>
+            <div class="inline-form inline-form-tight">
+                <button type="button" class="btn-primary" onclick="loginWithGoogle()">Start Google OAuth</button>
+                <span class="settings-note ml-2">Ensure popups are allowed for this site.</span>
+            </div>
+            <div id="googleOauthStatus" class="settings-note mt-1">Gmail OAuth session: unknown</div>
+            <div id="gmailProfileStatus" class="settings-note">Gmail profile target: unknown</div>
+
             <div class="inline-form inline-form-tight mt-8-align-center">
                 <button type="button" id="resetLocalPrefsButton" class="btn-danger"
                     title="Clear stored user/org/language preferences for this browser">Reset Local Preferences</button>
