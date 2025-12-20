@@ -1,0 +1,10 @@
+Analyze this LLM response and determine if the model said it would perform an action using tools but did not actually emit a tool call.
+
+Response to analyze:
+{response}
+
+Answer with ONLY "yes" or "no":
+- yes: The model explicitly stated it would perform an action ("I will", "I'm going to", "Let me", "Executing", etc.) but did not include a tool call JSON object
+- no: The model either (a) included a valid tool call, (b) did not promise to take action, or (c) only described what it would do without claiming to do it now
+
+Answer:

@@ -1281,7 +1281,7 @@ async function reloadConceptTab(conceptId) {
 
         // Reload names explicitly to ensure they're fresh
         await loadConceptNames(conceptId, suffix);
-        
+
         // Reload attributes explicitly
         await loadConceptAttributes(conceptId, suffix);
 
@@ -3087,7 +3087,8 @@ async function populateTypeDescription(conceptId, suffix) {
             display.className = (display.className || '').replace(/\bmarkdown-rendered\b/g, '').trim();
             if (text) {
                 try {
-                    display.innerHTML = renderSmartText(text, false);
+                    // Always render with HTML escaping (escapeHtml=true) to properly handle markdown
+                    display.innerHTML = renderSmartText(text, true);
                     if (detectMarkdown(text)) display.classList.add('markdown-rendered');
                 } catch (e) {
                     // Fallback: plain text escape
