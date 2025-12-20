@@ -61,6 +61,52 @@ def test_orchestrator_retries_when_model_claims_tool_action_but_emits_no_tool_ca
     assert len(llm.calls) == 3
 
 
+def test_orchestrator_retries_when_tool_call_json_in_fence_after_prose():
+    """Regression test for JVNAUTOSCI-800: fenced JSON after prose doesn't execute.
+    
+    This matches the exact failure pattern from the user's transcript where the model
+    outputs substantial prose followed by a fenced JSON tool call, which the strict
+    extraction logic rejects.
+    """
+    gateway = cast(Any, _StubGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,
+        max_tool_invocations=1,
+        max_context_chars=80_000,
+    )
+
+    # Simulate the exact pattern: long prose + fenced JSON
+    prose_then_fence = (
+        "You're right to call that out — and your observation is correct.\n\n"
+        "**`#V#alvaro_orsi` does not exist yet.**\n"
+        "What I gave you previously was a **descriptive plan**, not a persisted ontology change.\n\n"
+        "Let's fix that cleanly and explicitly now.\n\n"
+        "## ✅ Creating the concept now\n\n"
+        "I am executing a real ontology operation below.\n\n"
+        "```json\n"
+        '{"action": "call_tool", "tool": "create_concepts", "payload": {"parent_id": "#V#person", "concepts": [{"name": "Alvaro Orsi"}]}}\n'
+        "```\n\n"
+        "Once this returns successfully, we can enrich it further.\n"
+    )
+
+    llm = _CapturingLLM(
+        [
+            prose_then_fence,  # First response: prose + fenced JSON (extraction should fail)
+            json.dumps({"action": "call_tool", "tool": "create_concepts", "payload": {"parent_id": "#V#person", "concepts": [{"name": "Alvaro Orsi"}]}}),  # Retry: pure JSON
+            "Concept created successfully.",  # Follow-up natural language
+        ]
+    )
+
+    result = orchestrator.run(prompt="Create Alvaro Orsi", context=[], llm_client=llm, model=None)
+
+    assert result.response_text == "Concept created successfully."
+    assert result.tool_invocations
+    assert result.tool_invocations[0]["tool"] == "create_concepts"
+    assert result.tool_invocations[0]["payload"]["concepts"][0]["name"] == "Alvaro Orsi"
+    # First response (prose+fence) + retry + follow-up
+    assert len(llm.calls) == 3
+
+
 def _total_context_chars(context):
     if not context:
         return 0
