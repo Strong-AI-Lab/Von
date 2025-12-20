@@ -4,6 +4,7 @@ import re
 import ctypes
 import sys
 
+
 def is_admin():
     """Check if the script is running with administrative privileges."""
     try:
@@ -11,32 +12,38 @@ def is_admin():
     except:
         return False
 
+
 def elevate_privileges():
     """Restart the script with elevated privileges if not already running as admin."""
     if not is_admin():
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+        ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable, " ".join(sys.argv), None, 1
+        )
         sys.exit(0)
+
 
 def get_installed_python_versions():
     """Get all installed Python versions using the 'py' launcher."""
     versions = []
     try:
-        result = subprocess.run(['py', '-0p'], capture_output=True, text=True)
+        result = subprocess.run(["py", "-0p"], capture_output=True, text=True)
         if result.returncode == 0:
             output = result.stdout
-            version_pattern = re.compile(r'-V:(\d+\.\d+(\.\d+)?)')
+            version_pattern = re.compile(r"-V:(\d+\.\d+(\.\d+)?)")
             versions = version_pattern.findall(output)
             versions = [v[0] for v in versions]
     except Exception as e:
         print(f"Error listing Python versions: {e}")
     return versions
 
+
 def normalize_version(version):
     """Normalize version strings into tuples for comparison."""
-    parts = version.split('.')
+    parts = version.split(".")
     while len(parts) < 3:
-        parts.append('0')
+        parts.append("0")
     return tuple(map(int, parts))
+
 
 def find_python_in_paths():
     """Find Python executables in PATH."""
@@ -46,7 +53,9 @@ def find_python_in_paths():
         python_executable = os.path.join(path, "python.exe")
         if os.path.exists(python_executable):
             try:
-                result = subprocess.run([python_executable, "--version"], capture_output=True, text=True)
+                result = subprocess.run(
+                    [python_executable, "--version"], capture_output=True, text=True
+                )
                 if result.returncode == 0:
                     version = result.stdout.strip().split()[-1]
                     detected_versions[version] = python_executable
@@ -56,6 +65,7 @@ def find_python_in_paths():
         print(f"Detected Python {version} at {location}")
     return detected_versions
 
+
 def handle_microsoft_store_python(location):
     """Handle Python installed via the Microsoft Store."""
     print(f"The Python installation at {location} is a Microsoft Store installation.")
@@ -64,7 +74,10 @@ def handle_microsoft_store_python(location):
     print("2. Locate 'Python' in the list of installed apps.")
     print("3. Select the entry and click 'Uninstall'.")
     print("4. Confirm the uninstallation.")
-    print("Alternatively, you can manually delete the placeholder file, but this is not recommended.")
+    print(
+        "Alternatively, you can manually delete the placeholder file, but this is not recommended."
+    )
+
 
 def main():
     print("Cleaning up old Python versions... version GPT 5")
@@ -97,9 +110,14 @@ def main():
             if "WindowsApps" in location:
                 handle_microsoft_store_python(location)
             else:
-                print(f"Python {version} detected at {location}, but no automated uninstallation is available.")
+                print(
+                    f"Python {version} detected at {location}, but no automated uninstallation is available."
+                )
         else:
-            print(f"Python {version} appears to be installed but could not be uninstalled programmatically.")
+            print(
+                f"Python {version} appears to be installed but could not be uninstalled programmatically."
+            )
+
 
 if __name__ == "__main__":
     main()

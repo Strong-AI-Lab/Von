@@ -11,13 +11,14 @@ from src.backend.db.connection_manager import get_db
 from src.backend.models.concept_models import IndexingStatus
 from src.backend.utilities.rag_indexing_worker import process_pending_interactions
 
+
 def test_rag_worker():
     db = get_db()
     if db is None:
         print("Could not connect to database")
         return
 
-    interactions_coll = db['interaction_sessions']
+    interactions_coll = db["interaction_sessions"]
 
     # Create a dummy interaction
     interaction_id = ObjectId()
@@ -33,15 +34,12 @@ def test_rag_worker():
             {
                 "interaction_type": "ask_question",
                 "timestamp": datetime.now(timezone.utc),
-                "details": {
-                    "question": "What is the meaning of life?",
-                    "answer": "42"
-                }
+                "details": {"question": "What is the meaning of life?", "answer": "42"},
             }
         ],
         "created_at": datetime.now(timezone.utc),
         "last_updated_at": datetime.now(timezone.utc),
-        "indexing_status": IndexingStatus.PENDING.value
+        "indexing_status": IndexingStatus.PENDING.value,
     }
 
     print(f"Inserting dummy interaction {interaction_id}...")
@@ -71,6 +69,7 @@ def test_rag_worker():
 
     # Cleanup
     interactions_coll.delete_one({"_id": interaction_id})
+
 
 if __name__ == "__main__":
     test_rag_worker()

@@ -94,17 +94,22 @@ def get_rag_service(backend: Optional[str] = None) -> RAGService:
     if name == "llamaindex":
         try:
             from .rag_backends.llamaindex_backend import LlamaIndexRAGService  # type: ignore
+
             return LlamaIndexRAGService()
         except Exception as e:
             # Fallback to Haystack if LlamaIndex not available
             try:
                 from .rag_backends.haystack_backend import HaystackRAGService  # type: ignore
+
                 return HaystackRAGService()
             except Exception:
-                raise RAGBackendUnavailable(f"No RAG backend available (llamaindex failure: {e})")
+                raise RAGBackendUnavailable(
+                    f"No RAG backend available (llamaindex failure: {e})"
+                )
     elif name == "haystack":
         try:
             from .rag_backends.haystack_backend import HaystackRAGService  # type: ignore
+
             return HaystackRAGService()
         except Exception as e:
             raise RAGBackendUnavailable(f"Haystack backend unavailable: {e}")
@@ -114,6 +119,7 @@ def get_rag_service(backend: Optional[str] = None) -> RAGService:
 
 # Minimal shim backends to keep code import-safe until concrete modules are added.
 # These provide clear errors if called prematurely.
+
 
 class _NotImplementedRAG(RAGService):
     def upsert_documents(self, docs: Iterable[Dict[str, Any]], *, namespace: Optional[str] = None, allow_partial_failures: bool = True) -> Tuple[int, int]:  # type: ignore

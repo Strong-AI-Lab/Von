@@ -24,7 +24,11 @@ class AnnotationPromptBuilder:
     def __init__(self, concept_id: str, ttl_sec: int = 300):
         self.concept_id = concept_id
         self.ttl_sec = ttl_sec
-        self._cache: Dict[str, Any] = {"text": None, "ts": 0.0, "source_predicate": None}
+        self._cache: Dict[str, Any] = {
+            "text": None,
+            "ts": 0.0,
+            "source_predicate": None,
+        }
 
     def invalidate(self):
         self._cache = {"text": None, "ts": 0.0, "source_predicate": None}
@@ -33,7 +37,9 @@ class AnnotationPromptBuilder:
         try:
             rels = get_texts_for_concept(self.concept_id, predicate=predicate, limit=1)
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug(f"PromptBuilder relation fetch failed predicate={predicate}: {e}")
+            logger.debug(
+                f"PromptBuilder relation fetch failed predicate={predicate}: {e}"
+            )
             return None
         if not rels:
             return None
@@ -51,7 +57,10 @@ class AnnotationPromptBuilder:
         instruction: Optional[str] = None
         source_predicate: Optional[str] = None
 
-        for predicate in (RelationPredicate.HAS_CONTENT, RelationPredicate.HAS_DESCRIPTION):
+        for predicate in (
+            RelationPredicate.HAS_CONTENT,
+            RelationPredicate.HAS_DESCRIPTION,
+        ):
             txt = self._fetch_relation_text(predicate)
             if txt:
                 instruction = txt
@@ -90,7 +99,9 @@ class AnnotationPromptBuilder:
         return {
             "concept_id": self.concept_id,
             "cached": bool(self._cache.get("text")),
-            "age_sec": (time.time() - self._cache["ts"]) if self._cache.get("ts") else None,
+            "age_sec": (
+                (time.time() - self._cache["ts"]) if self._cache.get("ts") else None
+            ),
             "source_predicate": self._cache.get("source_predicate"),
             "ttl_sec": self.ttl_sec,
         }

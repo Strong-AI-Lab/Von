@@ -5,7 +5,12 @@ from pymongo.results import UpdateResult
 from pymongo.errors import OperationFailure
 from datetime import datetime, timezone
 from ..utils.time_utils import utc_now
-from ..db.mongo_client import APPLICATION_SETTINGS_COLLECTION_NAME, get_concepts_collection, get_text_values_collection, get_text_relations_collection
+from ..db.mongo_client import (
+    APPLICATION_SETTINGS_COLLECTION_NAME,
+    get_concepts_collection,
+    get_text_values_collection,
+    get_text_relations_collection,
+)
 from ..db.mongo_setup import get_application_settings_collection
 from .exceptions import MultipleUsersForEmailError
 
@@ -46,7 +51,9 @@ def get_setting(setting_name: str) -> Any:
     logger.info(f"Attempting to get setting: '{setting_name}'")
     settings_coll = get_application_settings_collection()
     if settings_coll is None:
-        logger.error(f"Could not access the '{APPLICATION_SETTINGS_COLLECTION_NAME}' collection for setting '{setting_name}'.")
+        logger.error(
+            f"Could not access the '{APPLICATION_SETTINGS_COLLECTION_NAME}' collection for setting '{setting_name}'."
+        )
         return None
     try:
         setting_doc = settings_coll.find_one({"setting_name": setting_name})
@@ -57,11 +64,16 @@ def get_setting(setting_name: str) -> Any:
         logger.info(f"Setting '{setting_name}' not found in the database.")
         return None
     except OperationFailure as e:
-        logger.error(f"MongoDB operation failed while getting setting '{setting_name}': {e}")
+        logger.error(
+            f"MongoDB operation failed while getting setting '{setting_name}': {e}"
+        )
         return None
     except Exception as e:
-        logger.error(f"An unexpected error occurred while getting setting '{setting_name}': {e}")
+        logger.error(
+            f"An unexpected error occurred while getting setting '{setting_name}': {e}"
+        )
         return None
+
 
 def update_setting(setting_name: str, setting_value: Any) -> bool:
     """
@@ -78,20 +90,25 @@ def update_setting(setting_name: str, setting_value: Any) -> bool:
         settings_collection = get_application_settings_collection()
         if settings_collection is None:
             # For test_update_setting_collection_unavailable
-            logger.error("Could not access the '%s' collection.", APPLICATION_SETTINGS_COLLECTION_NAME)
+            logger.error(
+                "Could not access the '%s' collection.",
+                APPLICATION_SETTINGS_COLLECTION_NAME,
+            )
             return False
 
         # Pre-check for existing setting with the same value
-        existing_doc = settings_collection.find_one({"setting_name": setting_name}) # Changed "name" to "setting_name"
+        existing_doc = settings_collection.find_one(
+            {"setting_name": setting_name}
+        )  # Changed "name" to "setting_name"
         if existing_doc and existing_doc.get("value") == setting_value:
             # For test_update_setting_same_value
             logger.info(f"Setting '{setting_name}' value is already up to date.")
             return True
 
         result: UpdateResult = settings_collection.update_one(
-            {"setting_name": setting_name}, # Changed "name" to "setting_name"
-                {"$set": {"value": setting_value, "updated_at": utc_now()}},
-            upsert=True
+            {"setting_name": setting_name},  # Changed "name" to "setting_name"
+            {"$set": {"value": setting_value, "updated_at": utc_now()}},
+            upsert=True,
         )
 
         if result.acknowledged:
@@ -103,20 +120,29 @@ def update_setting(setting_name: str, setting_value: Any) -> bool:
                 logger.info(f"Setting '{setting_name}' value is already up to date.")
             else:
                 # Fallback, less likely to be hit
-                logger.info(f"Setting '{setting_name}' update operation acknowledged, but no changes detected.")
+                logger.info(
+                    f"Setting '{setting_name}' update operation acknowledged, but no changes detected."
+                )
             return True
         else:
             # For test_update_setting_not_acknowledged
-            logger.error(f"Update/create operation for setting '{setting_name}' was not acknowledged by the server.")
+            logger.error(
+                f"Update/create operation for setting '{setting_name}' was not acknowledged by the server."
+            )
             return False
     except OperationFailure as e:
         # For test_update_setting_operation_failure
-        logger.error(f"MongoDB operation failed while updating setting '{setting_name}': {e}")
+        logger.error(
+            f"MongoDB operation failed while updating setting '{setting_name}': {e}"
+        )
         return False
     except Exception as e:
         # For test_update_setting_general_exception
-        logger.error(f"An unexpected error occurred while updating setting '{setting_name}': {e}")
+        logger.error(
+            f"An unexpected error occurred while updating setting '{setting_name}': {e}"
+        )
         return False
+
 
 def get_active_llm_setting() -> Optional[Dict[str, str]]:
     """
@@ -125,17 +151,23 @@ def get_active_llm_setting() -> Optional[Dict[str, str]]:
     """
     setting = get_setting(ACTIVE_LLM_SETTING_NAME)
     if setting is not None and not isinstance(setting, dict):
-        logger.warning(f"Active LLM setting is not a dictionary: {type(setting)}. Returning None.")
+        logger.warning(
+            f"Active LLM setting is not a dictionary: {type(setting)}. Returning None."
+        )
         return None
     return setting
+
 
 def set_active_llm_setting(provider: str, model_name: str) -> bool:
     """Convenience function to set the active LLM setting."""
     if not isinstance(provider, str) or not isinstance(model_name, str):
-        logger.error(f"Provider and model_name must be strings. Got: {type(provider)}, {type(model_name)}")
+        logger.error(
+            f"Provider and model_name must be strings. Got: {type(provider)}, {type(model_name)}"
+        )
         return False
     setting_value = {"provider": provider, "model": model_name}
     return update_setting(ACTIVE_LLM_SETTING_NAME, setting_value)
+
 
 # ---------------------------------------------------------------------------
 # Contextual (User / Organisation) LLM overrides
@@ -143,17 +175,26 @@ def set_active_llm_setting(provider: str, model_name: str) -> bool:
 # Stored as individual settings to avoid schema migration of existing global doc.
 # ---------------------------------------------------------------------------
 
+
 def _build_user_llm_setting_name(user_concept_id: str) -> str:
     return f"{_ACTIVE_LLM_USER_PREFIX}{user_concept_id}"
+
 
 def _build_org_llm_setting_name(org_concept_id: str) -> str:
     return f"{_ACTIVE_LLM_ORG_PREFIX}{org_concept_id}"
 
+
 def set_user_llm_setting(user_concept_id: str, provider: str, model_name: str) -> bool:
-    if not all(isinstance(x, str) and x for x in (user_concept_id, provider, model_name)):
+    if not all(
+        isinstance(x, str) and x for x in (user_concept_id, provider, model_name)
+    ):
         logger.error("set_user_llm_setting requires non-empty string arguments")
         return False
-    return update_setting(_build_user_llm_setting_name(user_concept_id), {"provider": provider, "model": model_name})
+    return update_setting(
+        _build_user_llm_setting_name(user_concept_id),
+        {"provider": provider, "model": model_name},
+    )
+
 
 def get_user_llm_setting(user_concept_id: str):
     if not isinstance(user_concept_id, str) or not user_concept_id:
@@ -164,11 +205,18 @@ def get_user_llm_setting(user_concept_id: str):
         return None
     return raw
 
+
 def set_org_llm_setting(org_concept_id: str, provider: str, model_name: str) -> bool:
-    if not all(isinstance(x, str) and x for x in (org_concept_id, provider, model_name)):
+    if not all(
+        isinstance(x, str) and x for x in (org_concept_id, provider, model_name)
+    ):
         logger.error("set_org_llm_setting requires non-empty string arguments")
         return False
-    return update_setting(_build_org_llm_setting_name(org_concept_id), {"provider": provider, "model": model_name})
+    return update_setting(
+        _build_org_llm_setting_name(org_concept_id),
+        {"provider": provider, "model": model_name},
+    )
+
 
 def get_org_llm_setting(org_concept_id: str):
     if not isinstance(org_concept_id, str) or not org_concept_id:
@@ -179,7 +227,10 @@ def get_org_llm_setting(org_concept_id: str):
         return None
     return raw
 
-def resolve_llm_setting(user_concept_id: str | None = None, org_concept_id: str | None = None):
+
+def resolve_llm_setting(
+    user_concept_id: str | None = None, org_concept_id: str | None = None
+):
     """Resolve effective LLM setting with precedence user > org > global.
 
     Returns dict or None.
@@ -191,32 +242,44 @@ def resolve_llm_setting(user_concept_id: str | None = None, org_concept_id: str 
     if org_concept_id:
         org_val = get_org_llm_setting(org_concept_id)
         if org_val:
-            return {**org_val, "scope": "organisation", "organisation_concept_id": org_concept_id}
+            return {
+                **org_val,
+                "scope": "organisation",
+                "organisation_concept_id": org_concept_id,
+            }
     global_val = get_active_llm_setting()
     if global_val:
         return {**global_val, "scope": "global"}
     return None
 
+
 # --- Deprecated compatibility layer (tests still reference these) ---
-def set_current_user_person_concept_id(concept_id: str) -> bool:  # legacy name used in tests
+def set_current_user_person_concept_id(
+    concept_id: str,
+) -> bool:  # legacy name used in tests
     """Compatibility shim: store provided concept_id in Flask session if available.
 
     Returns True to satisfy existing tests, but logs deprecation.
     """
     try:
         from flask import session, has_request_context
+
         if has_request_context():
-            session['user_concept_id'] = concept_id
+            session["user_concept_id"] = concept_id
     except Exception:
         pass
-    logger.warning("set_current_user_person_concept_id is deprecated; relying on session user_concept_id.")
+    logger.warning(
+        "set_current_user_person_concept_id is deprecated; relying on session user_concept_id."
+    )
     return True
+
 
 def get_current_user_person_concept_id() -> Optional[str]:  # legacy accessor
     try:
         from flask import session, has_request_context
+
         if has_request_context():
-            return session.get('user_concept_id')
+            return session.get("user_concept_id")
     except Exception:
         return None
     return None
@@ -224,31 +287,38 @@ def get_current_user_person_concept_id() -> Optional[str]:  # legacy accessor
 
 # Removed: get/set_current_user_person_concept_id functions (client localStorage authority)
 
+
 # The following functions are deprecated as organisation is managed on the client.
 def get_current_organisation_id() -> Optional[str]:
     """DEPRECATED: This function is deprecated. Organisation is managed on the client."""
     logger.warning("get_current_organisation_id is deprecated and should not be used.")
     try:
         from flask import session, has_request_context
+
         if has_request_context():
-            return session.get('organisation_concept_id')
+            return session.get("organisation_concept_id")
     except Exception:
         return None
     return None
 
+
 def set_current_organisation_id(org_id: str) -> bool:
     """DEPRECATED: This function is deprecated. Organisation is managed on the client."""
-    logger.warning("set_current_organisation_id is deprecated; returning True (session-scoped only).")
+    logger.warning(
+        "set_current_organisation_id is deprecated; returning True (session-scoped only)."
+    )
     try:
         from flask import session, has_request_context
+
         if has_request_context():
-            session['organisation_concept_id'] = org_id
+            session["organisation_concept_id"] = org_id
     except Exception:
         pass
     return True
 
 
 # Removed: get/set_current_organisation_concept_id functions (client localStorage authority)
+
 
 # ---------------- Identity Resolution Helpers (Deterministic, Email-Centric) ----------------
 def _log_identity_event(**fields):
@@ -270,7 +340,9 @@ def _log_identity_event(**fields):
         logger.info(f"auth_user_resolution (fallback log) {payload}")
 
 
-def _find_user_concept_by_email(email: str) -> Optional[Dict[str, Any]]:  # Reintroduced deterministic helper
+def _find_user_concept_by_email(
+    email: str,
+) -> Optional[Dict[str, Any]]:  # Reintroduced deterministic helper
     """Find an existing user concept via an existing #V#has_email relation.
 
     Returns the full concept document or None.
@@ -282,7 +354,9 @@ def _find_user_concept_by_email(email: str) -> Optional[Dict[str, Any]]:  # Rein
     text_relations_coll = get_text_relations_collection()
 
     if text_values_coll is None or text_relations_coll is None:
-        logger.error("_find_user_concept_by_email: Missing text collections (DB unavailable).")
+        logger.error(
+            "_find_user_concept_by_email: Missing text collections (DB unavailable)."
+        )
         return None
 
     tv = text_values_coll.find_one({"text": email})
@@ -291,35 +365,43 @@ def _find_user_concept_by_email(email: str) -> Optional[Dict[str, Any]]:  # Rein
     tv_id = str(tv.get("_id"))
 
     # Find all relations for the given email text value
-    relations = list(text_relations_coll.find({"object_text_id": tv_id, "predicate": "#V#has_email"}))
+    relations = list(
+        text_relations_coll.find({"object_text_id": tv_id, "predicate": "#V#has_email"})
+    )
 
     if len(relations) > 1:
         # Log a critical error if multiple users are found for the same email
         user_ids = [rel.get("subject_concept_id") for rel in relations]
-        logger.critical(f"CRITICAL: Multiple users found for email '{email}': {user_ids}. This is a data integrity issue that must be resolved manually.")
+        logger.critical(
+            f"CRITICAL: Multiple users found for email '{email}': {user_ids}. This is a data integrity issue that must be resolved manually."
+        )
         raise MultipleUsersForEmailError(email, user_ids)
 
     if not relations:
         return None
 
-    rel = relations[0] # Use the first relation found
+    rel = relations[0]  # Use the first relation found
     subj_id = rel.get("subject_concept_id")
     if not subj_id:
         return None
     try:
         # Use get_concept_by_concept_id for Von concept IDs like #V#michael_witbrock
         # Use get_concept_by_id for MongoDB ObjectIds
-        if subj_id.startswith('#V#'):
+        if subj_id.startswith("#V#"):
             concept = get_concept_by_concept_id(subj_id)
         else:
             concept = get_concept_by_id(subj_id)
         return concept
     except Exception:
-        logger.warning(f"_find_user_concept_by_email: concept retrieval failed for {subj_id}")
+        logger.warning(
+            f"_find_user_concept_by_email: concept retrieval failed for {subj_id}"
+        )
         return None
 
 
-def set_current_user_by_email(email: str, name: str, expected_user_concept_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def set_current_user_by_email(
+    email: str, name: str, expected_user_concept_id: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
     """Deterministically resolve (and set) the current user concept for an authenticated email.
 
     Resolution algorithm (authoritative source = email relation):
@@ -352,7 +434,7 @@ def set_current_user_by_email(email: str, name: str, expected_user_concept_id: O
 
     # Allow caller override; if absent, attempt to read from existing session (pre-login hint from client localStorage)
     if expected_user_concept_id is None:
-        expected_user_concept_id = session.get('user_concept_id')
+        expected_user_concept_id = session.get("user_concept_id")
 
     try:
         email_user = _find_user_concept_by_email(email)
@@ -368,7 +450,10 @@ def set_current_user_by_email(email: str, name: str, expected_user_concept_id: O
     if email_user:
         adopted = email_user
         action = "adopt_email_relation"
-        if expected_user_concept_id and adopted.get("concept_id") != expected_user_concept_id:
+        if (
+            expected_user_concept_id
+            and adopted.get("concept_id") != expected_user_concept_id
+        ):
             conflict = True
             _log_identity_event(
                 email=email,
@@ -395,7 +480,10 @@ def set_current_user_by_email(email: str, name: str, expected_user_concept_id: O
         if candidate:
             try:
                 candidate_concept_id = candidate.get("concept_id")
-                if not isinstance(candidate_concept_id, str) or not candidate_concept_id:
+                if (
+                    not isinstance(candidate_concept_id, str)
+                    or not candidate_concept_id
+                ):
                     raise ValueError("Candidate concept missing concept_id for linking")
                 upsert_text_for_concept(
                     subject_concept_id=candidate_concept_id,
@@ -413,7 +501,9 @@ def set_current_user_by_email(email: str, name: str, expected_user_concept_id: O
                     action=action,
                 )
             except Exception as e:
-                logger.error(f"Failed linking expected concept {expected_user_concept_id} to email {email}: {e}")
+                logger.error(
+                    f"Failed linking expected concept {expected_user_concept_id} to email {email}: {e}"
+                )
         # Step 3: Create new if still unresolved
         if adopted is None:
             try:
@@ -450,17 +540,20 @@ def set_current_user_by_email(email: str, name: str, expected_user_concept_id: O
     if not adopted or not adopted.get("concept_id"):
         # Attempt normalisation: some older concept docs may use 'id' or only have a legacy structure.
         fallback_id = adopted.get("id") or adopted.get("_id")
-        if isinstance(fallback_id, str) and fallback_id.startswith('#V#'):
-            adopted['concept_id'] = fallback_id
+        if isinstance(fallback_id, str) and fallback_id.startswith("#V#"):
+            adopted["concept_id"] = fallback_id
         else:
-            logger.error(f"set_current_user_by_email: Adopted concept invalid for email {email} (action={action}).")
+            logger.error(
+                f"set_current_user_by_email: Adopted concept invalid for email {email} (action={action})."
+            )
             return None
 
     # Set session binding (authoritative for remainder of request flow)
-    session['user_concept_id'] = adopted.get("concept_id")
-    logger.info(f"set_current_user_by_email: Adopted concept {adopted.get('concept_id')} (action={action}, conflict={conflict}).")
+    session["user_concept_id"] = adopted.get("concept_id")
+    logger.info(
+        f"set_current_user_by_email: Adopted concept {adopted.get('concept_id')} (action={action}, conflict={conflict})."
+    )
     return adopted
-
 
 
 def get_current_user() -> Optional[Dict[str, Any]]:
@@ -470,7 +563,8 @@ def get_current_user() -> Optional[Dict[str, Any]]:
     from ..services.concept_service import get_concept_by_id
 
     from flask import session
-    user_concept_id = session.get('user_concept_id')
+
+    user_concept_id = session.get("user_concept_id")
     if not user_concept_id:
         # DEPRECATED PATH: Fallback to the old setting. This should be removed in the future.
         user_id = get_current_user_person_concept_id()
@@ -485,6 +579,7 @@ def get_current_user() -> Optional[Dict[str, Any]]:
     try:
         # Try finding by concept_id first
         from ..services.concept_service import get_concept_by_concept_id
+
         return get_concept_by_concept_id(user_concept_id)
     except Exception:
         # Fallback to searching by _id
@@ -492,6 +587,7 @@ def get_current_user() -> Optional[Dict[str, Any]]:
             return get_concept_by_id(user_concept_id)
         except Exception:
             return None
+
 
 # OpenAI settings functions
 def get_openai_env_var() -> Optional[str]:
@@ -507,12 +603,14 @@ def get_openai_env_var() -> Optional[str]:
         return "OPENAI_API_KEY"
     return env_var
 
+
 def set_openai_env_var(env_var: str) -> bool:
     """Set the environment variable name for OpenAI API key."""
     if not isinstance(env_var, str):
         logger.error("env_var must be a string. Got: %s", type(env_var))
         return False
     return update_setting(OPENAI_ENV_VAR_SETTING_NAME, env_var)
+
 
 # --- Vontology UI behaviour toggles ---
 def get_fetch_counts_on_load() -> bool:
@@ -534,11 +632,13 @@ def get_fetch_counts_on_load() -> bool:
         return val != 0
     return True
 
+
 def set_fetch_counts_on_load(enabled: bool) -> bool:
     if not isinstance(enabled, bool):
         # Coerce permissively but persist canonical bool
         enabled = bool(enabled)
     return update_setting(FETCH_COUNTS_ON_LOAD_SETTING_NAME, enabled)
+
 
 def get_disable_remote_ollama_scan() -> bool:
     """Return whether remote Ollama host scanning should be disabled.
@@ -559,11 +659,13 @@ def get_disable_remote_ollama_scan() -> bool:
         return val != 0
     return False  # Default to allowing remote scans
 
+
 def set_disable_remote_ollama_scan(disabled: bool) -> bool:
     if not isinstance(disabled, bool):
         # Coerce permissively but persist canonical bool
         disabled = bool(disabled)
     return update_setting(DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME, disabled)
+
 
 # Ollama hosts settings functions
 def get_ollama_hosts_list() -> List[Dict[str, Any]]:
@@ -591,23 +693,29 @@ def get_ollama_hosts_list() -> List[Dict[str, Any]]:
             return None
 
         # If someone provided only a hostname/IP (no scheme), add http
-        if '://' not in s:
+        if "://" not in s:
             s = f"http://{s}"
 
         # Remove trailing slash to avoid duplicates like host:11434/
-        while s.endswith('/'):
+        while s.endswith("/"):
             s = s[:-1]
 
         p = urlparse(s)
         # Guard against parse failures
-        host = p.hostname or s.replace('http://', '').replace('https://', '').split('/', 1)[0].split(':')[0]
+        host = (
+            p.hostname
+            or s.replace("http://", "")
+            .replace("https://", "")
+            .split("/", 1)[0]
+            .split(":")[0]
+        )
         # Determine port
         port = p.port or DEFAULT_PORT
-        scheme = p.scheme or 'http'
+        scheme = p.scheme or "http"
 
         # IPv6 bracket handling
         host_netloc = host
-        if ':' in host and not host.startswith('['):
+        if ":" in host and not host.startswith("["):
             host_netloc = f"[{host}]"
 
         return f"{scheme}://{host_netloc}:{port}"
@@ -622,8 +730,13 @@ def get_ollama_hosts_list() -> List[Dict[str, Any]]:
             url_candidate = entry
         elif isinstance(entry, dict):
             # Prefer url; fall back to name if url missing
-            url_candidate = entry.get('url') or entry.get('host') or entry.get('address') or entry.get('name')
-            name_candidate = entry.get('name')
+            url_candidate = (
+                entry.get("url")
+                or entry.get("host")
+                or entry.get("address")
+                or entry.get("name")
+            )
+            name_candidate = entry.get("name")
         else:
             return None
 
@@ -633,11 +746,11 @@ def get_ollama_hosts_list() -> List[Dict[str, Any]]:
 
         # Derive name from URL if not provided
         parsed = urlparse(norm_url)
-        hostname = parsed.hostname or ''
+        hostname = parsed.hostname or ""
         name = name_candidate or hostname
-        is_local = hostname in {'localhost', '127.0.0.1'}
+        is_local = hostname in {"localhost", "127.0.0.1"}
 
-        return {'url': norm_url, 'name': name, 'is_local': is_local}
+        return {"url": norm_url, "name": name, "is_local": is_local}
 
     def _dedupe_and_sort(hosts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Dedupe by normalized URL, keep first occurrence; prioritize local first then by name."""
@@ -648,12 +761,14 @@ def get_ollama_hosts_list() -> List[Dict[str, Any]]:
             norm = _to_host_entry(h)
             if not norm:
                 continue
-            key = norm['url']
+            key = norm["url"]
             if key not in seen:
                 seen[key] = norm
         # Sort: local first, then by name for stability
         result = list(seen.values())
-        result.sort(key=lambda x: (not x.get('is_local', False), str(x.get('name', ''))))
+        result.sort(
+            key=lambda x: (not x.get("is_local", False), str(x.get("name", "")))
+        )
         return result
 
     # First check database settings
@@ -661,7 +776,9 @@ def get_ollama_hosts_list() -> List[Dict[str, Any]]:
     if hosts_list and isinstance(hosts_list, list):
         # Normalize and dedupe persisted hosts
         clean_hosts = _dedupe_and_sort(hosts_list)
-        logger.info(f"Found Ollama hosts list in settings: {len(clean_hosts)} hosts (normalized)")
+        logger.info(
+            f"Found Ollama hosts list in settings: {len(clean_hosts)} hosts (normalized)"
+        )
         # If normalization changed the list, persist the cleaned version silently
         try:
             if clean_hosts != hosts_list:
@@ -677,7 +794,7 @@ def get_ollama_hosts_list() -> List[Dict[str, Any]]:
         try:
             # Parse comma-separated list of hosts
             parsed_hosts: List[Dict[str, Any]] = []
-            for host_url in env_hosts.split(','):
+            for host_url in env_hosts.split(","):
                 host_url = host_url.strip()
                 if not host_url:
                     continue
@@ -685,7 +802,9 @@ def get_ollama_hosts_list() -> List[Dict[str, Any]]:
                 if entry:
                     parsed_hosts.append(entry)
             parsed_hosts = _dedupe_and_sort(parsed_hosts)
-            logger.info(f"Found Ollama hosts in environment variable: {len(parsed_hosts)} hosts")
+            logger.info(
+                f"Found Ollama hosts in environment variable: {len(parsed_hosts)} hosts"
+            )
             return parsed_hosts
         except Exception as e:
             logger.error(f"Error parsing OLLAMA_HOSTS_LIST environment variable: {e}")
@@ -694,13 +813,13 @@ def get_ollama_hosts_list() -> List[Dict[str, Any]]:
     default_hosts: List[Dict[str, Any]] = []
 
     # Always include localhost (guard _to_host_entry which may return None)
-    localhost_entry = _to_host_entry('http://localhost:11434')
+    localhost_entry = _to_host_entry("http://localhost:11434")
     if localhost_entry:
         default_hosts.append(localhost_entry)
 
     # Check for current OLLAMA_HOST environment variable
     current_host = os.environ.get("OLLAMA_HOST")
-    if current_host and current_host != 'http://localhost:11434':
+    if current_host and current_host != "http://localhost:11434":
         entry = _to_host_entry(current_host)
         if entry:
             default_hosts.append(entry)
@@ -708,6 +827,7 @@ def get_ollama_hosts_list() -> List[Dict[str, Any]]:
     default_hosts = _dedupe_and_sort([h for h in default_hosts if h])
     logger.info(f"Using default Ollama hosts: {len(default_hosts)} hosts")
     return default_hosts
+
 
 def set_ollama_hosts_list(hosts_list: List[Dict[str, Any]]) -> bool:
     """
@@ -738,16 +858,22 @@ def set_ollama_hosts_list(hosts_list: List[Dict[str, Any]]) -> bool:
                 s = u.strip()
                 if not s:
                     return None
-                if '://' not in s:
+                if "://" not in s:
                     s = f"http://{s}"
-                while s.endswith('/'):
+                while s.endswith("/"):
                     s = s[:-1]
                 p = urlparse(s)
-                host = p.hostname or s.replace('http://', '').replace('https://', '').split('/', 1)[0].split(':')[0]
+                host = (
+                    p.hostname
+                    or s.replace("http://", "")
+                    .replace("https://", "")
+                    .split("/", 1)[0]
+                    .split(":")[0]
+                )
                 port = p.port or DEFAULT_PORT_LOCAL
-                scheme = p.scheme or 'http'
+                scheme = p.scheme or "http"
                 host_netloc = host
-                if ':' in host and not host.startswith('['):
+                if ":" in host and not host.startswith("["):
                     host_netloc = f"[{host}]"
                 return f"{scheme}://{host_netloc}:{port}"
 
@@ -757,28 +883,35 @@ def set_ollama_hosts_list(hosts_list: List[Dict[str, Any]]) -> bool:
                 if isinstance(e, str):
                     url_cand = e
                 elif isinstance(e, dict):
-                    url_cand = e.get('url') or e.get('host') or e.get('address') or e.get('name')
-                    name_cand = e.get('name')
+                    url_cand = (
+                        e.get("url")
+                        or e.get("host")
+                        or e.get("address")
+                        or e.get("name")
+                    )
+                    name_cand = e.get("name")
                 else:
                     return None
                 nu = _normalize_url_local(url_cand) if url_cand else None
                 if not nu:
                     return None
                 ph = urlparse(nu)
-                hostname = ph.hostname or ''
+                hostname = ph.hostname or ""
                 name = name_cand or hostname
-                is_local = hostname in {'localhost', '127.0.0.1'}
-                return {'url': nu, 'name': name, 'is_local': is_local}
+                is_local = hostname in {"localhost", "127.0.0.1"}
+                return {"url": nu, "name": name, "is_local": is_local}
 
             dedup: Dict[str, Dict[str, Any]] = {}
             for it in items:
                 en = _entry(it)
                 if not en:
                     continue
-                if en['url'] not in dedup:
-                    dedup[en['url']] = en
+                if en["url"] not in dedup:
+                    dedup[en["url"]] = en
             res = list(dedup.values())
-            res.sort(key=lambda x: (not x.get('is_local', False), str(x.get('name', ''))))
+            res.sort(
+                key=lambda x: (not x.get("is_local", False), str(x.get("name", "")))
+            )
             return res
 
         cleaned = _normalize_and_dedupe(hosts_list)
@@ -789,6 +922,7 @@ def set_ollama_hosts_list(hosts_list: List[Dict[str, Any]]) -> bool:
     except Exception as e:
         logger.error(f"Failed to normalize hosts list: {e}")
         return False
+
 
 def get_active_ollama_host() -> Optional[str]:
     """
@@ -804,16 +938,22 @@ def get_active_ollama_host() -> Optional[str]:
             return None
         # Reuse same normalization as above (minimal copy to avoid import cycles)
         s = u.strip()
-        if '://' not in s:
+        if "://" not in s:
             s = f"http://{s}"
-        while s.endswith('/'):
+        while s.endswith("/"):
             s = s[:-1]
         p = urlparse(s)
-        host = p.hostname or s.replace('http://', '').replace('https://', '').split('/', 1)[0].split(':')[0]
+        host = (
+            p.hostname
+            or s.replace("http://", "")
+            .replace("https://", "")
+            .split("/", 1)[0]
+            .split(":")[0]
+        )
         port = p.port or 11434
-        scheme = p.scheme or 'http'
+        scheme = p.scheme or "http"
         host_netloc = host
-        if ':' in host and not host.startswith('['):
+        if ":" in host and not host.startswith("["):
             host_netloc = f"[{host}]"
         return f"{scheme}://{host_netloc}:{port}"
 
@@ -831,9 +971,10 @@ def get_active_ollama_host() -> Optional[str]:
     # Fall back to first host in the list
     hosts_list = get_ollama_hosts_list()
     if hosts_list:
-        return hosts_list[0]['url']
+        return hosts_list[0]["url"]
 
     return None
+
 
 def set_active_ollama_host(host_url: str) -> bool:
     """
@@ -853,17 +994,24 @@ def set_active_ollama_host(host_url: str) -> bool:
     try:
         # Minimal inline normalizer to avoid cross-scope helper use
         from urllib.parse import urlparse
+
         s = host_url.strip()
-        if '://' not in s:
+        if "://" not in s:
             s = f"http://{s}"
-        while s.endswith('/'):
+        while s.endswith("/"):
             s = s[:-1]
         p = urlparse(s)
-        host = p.hostname or s.replace('http://', '').replace('https://', '').split('/', 1)[0].split(':')[0]
+        host = (
+            p.hostname
+            or s.replace("http://", "")
+            .replace("https://", "")
+            .split("/", 1)[0]
+            .split(":")[0]
+        )
         port = p.port or 11434
-        scheme = p.scheme or 'http'
+        scheme = p.scheme or "http"
         host_netloc = host
-        if ':' in host and not host.startswith('['):
+        if ":" in host and not host.startswith("["):
             host_netloc = f"[{host}]"
         host_url = f"{scheme}://{host_netloc}:{port}"
     except Exception:
@@ -871,17 +1019,18 @@ def set_active_ollama_host(host_url: str) -> bool:
 
     # Validate that the host is in the hosts list
     hosts_list = get_ollama_hosts_list()
-    valid_urls = [host['url'] for host in hosts_list]
+    valid_urls = [host["url"] for host in hosts_list]
     if host_url not in valid_urls:
         logger.warning(f"Host URL {host_url} not found in hosts list. Adding it.")
         # Add the new host to the list
         try:
             from urllib.parse import urlparse
+
             p = urlparse(host_url)
-            hostname = p.hostname or ''
+            hostname = p.hostname or ""
             name = hostname
-            is_local = hostname in {'localhost', '127.0.0.1'}
-            hosts_list.append({'url': host_url, 'name': name, 'is_local': is_local})
+            is_local = hostname in {"localhost", "127.0.0.1"}
+            hosts_list.append({"url": host_url, "name": name, "is_local": is_local})
             # Persist through setter to ensure normalization/dedupe
             set_ollama_hosts_list(hosts_list)
         except Exception:
@@ -889,18 +1038,22 @@ def set_active_ollama_host(host_url: str) -> bool:
 
     return update_setting(ACTIVE_OLLAMA_HOST_SETTING_NAME, host_url)
 
+
 # Preferred language setting
 def get_preferred_language() -> str:
     """Get the preferred language code; default to 'en-NZ' if not set or invalid."""
     value = get_setting(PREFERRED_LANGUAGE_SETTING_NAME)
     if isinstance(value, str) and value:
         return value
-    return 'en-NZ'
+    return "en-NZ"
+
 
 def set_preferred_language(lang_code: str) -> bool:
     """Set the preferred language code."""
     if not isinstance(lang_code, str) or not lang_code:
-        logger.error(f"Language code must be a non-empty string. Got: {type(lang_code)} {lang_code}")
+        logger.error(
+            f"Language code must be a non-empty string. Got: {type(lang_code)} {lang_code}"
+        )
         return False
 
     result = update_setting(PREFERRED_LANGUAGE_SETTING_NAME, lang_code)
@@ -909,6 +1062,7 @@ def set_preferred_language(lang_code: str) -> bool:
     if result:
         try:
             from ..vontology.utils_vontology import clear_preferred_language_cache
+
             clear_preferred_language_cache()
         except ImportError:
             # Module might not be available in some contexts (tests, etc.)
@@ -916,8 +1070,10 @@ def set_preferred_language(lang_code: str) -> bool:
 
     return result
 
+
 # --- COMPATIBILITY FUNCTIONS ---
 # These functions provide backward compatibility for code that hasn't been updated yet.
+
 
 def get_global_ollama_model() -> Optional[str]:
     """
@@ -930,6 +1086,7 @@ def get_global_ollama_model() -> Optional[str]:
     if active_llm and active_llm.get("provider") == "ollama":
         return active_llm.get("model")
     return None
+
 
 def set_global_ollama_model(model_name: str) -> bool:
     """
@@ -946,12 +1103,13 @@ def set_global_ollama_model(model_name: str) -> bool:
         return False
     return set_active_llm_setting("ollama", model_name)
 
+
 # --- DEPRECATED FUNCTIONS ---
 # These are no longer used and will be removed.
 # def get_openai_model() -> Optional[str]: ...
 # def set_openai_model(model: str) -> bool: ...
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("--- Testing Settings Service ---")
 
     # Test setting and getting the active LLM

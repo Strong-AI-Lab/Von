@@ -21,7 +21,9 @@ def test_manifest_parity():
     code_tool_map = {t.name: t for t in code_tools}
 
     # 2. Get tools from manifest
-    manifest_path = project_root / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
+    manifest_path = (
+        project_root / "src" / "backend" / "mcp_server" / "vontology_mcp.json"
+    )
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest_data = json.load(f)
 
@@ -35,8 +37,12 @@ def test_manifest_parity():
     missing_in_manifest = code_names - manifest_names
     missing_in_code = manifest_names - code_names
 
-    assert not missing_in_manifest, f"Tools implemented but missing from manifest: {missing_in_manifest}"
-    assert not missing_in_code, f"Tools in manifest but not implemented: {missing_in_code}"
+    assert (
+        not missing_in_manifest
+    ), f"Tools implemented but missing from manifest: {missing_in_manifest}"
+    assert (
+        not missing_in_code
+    ), f"Tools in manifest but not implemented: {missing_in_code}"
 
     # Optional: Compare schemas (basic check)
     for name in code_names:
@@ -44,9 +50,13 @@ def test_manifest_parity():
         manifest_tool = manifest_tool_map[name]
 
         # Check description presence
-        assert manifest_tool.get("description"), f"Tool {name} missing description in manifest"
+        assert manifest_tool.get(
+            "description"
+        ), f"Tool {name} missing description in manifest"
 
         # Check input schema presence
-        assert "inputSchema" in manifest_tool, f"Tool {name} missing inputSchema in manifest"
+        assert (
+            "inputSchema" in manifest_tool
+        ), f"Tool {name} missing inputSchema in manifest"
 
         # We could do deep comparison of schemas here, but existence is a good start.

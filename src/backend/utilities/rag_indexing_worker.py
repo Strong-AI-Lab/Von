@@ -20,23 +20,27 @@ These additions are temporary and may be reduced once stability confirmed.
 # Add src to path so we can import backend modules
 # Assuming this script is in src/backend/utilities/
 # Add project root (for src.backend imports)
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 # Add src directory (for backend imports)
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from src.backend.db.connection_manager import get_db, health_summary
 from src.backend.models.concept_models import IndexingStatus
 from src.backend.languagemodels.llm_interface import get_llm_client
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger("rag_worker")
+
 
 def _flush():
     try:
         sys.stdout.flush()
     except Exception:
         pass
+
 
 def startup_diagnostics():
     logger.info("=== RAG Worker Startup Diagnostics ===")
@@ -45,20 +49,33 @@ def startup_diagnostics():
     logger.info(f"RAG_EMBEDDING_MODEL={os.getenv('RAG_EMBEDDING_MODEL')}")
     try:
         hs = health_summary()
-        logger.info(f"Mongo connected={hs.get('connected')} using_fallback={hs.get('using_fallback')} uri={hs.get('effective_uri')}")
+        logger.info(
+            f"Mongo connected={hs.get('connected')} using_fallback={hs.get('using_fallback')} uri={hs.get('effective_uri')}"
+        )
         # Collection-level counts
         db = get_db()
         if db is not None:
-            coll = db['interaction_sessions']
-            indexed = coll.count_documents({"indexing_status": IndexingStatus.INDEXED.value})
-            pending = coll.count_documents({"indexing_status": IndexingStatus.PENDING.value})
-            failed = coll.count_documents({"indexing_status": IndexingStatus.FAILED.value})
-            skipped = coll.count_documents({"indexing_status": IndexingStatus.SKIPPED.value})
+            coll = db["interaction_sessions"]
+            indexed = coll.count_documents(
+                {"indexing_status": IndexingStatus.INDEXED.value}
+            )
+            pending = coll.count_documents(
+                {"indexing_status": IndexingStatus.PENDING.value}
+            )
+            failed = coll.count_documents(
+                {"indexing_status": IndexingStatus.FAILED.value}
+            )
+            skipped = coll.count_documents(
+                {"indexing_status": IndexingStatus.SKIPPED.value}
+            )
             total = coll.count_documents({})
-            logger.info(f"RAG counts: total={total} indexed={indexed} pending={pending} failed={failed} skipped={skipped}")
+            logger.info(
+                f"RAG counts: total={total} indexed={indexed} pending={pending} failed={failed} skipped={skipped}"
+            )
     except Exception as e:
         logger.warning(f"Mongo health_summary failed: {e}")
     _flush()
+
 
 def process_pending_interactions(loop_iteration: int):
     loop_start = time.time()
@@ -68,11 +85,13 @@ def process_pending_interactions(loop_iteration: int):
         logger.error("Could not connect to database")
         return
 
-    interactions_coll = db['interaction_sessions']
+    interactions_coll = db["interaction_sessions"]
 
     # Diagnostic: report database name and raw pending count prior to query
     try:
-        raw_pending_count = interactions_coll.count_documents({"indexing_status": IndexingStatus.PENDING.value})
+        raw_pending_count = interactions_coll.count_documents(
+            {"indexing_status": IndexingStatus.PENDING.value}
+        )
         logger.info(f"DB name={db.name} raw_pending_count={raw_pending_count}")
     except Exception as e:
         logger.warning(f"Unable to count pending documents: {e}")
@@ -84,12 +103,14 @@ def process_pending_interactions(loop_iteration: int):
     # Limit to a batch size to avoid holding cursor too long if many items
     batch_size = 10
     scanned = interactions_coll.count_documents({})
-    eligible = interactions_coll.count_documents({
-        '$or': [
-            {'history': {'$exists': True, '$ne': []}},
-            {'summary': {'$exists': True, '$type': 'string', '$ne': ''}}
-        ]
-    })
+    eligible = interactions_coll.count_documents(
+        {
+            "$or": [
+                {"history": {"$exists": True, "$ne": []}},
+                {"summary": {"$exists": True, "$type": "string", "$ne": ""}},
+            ]
+        }
+    )
     cursor = interactions_coll.find(query).limit(batch_size)
 
     # Convert to list to avoid cursor timeout issues during processing
@@ -127,32 +148,36 @@ def process_pending_interactions(loop_iteration: int):
     embedding_model = os.getenv("RAG_EMBEDDING_MODEL")
 
     for interaction in pending_items:
-        interaction_id = interaction['_id']
+        interaction_id = interaction["_id"]
         try:
             logger.info(f"Processing interaction {interaction_id}")
 
             # 1. Extract text from history (Q&A pairs)
             text_content = []
-            interactions = interaction.get('interactions', [])
+            interactions = interaction.get("interactions", [])
             for entry in interactions:
-                details = entry.get('details', {})
-                question = details.get('question')
-                answer = details.get('answer') or details.get('answer_preview')
+                details = entry.get("details", {})
+                question = details.get("question")
+                answer = details.get("answer") or details.get("answer_preview")
                 if question and answer:
                     text_content.append(f"Q: {question}\nA: {answer}")
 
             # Fallback to 'history' field if 'interactions' is empty
             if not text_content:
-                history = interaction.get('history', [])
-                logger.info(f"Checking history for {interaction_id}: found {len(history)} entries")
+                history = interaction.get("history", [])
+                logger.info(
+                    f"Checking history for {interaction_id}: found {len(history)} entries"
+                )
                 for entry in history:
-                    role = entry.get('type')
-                    content = entry.get('content')
-                    logger.info(f"Entry: role={role}, content_len={len(content) if content else 0}")
+                    role = entry.get("type")
+                    content = entry.get("content")
+                    logger.info(
+                        f"Entry: role={role}, content_len={len(content) if content else 0}"
+                    )
                     if content:
-                        if role == 'system_question':
+                        if role == "system_question":
                             text_content.append(f"Q: {content}")
-                        elif role == 'user_answer':
+                        elif role == "user_answer":
                             text_content.append(f"A: {content}")
                         else:
                             text_content.append(f"{role}: {content}")
@@ -161,15 +186,17 @@ def process_pending_interactions(loop_iteration: int):
             logger.info(f"Full text length: {len(full_text)}")
 
             if not full_text.strip():
-                logger.warning(f"No text content found for interaction {interaction_id}")
+                logger.warning(
+                    f"No text content found for interaction {interaction_id}"
+                )
                 interactions_coll.update_one(
                     {"_id": interaction_id},
                     {
                         "$set": {
                             "indexing_status": IndexingStatus.SKIPPED.value,
-                            "indexed_at": datetime.now(timezone.utc)
+                            "indexed_at": datetime.now(timezone.utc),
                         }
-                    }
+                    },
                 )
                 continue
 
@@ -183,9 +210,9 @@ def process_pending_interactions(loop_iteration: int):
                     "$set": {
                         "embedding": embedding,
                         "indexing_status": IndexingStatus.INDEXED.value,
-                        "indexed_at": datetime.now(timezone.utc)
+                        "indexed_at": datetime.now(timezone.utc),
                     }
-                }
+                },
             )
             logger.info(
                 f"Successfully indexed interaction {interaction_id}. "
@@ -198,19 +225,26 @@ def process_pending_interactions(loop_iteration: int):
             # 4. Trigger per-session sync to chat RAG store (best-effort)
             try:
                 from src.backend.services.rag_sync_service import sync_one_session
+
                 # Determine namespace: prefer session namespace, else env
                 try:
-                    sess_doc = interactions_coll.find_one({"_id": interaction_id}, {"namespace": 1})
+                    sess_doc = interactions_coll.find_one(
+                        {"_id": interaction_id}, {"namespace": 1}
+                    )
                     ns = sess_doc.get("namespace") if sess_doc else None
                 except Exception:
                     ns = None
                 if not ns:
-                    ns = os.getenv('VON_DEFAULT_NAMESPACE')
+                    ns = os.getenv("VON_DEFAULT_NAMESPACE")
                 sync_result = sync_one_session(str(interaction_id), namespace=ns)
                 if not sync_result.get("success"):
-                    logger.warning(f"RAG sync failed for {interaction_id}: {sync_result.get('error')}")
+                    logger.warning(
+                        f"RAG sync failed for {interaction_id}: {sync_result.get('error')}"
+                    )
                 else:
-                    logger.info(f"RAG sync ok for {interaction_id} namespace={sync_result.get('namespace')}")
+                    logger.info(
+                        f"RAG sync ok for {interaction_id} namespace={sync_result.get('namespace')}"
+                    )
             except Exception as sync_err:
                 logger.warning(f"RAG sync error for {interaction_id}: {sync_err}")
 
@@ -219,15 +253,12 @@ def process_pending_interactions(loop_iteration: int):
             # Update status to FAILED
             interactions_coll.update_one(
                 {"_id": interaction_id},
-                {
-                    "$set": {
-                        "indexing_status": IndexingStatus.FAILED.value
-                    }
-                }
+                {"$set": {"indexing_status": IndexingStatus.FAILED.value}},
             )
     elapsed = round(time.time() - loop_start, 3)
     logger.info(f"Iteration {loop_iteration} batch complete in {elapsed}s")
     _flush()
+
 
 def main():
     print("[stdout] RAG Indexing Worker starting...")  # direct stdout banner
@@ -248,6 +279,7 @@ def main():
             logger.error(f"Error in worker loop: {e}")
             _flush()
         time.sleep(5)
+
 
 if __name__ == "__main__":
     main()

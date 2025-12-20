@@ -1,16 +1,25 @@
-
 import pytest
 from unittest.mock import MagicMock, patch
 from backend.services.rag_service import get_rag_service, RAGService
 
+
 # Mock LlamaIndex components to avoid real API calls and dependencies during unit tests
 @pytest.fixture
 def mock_llamaindex():
-        with patch("src.backend.services.rag_backends.llamaindex_backend.VectorStoreIndex") as mock_index_cls, \
-            patch("src.backend.services.rag_backends.llamaindex_backend.ServiceContext") as mock_service_context, \
-            patch("src.backend.services.rag_backends.llamaindex_backend.StorageContext") as mock_storage_context, \
-            patch("src.backend.services.rag_backends.llamaindex_backend.load_index_from_storage") as mock_load:
-
+    with (
+        patch(
+            "src.backend.services.rag_backends.llamaindex_backend.VectorStoreIndex"
+        ) as mock_index_cls,
+        patch(
+            "src.backend.services.rag_backends.llamaindex_backend.ServiceContext"
+        ) as mock_service_context,
+        patch(
+            "src.backend.services.rag_backends.llamaindex_backend.StorageContext"
+        ) as mock_storage_context,
+        patch(
+            "src.backend.services.rag_backends.llamaindex_backend.load_index_from_storage"
+        ) as mock_load,
+    ):
         # Setup mock index instance
         mock_index_instance = MagicMock()
         mock_index_cls.from_documents.return_value = mock_index_instance
@@ -31,14 +40,16 @@ def mock_llamaindex():
         yield {
             "index_cls": mock_index_cls,
             "index": mock_index_instance,
-            "load": mock_load
+            "load": mock_load,
         }
+
 
 def test_get_rag_service_llamaindex(mock_llamaindex):
     service = get_rag_service("llamaindex")
     assert service is not None
     # Check if it's the right class (by name, to avoid importing the class directly if lazy)
     assert type(service).__name__ == "LlamaIndexRAGService"
+
 
 def test_upsert_documents(mock_llamaindex):
     service = get_rag_service("llamaindex")
@@ -56,6 +67,7 @@ def test_upsert_documents(mock_llamaindex):
     # Let's adjust expectation based on fixture: load returns instance.
     mock_llamaindex["index"].insert.assert_called()
 
+
 def test_query(mock_llamaindex):
     service = get_rag_service("llamaindex")
     results = service.query("test query")
@@ -65,11 +77,14 @@ def test_query(mock_llamaindex):
     assert results[0]["text"] == "content"
     assert results[0]["score"] == 0.9
 
+
 def test_delete_documents(mock_llamaindex):
     service = get_rag_service("llamaindex")
     count = service.delete_documents(["doc1"])
 
     # Our implementation returns count if successful
     # It calls delete_ref_doc
-    mock_llamaindex["index"].delete_ref_doc.assert_called_with("doc1", delete_from_docstore=True)
+    mock_llamaindex["index"].delete_ref_doc.assert_called_with(
+        "doc1", delete_from_docstore=True
+    )
     assert count == 1

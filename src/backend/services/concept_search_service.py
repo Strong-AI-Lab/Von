@@ -34,7 +34,10 @@ from datetime import datetime, timezone
 from bson import ObjectId
 
 from ..db.repositories.concepts_repository import ConceptsRepository
-from ..db.repositories.text_value_repository import TextRelationsRepository, TextValuesRepository
+from ..db.repositories.text_value_repository import (
+    TextRelationsRepository,
+    TextValuesRepository,
+)
 from ..vontology.utils_vontology import (
     get_vontology_node_and_descendant_ids,
     get_concept_display_name_with_names_fallback,
@@ -48,11 +51,13 @@ logger = logging.getLogger(__name__)
 
 class ConceptSearchError(Exception):
     """Base exception for concept search errors."""
+
     pass
 
 
 class InvalidSearchParameters(ConceptSearchError):
     """Raised when search parameters are invalid."""
+
     pass
 
 
@@ -73,7 +78,9 @@ def _determine_concept_kind(concept_doc: Dict[str, Any]) -> str:
         else:
             return "individual"
     except Exception as e:
-        logger.warning(f"Error determining concept kind: {e}, defaulting to 'individual'")
+        logger.warning(
+            f"Error determining concept kind: {e}, defaulting to 'individual'"
+        )
         return "individual"
 
 
@@ -81,7 +88,7 @@ def _build_name_query(
     query: str,
     exact: bool = False,
     prefix: bool = False,
-    include_description: bool = False
+    include_description: bool = False,
 ) -> Dict[str, Any]:
     """Build MongoDB query for name/description matching.
 
@@ -124,10 +131,12 @@ def _build_name_query(
     # Add description fields if requested
     if include_description:
         regex = {"$regex": re.escape(query), "$options": "i"}
-        base_or.extend([  # type: ignore[arg-type]
-            {"metadata.description": regex},
-            {"names.text": regex},  # Legacy field in names array
-        ])
+        base_or.extend(
+            [  # type: ignore[arg-type]
+                {"metadata.description": regex},
+                {"names.text": regex},  # Legacy field in names array
+            ]
+        )
 
     return {"$or": base_or}
 
@@ -158,7 +167,7 @@ def _search_text_relations(
         {'#V#university', '#V#university_of_melbourne', ...}
     """
     # Normalize whitespace in query (collapse multiple spaces to single space)
-    normalized_query = re.sub(r'\s+', ' ', query.strip())
+    normalized_query = re.sub(r"\s+", " ", query.strip())
 
     # Build predicates list FIRST - only search text_values linked via these predicates
     predicates = ["hasName"]
@@ -170,42 +179,62 @@ def _search_text_relations(
     # This prevents finding "New Zealand" in descriptions/notes when we only want names
 
     # Step 1: Get ALL text_relations for the specified predicates (hasName by default)
-    all_relations = list(TextRelationsRepository.find({
-        "predicate": {"$in": predicates}
-    }, limit=10000))
+    all_relations = list(
+        TextRelationsRepository.find({"predicate": {"$in": predicates}}, limit=10000)
+    )
 
     if not all_relations:
         logger.debug(f"No text_relations found for predicates {predicates}")
         return set()
 
     # Step 2: Extract the text_value_ids that are actually used as names (or descriptions if enabled)
-    valid_text_value_ids = {rel["object_text_id"] for rel in all_relations if rel.get("object_text_id")}
+    valid_text_value_ids = {
+        rel["object_text_id"] for rel in all_relations if rel.get("object_text_id")
+    }
 
     if not valid_text_value_ids:
-        logger.debug(f"No text_value_ids found in relations for predicates {predicates}")
+        logger.debug(
+            f"No text_value_ids found in relations for predicates {predicates}"
+        )
         return set()
 
     # Step 3: Build text search query, but restrict to valid_text_value_ids
     if exact:
         text_query = {
-            "_id": {"$in": [ObjectId(tv_id) for tv_id in valid_text_value_ids if ObjectId.is_valid(tv_id)]},
-            "text": normalized_query
+            "_id": {
+                "$in": [
+                    ObjectId(tv_id)
+                    for tv_id in valid_text_value_ids
+                    if ObjectId.is_valid(tv_id)
+                ]
+            },
+            "text": normalized_query,
         }
     elif prefix:
         text_query = {
-            "_id": {"$in": [ObjectId(tv_id) for tv_id in valid_text_value_ids if ObjectId.is_valid(tv_id)]},
-            "text": {"$regex": f"^{re.escape(normalized_query)}", "$options": "i"}
+            "_id": {
+                "$in": [
+                    ObjectId(tv_id)
+                    for tv_id in valid_text_value_ids
+                    if ObjectId.is_valid(tv_id)
+                ]
+            },
+            "text": {"$regex": f"^{re.escape(normalized_query)}", "$options": "i"},
         }
     else:
         # For substring search, try exact match first, then broader text search
         # All searches restricted to valid_text_value_ids
-        object_ids = [ObjectId(tv_id) for tv_id in valid_text_value_ids if ObjectId.is_valid(tv_id)]
+        object_ids = [
+            ObjectId(tv_id)
+            for tv_id in valid_text_value_ids
+            if ObjectId.is_valid(tv_id)
+        ]
 
         # Try exact match with flexible whitespace
         flexible_exact_pattern = re.escape(normalized_query).replace(" ", r"\s+")
         exact_query = {
             "_id": {"$in": object_ids},
-            "text": {"$regex": f"^{flexible_exact_pattern}$", "$options": "i"}
+            "text": {"$regex": f"^{flexible_exact_pattern}$", "$options": "i"},
         }
         matching_texts = list(TextValuesRepository.find(exact_query, limit=500))
 
@@ -214,17 +243,21 @@ def _search_text_relations(
             try:
                 text_search_query = {
                     "_id": {"$in": object_ids},
-                    "$text": {"$search": normalized_query}
+                    "$text": {"$search": normalized_query},
                 }
-                matching_texts = list(TextValuesRepository.find(text_search_query, limit=500))
+                matching_texts = list(
+                    TextValuesRepository.find(text_search_query, limit=500)
+                )
             except Exception as e:
                 logger.debug(f"Text search failed: {e}")
                 # Final fallback: substring anywhere in text
                 substring_query = {
                     "_id": {"$in": object_ids},
-                    "text": {"$regex": re.escape(normalized_query), "$options": "i"}
+                    "text": {"$regex": re.escape(normalized_query), "$options": "i"},
                 }
-                matching_texts = list(TextValuesRepository.find(substring_query, limit=500))
+                matching_texts = list(
+                    TextValuesRepository.find(substring_query, limit=500)
+                )
 
     # Step 4: Execute query for exact/prefix
     if exact or prefix:
@@ -237,13 +270,20 @@ def _search_text_relations(
     text_value_ids = [str(tv["_id"]) for tv in matching_texts]
 
     # Step 6: Find text_relations linking these text_values to concepts
-    relations = list(TextRelationsRepository.find({
-        "object_text_id": {"$in": text_value_ids},
-        "predicate": {"$in": predicates}
-    }, limit=1000))
+    relations = list(
+        TextRelationsRepository.find(
+            {
+                "object_text_id": {"$in": text_value_ids},
+                "predicate": {"$in": predicates},
+            },
+            limit=1000,
+        )
+    )
 
     # Extract unique concept IDs
-    concept_ids = {rel["subject_concept_id"] for rel in relations if rel.get("subject_concept_id")}
+    concept_ids = {
+        rel["subject_concept_id"] for rel in relations if rel.get("subject_concept_id")
+    }
 
     logger.info(
         f"[text_relations_search] query='{query}' exact={exact} prefix={prefix} "
@@ -406,11 +446,15 @@ def search_concepts(
     # Validate parameters
     # Allow empty query when using instance_of filter (matches all instances)
     if query is None or not isinstance(query, str):
-        raise InvalidSearchParameters("Query must be a string (use empty string '' to match all)")
+        raise InvalidSearchParameters(
+            "Query must be a string (use empty string '' to match all)"
+        )
 
     # Empty query is valid when using filters like instance_of
     if not query and not instance_of:
-        raise InvalidSearchParameters("Query cannot be empty unless using instance_of filter")
+        raise InvalidSearchParameters(
+            "Query cannot be empty unless using instance_of filter"
+        )
 
     # Handle backward compatibility for exact_match parameter
     if exact_match:
@@ -487,7 +531,9 @@ def search_concepts(
 
         # Special case: empty query with instance_of means "match all instances"
         if not query and instance_of:
-            logger.info(f"[concept_search] Empty query with instance_of={instance_of}, fetching all instances")
+            logger.info(
+                f"[concept_search] Empty query with instance_of={instance_of}, fetching all instances"
+            )
             # Just fetch all concepts matching base_query (which has instance_of filter)
             all_instances_cursor = ConceptsRepository.find(
                 base_query,
@@ -516,13 +562,17 @@ def search_concepts(
         elif match_type != "similarity":
             try:
                 use_exact = match_type == "exact"
-                use_prefix = use_two_pass and not re.search(r"\W", query) and match_type != "exact"
+                use_prefix = (
+                    use_two_pass
+                    and not re.search(r"\W", query)
+                    and match_type != "exact"
+                )
 
                 text_relations_concept_ids = _search_text_relations(
                     query,
                     exact=use_exact,
                     prefix=use_prefix,
-                    include_description=include_description
+                    include_description=include_description,
                 )
 
                 if text_relations_concept_ids:
@@ -531,7 +581,9 @@ def search_concepts(
                         f"via text_relations (modern schema)"
                     )
             except Exception as e:
-                logger.warning(f"Text relations search failed (non-fatal): {e}", exc_info=True)
+                logger.warning(
+                    f"Text relations search failed (non-fatal): {e}", exc_info=True
+                )
 
         # For similarity matching, fetch broader candidate set
         if match_type == "similarity" or match_type == "all":
@@ -568,8 +620,12 @@ def search_concepts(
 
             # If match_type is "all", also do substring search and merge
             if match_type == "all":
-                substring_query = _build_name_query(query, prefix=False, include_description=include_description)
-                combined_query = {**base_query, **substring_query} if base_query else substring_query
+                substring_query = _build_name_query(
+                    query, prefix=False, include_description=include_description
+                )
+                combined_query = (
+                    {**base_query, **substring_query} if base_query else substring_query
+                )
 
                 if seen_ids:
                     combined_query["concept_id"] = {"$nin": list(seen_ids)}
@@ -606,8 +662,12 @@ def search_concepts(
 
             if not has_special_chars:
                 # Pass 1: Prefix match (fast, high-quality results)
-                prefix_query = _build_name_query(query, prefix=True, include_description=include_description)
-                combined_query = {**base_query, **prefix_query} if base_query else prefix_query
+                prefix_query = _build_name_query(
+                    query, prefix=True, include_description=include_description
+                )
+                combined_query = (
+                    {**base_query, **prefix_query} if base_query else prefix_query
+                )
 
                 prefix_cursor = ConceptsRepository.find(
                     combined_query,
@@ -634,8 +694,14 @@ def search_concepts(
                 fallback_threshold = max(3, limit // 2)
                 if len(results) < fallback_threshold:
                     remaining = limit * 2 - len(results)
-                    substring_query = _build_name_query(query, prefix=False, include_description=include_description)
-                    combined_query = {**base_query, **substring_query} if base_query else substring_query
+                    substring_query = _build_name_query(
+                        query, prefix=False, include_description=include_description
+                    )
+                    combined_query = (
+                        {**base_query, **substring_query}
+                        if base_query
+                        else substring_query
+                    )
 
                     # Exclude already found IDs
                     if seen_ids:
@@ -663,8 +729,12 @@ def search_concepts(
                             seen_ids.add(concept_id)
             else:
                 # Special chars detected, skip directly to substring
-                substring_query = _build_name_query(query, prefix=False, include_description=include_description)
-                combined_query = {**base_query, **substring_query} if base_query else substring_query
+                substring_query = _build_name_query(
+                    query, prefix=False, include_description=include_description
+                )
+                combined_query = (
+                    {**base_query, **substring_query} if base_query else substring_query
+                )
 
                 substring_cursor = ConceptsRepository.find(
                     combined_query,
@@ -690,7 +760,9 @@ def search_concepts(
         else:
             # Single-pass search (exact or substring)
             use_exact = match_type == "exact"
-            name_query = _build_name_query(query, exact=use_exact, include_description=include_description)
+            name_query = _build_name_query(
+                query, exact=use_exact, include_description=include_description
+            )
             combined_query = {**base_query, **name_query} if base_query else name_query
 
             concepts_cursor = ConceptsRepository.find(
@@ -801,7 +873,9 @@ def search_concepts(
             concept_ids_for_paths = [cid for cid, _, _ in paginated_results]
             try:
                 path_data = get_concept_hierarchical_paths(concept_ids_for_paths)
-                logger.debug(f"[concept_search] Enriched {len(path_data)} concepts with hierarchy paths")
+                logger.debug(
+                    f"[concept_search] Enriched {len(path_data)} concepts with hierarchy paths"
+                )
             except Exception as e:
                 logger.warning(f"Failed to build hierarchy paths: {e}", exc_info=True)
                 path_data = {}
@@ -809,7 +883,9 @@ def search_concepts(
         # Score results by relevance (exact matches score higher)
         scored_results = []
 
-        logger.info(f"[concept_search] Scoring {len(paginated_results)} paginated results for query='{query}'")
+        logger.info(
+            f"[concept_search] Scoring {len(paginated_results)} paginated results for query='{query}'"
+        )
 
         # MODERN SCHEMA: Fetch ALL names from text_relations for ALL concepts
         # This is the primary source of names; concept document names/name fields are legacy only
@@ -819,20 +895,44 @@ def search_concepts(
 
         if concept_ids:
             try:
-                relations = list(TextRelationsRepository.find({
-                    "subject_concept_id": {"$in": concept_ids},
-                    "predicate": "hasName"
-                }, limit=1000))
+                relations = list(
+                    TextRelationsRepository.find(
+                        {
+                            "subject_concept_id": {"$in": concept_ids},
+                            "predicate": "hasName",
+                        },
+                        limit=1000,
+                    )
+                )
 
-                logger.info(f"[concept_search] Found {len(relations)} hasName relations for {len(concept_ids)} concepts")
+                logger.info(
+                    f"[concept_search] Found {len(relations)} hasName relations for {len(concept_ids)} concepts"
+                )
 
-                text_value_ids = [rel["object_text_id"] for rel in relations if rel.get("object_text_id")]
-                logger.info(f"[concept_search] Extracted {len(text_value_ids)} text_value_ids from relations")
+                text_value_ids = [
+                    rel["object_text_id"]
+                    for rel in relations
+                    if rel.get("object_text_id")
+                ]
+                logger.info(
+                    f"[concept_search] Extracted {len(text_value_ids)} text_value_ids from relations"
+                )
 
                 if text_value_ids:
-                    text_values = list(TextValuesRepository.find({
-                        "_id": {"$in": [ObjectId(tv_id) for tv_id in text_value_ids if ObjectId.is_valid(tv_id)]}
-                    }, limit=1000))
+                    text_values = list(
+                        TextValuesRepository.find(
+                            {
+                                "_id": {
+                                    "$in": [
+                                        ObjectId(tv_id)
+                                        for tv_id in text_value_ids
+                                        if ObjectId.is_valid(tv_id)
+                                    ]
+                                }
+                            },
+                            limit=1000,
+                        )
+                    )
 
                     # Build map of text_value_id -> text (just the text content)
                     tv_map = {}
@@ -849,7 +949,11 @@ def search_concepts(
                             name = tv_map[tv_id]
                             # Get name_type from relation's context field (singular, not plural)
                             context = rel.get("context", {})
-                            name_type = context.get("name_type", "NL") if isinstance(context, dict) else "NL"
+                            name_type = (
+                                context.get("name_type", "NL")
+                                if isinstance(context, dict)
+                                else "NL"
+                            )
                             # First name becomes primary
                             if cid not in text_relations_names:
                                 text_relations_names[cid] = name
@@ -858,21 +962,32 @@ def search_concepts(
                                 text_relations_all_names[cid] = []
                             text_relations_all_names[cid].append((name, name_type))
 
-                logger.info(f"[concept_search] Fetched names from text_relations for {len(text_relations_names)} concepts")
+                logger.info(
+                    f"[concept_search] Fetched names from text_relations for {len(text_relations_names)} concepts"
+                )
             except Exception as e:
-                logger.warning(f"Failed to fetch names from text_relations: {e}", exc_info=True)
+                logger.warning(
+                    f"Failed to fetch names from text_relations: {e}", exc_info=True
+                )
 
         for concept_id, kind, concept_doc in paginated_results:
             try:
                 # MODERN SCHEMA: Use text_relations name first, fall back to legacy fields only if not found
-                if concept_id in text_relations_names and text_relations_names[concept_id]:
+                if (
+                    concept_id in text_relations_names
+                    and text_relations_names[concept_id]
+                ):
                     primary_name = text_relations_names[concept_id]
                 else:
                     # Legacy fallback
-                    primary_name = get_concept_display_name_with_names_fallback(concept_doc)
+                    primary_name = get_concept_display_name_with_names_fallback(
+                        concept_doc
+                    )
             except Exception as e:
                 logger.warning(f"Error getting display name: {e}")
-                primary_name = text_relations_names.get(concept_id) or concept_doc.get("concept_id", "Unknown")
+                primary_name = text_relations_names.get(concept_id) or concept_doc.get(
+                    "concept_id", "Unknown"
+                )
 
             # Calculate relevance score
             score = 0.0
@@ -897,11 +1012,15 @@ def search_concepts(
                     best_match_score = 100.0
                     best_match_name = primary_name
                 elif name_lower.startswith(query_lower):
-                    match_ratio = len(query_lower) / len(name_lower) if len(name_lower) > 0 else 0
+                    match_ratio = (
+                        len(query_lower) / len(name_lower) if len(name_lower) > 0 else 0
+                    )
                     best_match_score = 90.0 + (match_ratio * 5.0)
                     best_match_name = primary_name
                 elif query_lower in name_lower:
-                    match_ratio = len(query_lower) / len(name_lower) if len(name_lower) > 0 else 0
+                    match_ratio = (
+                        len(query_lower) / len(name_lower) if len(name_lower) > 0 else 0
+                    )
                     best_match_score = 70.0 + (match_ratio * 15.0)
                     best_match_name = primary_name
 
@@ -915,11 +1034,19 @@ def search_concepts(
                         candidate_score = 100.0
                     elif alt_lower.startswith(query_lower):
                         # Prefix match on alternate name
-                        match_ratio = len(query_lower) / len(alt_lower) if len(alt_lower) > 0 else 0
+                        match_ratio = (
+                            len(query_lower) / len(alt_lower)
+                            if len(alt_lower) > 0
+                            else 0
+                        )
                         candidate_score = 90.0 + (match_ratio * 5.0)
                     elif query_lower in alt_lower:
                         # Substring match on alternate name
-                        match_ratio = len(query_lower) / len(alt_lower) if len(alt_lower) > 0 else 0
+                        match_ratio = (
+                            len(query_lower) / len(alt_lower)
+                            if len(alt_lower) > 0
+                            else 0
+                        )
                         candidate_score = 70.0 + (match_ratio * 15.0)
 
                     # Apply name_type bonus: NL (natural language) gets slight boost over ABBR/CODE
@@ -965,7 +1092,9 @@ def search_concepts(
                     "primary_path": hierarchy_info.get("primary_path"),
                     "all_parents": hierarchy_info.get("all_parents", []),
                     "depth": hierarchy_info.get("max_depth", 0),
-                    "paths": hierarchy_info.get("paths", []),  # All paths for multiple inheritance
+                    "paths": hierarchy_info.get(
+                        "paths", []
+                    ),  # All paths for multiple inheritance
                 }
 
             scored_results.append(result_obj)
@@ -973,7 +1102,9 @@ def search_concepts(
         # Sort by relevance score descending
         scored_results.sort(key=lambda x: (-x["relevance_score"], x["name"].lower()))
 
-        logger.info(f"[concept_search] Found {total_count} results, returning {len(scored_results)}")
+        logger.info(
+            f"[concept_search] Found {total_count} results, returning {len(scored_results)}"
+        )
 
         return {
             "results": scored_results,
@@ -982,7 +1113,9 @@ def search_concepts(
             "query_info": {
                 "query": query,
                 "match_type": match_type,
-                "min_similarity": min_similarity if match_type in ("similarity", "all") else None,
+                "min_similarity": (
+                    min_similarity if match_type in ("similarity", "all") else None
+                ),
                 "use_two_pass": use_two_pass,
                 "filter_kind": filter_kind,
                 "scope_root": scope_root,

@@ -40,7 +40,9 @@ def _compute_fingerprint(text: str, lang: str) -> str:
     return f"{normalized}||{lang.lower()}"
 
 
-def create_text_value(text: str, lang: str = "en", provenance: Optional[Dict[str, Any]] = None) -> str:
+def create_text_value(
+    text: str, lang: str = "en", provenance: Optional[Dict[str, Any]] = None
+) -> str:
     """Create or return an existing TextValue document based on (fingerprint, lang).
 
     Returns the inserted/existing ObjectId as a hex string.
@@ -87,7 +89,9 @@ def link_text_to_concept(
     _ = TextRelationModel(
         subject_concept_id=subject_concept_id,
         predicate=cast(
-            Literal["hasName", "hasNote", "hasDescription", "hasInteraction", "hasContent"],
+            Literal[
+                "hasName", "hasNote", "hasDescription", "hasInteraction", "hasContent"
+            ],
             predicate,
         ),  # Literal validated in model
         object_text_id=object_text_id,
@@ -142,7 +146,9 @@ def upsert_text_for_concept(
     Returns a payload with text_value_id and relation_id.
     """
     normalized_text = _normalize_text(text)
-    text_value_id = create_text_value(text=normalized_text, lang=lang, provenance=provenance)
+    text_value_id = create_text_value(
+        text=normalized_text, lang=lang, provenance=provenance
+    )
     relation_id, relation_created, context_updated = link_text_to_concept(
         subject_concept_id=subject_concept_id,
         predicate=predicate,
@@ -152,7 +158,9 @@ def upsert_text_for_concept(
     relation_doc = None
     if relation_id:
         try:
-            relation_doc = TextRelationsRepository.find_one({"_id": ObjectId(relation_id)})
+            relation_doc = TextRelationsRepository.find_one(
+                {"_id": ObjectId(relation_id)}
+            )
         except (InvalidId, TypeError):
             relation_doc = None
 
@@ -307,7 +315,9 @@ def update_text_relation_text(
         }
 
     # Reuse create_text_value for fingerprint logic to avoid duplicate documents for whitespace-only changes
-    new_text_value_id = create_text_value(text=normalized_new, lang=lang, provenance=provenance)
+    new_text_value_id = create_text_value(
+        text=normalized_new, lang=lang, provenance=provenance
+    )
     relation_updated = False
     if new_text_value_id != current_tv_id_str:
         TextRelationsRepository.update_one(
@@ -352,10 +362,14 @@ def delete_text_relation_by_predicate_and_text(
             normalized_context["name_type"] = name_type.strip().upper()
             context = normalized_context
 
-    text_value = TextValuesRepository.find_one({"fingerprint": fingerprint, "lang": lang})
+    text_value = TextValuesRepository.find_one(
+        {"fingerprint": fingerprint, "lang": lang}
+    )
     if not text_value:
         # Legacy fallback: direct text/lang lookup
-        text_value = TextValuesRepository.find_one({"text": normalized_text, "lang": lang})
+        text_value = TextValuesRepository.find_one(
+            {"text": normalized_text, "lang": lang}
+        )
     if not text_value:
         text_value = TextValuesRepository.find_one({"text": normalized_text})
     if not text_value:
@@ -374,13 +388,19 @@ def delete_text_relation_by_predicate_and_text(
     )
 
     if not rel_candidates:
-        raise ValueError(f"Text relation not found for predicate '{predicate}' and text '{text}'")
+        raise ValueError(
+            f"Text relation not found for predicate '{predicate}' and text '{text}'"
+        )
 
     relation = None
     if context:
         for rel in rel_candidates:
             existing_context = rel.get("context") or {}
-            if all(existing_context.get(k) == v for k, v in context.items() if v is not None):
+            if all(
+                existing_context.get(k) == v
+                for k, v in context.items()
+                if v is not None
+            ):
                 relation = rel
                 break
     if relation is None:
@@ -399,7 +419,13 @@ def delete_text_relation_by_predicate_and_text(
         TextValuesRepository.delete_one({"_id": ObjectId(text_value_id)})
         orphaned = True
 
-    return {"deleted": True, "relation_id": relation_id, "predicate": predicate, "text": text, "orphaned_text_value_deleted": orphaned}
+    return {
+        "deleted": True,
+        "relation_id": relation_id,
+        "predicate": predicate,
+        "text": text,
+        "orphaned_text_value_deleted": orphaned,
+    }
 
 
 def delete_text_relation(subject_concept_id: str, relation_id: str) -> Dict[str, Any]:
@@ -425,7 +451,11 @@ def delete_text_relation(subject_concept_id: str, relation_id: str) -> Dict[str,
             # Safe to delete
             TextValuesRepository.delete_one({"_id": ObjectId(tv_id)})
             orphaned = True
-    return {"deleted": True, "relation_id": relation_id, "orphaned_text_value_deleted": orphaned}
+    return {
+        "deleted": True,
+        "relation_id": relation_id,
+        "orphaned_text_value_deleted": orphaned,
+    }
 
 
 __all__ = [

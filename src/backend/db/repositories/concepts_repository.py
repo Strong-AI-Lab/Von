@@ -13,6 +13,7 @@ from ...security.access_control import (
     sanitize_concept_document,
 )
 
+
 # --- Legacy Field Guard -------------------------------------------------
 def _sanitize_update_payload(update: Dict[str, Any]) -> Dict[str, Any]:
     """Strip any attempt to write legacy top-level 'description'.
@@ -25,23 +26,28 @@ def _sanitize_update_payload(update: Dict[str, Any]) -> Dict[str, Any]:
         if not update:
             return update
         # Modifier style ($set etc.)
-        if any(k.startswith('$') for k in update.keys()):
-            set_ops = update.get('$set')
-            if isinstance(set_ops, dict) and 'description' in set_ops:
-                logger.warning('[legacy_field_guard] Stripping top-level description from $set update; use relation hasDescription instead')
-                set_ops.pop('description', None)
+        if any(k.startswith("$") for k in update.keys()):
+            set_ops = update.get("$set")
+            if isinstance(set_ops, dict) and "description" in set_ops:
+                logger.warning(
+                    "[legacy_field_guard] Stripping top-level description from $set update; use relation hasDescription instead"
+                )
+                set_ops.pop("description", None)
                 if not set_ops:
-                    update.pop('$set', None)
+                    update.pop("$set", None)
             return update
         # Replacement style (full document)
-        if 'description' in update:
-            logger.warning('[legacy_field_guard] Stripping top-level description from replacement document; use relation hasDescription instead')
+        if "description" in update:
+            logger.warning(
+                "[legacy_field_guard] Stripping top-level description from replacement document; use relation hasDescription instead"
+            )
             update = dict(update)
-            update.pop('description', None)
+            update.pop("description", None)
         return update
     except Exception as e:  # pragma: no cover
-        logger.error(f'[legacy_field_guard] Failed to sanitize update payload: {e}')
+        logger.error(f"[legacy_field_guard] Failed to sanitize update payload: {e}")
         return update
+
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +97,9 @@ class ConceptsRepository:
 
     # Basic wrappers
     @staticmethod
-    def find_one(filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    def find_one(
+        filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
         coll = ConceptsRepository.collection()
         if coll is None:
             return None
@@ -100,7 +108,13 @@ class ConceptsRepository:
         return sanitize_concept_document(result)
 
     @staticmethod
-    def find(filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None, sort: Optional[List] = None, skip: int = 0, limit: int = 0):
+    def find(
+        filter: Dict[str, Any],
+        projection: Optional[Dict[str, Any]] = None,
+        sort: Optional[List] = None,
+        skip: int = 0,
+        limit: int = 0,
+    ):
         coll = ConceptsRepository.collection()
         if coll is None:
             return []
@@ -122,7 +136,9 @@ class ConceptsRepository:
         return coll.insert_one(document)
 
     @staticmethod
-    def update_one(filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
+    def update_one(
+        filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False
+    ):
         coll = ConceptsRepository.collection()
         if coll is None:
             raise RuntimeError("Concepts collection not available")
@@ -140,13 +156,17 @@ class ConceptsRepository:
         return coll.update_many(query, update)
 
     @staticmethod
-    def find_one_and_update(filter: Dict[str, Any], update: Dict[str, Any], return_document: bool = False):
+    def find_one_and_update(
+        filter: Dict[str, Any], update: Dict[str, Any], return_document: bool = False
+    ):
         coll = ConceptsRepository.collection()
         if coll is None:
             return None
         update = _sanitize_update_payload(update)
         query = apply_concept_query_filter(filter or {})
-        result = coll.find_one_and_update(query, update, return_document=return_document)
+        result = coll.find_one_and_update(
+            query, update, return_document=return_document
+        )
         return sanitize_concept_document(result)
 
     @staticmethod
@@ -188,12 +208,14 @@ class ConceptsRepository:
         """Ensure relationships.<rel_kind> is stored as a list for the concept."""
         doc = ConceptsRepository.find_one(
             {"concept_id": concept_id},
-            {f"relationships.{rel_kind}": 1, "concept_id": 1}
+            {f"relationships.{rel_kind}": 1, "concept_id": 1},
         )
         if not doc:
-            raise ValueError(f"Concept '{concept_id}' not found while normalising relationships")
+            raise ValueError(
+                f"Concept '{concept_id}' not found while normalising relationships"
+            )
 
-        rels = (doc.get("relationships") or {})
+        rels = doc.get("relationships") or {}
         curr = rels.get(rel_kind)
         if isinstance(curr, list):
             return False
@@ -201,13 +223,12 @@ class ConceptsRepository:
         if isinstance(curr, str) and curr.strip():
             ConceptsRepository.update_one(
                 {"concept_id": concept_id},
-                {"$set": {f"relationships.{rel_kind}": [curr]}}
+                {"$set": {f"relationships.{rel_kind}": [curr]}},
             )
             return True
 
         ConceptsRepository.update_one(
-            {"concept_id": concept_id},
-            {"$set": {f"relationships.{rel_kind}": []}}
+            {"concept_id": concept_id}, {"$set": {f"relationships.{rel_kind}": []}}
         )
         return True
 
@@ -218,7 +239,7 @@ class ConceptsRepository:
         target_id: str,
         *,
         action: Literal["add", "remove"],
-        maintain_inverse: bool = True
+        maintain_inverse: bool = True,
     ) -> bool:
         """Mutate a relationship edge while optionally maintaining its structural inverse."""
 
@@ -235,12 +256,12 @@ class ConceptsRepository:
         if action == "add":
             result = ConceptsRepository.update_one(
                 {"concept_id": source_id},
-                {"$addToSet": {f"relationships.{kind}": target_id}}
+                {"$addToSet": {f"relationships.{kind}": target_id}},
             )
         else:
             result = ConceptsRepository.update_one(
                 {"concept_id": source_id},
-                {"$pull": {f"relationships.{kind}": target_id}}
+                {"$pull": {f"relationships.{kind}": target_id}},
             )
 
         changed = normalised or (result.modified_count > 0)
@@ -261,7 +282,7 @@ class ConceptsRepository:
                     inv_kind,
                     inv_target,
                     action=action,
-                    maintain_inverse=False
+                    maintain_inverse=False,
                 )
                 changed = changed or inverse_changed
 
@@ -285,7 +306,9 @@ class ConceptsRepository:
         if not isinstance(concept_id, str) or not concept_id:
             raise ValueError("concept_id must be a non-empty string")
 
-        def _collect_targets(source: Mapping[str, Iterable[str]] | None) -> Dict[str, Set[str]]:
+        def _collect_targets(
+            source: Mapping[str, Iterable[str]] | None,
+        ) -> Dict[str, Set[str]]:
             collected: Dict[str, Set[str]] = {}
             if not source:
                 return collected

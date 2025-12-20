@@ -30,7 +30,10 @@ from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.integrations.internal_mcp.search_proxy_mcp import get_search_proxy
 from src.backend.languagemodels.llm_interface import get_llm_client
 from src.backend.services.text_value_service import upsert_text_for_concept
-from src.backend.vontology.utils_vontology import create_vontology_concept, simulate_or_delete_concept
+from src.backend.vontology.utils_vontology import (
+    create_vontology_concept,
+    simulate_or_delete_concept,
+)
 
 
 @dataclass(frozen=True)
@@ -121,7 +124,9 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
             error="No web search results returned",
         )
 
-    top_urls = [r.get("url") for r in results if isinstance(r, dict) and r.get("url")][:3]
+    top_urls = [r.get("url") for r in results if isinstance(r, dict) and r.get("url")][
+        :3
+    ]
     primary_url = top_urls[0] if top_urls else None
     if not primary_url:
         return RunResult(
@@ -146,7 +151,7 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
             error=f"Extract failed: {extract.get('error')}",
         )
 
-    extracted_text = (extract.get("content") or "")
+    extracted_text = extract.get("content") or ""
     extracted_text = extracted_text[:12000]
 
     llm = get_llm_client("openai")
@@ -179,7 +184,11 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
         "notes": notes,
     }
 
-    proposed_names = [person_name, "Y. Bengio", "Bengio, Yoshua"] if person_name.lower() == "yoshua bengio" else [person_name]
+    proposed_names = (
+        [person_name, "Y. Bengio", "Bengio, Yoshua"]
+        if person_name.lower() == "yoshua bengio"
+        else [person_name]
+    )
 
     if not write:
         print("DRY RUN (no writes). Would create concept with:")
@@ -244,11 +253,21 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--person", required=False, default="Yoshua Bengio")
-    parser.add_argument("--write", action="store_true", help="Actually create the concept (writes to DB).")
-    parser.add_argument("--cleanup", action="store_true", help="After creation, delete the created concept.")
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Actually create the concept (writes to DB).",
+    )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="After creation, delete the created concept.",
+    )
     args = parser.parse_args()
 
-    result = asyncio.run(run(person_name=args.person, write=args.write, cleanup=args.cleanup))
+    result = asyncio.run(
+        run(person_name=args.person, write=args.write, cleanup=args.cleanup)
+    )
 
     if result.success:
         print("SUCCESS")

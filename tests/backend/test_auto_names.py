@@ -6,9 +6,10 @@ from unittest.mock import MagicMock, patch
 from backend.services.concept_service import create_concept
 from backend.vontology.utils_vontology import import_ontology_nodes
 
+
 class TestAutoNames(unittest.TestCase):
-    @patch('backend.services.concept_service.ConceptsRepository')
-    @patch('backend.services.text_value_service.upsert_text_for_concept')
+    @patch("backend.services.concept_service.ConceptsRepository")
+    @patch("backend.services.text_value_service.upsert_text_for_concept")
     def test_create_concept_auto_names(self, mock_upsert, mock_repo):
         print("Testing create_concept_auto_names...")
         # Setup mock
@@ -16,26 +17,24 @@ class TestAutoNames(unittest.TestCase):
         mock_repo.collection.return_value = mock_collection
 
         def side_effect_insert(doc):
-            doc['_id'] = 'mock_guid'
+            doc["_id"] = "mock_guid"
             res = MagicMock()
-            res.inserted_id = 'mock_guid'
+            res.inserted_id = "mock_guid"
             return res
 
         mock_collection.insert_one.side_effect = side_effect_insert
 
         # Mock find_one to return the created doc
         mock_doc = {
-            '_id': 'mock_guid',
-            'concept_id': '#V#test_concept',
-            'relationships': {}
+            "_id": "mock_guid",
+            "concept_id": "#V#test_concept",
+            "relationships": {},
         }
         mock_collection.find_one.return_value = mock_doc
 
         # Call create_concept
         create_concept(
-            name="Test Concept",
-            concept_id="#V#test_concept",
-            create_as_instance=False
+            name="Test Concept", concept_id="#V#test_concept", create_as_instance=False
         )
 
         # Verify upsert calls
@@ -45,37 +44,61 @@ class TestAutoNames(unittest.TestCase):
         #     print(f"  Call: {c.kwargs}")
 
         # Verify vonID call
-        von_id_call = [c for c in calls if c.kwargs.get('text') == '#V#test_concept' and c.kwargs.get('context', {}).get('name_type') == 'CODE']
+        von_id_call = [
+            c
+            for c in calls
+            if c.kwargs.get("text") == "#V#test_concept"
+            and c.kwargs.get("context", {}).get("name_type") == "CODE"
+        ]
         self.assertTrue(von_id_call, "vonID not registered as CODE name")
 
         # Verify GUID call
-        guid_call = [c for c in calls if c.kwargs.get('text') == 'mock_guid' and c.kwargs.get('context', {}).get('name_type') == 'CODE']
+        guid_call = [
+            c
+            for c in calls
+            if c.kwargs.get("text") == "mock_guid"
+            and c.kwargs.get("context", {}).get("name_type") == "CODE"
+        ]
         self.assertTrue(guid_call, "GUID not registered as CODE name")
 
-    @patch('backend.vontology.utils_vontology.ConceptsRepository') # Patch global import in utils_vontology
-    @patch('backend.db.repositories.concepts_repository.ConceptsRepository') # Patch for local import
-    @patch('backend.services.text_value_service.upsert_text_for_concept')
-    def test_import_ontology_nodes_auto_names(self, mock_upsert, mock_repo_local, mock_repo_global):
+    @patch(
+        "backend.vontology.utils_vontology.ConceptsRepository"
+    )  # Patch global import in utils_vontology
+    @patch(
+        "backend.db.repositories.concepts_repository.ConceptsRepository"
+    )  # Patch for local import
+    @patch("backend.services.text_value_service.upsert_text_for_concept")
+    def test_import_ontology_nodes_auto_names(
+        self, mock_upsert, mock_repo_local, mock_repo_global
+    ):
         print("\nTesting import_ontology_nodes_auto_names...")
 
         # Configure mocks
         # Both mocks should behave similarly for find/insert
 
         # Mock for local import (used in import_ontology_nodes main body)
-        mock_repo_local.find_one.return_value = None # No existing concept
+        mock_repo_local.find_one.return_value = None  # No existing concept
+
         def side_effect_insert(doc):
-            doc['_id'] = 'mock_import_guid'
+            doc["_id"] = "mock_import_guid"
             return MagicMock()
+
         mock_repo_local.insert_one.side_effect = side_effect_insert
 
         # Mock for global import (used in detect_circular_references_in_import)
         # It calls find({}, projection)
-        mock_repo_global.find.return_value = [] # No existing concepts for cycle detection
+        mock_repo_global.find.return_value = (
+            []
+        )  # No existing concepts for cycle detection
 
-        nodes = [{
-            'concept_id': '#V#imported_concept',
-            'names': [{'name': 'Imported Concept', 'language': 'en-US', 'type': 'NL'}]
-        }]
+        nodes = [
+            {
+                "concept_id": "#V#imported_concept",
+                "names": [
+                    {"name": "Imported Concept", "language": "en-US", "type": "NL"}
+                ],
+            }
+        ]
 
         # Call import
         import_ontology_nodes(nodes)
@@ -87,12 +110,23 @@ class TestAutoNames(unittest.TestCase):
         #     print(f"  Call: {c.kwargs}")
 
         # Verify vonID call
-        von_id_call = [c for c in calls if c.kwargs.get('text') == '#V#imported_concept' and c.kwargs.get('context', {}).get('name_type') == 'CODE']
+        von_id_call = [
+            c
+            for c in calls
+            if c.kwargs.get("text") == "#V#imported_concept"
+            and c.kwargs.get("context", {}).get("name_type") == "CODE"
+        ]
         self.assertTrue(von_id_call, "vonID not registered as CODE name in import")
 
         # Verify GUID call
-        guid_call = [c for c in calls if c.kwargs.get('text') == 'mock_import_guid' and c.kwargs.get('context', {}).get('name_type') == 'CODE']
+        guid_call = [
+            c
+            for c in calls
+            if c.kwargs.get("text") == "mock_import_guid"
+            and c.kwargs.get("context", {}).get("name_type") == "CODE"
+        ]
         self.assertTrue(guid_call, "GUID not registered as CODE name in import")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()

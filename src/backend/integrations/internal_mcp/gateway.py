@@ -139,7 +139,9 @@ class InternalMCPGateway:
         if method_name not in self._method_metrics:
             self._method_metrics[method_name] = MethodMetrics()
 
-    def invoke(self, method_name: str, payload: Optional[MutableMapping[str, Any]] = None) -> TransportResult:
+    def invoke(
+        self, method_name: str, payload: Optional[MutableMapping[str, Any]] = None
+    ) -> TransportResult:
         if not self._enabled:
             raise GatewayDisabledError("Internal MCP gateway is disabled.")
 
@@ -164,14 +166,18 @@ class InternalMCPGateway:
             )
         except Exception as exc:
             message = str(exc)
-            logger.exception("%s handler for %s raised: %s", self._log_tag, method_name, message)
+            logger.exception(
+                "%s handler for %s raised: %s", self._log_tag, method_name, message
+            )
             self._record_failure(method_name, message)
             raise
 
         result_payload = transport_result.payload
         if definition.output_schema is not None:
             if not isinstance(result_payload, MutableMapping):
-                message = "Output schema provided but handler returned non-mapping payload."
+                message = (
+                    "Output schema provided but handler returned non-mapping payload."
+                )
                 self._record_failure(method_name, message)
                 raise SchemaValidationError(message)
             ok, errors = validate_payload(definition.output_schema, result_payload)
@@ -205,7 +211,8 @@ class InternalMCPGateway:
             "total_calls": self._total_calls,
             "total_failures": self._total_failures,
             "methods": {
-                name: metrics.snapshot() for name, metrics in self._method_metrics.items()
+                name: metrics.snapshot()
+                for name, metrics in self._method_metrics.items()
             },
         }
 

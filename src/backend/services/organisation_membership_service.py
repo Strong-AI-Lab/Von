@@ -21,9 +21,7 @@ ROLE_PREDICATE = "#V#hasRole"
 
 
 def create_organisation_membership(
-    user_concept_id: str,
-    organisation_concept_id: str,
-    role: str = "member"
+    user_concept_id: str, organisation_concept_id: str, role: str = "member"
 ) -> Dict[str, Any]:
     """Create a memberOf relationship between a user and an organisation.
 
@@ -56,7 +54,9 @@ def create_organisation_membership(
     if not can_access_concept(user_concept_id):
         raise PermissionError(f"Cannot access user concept '{user_concept_id}'")
     if not can_access_concept(organisation_concept_id):
-        raise PermissionError(f"Cannot access organisation concept '{organisation_concept_id}'")
+        raise PermissionError(
+            f"Cannot access organisation concept '{organisation_concept_id}'"
+        )
 
     # Verify both concepts exist
     user_concept = ConceptsRepository.find_one({"concept_id": user_concept_id})
@@ -68,7 +68,9 @@ def create_organisation_membership(
         raise ValueError(f"Organisation concept '{organisation_concept_id}' not found")
 
     # Create or update the memberOf relationship edge
-    relationship_exists = _check_relationship_exists(user_concept_id, organisation_concept_id)
+    relationship_exists = _check_relationship_exists(
+        user_concept_id, organisation_concept_id
+    )
 
     if not relationship_exists:
         ConceptsRepository.mutate_relationship_edge(
@@ -76,7 +78,7 @@ def create_organisation_membership(
             kind=MEMBERSHIP_RELATIONSHIP_KIND,
             target_id=organisation_concept_id,
             action="add",
-            maintain_inverse=True
+            maintain_inverse=True,
         )
         relationship_created = True
         logger.info(
@@ -94,7 +96,7 @@ def create_organisation_membership(
         predicate=ROLE_PREDICATE,
         text=role,
         lang="en",
-        context={"organisation_id": organisation_concept_id}
+        context={"organisation_id": organisation_concept_id},
     )
 
     return {
@@ -104,7 +106,7 @@ def create_organisation_membership(
         "relationship_created": relationship_created,
         "relationship_id": f"{user_concept_id}::{MEMBERSHIP_RELATIONSHIP_KIND}::{organisation_concept_id}",
         "role_text_value_id": role_result.get("text_value_id"),
-        "role_relation_id": role_result.get("relation_id")
+        "role_relation_id": role_result.get("relation_id"),
     }
 
 
@@ -136,10 +138,10 @@ def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
 
     # Fetch roles from text relations
     from ..db.repositories.text_value_repository import TextRelationsRepository
-    role_relations = TextRelationsRepository.find({
-        "subject_concept_id": user_concept_id,
-        "predicate": ROLE_PREDICATE
-    })
+
+    role_relations = TextRelationsRepository.find(
+        {"subject_concept_id": user_concept_id, "predicate": ROLE_PREDICATE}
+    )
 
     # Build map of org_id -> role (from context)
     org_role_map = {}
@@ -151,6 +153,7 @@ def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
             text_value_id = rel.get("object_text_id")
             if text_value_id:
                 from ..db.repositories.text_value_repository import TextValuesRepository
+
                 tv = TextValuesRepository.find_one({"_id": text_value_id})
                 if tv:
                     org_role_map[org_id] = tv.get("text", "member")
@@ -158,22 +161,20 @@ def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
     # Build result
     memberships = []
     for org_id in org_ids:
-        role = org_role_map.get(org_id, "member")  # Default to member if no role specified
-        memberships.append({
-            "organisation_concept_id": org_id,
-            "role": role
-        })
+        role = org_role_map.get(
+            org_id, "member"
+        )  # Default to member if no role specified
+        memberships.append({"organisation_concept_id": org_id, "role": role})
 
     return {
         "user_concept_id": user_concept_id,
         "memberships": memberships,
-        "total_memberships": len(memberships)
+        "total_memberships": len(memberships),
     }
 
 
 def get_organisation_members(
-    organisation_concept_id: str,
-    role_filter: Optional[str] = None
+    organisation_concept_id: str, role_filter: Optional[str] = None
 ) -> Dict[str, Any]:
     """Retrieve all members of an organisation, optionally filtered by role.
 
@@ -192,7 +193,9 @@ def get_organisation_members(
         raise ValueError("organisation_concept_id must be a non-empty string")
 
     if not can_access_concept(organisation_concept_id):
-        raise PermissionError(f"Cannot access organisation concept '{organisation_concept_id}'")
+        raise PermissionError(
+            f"Cannot access organisation concept '{organisation_concept_id}'"
+        )
 
     org_concept = ConceptsRepository.find_one({"concept_id": organisation_concept_id})
     if not org_concept:
@@ -205,10 +208,12 @@ def get_organisation_members(
     from ..db.repositories.text_value_repository import TextRelationsRepository
 
     # Find all text relations with this org in the context (role associations)
-    role_relations = TextRelationsRepository.find({
-        "predicate": ROLE_PREDICATE,
-        "context.organisation_id": organisation_concept_id
-    })
+    role_relations = TextRelationsRepository.find(
+        {
+            "predicate": ROLE_PREDICATE,
+            "context.organisation_id": organisation_concept_id,
+        }
+    )
 
     # Build map of user_id -> role
     user_role_map: Dict[str, str] = {}
@@ -222,6 +227,7 @@ def get_organisation_members(
             text_value_id = rel.get("object_text_id")
             if text_value_id:
                 from ..db.repositories.text_value_repository import TextValuesRepository
+
                 tv = TextValuesRepository.find_one({"_id": text_value_id})
                 if tv:
                     user_role_map[user_id] = tv.get("text", "member")
@@ -233,23 +239,18 @@ def get_organisation_members(
     for user_id in user_ids:
         role = user_role_map.get(user_id, "member")
         if role_filter is None or role == role_filter:
-            members.append({
-                "user_concept_id": user_id,
-                "role": role
-            })
+            members.append({"user_concept_id": user_id, "role": role})
 
     return {
         "organisation_concept_id": organisation_concept_id,
         "members": members,
         "total_members": len(members),
-        "role_filter": role_filter
+        "role_filter": role_filter,
     }
 
 
 def update_user_role(
-    user_concept_id: str,
-    organisation_concept_id: str,
-    new_role: str
+    user_concept_id: str, organisation_concept_id: str, new_role: str
 ) -> Dict[str, Any]:
     """Update a user's role in an organisation.
 
@@ -273,7 +274,9 @@ def update_user_role(
     if not can_access_concept(user_concept_id):
         raise PermissionError(f"Cannot access user concept '{user_concept_id}'")
     if not can_access_concept(organisation_concept_id):
-        raise PermissionError(f"Cannot access organisation concept '{organisation_concept_id}'")
+        raise PermissionError(
+            f"Cannot access organisation concept '{organisation_concept_id}'"
+        )
 
     # Verify membership exists
     memberships = get_user_memberships(user_concept_id)
@@ -288,17 +291,21 @@ def update_user_role(
 
     # Get current role
     from ..db.repositories.text_value_repository import TextRelationsRepository
-    current_role_rel = TextRelationsRepository.find_one({
-        "subject_concept_id": user_concept_id,
-        "predicate": ROLE_PREDICATE,
-        "context.organisation_id": organisation_concept_id
-    })
+
+    current_role_rel = TextRelationsRepository.find_one(
+        {
+            "subject_concept_id": user_concept_id,
+            "predicate": ROLE_PREDICATE,
+            "context.organisation_id": organisation_concept_id,
+        }
+    )
 
     old_role = "member"  # Default
     if current_role_rel:
         text_value_id = current_role_rel.get("object_text_id")
         if text_value_id:
             from ..db.repositories.text_value_repository import TextValuesRepository
+
             tv = TextValuesRepository.find_one({"_id": text_value_id})
             if tv:
                 old_role = tv.get("text", "member")
@@ -309,7 +316,7 @@ def update_user_role(
             "user_concept_id": user_concept_id,
             "organisation_concept_id": organisation_concept_id,
             "new_role": new_role,
-            "role_updated": False
+            "role_updated": False,
         }
 
     # Update role via upsert
@@ -318,7 +325,7 @@ def update_user_role(
         predicate=ROLE_PREDICATE,
         text=new_role,
         lang="en",
-        context={"organisation_id": organisation_concept_id}
+        context={"organisation_id": organisation_concept_id},
     )
 
     logger.info(
@@ -331,13 +338,12 @@ def update_user_role(
         "organisation_concept_id": organisation_concept_id,
         "new_role": new_role,
         "role_updated": True,
-        "previous_role": old_role
+        "previous_role": old_role,
     }
 
 
 def remove_organisation_membership(
-    user_concept_id: str,
-    organisation_concept_id: str
+    user_concept_id: str, organisation_concept_id: str
 ) -> Dict[str, Any]:
     """Remove a user from an organisation.
 
@@ -359,7 +365,9 @@ def remove_organisation_membership(
     if not can_access_concept(user_concept_id):
         raise PermissionError(f"Cannot access user concept '{user_concept_id}'")
     if not can_access_concept(organisation_concept_id):
-        raise PermissionError(f"Cannot access organisation concept '{organisation_concept_id}'")
+        raise PermissionError(
+            f"Cannot access organisation concept '{organisation_concept_id}'"
+        )
 
     # Remove the memberOf relationship
     ConceptsRepository.mutate_relationship_edge(
@@ -367,16 +375,19 @@ def remove_organisation_membership(
         kind=MEMBERSHIP_RELATIONSHIP_KIND,
         target_id=organisation_concept_id,
         action="remove",
-        maintain_inverse=True
+        maintain_inverse=True,
     )
 
     # Remove role text relations for this organisation
     from ..db.repositories.text_value_repository import TextRelationsRepository
-    role_relation = TextRelationsRepository.find_one({
-        "subject_concept_id": user_concept_id,
-        "predicate": ROLE_PREDICATE,
-        "context.organisation_id": organisation_concept_id
-    })
+
+    role_relation = TextRelationsRepository.find_one(
+        {
+            "subject_concept_id": user_concept_id,
+            "predicate": ROLE_PREDICATE,
+            "context.organisation_id": organisation_concept_id,
+        }
+    )
 
     if role_relation:
         TextRelationsRepository.delete_one({"_id": role_relation["_id"]})
@@ -388,11 +399,13 @@ def remove_organisation_membership(
     return {
         "user_concept_id": user_concept_id,
         "organisation_concept_id": organisation_concept_id,
-        "membership_removed": True
+        "membership_removed": True,
     }
 
 
-def _check_relationship_exists(user_concept_id: str, organisation_concept_id: str) -> bool:
+def _check_relationship_exists(
+    user_concept_id: str, organisation_concept_id: str
+) -> bool:
     """Check if a memberOf relationship already exists between user and organisation."""
     user_concept = ConceptsRepository.find_one({"concept_id": user_concept_id})
     if not user_concept:

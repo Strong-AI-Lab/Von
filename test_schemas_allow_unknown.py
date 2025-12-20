@@ -1,4 +1,3 @@
-
 import sys
 import os
 
@@ -14,8 +13,9 @@ from backend.integrations.internal_mcp.catalogue import (
     _delete_concept_input_schema,
     _merge_concepts_input_schema,
     _search_knowledge_base_input_schema,
-    build_default_catalogue
+    build_default_catalogue,
 )
+
 
 def test_schemas():
     schemas_to_check = [
@@ -57,6 +57,7 @@ def test_schemas():
         print("All checked schemas have allow_unknown=True")
     else:
         print("Some schemas failed check")
+
 
 if __name__ == "__main__":
     test_schemas()

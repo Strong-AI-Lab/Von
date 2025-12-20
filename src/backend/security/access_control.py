@@ -1,4 +1,5 @@
 """Per-request helpers enforcing user-specific concept visibility."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -17,7 +18,9 @@ from ..db.mongo_client import get_concepts_collection
 # ---------------------------------------------------------------------------
 _MANUAL_USER: ContextVar[Optional[str]] = ContextVar("access_manual_user", default=None)
 _BYPASS: ContextVar[bool] = ContextVar("access_bypass", default=False)
-_EVALUATOR: ContextVar["AccessEvaluator | None"] = ContextVar("access_evaluator", default=None)
+_EVALUATOR: ContextVar["AccessEvaluator | None"] = ContextVar(
+    "access_evaluator", default=None
+)
 
 _REMOVE = object()
 
@@ -26,7 +29,7 @@ def _normalise_concept_id(value: Any) -> Optional[str]:
     """Return a normalised concept id if the value resembles one."""
     if isinstance(value, str):
         candidate = value.strip()
-        if candidate and candidate.startswith('#'):
+        if candidate and candidate.startswith("#"):
             return candidate
     return None
 
@@ -79,17 +82,25 @@ class AccessEvaluator:
         cached = self._cache.get(normalised)
         if cached is not None:
             return cached
-        coll = self._collection if self._collection is not None else get_concepts_collection()
+        coll = (
+            self._collection
+            if self._collection is not None
+            else get_concepts_collection()
+        )
         self._collection = coll
         if coll is None:
             allowed = True
         else:
-            doc = coll.find_one({"concept_id": normalised}, {"relationships.specific_to_user": 1})
+            doc = coll.find_one(
+                {"concept_id": normalised}, {"relationships.specific_to_user": 1}
+            )
             if doc:
                 user_specific = doc.get("relationships", {}).get("specific_to_user")
                 if user_specific:
                     # Log user-specific concept access
-                    _log.info(f"[access_filter] concept_id={normalised} specific_to_user={user_specific} authenticated_user={self.user_id}")
+                    _log.info(
+                        f"[access_filter] concept_id={normalised} specific_to_user={user_specific} authenticated_user={self.user_id}"
+                    )
                 allowed = _document_visible_to_user(doc, self.user_id)
             else:
                 allowed = False
@@ -97,7 +108,9 @@ class AccessEvaluator:
         return allowed
 
 
-_HEADER_CACHE: ContextVar[Optional[str]] = ContextVar("access_header_user", default=None)
+_HEADER_CACHE: ContextVar[Optional[str]] = ContextVar(
+    "access_header_user", default=None
+)
 
 
 def _validate_person_concept(concept_id: Optional[str]) -> Optional[str]:
@@ -107,34 +120,48 @@ def _validate_person_concept(concept_id: Optional[str]) -> Optional[str]:
     if not norm:
         return None
     try:
-        from ..services.concept_service import get_concept_by_concept_id  # local import to avoid cycles
+        from ..services.concept_service import (
+            get_concept_by_concept_id,
+        )  # local import to avoid cycles
+
         doc = get_concept_by_concept_id(norm)
         if not doc:
             return None
 
         # Allow the canonical von_user type itself
-        if norm == '#V#von_user':
+        if norm == "#V#von_user":
             return norm
 
-        relationships = doc.get('relationships') if isinstance(doc, dict) else None
+        relationships = doc.get("relationships") if isinstance(doc, dict) else None
         if isinstance(relationships, dict):
             instance_edges = []
-            for key in ('is_an_instance_of', 'instance_of', 'is_an_instance_of', 'type'):  # tolerate legacy keys
+            for key in (
+                "is_an_instance_of",
+                "instance_of",
+                "is_an_instance_of",
+                "type",
+            ):  # tolerate legacy keys
                 val = relationships.get(key)
                 if isinstance(val, list):
                     instance_edges.extend(val)
                 elif isinstance(val, str):
                     instance_edges.append(val)
-            if any(_normalise_concept_id(edge) in {'#V#person', '#V#von_user'} for edge in instance_edges):
+            if any(
+                _normalise_concept_id(edge) in {"#V#person", "#V#von_user"}
+                for edge in instance_edges
+            ):
                 return norm
 
-        direct_name = doc.get('direct_concept_name') or doc.get('concept_type')
-        if isinstance(direct_name, str) and direct_name.lower().startswith('person'):
+        direct_name = doc.get("direct_concept_name") or doc.get("concept_type")
+        if isinstance(direct_name, str) and direct_name.lower().startswith("person"):
             return norm
 
         # Check for indirect instance relationships through type hierarchies
         # Logic: A is instance of B AND B is subtype of C → A is instance of C
-        from ..vontology.utils_vontology import get_vontology_node_and_ancestor_instance_ids
+        from ..vontology.utils_vontology import (
+            get_vontology_node_and_ancestor_instance_ids,
+        )
+
         if get_vontology_node_and_ancestor_instance_ids(norm):
             return norm
 
@@ -152,14 +179,16 @@ def get_effective_user_concept_id() -> Optional[str]:
 
     # Primary authority is the server-side session which is populated during the
     # authenticated login flow.
-    session_user = _normalise_concept_id(session.get('user_concept_id'))
+    session_user = _normalise_concept_id(session.get("user_concept_id"))
     if session_user:
         return session_user
 
     # Allow a guarded per-request override via headers for trusted automation
     # clients (legacy behaviour relied on this pathway). We validate that the
     # supplied identifier maps to an existing person concept before accepting it.
-    header_user = request.headers.get('X-User-Concept-ID') or request.headers.get('X-User-Client-ID')
+    header_user = request.headers.get("X-User-Concept-ID") or request.headers.get(
+        "X-User-Client-ID"
+    )
     header_user = _normalise_concept_id(header_user)
     if header_user:
         validated = _validate_person_concept(header_user)
@@ -200,7 +229,7 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
     user_org_id = None
     try:
         if has_request_context():
-            user_org_id = session.get('organisation_concept_id')
+            user_org_id = session.get("organisation_concept_id")
     except Exception:
         pass
 
@@ -208,11 +237,13 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
     user_email = "unknown"
     try:
         if has_request_context():
-            user_email = session.get('user_email', 'no_email_in_session')
+            user_email = session.get("user_email", "no_email_in_session")
     except Exception:
         pass
 
-    _log.info(f"[access_filter] Building visibility filter - authenticated_user={user_id} org={user_org_id} email={user_email}")
+    _log.info(
+        f"[access_filter] Building visibility filter - authenticated_user={user_id} org={user_org_id} email={user_email}"
+    )
 
     clauses: List[Dict[str, Any]] = [
         {"relationships.specific_to_user": {"$exists": False}},
@@ -223,15 +254,19 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
     # User-specific visibility
     if user_id:
         clauses.append({"relationships.specific_to_user": {"$in": [user_id]}})
-        _log.info(f"[access_filter] Including user-specific concepts for user={user_id}")
+        _log.info(
+            f"[access_filter] Including user-specific concepts for user={user_id}"
+        )
     else:
         # Instrumentation: no effective user; user-specific concepts will be hidden.
-        _log.info(f"[access_filter] No authenticated user - user-specific concepts will be hidden")
+        _log.info(
+            f"[access_filter] No authenticated user - user-specific concepts will be hidden"
+        )
         try:
             _log.info(
                 "[access_filter] Context details - path=%s session_user=%s",
                 request.path if has_request_context() else None,
-                session.get('user_concept_id') if has_request_context() else None,
+                session.get("user_concept_id") if has_request_context() else None,
             )
         except Exception:
             pass
@@ -239,7 +274,9 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
     # Organisation-specific visibility (Phase 1)
     if user_org_id:
         clauses.append({"relationships.specific_to_org": {"$in": [user_org_id]}})
-        _log.info(f"[access_filter] Including org-specific concepts for org={user_org_id}")
+        _log.info(
+            f"[access_filter] Including org-specific concepts for org={user_org_id}"
+        )
 
     return {"$or": clauses}
 
@@ -262,7 +299,9 @@ def apply_pipeline_filter(pipeline: Iterable[Dict[str, Any]]) -> List[Dict[str, 
     match_stage = {"$match": visibility}
     if pipeline_list:
         first_stage = pipeline_list[0]
-        if isinstance(first_stage, dict) and any(k in first_stage for k in ("$geoNear", "$search", "$vectorSearch")):
+        if isinstance(first_stage, dict) and any(
+            k in first_stage for k in ("$geoNear", "$search", "$vectorSearch")
+        ):
             pipeline_list.insert(1, match_stage)
             return pipeline_list
         if "$match" in first_stage:
@@ -273,7 +312,9 @@ def apply_pipeline_filter(pipeline: Iterable[Dict[str, Any]]) -> List[Dict[str, 
     return pipeline_list
 
 
-def _sanitize_relationship_value(value: Any, evaluator: AccessEvaluator) -> Tuple[Any, bool]:
+def _sanitize_relationship_value(
+    value: Any, evaluator: AccessEvaluator
+) -> Tuple[Any, bool]:
     if isinstance(value, list):
         new_list: List[Any] = []
         changed = False
@@ -304,7 +345,9 @@ def _sanitize_relationship_value(value: Any, evaluator: AccessEvaluator) -> Tupl
     return value, False
 
 
-def sanitize_concept_document(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def sanitize_concept_document(
+    doc: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
     if doc is None:
         return None
     if not should_enforce_access_control():
@@ -315,21 +358,25 @@ def sanitize_concept_document(doc: Optional[Dict[str, Any]]) -> Optional[Dict[st
     user_email = "unknown"
     try:
         if has_request_context():
-            user_email = session.get('user_email', 'no_email_in_session')
+            user_email = session.get("user_email", "no_email_in_session")
     except Exception:
         pass
 
-    concept_id = doc.get('concept_id', 'unknown_concept')
-    user_specific = doc.get('relationships', {}).get('specific_to_user')
+    concept_id = doc.get("concept_id", "unknown_concept")
+    user_specific = doc.get("relationships", {}).get("specific_to_user")
 
     if not _document_visible_to_user(doc, user_id):
-        _log.info(f"[access_filter] BLOCKED concept_id={concept_id} specific_to_user={user_specific} authenticated_user={user_id} email={user_email}")
+        _log.info(
+            f"[access_filter] BLOCKED concept_id={concept_id} specific_to_user={user_specific} authenticated_user={user_id} email={user_email}"
+        )
         return None
 
     # Log if this is a user-specific concept that was allowed
     if user_specific:
-        _log.info(f"[access_filter] ALLOWED concept_id={concept_id} specific_to_user={user_specific} authenticated_user={user_id} email={user_email}")
-    relationships = doc.get('relationships')
+        _log.info(
+            f"[access_filter] ALLOWED concept_id={concept_id} specific_to_user={user_specific} authenticated_user={user_id} email={user_email}"
+        )
+    relationships = doc.get("relationships")
     if not isinstance(relationships, dict):
         return doc
     evaluator = _current_evaluator()
@@ -345,7 +392,7 @@ def sanitize_concept_document(doc: Optional[Dict[str, Any]]) -> Optional[Dict[st
         new_relationships[predicate] = sanitised
     if changed:
         doc = dict(doc)
-        doc['relationships'] = new_relationships
+        doc["relationships"] = new_relationships
     return doc
 
 
@@ -356,9 +403,9 @@ def can_access_concept(concept_id: Any) -> bool:
 
 def cache_scope_key() -> str:
     if not should_enforce_access_control():
-        return 'global'
+        return "global"
     user_id = get_effective_user_concept_id()
-    return f'user:{user_id}' if user_id else 'user:anon'
+    return f"user:{user_id}" if user_id else "user:anon"
 
 
 @contextmanager

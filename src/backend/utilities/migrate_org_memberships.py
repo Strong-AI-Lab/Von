@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 def get_stub_mappings() -> Dict[str, Dict[str, str]]:
     """Get the stub role mappings from role_resolver."""
     from src.backend.security.role_resolver import STUB_ROLE_MAPPINGS
+
     return STUB_ROLE_MAPPINGS
 
 
@@ -47,19 +48,19 @@ def get_create_membership_fn():
     from src.backend.services.organisation_membership_service import (
         create_organisation_membership,
     )
+
     return create_organisation_membership
 
 
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging for the migration script."""
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(levelname)-8s: %(message)s"
-    )
+    logging.basicConfig(level=level, format="%(levelname)-8s: %(message)s")
 
 
-def validate_concepts_exist(user_id: str, org_id: str, dry_run: bool = False) -> Tuple[bool, str]:
+def validate_concepts_exist(
+    user_id: str, org_id: str, dry_run: bool = False
+) -> Tuple[bool, str]:
     """Validate that both user and organisation concepts exist in the Vontology.
 
     Returns:
@@ -83,7 +84,7 @@ def migrate_user_memberships(
     org_roles: Dict[str, str],
     dry_run: bool = False,
     verbose: bool = False,
-    create_membership_fn=None
+    create_membership_fn=None,
 ) -> Tuple[int, int, List[str]]:
     """Migrate memberships for a single user across multiple organisations.
 
@@ -119,14 +120,16 @@ def migrate_user_memberships(
             continue
 
         if dry_run:
-            logger.info(f"[DRY RUN] Would create membership: {user_concept_id} --memberOf--> {org_concept_id} (role: {role})")
+            logger.info(
+                f"[DRY RUN] Would create membership: {user_concept_id} --memberOf--> {org_concept_id} (role: {role})"
+            )
             successful += 1
         else:
             try:
                 result = create_membership_fn(
                     user_concept_id=user_concept_id,
                     organisation_concept_id=org_concept_id,
-                    role=role
+                    role=role,
                 )
 
                 if result.get("relationship_created"):
@@ -142,8 +145,12 @@ def migrate_user_memberships(
 
                 if verbose:
                     logger.debug(f"  Relationship ID: {result.get('relationship_id')}")
-                    logger.debug(f"  Role text value ID: {result.get('role_text_value_id')}")
-                    logger.debug(f"  Role relation ID: {result.get('role_relation_id')}")
+                    logger.debug(
+                        f"  Role text value ID: {result.get('role_text_value_id')}"
+                    )
+                    logger.debug(
+                        f"  Role relation ID: {result.get('role_relation_id')}"
+                    )
 
             except Exception as e:
                 failed += 1
@@ -191,7 +198,7 @@ def run_migration(dry_run: bool = False, verbose: bool = False) -> Dict[str, Any
             org_roles=org_roles,
             dry_run=dry_run,
             verbose=verbose,
-            create_membership_fn=create_membership
+            create_membership_fn=create_membership,
         )
 
         total_successful += successful
@@ -215,7 +222,9 @@ def run_migration(dry_run: bool = False, verbose: bool = False) -> Dict[str, Any
     if not dry_run:
         logger.info("\n✓ Migration complete!")
         logger.info("Organisation memberships are now persistent in the Vontology.")
-        logger.info("The stub role mappings in role_resolver.py can now be considered a fallback.")
+        logger.info(
+            "The stub role mappings in role_resolver.py can now be considered a fallback."
+        )
     else:
         logger.info("\n✓ Dry-run complete! No changes were made.")
         logger.info("Run without --dry-run to execute the migration.")
@@ -225,7 +234,7 @@ def run_migration(dry_run: bool = False, verbose: bool = False) -> Dict[str, Any
         "total_failed": total_failed,
         "errors": all_errors,
         "total_users": len(stub_mappings),
-        "dry_run": dry_run
+        "dry_run": dry_run,
     }
 
 
@@ -237,12 +246,12 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be migrated without making changes"
+        help="Show what would be migrated without making changes",
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help="Print detailed output for each migration step"
+        help="Print detailed output for each migration step",
     )
 
     args = parser.parse_args()
@@ -250,14 +259,13 @@ def main() -> int:
     setup_logging(verbose=args.verbose)
 
     try:
-        stats = run_migration(
-            dry_run=args.dry_run,
-            verbose=args.verbose
-        )
+        stats = run_migration(dry_run=args.dry_run, verbose=args.verbose)
 
         # Exit with non-zero status if there were any failures
         if stats["total_failed"] > 0:
-            logger.error(f"\nMigration completed with {stats['total_failed']} failure(s)")
+            logger.error(
+                f"\nMigration completed with {stats['total_failed']} failure(s)"
+            )
             return 1
 
         return 0
@@ -266,6 +274,7 @@ def main() -> int:
         logger.error(f"Migration failed with error: {str(e)}")
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 

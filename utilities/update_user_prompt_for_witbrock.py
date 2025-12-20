@@ -64,7 +64,9 @@ def main() -> int:
     with bypass_access_control():
         existing = get_texts_for_concept(PROMPT_CONCEPT_ID, limit=200)
         existing_prompt_texts = [
-            t for t in existing if t.get("predicate") in ("hasContent", "hasDescription")
+            t
+            for t in existing
+            if t.get("predicate") in ("hasContent", "hasDescription")
         ]
 
         for t in existing_prompt_texts:
@@ -92,7 +94,9 @@ def main() -> int:
     print("Updated prompt concept.")
     print(f"concept_id={PROMPT_CONCEPT_ID}")
     print(f"predicate=hasContent lang={PROMPT_LANG}")
-    print(f"relation_id={res.get('relation_id')} text_value_id={res.get('text_value_id')}")
+    print(
+        f"relation_id={res.get('relation_id')} text_value_id={res.get('text_value_id')}"
+    )
     return 0
 
 

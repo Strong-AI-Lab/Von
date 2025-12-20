@@ -8,7 +8,9 @@ class _FailingLLM:
 
     def generate(self, *_args, **_kwargs):
         self.calls.append({"called": True})
-        raise AssertionError("LLM should not be called for prompt introspection fast-path")
+        raise AssertionError(
+            "LLM should not be called for prompt introspection fast-path"
+        )
 
 
 class _StubGateway:
@@ -53,7 +55,12 @@ def app(monkeypatch):
     # Keep user prompt loader stable.
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _user_id: [{"concept_id": "#V#general_von_chat_prompt_for_witbrock", "content": "Please be terse."}],
+        lambda _user_id: [
+            {
+                "concept_id": "#V#general_von_chat_prompt_for_witbrock",
+                "content": "Please be terse.",
+            }
+        ],
     )
 
     llm = _FailingLLM()
@@ -81,7 +88,12 @@ def test_prompt_introspection_fastpath_returns_prompt_text(app):
         "success": True,
         "namespace": "#V#michael_witbrock",
         "prompt_concept_ids": ["#V#general_von_chat_prompt_for_witbrock"],
-        "prompt_concepts": [{"concept_id": "#V#general_von_chat_prompt_for_witbrock", "content": "Please be terse."}],
+        "prompt_concepts": [
+            {
+                "concept_id": "#V#general_von_chat_prompt_for_witbrock",
+                "content": "Please be terse.",
+            }
+        ],
         "prompt_text": "Please be terse.",
         "prompt_count": 1,
     }
@@ -90,9 +102,14 @@ def test_prompt_introspection_fastpath_returns_prompt_text(app):
     app.config["INTERNAL_MCP_ORCHESTRATOR"] = object()
 
     client = app.test_client()
-    resp = client.post("/von/generate", json={"prompt": "Can you tell me what my user prompt is for chat?"})
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Can you tell me what my user prompt is for chat?"},
+    )
     if resp.status_code != 200:
-        raise AssertionError(f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}")
+        raise AssertionError(
+            f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}"
+        )
 
     data = resp.get_json()
     assert isinstance(data, dict)
@@ -115,9 +132,14 @@ def test_prompt_introspection_fastpath_falls_back_when_gateway_disabled(app):
     app.config["INTERNAL_MCP_ORCHESTRATOR"] = object()
 
     client = app.test_client()
-    resp = client.post("/von/generate", json={"prompt": "Can you tell me what my user prompt is for chat?"})
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Can you tell me what my user prompt is for chat?"},
+    )
     if resp.status_code != 200:
-        raise AssertionError(f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}")
+        raise AssertionError(
+            f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}"
+        )
 
     data = resp.get_json()
     assert isinstance(data, dict)
@@ -137,7 +159,9 @@ def test_tool_inventory_fastpath_lists_tools(app):
     client = app.test_client()
     resp = client.post("/von/generate", json={"prompt": "What tools do you have?"})
     if resp.status_code != 200:
-        raise AssertionError(f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}")
+        raise AssertionError(
+            f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}"
+        )
 
     data = resp.get_json()
     assert isinstance(data, dict)
@@ -153,7 +177,11 @@ def test_tool_inventory_fastpath_lists_tools(app):
 
 
 def test_rag_status_fastpath_calls_tool(app):
-    gateway_payload = {"success": True, "namespace": "#V#michael_witbrock", "status": "ok"}
+    gateway_payload = {
+        "success": True,
+        "namespace": "#V#michael_witbrock",
+        "status": "ok",
+    }
     gateway = _StubGateway(gateway_payload)
     app.config["INTERNAL_MCP_GATEWAY"] = gateway
     app.config["INTERNAL_MCP_ORCHESTRATOR"] = object()
@@ -161,7 +189,9 @@ def test_rag_status_fastpath_calls_tool(app):
     client = app.test_client()
     resp = client.post("/von/generate", json={"prompt": "What is my RAG status?"})
     if resp.status_code != 200:
-        raise AssertionError(f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}")
+        raise AssertionError(
+            f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}"
+        )
 
     data = resp.get_json()
     assert isinstance(data, dict)
@@ -171,7 +201,9 @@ def test_rag_status_fastpath_calls_tool(app):
     assert gateway.calls[0]["method_name"] == "rag_get_status"
 
 
-def test_prompt_introspection_fastpath_disabled_by_default_does_not_trigger(monkeypatch):
+def test_prompt_introspection_fastpath_disabled_by_default_does_not_trigger(
+    monkeypatch,
+):
     from src.backend.server.routes.von_routes import von_bp
 
     monkeypatch.delenv("VON_DETERMINISTIC_INTROSPECTION", raising=False)
@@ -186,7 +218,12 @@ def test_prompt_introspection_fastpath_disabled_by_default_does_not_trigger(monk
     # Keep user prompt loader stable.
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _user_id: [{"concept_id": "#V#general_von_chat_prompt_for_witbrock", "content": "Please be terse."}],
+        lambda _user_id: [
+            {
+                "concept_id": "#V#general_von_chat_prompt_for_witbrock",
+                "content": "Please be terse.",
+            }
+        ],
     )
 
     class _NonFailingLLM:
@@ -223,9 +260,14 @@ def test_prompt_introspection_fastpath_disabled_by_default_does_not_trigger(monk
     flask_app.config["INTERNAL_MCP_ORCHESTRATOR"] = None
 
     client = flask_app.test_client()
-    resp = client.post("/von/generate", json={"prompt": "Can you tell me what my user prompt is for chat?"})
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Can you tell me what my user prompt is for chat?"},
+    )
     if resp.status_code != 200:
-        raise AssertionError(f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}")
+        raise AssertionError(
+            f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}"
+        )
 
     data = resp.get_json()
     assert isinstance(data, dict)

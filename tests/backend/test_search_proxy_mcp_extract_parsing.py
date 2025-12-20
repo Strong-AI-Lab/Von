@@ -1,6 +1,9 @@
 import asyncio
 
-from src.backend.integrations.internal_mcp.search_proxy_mcp import SearchMCPProxy, SearchProxyConfig
+from src.backend.integrations.internal_mcp.search_proxy_mcp import (
+    SearchMCPProxy,
+    SearchProxyConfig,
+)
 
 
 class _StubClient:

@@ -1,4 +1,3 @@
-
 import sys
 import os
 from datetime import datetime, timezone
@@ -7,6 +6,7 @@ from datetime import datetime, timezone
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
 
 from backend.services.rag_service import get_rag_service
+
 
 def test_rag():
     print("Getting RAG service...")
@@ -19,18 +19,14 @@ def test_rag():
 
     doc_id = "test_doc_1"
     text = "Spirals are interesting geometric shapes found in nature."
-    metadata = {
-        "type": "test",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+    metadata = {"type": "test", "timestamp": datetime.now(timezone.utc).isoformat()}
 
     print(f"Indexing document: {text}")
     try:
-        success, failed = rag.upsert_documents([{
-            "id": doc_id,
-            "text": text,
-            "metadata": metadata
-        }], namespace="test_namespace")
+        success, failed = rag.upsert_documents(
+            [{"id": doc_id, "text": text, "metadata": metadata}],
+            namespace="test_namespace",
+        )
         print(f"Upsert result: success={success}, failed={failed}")
     except Exception as e:
         print(f"Upsert failed: {e}")
@@ -42,6 +38,7 @@ def test_rag():
         print(f"Query results: {results}")
     except Exception as e:
         print(f"Query failed: {e}")
+
 
 if __name__ == "__main__":
     test_rag()

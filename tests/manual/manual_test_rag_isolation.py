@@ -2,6 +2,7 @@ import os
 import shutil
 from src.backend.services.rag_backends.llamaindex_backend import LlamaIndexRAGService
 
+
 def test_rag_isolation():
     # Setup clean storage
     storage_path = "./data/test_rag_isolation"
@@ -15,13 +16,13 @@ def test_rag_isolation():
         {
             "id": "doc_a",
             "text": "This is a secret for User A.",
-            "metadata": {"user_id": "user_A", "type": "secret"}
+            "metadata": {"user_id": "user_A", "type": "secret"},
         },
         {
             "id": "doc_b",
             "text": "This is a secret for User B.",
-            "metadata": {"user_id": "user_B", "type": "secret"}
-        }
+            "metadata": {"user_id": "user_B", "type": "secret"},
+        },
     ]
     rag.upsert_documents(docs)
     print("Documents upserted.")
@@ -56,6 +57,7 @@ def test_rag_isolation():
     # Cleanup
     if os.path.exists(storage_path):
         shutil.rmtree(storage_path)
+
 
 if __name__ == "__main__":
     test_rag_isolation()
