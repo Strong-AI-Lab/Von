@@ -202,7 +202,9 @@ def _collect_structural_relations_for_subject(
             preview_cache=preview_cache,
             primary_target=None,
         )
-        entry["follow_up_actions"] = _build_follow_up_actions(targets, exclude={concept_id})
+        entry["follow_up_actions"] = _build_follow_up_actions(
+            targets, exclude={concept_id}
+        )
         consumer(entry)
 
 
@@ -246,7 +248,9 @@ def _collect_structural_relations_for_targets(
                 preview_cache=preview_cache,
                 primary_target=concept_id,
             )
-            follow_up_sources: List[str] = [source_id] if isinstance(source_id, str) else []
+            follow_up_sources: List[str] = (
+                [source_id] if isinstance(source_id, str) else []
+            )
             entry["follow_up_actions"] = _build_follow_up_actions(
                 follow_up_sources,
                 exclude={concept_id},
@@ -264,14 +268,18 @@ def _collect_text_relations_for_subject(
     snippet_mode: str,
     consumer,
 ) -> None:
-    text_relations = get_texts_for_concept(subject_concept_id=concept_id, limit=_MAX_LIMIT)
+    text_relations = get_texts_for_concept(
+        subject_concept_id=concept_id, limit=_MAX_LIMIT
+    )
     for rel in text_relations:
         predicate_id = rel.get("predicate")
         if not predicate_allowed(predicate_id):
             continue
         text_value = rel.get("text")
         entry: RelationValue = {
-            "relation_id": str(rel.get("relation_id") or f"text::{concept_id}::{predicate_id}"),
+            "relation_id": str(
+                rel.get("relation_id") or f"text::{concept_id}::{predicate_id}"
+            ),
             "source_concept_id": concept_id,
             "predicate_id": predicate_id,
             "relation_kind": "text",
@@ -447,7 +455,9 @@ def _make_snippet(text: Optional[str], mode: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _build_follow_up_actions(values: Iterable[str], *, exclude: set[str]) -> List[Dict[str, Any]]:
+def _build_follow_up_actions(
+    values: Iterable[str], *, exclude: set[str]
+) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     for val in values:
         if not isinstance(val, str) or val in exclude:

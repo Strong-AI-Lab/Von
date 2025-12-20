@@ -7,7 +7,9 @@ from flask import Flask
 
 class _DummyLLM:
     def generate(self, *_args, **_kwargs):
-        raise AssertionError("LLM generate() should not be called for direct tool calls")
+        raise AssertionError(
+            "LLM generate() should not be called for direct tool calls"
+        )
 
 
 class _StubResult:
@@ -38,7 +40,9 @@ class _StubOrchestrator:
     def _extract_json_blob(self, text: str):
         return json.loads(text)
 
-    def _format_tool_result(self, tool_name, payload, duration_ms, status, error_message=None):
+    def _format_tool_result(
+        self, tool_name, payload, duration_ms, status, error_message=None
+    ):
         result = {
             "tool": tool_name,
             "status": status,
@@ -93,7 +97,9 @@ def test_generate_executes_direct_read_tool_call(app):
     body = resp.get_json()
     assert "llm_debug" in body
     assert "interaction_timestamp_utc" in body["llm_debug"]
-    datetime.fromisoformat(body["llm_debug"]["interaction_timestamp_utc"].replace("Z", "+00:00"))
+    datetime.fromisoformat(
+        body["llm_debug"]["interaction_timestamp_utc"].replace("Z", "+00:00")
+    )
     assert body["llm_debug"]["tool_invocations"], "expected a recorded tool invocation"
 
     invocation = body["llm_debug"]["tool_invocations"][0]
@@ -122,5 +128,7 @@ def test_generate_rejects_direct_write_tool_call(app):
     body = resp.get_json()
     assert "restricted to read-only tools" in body["response"]
     assert "interaction_timestamp_utc" in body["llm_debug"]
-    datetime.fromisoformat(body["llm_debug"]["interaction_timestamp_utc"].replace("Z", "+00:00"))
+    datetime.fromisoformat(
+        body["llm_debug"]["interaction_timestamp_utc"].replace("Z", "+00:00")
+    )
     assert body["llm_debug"]["tool_invocations"] == []

@@ -41,6 +41,7 @@ class RelationElicitationService:
             return []
 
         from ..db.repositories.concepts_repository import ConceptsRepository
+
         repo = ConceptsRepository
 
         candidate_predicates: List[str] = []
@@ -60,7 +61,7 @@ class RelationElicitationService:
             except Exception:
                 t_concept = None
             if t_concept:
-                trels = (t_concept.get("relationships") or {})
+                trels = t_concept.get("relationships") or {}
                 for rel_name in trels.get("suggested_relations_for_type", []) or []:
                     if isinstance(rel_name, str) and rel_name not in seen_predicates:
                         seen_predicates.add(rel_name)
@@ -69,16 +70,26 @@ class RelationElicitationService:
                     if isinstance(pred, str) and pred not in seen_predicates:
                         seen_predicates.add(pred)
                         candidate_predicates.append(pred)
-                forward_parents = trels.get('is_a_type_of') or []
+                forward_parents = trels.get("is_a_type_of") or []
                 if isinstance(forward_parents, list):
                     for p in forward_parents:
-                        if isinstance(p, str) and p not in visited_types and p not in queue:
+                        if (
+                            isinstance(p, str)
+                            and p not in visited_types
+                            and p not in queue
+                        ):
                             queue.append(p)
             try:
-                reverse_cursor = repo.find({"relationships.has_subtype": {"$in": [t_id]}}, {"concept_id": 1})
+                reverse_cursor = repo.find(
+                    {"relationships.has_subtype": {"$in": [t_id]}}, {"concept_id": 1}
+                )
                 for d in reverse_cursor:
-                    cid = d.get('concept_id')
-                    if isinstance(cid, str) and cid not in visited_types and cid not in queue:
+                    cid = d.get("concept_id")
+                    if (
+                        isinstance(cid, str)
+                        and cid not in visited_types
+                        and cid not in queue
+                    ):
                         queue.append(cid)
             except Exception:
                 pass
@@ -87,42 +98,72 @@ class RelationElicitationService:
             return []
 
         existing_relations = set(relationships.keys())
-        existing_hypothesized = set((instance_concept.get("hypothesized_relations") or {}).keys())
-        return [c for c in candidate_predicates if c not in existing_relations and c not in existing_hypothesized]
+        existing_hypothesized = set(
+            (instance_concept.get("hypothesized_relations") or {}).keys()
+        )
+        return [
+            c
+            for c in candidate_predicates
+            if c not in existing_relations and c not in existing_hypothesized
+        ]
 
-    def generate_question_for_elicit(self, instance_id: str, predicate: str) -> Optional[str]:
+    def generate_question_for_elicit(
+        self, instance_id: str, predicate: str
+    ) -> Optional[str]:
         """Generate a natural language question for a relation."""
         instance_concept = concept_service.get_concept_by_id(instance_id)
         if not instance_concept:
             return None
         instance_name = instance_concept.get("name", "this concept")
-        question_prompt_concept = concept_service.get_concept_by_concept_id("user_question_prompt_for_relation")
+        question_prompt_concept = concept_service.get_concept_by_concept_id(
+            "user_question_prompt_for_relation"
+        )
         if not question_prompt_concept:
             return None
-        question_template = question_prompt_concept.get("attributes", {}).get("prompt_template")
+        question_template = question_prompt_concept.get("attributes", {}).get(
+            "prompt_template"
+        )
         if not question_template:
             return None
-        return question_template.replace("[Instance Name]", instance_name).replace("[Relation Name]", predicate.replace("#V#", "").replace("_", " "))
+        return question_template.replace("[Instance Name]", instance_name).replace(
+            "[Relation Name]", predicate.replace("#V#", "").replace("_", " ")
+        )
 
-    def process_and_store_hypothesis(self, instance_id: str, predicate: str, answer: str) -> Optional[Dict[str, Any]]:
+    def process_and_store_hypothesis(
+        self, instance_id: str, predicate: str, answer: str
+    ) -> Optional[Dict[str, Any]]:
         """Process user answer and store as hypothesized relation."""
-        understanding_prompt_concept = concept_service.get_concept_by_concept_id("understand_user_response_for_relation")
+        understanding_prompt_concept = concept_service.get_concept_by_concept_id(
+            "understand_user_response_for_relation"
+        )
         if not understanding_prompt_concept:
             return None
-        understanding_template = understanding_prompt_concept.get("attributes", {}).get("prompt_template")
+        understanding_template = understanding_prompt_concept.get("attributes", {}).get(
+            "prompt_template"
+        )
         if not understanding_template:
             return None
         if self.llm_client is None:
-            raise RuntimeError("LLM client unavailable for relation elicitation") from self._llm_initialisation_error
+            raise RuntimeError(
+                "LLM client unavailable for relation elicitation"
+            ) from self._llm_initialisation_error
 
-        understanding_prompt = understanding_template.replace("[User Response]", answer).replace("[Relation Name]", predicate.replace("#V#", "").replace("_", " "))
+        understanding_prompt = understanding_template.replace(
+            "[User Response]", answer
+        ).replace("[Relation Name]", predicate.replace("#V#", "").replace("_", " "))
         extracted_value = self.llm_client.generate(understanding_prompt)
-        hypothesis = {"value": extracted_value.strip(), "confidence_score": 0.85, "source_interaction_id": "interaction_abc_123"}
+        hypothesis = {
+            "value": extracted_value.strip(),
+            "confidence_score": 0.85,
+            "source_interaction_id": "interaction_abc_123",
+        }
         update_payload = {"hypothesized_relations": {predicate: [hypothesis]}}
         concept_service.update_concept(instance_id, update_payload)
         return hypothesis
 
-    def elicit_relation(self, instance_id: str, predicate: str) -> Optional[Dict[str, Any]]:
+    def elicit_relation(
+        self, instance_id: str, predicate: str
+    ) -> Optional[Dict[str, Any]]:
         """
         Manages the Q&A flow to elicit a value for a specific relation and
         creates a hypothesis. (Interactive version for testing)

@@ -72,6 +72,7 @@ class RelationPredicate:
     HAS_INTERACTION = "hasInteraction"
     HAS_CONTENT = "hasContent"
 
+
 # Use Literal of the allowed predicate string values
 
 
@@ -84,7 +85,9 @@ class TextRelationModel(BaseModel):
     predicate: str = Field(
         description=f"The relationship predicate. Common values: {RelationPredicate.HAS_NAME}, {RelationPredicate.HAS_NOTE}, {RelationPredicate.HAS_DESCRIPTION}, {RelationPredicate.HAS_INTERACTION}, {RelationPredicate.HAS_CONTENT}. Custom predicates like '#V#has_email' are also supported."
     )
-    object_text_id: str = Field(description="The ObjectId of the text value document, as a hex string.")
+    object_text_id: str = Field(
+        description="The ObjectId of the text value document, as a hex string."
+    )
 
     # Optional extra context
     context: Dict[str, Any] = Field(default_factory=dict)
@@ -113,6 +116,7 @@ class TextRelationModel(BaseModel):
         if v2.startswith("#V#"):
             return v2
         raise ValueError(f"Unsupported predicate: {v2}")
+
 
 __all__ = [
     "TextValueModel",

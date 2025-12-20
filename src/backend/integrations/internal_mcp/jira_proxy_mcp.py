@@ -71,17 +71,25 @@ class JiraMCPProxy:
             arguments["fields"] = fields
         return await self._call("jira_search", arguments)
 
-    async def get_issue(self, *, issue_key: str, fields: Optional[list[str]] = None) -> Dict[str, Any]:
+    async def get_issue(
+        self, *, issue_key: str, fields: Optional[list[str]] = None
+    ) -> Dict[str, Any]:
         arguments: Dict[str, Any] = {"issue_key": issue_key}
         if fields:
             arguments["fields"] = fields
         return await self._call("jira_get_issue", arguments)
 
     async def add_comment(self, *, issue_key: str, comment: str) -> Dict[str, Any]:
-        return await self._call("jira_add_comment", {"issue_key": issue_key, "comment": comment})
+        return await self._call(
+            "jira_add_comment", {"issue_key": issue_key, "comment": comment}
+        )
 
-    async def transition_issue(self, *, issue_key: str, transition_id: str) -> Dict[str, Any]:
-        return await self._call("jira_transition", {"issue_key": issue_key, "transition_id": transition_id})
+    async def transition_issue(
+        self, *, issue_key: str, transition_id: str
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "jira_transition", {"issue_key": issue_key, "transition_id": transition_id}
+        )
 
     async def get_myself(self) -> Dict[str, Any]:
         return await self._call("jira_get_myself", {})
@@ -111,11 +119,15 @@ def _build_jira_env() -> Dict[str, str]:
     if base_url:
         base_url = base_url.rstrip("/")
 
-    missing = [name for name, value in {
-        "ATLASSIAN_BASE_URL": base_url,
-        "ATLASSIAN_EMAIL": email,
-        "ATLASSIAN_API_TOKEN": token,
-    }.items() if not value]
+    missing = [
+        name
+        for name, value in {
+            "ATLASSIAN_BASE_URL": base_url,
+            "ATLASSIAN_EMAIL": email,
+            "ATLASSIAN_API_TOKEN": token,
+        }.items()
+        if not value
+    ]
 
     if missing:
         raise JiraProxyError(
@@ -149,11 +161,15 @@ def inspect_jira_auth_config() -> Dict[str, Any]:
             cleaned = cleaned[1:-1].strip()
         return cleaned or None
 
-    base_url_key = "ATLASSIAN_BASE_URL" if env.get("ATLASSIAN_BASE_URL") else (
-        "ATLASSIAN_SITE_BASE" if env.get("ATLASSIAN_SITE_BASE") else None
+    base_url_key = (
+        "ATLASSIAN_BASE_URL"
+        if env.get("ATLASSIAN_BASE_URL")
+        else ("ATLASSIAN_SITE_BASE" if env.get("ATLASSIAN_SITE_BASE") else None)
     )
-    email_key = "ATLASSIAN_EMAIL" if env.get("ATLASSIAN_EMAIL") else (
-        "ATLASSIAN_API_EMAIL" if env.get("ATLASSIAN_API_EMAIL") else None
+    email_key = (
+        "ATLASSIAN_EMAIL"
+        if env.get("ATLASSIAN_EMAIL")
+        else ("ATLASSIAN_API_EMAIL" if env.get("ATLASSIAN_API_EMAIL") else None)
     )
     token_key = "ATLASSIAN_API_TOKEN" if env.get("ATLASSIAN_API_TOKEN") else None
 

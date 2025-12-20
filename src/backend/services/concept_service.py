@@ -28,16 +28,20 @@ from bson import ObjectId
 import logging
 import os
 import uuid  # Added for GUID generation
-import traceback # Added for error logging
-from datetime import datetime, timezone # Ensure timezone is imported
-import requests # Added for requests.exceptions.ConnectionError
-from typing import Dict, Any, Optional, List, Tuple # Added Tuple
-from pymongo.errors import PyMongoError # Added for DB operations
+import traceback  # Added for error logging
+from datetime import datetime, timezone  # Ensure timezone is imported
+import requests  # Added for requests.exceptions.ConnectionError
+from typing import Dict, Any, Optional, List, Tuple  # Added Tuple
+from pymongo.errors import PyMongoError  # Added for DB operations
+
 try:
     from ..services.annotation_extraction_service import invalidate_phrase_cache  # type: ignore
 except Exception:  # pragma: no cover
+
     def invalidate_phrase_cache():  # type: ignore
         return
+
+
 from ..vontology.utils_vontology import (
     VONTOLOGY_NODES_COLLECTION_NAME,
     get_vontology_node_and_descendant_ids,
@@ -50,20 +54,33 @@ from ..vontology.utils_vontology import (
     is_thing_id,
     THING_PRIMARY_ID,
     get_concept_display_name_with_names_fallback,
-) # Added imports for concept field accessors
-from pymongo.database import Database # For type hinting db
+)  # Added imports for concept field accessors
+from pymongo.database import Database  # For type hinting db
 
 from ..db import mongo_client
-from ..db.mongo_client import get_concepts_collection, CONCEPTS_COLLECTION_NAME # Corrected import
+from ..db.mongo_client import (
+    get_concepts_collection,
+    CONCEPTS_COLLECTION_NAME,
+)  # Corrected import
 from ..db.repositories.concepts_repository import ConceptsRepository
+
 # from src.backend.languagemodels.llm_interface import OllamaClient # ADDED: Import OllamaClient
-from ..db.mongo_client import get_db #, get_database_name
+from ..db.mongo_client import get_db  # , get_database_name
+
 # Assuming concept_model.py is in src.backend.models, adjust if necessary
 # Correcting the import path for concept_model based on typical project structure
 # If it is in src.backend.models, the original path should be fine if PYTHONPATH is set up correctly or it\'s a package.
 # For now, assuming the original path was intended to be resolvable.
-from ..models.concept_models import ConceptInteraction, ConceptModel, InteractionEntry, interaction_session_collection_name # Ensure this line is uncommented and correct
-from ..security.access_control import get_effective_user_concept_id, apply_concept_query_filter
+from ..models.concept_models import (
+    ConceptInteraction,
+    ConceptModel,
+    InteractionEntry,
+    interaction_session_collection_name,
+)  # Ensure this line is uncommented and correct
+from ..security.access_control import (
+    get_effective_user_concept_id,
+    apply_concept_query_filter,
+)
 from .text_value_service import upsert_text_for_concept
 from ..db.repositories.text_value_repository import TextRelationsRepository
 
@@ -73,21 +90,29 @@ logger = logging.getLogger(__name__)
 # REFACTORING_NOTE: Define a type alias for MongoDB query objects for clarity
 MongoQuery = Dict[str, Any]
 
+
 # REFACTORING_NOTE: Placeholder for potential error/exception classes
 class ConceptServiceError(Exception):
     "Base class for errors in conceptService."
+
     pass
+
 
 class ConceptNotFoundError(ConceptServiceError):
     "Raised when an concept is not found for a given ID."
+
     pass
+
 
 class InvalidConceptDataError(ConceptServiceError):
     "Raised when provided data for an concept is invalid."
+
     pass
+
 
 # --- Preserved Fields Write Guard ---
 _ALLOWED_PRESERVED_FIELDS = {"notes", "description"}
+
 
 def enforce_preserved_fields_write(payload: Dict[str, Any]):
     """Scan a $set payload for concept_data.preserved_fields.* writes.
@@ -116,7 +141,9 @@ def enforce_preserved_fields_write(payload: Dict[str, Any]):
     except Exception as e:  # pragma: no cover - defensive
         logger.exception(f"Error enforcing preserved_fields write policy: {e}")
 
+
 # REFACTORING_NOTE: Functions for 'concepts' collection will go here.
+
 
 # ---------- Context helpers ----------
 def gather_descriptive_material(
@@ -154,7 +181,7 @@ def gather_descriptive_material(
         lines.append(f"Type description: {description_val}")
     if include_notes_in_block and notes_val:
         lines.append(f"Concept notes: {notes_val}")
-    context_block = ("\n".join(lines) + ("\n" if lines else ""))
+    context_block = "\n".join(lines) + ("\n" if lines else "")
 
     return {
         "description": description_val,
@@ -162,9 +189,12 @@ def gather_descriptive_material(
         "context_block": context_block,
     }
 
+
 def create_concept(
     name: str,  # Display name (will be persisted in names[] canonical field)
-    concept_id: Optional[str] = None,  # Type concept_id for the instance, or node concept_id for types
+    concept_id: Optional[
+        str
+    ] = None,  # Type concept_id for the instance, or node concept_id for types
     vontology_path: Optional[str] = None,  # Legacy/path context if applicable
     description: Optional[str] = None,
     notes: Optional[str] = None,
@@ -189,7 +219,9 @@ def create_concept(
         raise InvalidConceptDataError("'name' is a required field.")
 
     if not concept_id and not vontology_path:
-        raise InvalidConceptDataError("Either 'concept_id' or 'vontology_path' must be provided.")
+        raise InvalidConceptDataError(
+            "Either 'concept_id' or 'vontology_path' must be provided."
+        )
 
     now = datetime.now(timezone.utc)
 
@@ -210,8 +242,8 @@ def create_concept(
         "relationships": {
             "is_a_type_of": is_a_type_of,
             "is_an_instance_of": is_instance_of,
-            "linked_to": linked_concepts or []
-        }
+            "linked_to": linked_concepts or [],
+        },
     }
     if description:
         set_concept_description(concept_doc, description)
@@ -240,45 +272,49 @@ def create_concept(
                 if name and name.strip():
                     upsert_text_for_concept(
                         subject_concept_id=concept_identifier,
-                        predicate='hasName',
+                        predicate="hasName",
                         text=name.strip(),
-                        lang='en-NZ',
-                        context={'name_type': 'NL'}
+                        lang="en-NZ",
+                        context={"name_type": "NL"},
                     )
-                    logger.info(f"[create_concept] Created hasName text_relation for {concept_identifier}: {name}")
+                    logger.info(
+                        f"[create_concept] Created hasName text_relation for {concept_identifier}: {name}"
+                    )
 
                 # 2. Register vonID as CODE name (JVNAUTOSCI-316)
                 upsert_text_for_concept(
                     subject_concept_id=concept_identifier,
-                    predicate='hasName',
+                    predicate="hasName",
                     text=concept_identifier,
-                    lang='en-NZ',
-                    context={'name_type': 'CODE'}
+                    lang="en-NZ",
+                    context={"name_type": "CODE"},
                 )
 
                 # 3. Register GUID as CODE name (JVNAUTOSCI-316)
-                if '_id' in concept_doc:
+                if "_id" in concept_doc:
                     upsert_text_for_concept(
                         subject_concept_id=concept_identifier,
-                        predicate='hasName',
-                        text=str(concept_doc['_id']),
-                        lang='en-NZ',
-                        context={'name_type': 'CODE'}
+                        predicate="hasName",
+                        text=str(concept_doc["_id"]),
+                        lang="en-NZ",
+                        context={"name_type": "CODE"},
                     )
 
                 # 4. Register stable GUID as CODE name (JVNAUTOSCI-730)
-                if 'guid' in concept_doc:
+                if "guid" in concept_doc:
                     upsert_text_for_concept(
                         subject_concept_id=concept_identifier,
-                        predicate='hasName',
-                        text=concept_doc['guid'],
-                        lang='en-NZ',
-                        context={'name_type': 'CODE'}
+                        predicate="hasName",
+                        text=concept_doc["guid"],
+                        lang="en-NZ",
+                        context={"name_type": "CODE"},
                     )
 
             except Exception as name_err:
                 # Non-fatal: concept is created, just name relation failed
-                logger.warning(f"[create_concept] Failed to create name relations for {concept_identifier}: {name_err}")
+                logger.warning(
+                    f"[create_concept] Failed to create name relations for {concept_identifier}: {name_err}"
+                )
 
         try:
             if concept_identifier:
@@ -294,13 +330,14 @@ def create_concept(
             )
 
         if created_concept:
-            if '_id' in created_concept:
-                created_concept['id'] = str(created_concept.pop('_id'))
+            if "_id" in created_concept:
+                created_concept["id"] = str(created_concept.pop("_id"))
             # Ensure a display name is present in response using centralized accessor
             try:
                 from ..vontology.utils_vontology import (
                     get_concept_display_name_with_names_fallback,
                 )
+
                 disp = get_concept_display_name_with_names_fallback(created_concept)
                 if disp:
                     created_concept["name"] = disp
@@ -315,14 +352,21 @@ def create_concept(
         return created_concept if created_concept else {}
 
     except DuplicateKeyError as e:
-        raise InvalidConceptDataError(f"concept creation failed due to duplicate key: {e}")
+        raise InvalidConceptDataError(
+            f"concept creation failed due to duplicate key: {e}"
+        )
     except Exception as e:
         raise ConceptServiceError(f"Error creating concept in database: {e}")
 
+
 # Note: get_concept and get_concept_by_id are defined below (duplicate removed)
 
-def get_concept(concept_id: str) -> Optional[Dict[str, Any]]:  # Backward-compatible alias expected by other services
+
+def get_concept(
+    concept_id: str,
+) -> Optional[Dict[str, Any]]:  # Backward-compatible alias expected by other services
     return get_concept_by_id(concept_id)
+
 
 def get_concept_by_id(concept_id: str) -> Optional[Dict[str, Any]]:
     """Retrieves a concept by its unique ID.
@@ -337,33 +381,41 @@ def get_concept_by_id(concept_id: str) -> Optional[Dict[str, Any]]:
     try:
         obj_id = ObjectId(concept_id)
     except Exception:
-        logger.debug(f"get_concept_by_id: '{concept_id}' is not a valid ObjectId; will try string _id.")
+        logger.debug(
+            f"get_concept_by_id: '{concept_id}' is not a valid ObjectId; will try string _id."
+        )
 
     try:
         concept_doc = None
         # Use a unified query to check _id (ObjectId/string) and concept_id
         query_filter: Dict[str, Any]
         if obj_id is not None:
-            query_filter = {"$or": [
-                {"_id": obj_id},
-                {"_id": concept_id},
-                {"concept_id": concept_id}
-            ]}
+            query_filter = {
+                "$or": [
+                    {"_id": obj_id},
+                    {"_id": concept_id},
+                    {"concept_id": concept_id},
+                ]
+            }
         else:
-            query_filter = {"$or": [
-                {"_id": concept_id},
-                {"concept_id": concept_id}
-            ]}
+            query_filter = {"$or": [{"_id": concept_id}, {"concept_id": concept_id}]}
 
         concept_doc = concepts_coll.find_one(query_filter)
 
         if concept_doc:
-            concept_doc["id"] = str(concept_doc.pop("_id")) if "_id" in concept_doc else concept_id
+            concept_doc["id"] = (
+                str(concept_doc.pop("_id")) if "_id" in concept_doc else concept_id
+            )
 
             # Ensure name is present using centralized accessor with language fallback
             try:
-                from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
-                resolved_name = get_concept_display_name_with_names_fallback(concept_doc)
+                from ..vontology.utils_vontology import (
+                    get_concept_display_name_with_names_fallback,
+                )
+
+                resolved_name = get_concept_display_name_with_names_fallback(
+                    concept_doc
+                )
                 if resolved_name:
                     concept_doc["name"] = resolved_name
             except Exception:
@@ -374,9 +426,15 @@ def get_concept_by_id(concept_id: str) -> Optional[Dict[str, Any]]:
                         concept_doc["name"] = cid[3:].replace("_", " ").title()
             # Scrub legacy top-level description for protected prompt concept(s)
             try:
-                from .annotation_extraction_service import PROMPT_CONCEPT_ID  # lazy import to avoid cycle
-                if concept_doc.get('concept_id') == PROMPT_CONCEPT_ID and 'description' in concept_doc:
-                    concept_doc.pop('description', None)
+                from .annotation_extraction_service import (
+                    PROMPT_CONCEPT_ID,
+                )  # lazy import to avoid cycle
+
+                if (
+                    concept_doc.get("concept_id") == PROMPT_CONCEPT_ID
+                    and "description" in concept_doc
+                ):
+                    concept_doc.pop("description", None)
             except Exception:
                 pass
             return concept_doc
@@ -387,6 +445,7 @@ def get_concept_by_id(concept_id: str) -> Optional[Dict[str, Any]]:
             raise
         logger.error(f"Error retrieving concept by ID {concept_id}: {e}", exc_info=True)
         raise ConceptServiceError(f"Could not retrieve concept: {str(e)}")
+
 
 def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
     """Retrieve a concept by its ontological concept_id (e.g., '#V#person').
@@ -403,8 +462,13 @@ def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
                 concept_doc["id"] = str(concept_doc.pop("_id"))
             # Ensure name is present using centralized accessor
             try:
-                from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
-                resolved_name = get_concept_display_name_with_names_fallback(concept_doc)
+                from ..vontology.utils_vontology import (
+                    get_concept_display_name_with_names_fallback,
+                )
+
+                resolved_name = get_concept_display_name_with_names_fallback(
+                    concept_doc
+                )
                 if resolved_name:
                     concept_doc["name"] = resolved_name
             except Exception:
@@ -413,15 +477,22 @@ def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
                     if isinstance(cid, str) and cid.startswith("#V#"):
                         concept_doc["name"] = cid[3:].replace("_", " ").title()
             try:
-                from .annotation_extraction_service import PROMPT_CONCEPT_ID  # lazy import
-                if concept_doc.get('concept_id') == PROMPT_CONCEPT_ID and 'description' in concept_doc:
-                    concept_doc.pop('description', None)
+                from .annotation_extraction_service import (
+                    PROMPT_CONCEPT_ID,
+                )  # lazy import
+
+                if (
+                    concept_doc.get("concept_id") == PROMPT_CONCEPT_ID
+                    and "description" in concept_doc
+                ):
+                    concept_doc.pop("description", None)
             except Exception:
                 pass
 
             # Add kind field (type, predicate, or individual) for frontend
             try:
                 from ..vontology.utils_vontology import is_type, is_predicate
+
                 if is_type(concept_doc):
                     concept_doc["kind"] = "type"
                 elif is_predicate(concept_doc):
@@ -436,11 +507,15 @@ def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         if isinstance(e, ConceptNotFoundError):
             raise
-        logger.error(f"Error retrieving concept by concept_id {concept_id}: {e}", exc_info=True)
+        logger.error(
+            f"Error retrieving concept by concept_id {concept_id}: {e}", exc_info=True
+        )
         raise ConceptServiceError(f"Could not retrieve concept by concept_id: {str(e)}")
 
 
-def enrich_concept_with_text_relations(concept: Dict[str, Any], logger=None) -> Dict[str, Any]:
+def enrich_concept_with_text_relations(
+    concept: Dict[str, Any], logger=None
+) -> Dict[str, Any]:
     """
     Enriches a concept document with names and descriptions from text relations.
     Also performs migrate-on-read for legacy names/descriptions in concept document.
@@ -473,132 +548,154 @@ def enrich_concept_with_text_relations(concept: Dict[str, Any], logger=None) -> 
     from ..db.repositories.concepts_repository import ConceptsRepository
 
     if not logger:
-        logger = globals().get('logger')
+        logger = globals().get("logger")
 
     if not concept:
         return concept
 
-    concept_id = concept.get('concept_id')
+    concept_id = concept.get("concept_id")
     if not concept_id:
         if logger:
-            logger.warning("[enrich_concept] Missing concept_id, cannot fetch text relations")
-        concept['names'] = []
+            logger.warning(
+                "[enrich_concept] Missing concept_id, cannot fetch text relations"
+            )
+        concept["names"] = []
         return concept
 
     # MIGRATE-ON-READ: Legacy names field → text relations
-    legacy_names = concept.get('names', [])
+    legacy_names = concept.get("names", [])
     if legacy_names and isinstance(legacy_names, list) and len(legacy_names) > 0:
         if logger:
-            logger.info(f"[migrate-on-read] Migrating {len(legacy_names)} legacy names for {concept_id}")
+            logger.info(
+                f"[migrate-on-read] Migrating {len(legacy_names)} legacy names for {concept_id}"
+            )
         migrated_count = 0
         for legacy_name in legacy_names:
             try:
-                name_text = legacy_name.get('name', '') if isinstance(legacy_name, dict) else str(legacy_name)
+                name_text = (
+                    legacy_name.get("name", "")
+                    if isinstance(legacy_name, dict)
+                    else str(legacy_name)
+                )
                 if not name_text:
                     continue
-                lang = legacy_name.get('language', 'en') if isinstance(legacy_name, dict) else 'en'
-                name_type = legacy_name.get('type', 'NL') if isinstance(legacy_name, dict) else 'NL'
+                lang = (
+                    legacy_name.get("language", "en")
+                    if isinstance(legacy_name, dict)
+                    else "en"
+                )
+                name_type = (
+                    legacy_name.get("type", "NL")
+                    if isinstance(legacy_name, dict)
+                    else "NL"
+                )
 
                 result = upsert_text_for_concept(
                     subject_concept_id=concept_id,
-                    predicate='hasName',
+                    predicate="hasName",
                     text=name_text,
                     lang=lang,
-                    context={'name_type': name_type}
+                    context={"name_type": name_type},
                 )
                 if result:
                     migrated_count += 1
                     if logger:
-                        logger.debug(f"[migrate-on-read] Migrated name: {name_text} ({lang})")
+                        logger.debug(
+                            f"[migrate-on-read] Migrated name: {name_text} ({lang})"
+                        )
             except Exception as e:
                 if logger:
-                    logger.warning(f"[migrate-on-read] Failed to migrate name {legacy_name}: {e}")
+                    logger.warning(
+                        f"[migrate-on-read] Failed to migrate name {legacy_name}: {e}"
+                    )
 
         # Remove legacy names field
         if migrated_count > 0:
             try:
                 ConceptsRepository.update_one(
-                    {'concept_id': concept_id},
-                    {'$unset': {'names': ''}}
+                    {"concept_id": concept_id}, {"$unset": {"names": ""}}
                 )
                 if logger:
-                    logger.info(f"[migrate-on-read] Removed legacy 'names' field after migrating {migrated_count} names")
+                    logger.info(
+                        f"[migrate-on-read] Removed legacy 'names' field after migrating {migrated_count} names"
+                    )
             except Exception as e:
                 if logger:
-                    logger.error(f"[migrate-on-read] Failed to remove legacy names field: {e}")
+                    logger.error(
+                        f"[migrate-on-read] Failed to remove legacy names field: {e}"
+                    )
 
     # Fetch names from text relations (authoritative source)
     names_from_relations = get_texts_for_concept(
-        subject_concept_id=concept_id,
-        predicate='hasName',
-        limit=100
+        subject_concept_id=concept_id, predicate="hasName", limit=100
     )
     # Convert to frontend format
-    concept['names'] = [
+    concept["names"] = [
         {
-            'name': item.get('text', ''),
-            'language': item.get('lang', 'en-NZ'),
-            'type': item.get('context', {}).get('name_type', 'NL'),
-            'relation_id': item.get('relation_id')
+            "name": item.get("text", ""),
+            "language": item.get("lang", "en-NZ"),
+            "type": item.get("context", {}).get("name_type", "NL"),
+            "relation_id": item.get("relation_id"),
         }
         for item in names_from_relations
     ]
 
     # MIGRATE-ON-READ: Legacy description field → text relations
-    legacy_description = concept.get('description')
-    if legacy_description and isinstance(legacy_description, str) and legacy_description.strip():
+    legacy_description = concept.get("description")
+    if (
+        legacy_description
+        and isinstance(legacy_description, str)
+        and legacy_description.strip()
+    ):
         if logger:
             logger.info(f"[migrate-on-read] Found legacy description for {concept_id}")
         try:
             existing_descriptions = get_texts_for_concept(
-                subject_concept_id=concept_id,
-                predicate='hasDescription',
-                limit=1
+                subject_concept_id=concept_id, predicate="hasDescription", limit=1
             )
 
             if not existing_descriptions:
                 if logger:
-                    logger.info(f"[migrate-on-read] Migrating legacy description to text relations")
+                    logger.info(
+                        f"[migrate-on-read] Migrating legacy description to text relations"
+                    )
                 upsert_text_for_concept(
                     subject_concept_id=concept_id,
-                    predicate='hasDescription',
+                    predicate="hasDescription",
                     text=legacy_description,
-                    lang='en',
-                    context={'source': 'OpenCyc', 'format': 'html'}
+                    lang="en",
+                    context={"source": "OpenCyc", "format": "html"},
                 )
 
             # Remove legacy description field
             try:
                 ConceptsRepository.update_one(
-                    {'concept_id': concept_id},
-                    {'$unset': {'description': ''}}
+                    {"concept_id": concept_id}, {"$unset": {"description": ""}}
                 )
                 if logger:
                     logger.info(f"[migrate-on-read] Removed legacy 'description' field")
             except Exception as e:
                 if logger:
-                    logger.error(f"[migrate-on-read] Failed to remove legacy description: {e}")
+                    logger.error(
+                        f"[migrate-on-read] Failed to remove legacy description: {e}"
+                    )
         except Exception as e:
             if logger:
                 logger.warning(f"[migrate-on-read] Failed to migrate description: {e}")
 
     # Fetch content from text relations (for diary entries, articles, etc.)
     content_relations = get_texts_for_concept(
-        subject_concept_id=concept_id,
-        predicate='hasContent',
-        limit=1
+        subject_concept_id=concept_id, predicate="hasContent", limit=1
     )
     if content_relations:
-        concept['content'] = content_relations[0].get('text', '')
+        concept["content"] = content_relations[0].get("text", "")
 
     # Fetch notes from text relations
     note_relations = get_texts_for_concept(
-        subject_concept_id=concept_id,
-        predicate='hasNote',
-        limit=1
+        subject_concept_id=concept_id, predicate="hasNote", limit=1
     )
     if note_relations:
-        concept['note'] = note_relations[0].get('text', '')
+        concept["note"] = note_relations[0].get("text", "")
 
     return concept
 
@@ -621,7 +718,9 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
     try:
         obj_id = ObjectId(concept_id)
     except Exception:
-        logger.debug(f"update_concept: '{concept_id}' is not a valid ObjectId; will try string _id only.")
+        logger.debug(
+            f"update_concept: '{concept_id}' is not a valid ObjectId; will try string _id only."
+        )
 
     # REFACTORING_NOTE: Prevent modification of certain fields.
     # Client should not send these, but good to enforce on server-side.
@@ -634,11 +733,15 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
     # Individual concepts should not have their concept_id changed to type concept_ids
     if "concept_id" in update_data:
         new_concept_id = update_data["concept_id"]
-        logger.warning(f"Attempt to update concept_id for concept {concept_id} to '{new_concept_id}'. This is generally not allowed for individual concepts.")
+        logger.warning(
+            f"Attempt to update concept_id for concept {concept_id} to '{new_concept_id}'. This is generally not allowed for individual concepts."
+        )
         # For now, remove concept_id from update_data to prevent duplicate key errors
         # TODO: Implement proper validation based on concept type vs individual distinction
         del update_data["concept_id"]
-        logger.info(f"Removed concept_id from update payload to prevent duplicate key error")
+        logger.info(
+            f"Removed concept_id from update payload to prevent duplicate key error"
+        )
 
     # Prepare the update document for MongoDB
     # We will use $set to update specified fields and also set the new updated_at timestamp.
@@ -647,7 +750,9 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
         # Special handling for notes field to use proper schema location
         if key == "notes":
             # Phase 1 removal: do not map 'notes' into preserved_fields. Leave for relation-based handlers.
-            logger.info("Skipping legacy mapping of 'notes' into concept_data.preserved_fields (deprecated Phase 1)")
+            logger.info(
+                "Skipping legacy mapping of 'notes' into concept_data.preserved_fields (deprecated Phase 1)"
+            )
             continue
         else:
             update_payload["$set"][key] = value
@@ -661,44 +766,46 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
         # This fixes updates for type nodes referenced by concept_id in routes like /api/concepts/%23V%23person.
         id_filter: Dict[str, Any]
         if obj_id is not None:
-            id_filter = {"$or": [
-                {"_id": obj_id},
-                {"_id": concept_id},
-                {"concept_id": concept_id}
-            ]}
+            id_filter = {
+                "$or": [
+                    {"_id": obj_id},
+                    {"_id": concept_id},
+                    {"concept_id": concept_id},
+                ]
+            }
         else:
-            id_filter = {"$or": [
-                {"_id": concept_id},
-                {"concept_id": concept_id}
-            ]}
+            id_filter = {"$or": [{"_id": concept_id}, {"concept_id": concept_id}]}
 
         updated_concept_doc = concepts_coll.find_one_and_update(
-            id_filter,
-            update_payload,
-            return_document=ReturnDocument.AFTER
+            id_filter, update_payload, return_document=ReturnDocument.AFTER
         )
 
         if not updated_concept_doc:
-            raise ConceptNotFoundError(f"concept with ID '{concept_id}' not found for update.")
+            raise ConceptNotFoundError(
+                f"concept with ID '{concept_id}' not found for update."
+            )
 
         # REFACTORING_NOTE: Convert _id to id string for consistent API response
-        if '_id' in updated_concept_doc:
-            updated_concept_doc['id'] = str(updated_concept_doc.pop('_id'))
+        if "_id" in updated_concept_doc:
+            updated_concept_doc["id"] = str(updated_concept_doc.pop("_id"))
 
         # Ensure notes field uses proper getter function for consistency in API response
         if updated_concept_doc:
-            updated_concept_doc['notes'] = get_concept_notes(updated_concept_doc)
+            updated_concept_doc["notes"] = get_concept_notes(updated_concept_doc)
 
         try:
             invalidate_phrase_cache()
         except Exception:
             pass
         return updated_concept_doc
-    except ConceptNotFoundError: # Re-raise specific error
+    except ConceptNotFoundError:  # Re-raise specific error
         raise
     except Exception as e:
         # Log the error e
-        raise ConceptServiceError(f"Error updating concept with ID '{concept_id}' in database: {e}")
+        raise ConceptServiceError(
+            f"Error updating concept with ID '{concept_id}' in database: {e}"
+        )
+
 
 def delete_concept(concept_id: str) -> bool:
     """Deletes an concept by its ID.
@@ -706,14 +813,16 @@ def delete_concept(concept_id: str) -> bool:
     Returns True if deletion was successful (acknowledged and count > 0), False otherwise.
     """
     concepts_coll = ConceptsRepository.collection()
-    if concepts_coll is None: # MODIFIED
+    if concepts_coll is None:  # MODIFIED
         raise ConceptServiceError("Database collection 'concepts' not available.")
 
     obj_id = None
     try:
         obj_id = ObjectId(concept_id)
     except Exception:
-        logger.debug(f"delete_concept: '{concept_id}' is not a valid ObjectId; will try string _id.")
+        logger.debug(
+            f"delete_concept: '{concept_id}' is not a valid ObjectId; will try string _id."
+        )
 
     try:
         delete_filter: Dict[str, Any]
@@ -726,7 +835,9 @@ def delete_concept(concept_id: str) -> bool:
         result: DeleteResult = concepts_coll.delete_one(delete_filter)
 
         if result.deleted_count == 0:
-            raise ConceptNotFoundError(f"concept with ID '{concept_id}' not found for deletion.")
+            raise ConceptNotFoundError(
+                f"concept with ID '{concept_id}' not found for deletion."
+            )
 
         ok = result.acknowledged and result.deleted_count > 0
         if ok:
@@ -747,16 +858,20 @@ def delete_concept(concept_id: str) -> bool:
                     total_rel += rel_removed
                     total_tv += tv_removed
                 except Exception as e:  # pragma: no cover - defensive
-                    logger.warning(f"[cascade_delete] Failed for subject variant {sid}: {e}")
+                    logger.warning(
+                        f"[cascade_delete] Failed for subject variant {sid}: {e}"
+                    )
             logger.info(
                 f"[cascade_delete] concept={concept_id} subject_variants={len(cascade_ids)} removed_relations={total_rel} gc_text_values={total_tv}"
             )
         return ok
-    except ConceptNotFoundError: # Re-raise specific error
+    except ConceptNotFoundError:  # Re-raise specific error
         raise
     except Exception as e:
         # Log the error e
-        raise ConceptServiceError(f"Error deleting concept with ID '{concept_id}' from database: {e}")
+        raise ConceptServiceError(
+            f"Error deleting concept with ID '{concept_id}' from database: {e}"
+        )
 
 
 def _cascade_delete_text_relations(concept_id: str) -> tuple[int, int]:
@@ -769,10 +884,13 @@ def _cascade_delete_text_relations(concept_id: str) -> tuple[int, int]:
         get_text_relations_collection,
         get_text_values_collection,
     )
+
     rel_coll = get_text_relations_collection()
     if rel_coll is None:
         return (0, 0)
-    rels = list(rel_coll.find({"subject_concept_id": concept_id}, {"object_text_id": 1}))
+    rels = list(
+        rel_coll.find({"subject_concept_id": concept_id}, {"object_text_id": 1})
+    )
     if not rels:
         return (0, 0)
     tv_ids: list[str] = []
@@ -795,6 +913,7 @@ def _cascade_delete_text_relations(concept_id: str) -> tuple[int, int]:
             unique_tv_ids.append(_id)
     tv_removed = 0
     from bson import ObjectId as _OID  # local alias
+
     for tv_id in unique_tv_ids:
         try:
             # Still referenced? skip
@@ -811,6 +930,7 @@ def _cascade_delete_text_relations(concept_id: str) -> tuple[int, int]:
             continue
     return (removed, tv_removed)
 
+
 def list_concepts(
     concept_id: Optional[str] = None,
     vontology_path: Optional[str] = None,
@@ -819,9 +939,9 @@ def list_concepts(
     search_term: Optional[str] = None,
     page: int = 1,
     per_page: int = 20,
-    sort_by: str = "updated_at", # Default sort field
-    sort_order: int = -1, # Default sort order (descending)
-    include_descendants: bool = True  # New parameter for transitive queries
+    sort_by: str = "updated_at",  # Default sort field
+    sort_order: int = -1,  # Default sort order (descending)
+    include_descendants: bool = True,  # New parameter for transitive queries
 ) -> Tuple[List[Dict[str, Any]], int]:
     """
     Lists instances (concepts) from the unified 'concepts' collection.
@@ -849,17 +969,26 @@ def list_concepts(
                 descendant_ids = get_vontology_node_and_descendant_ids(concept_id)
                 if descendant_ids:
                     query["relationships.is_an_instance_of"] = {"$in": descendant_ids}
-                    logger.info(f"Querying for instances of {concept_id} and its {len(descendant_ids)-1} descendants")
+                    logger.info(
+                        f"Querying for instances of {concept_id} and its {len(descendant_ids)-1} descendants"
+                    )
                 else:
                     # Fallback to direct instances only
                     query["relationships.is_an_instance_of"] = concept_id
-                    logger.info(f"No descendants found for {concept_id}, querying direct instances only")
+                    logger.info(
+                        f"No descendants found for {concept_id}, querying direct instances only"
+                    )
             else:
                 # Direct instances only
                 query["relationships.is_an_instance_of"] = concept_id
-                logger.info(f"Querying for direct instances with concept_id: {concept_id}")
+                logger.info(
+                    f"Querying for direct instances with concept_id: {concept_id}"
+                )
         except Exception as e:
-            logger.error(f"Error processing concept_id {concept_id}: {e}. Falling back to direct instances.", exc_info=True)
+            logger.error(
+                f"Error processing concept_id {concept_id}: {e}. Falling back to direct instances.",
+                exc_info=True,
+            )
             # Fallback to direct instances
             query["relationships.is_an_instance_of"] = concept_id
     else:
@@ -881,11 +1010,12 @@ def list_concepts(
         # Use unified search query building from concept_search_service
         # This ensures consistent search behaviour across all endpoints
         from .concept_search_service import _build_name_query
+
         name_search_query = _build_name_query(
             search_term,
             exact=False,  # Always substring for list_concepts
             prefix=False,  # No prefix optimization here (already filtered by instance_of)
-            include_description=True  # Search in descriptions for concept tab
+            include_description=True,  # Search in descriptions for concept tab
         )
         # Merge the name search query into our base query
         if "$or" in query:
@@ -906,11 +1036,13 @@ def list_concepts(
         sort_criteria = [(sort_by, sort_order)]
 
         skip_amount = (page - 1) * per_page
-        concepts_cursor = ConceptsRepository.find(query, sort=sort_criteria, skip=skip_amount, limit=per_page)
+        concepts_cursor = ConceptsRepository.find(
+            query, sort=sort_criteria, skip=skip_amount, limit=per_page
+        )
 
         concepts_list = []
         for concept_doc in concepts_cursor:
-            concept_doc["_id"] = str(concept_doc["_id"]) # Convert ObjectId for JSON
+            concept_doc["_id"] = str(concept_doc["_id"])  # Convert ObjectId for JSON
             # Convert datetime objects to ISO format strings for JSON
             if isinstance(concept_doc.get("created_at"), datetime):
                 concept_doc["created_at"] = concept_doc["created_at"].isoformat()
@@ -919,7 +1051,10 @@ def list_concepts(
 
             # Ensure display name present for frontend using names[] accessor with fallbacks
             try:
-                from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
+                from ..vontology.utils_vontology import (
+                    get_concept_display_name_with_names_fallback,
+                )
+
                 resolved = get_concept_display_name_with_names_fallback(concept_doc)
                 if resolved:
                     concept_doc["name"] = resolved
@@ -970,15 +1105,21 @@ def list_concepts(
                         concept_doc["direct_concept_name"] = type_name
                     else:
                         # Fallback: Extract readable name from type concept_id like "#V#person" -> "Person"
-                        if isinstance(primary_type_id, str) and primary_type_id.startswith("#V#"):
+                        if isinstance(
+                            primary_type_id, str
+                        ) and primary_type_id.startswith("#V#"):
                             type_name = primary_type_id[3:].replace("_", " ").title()
                             concept_doc["direct_concept_name"] = type_name
                         else:
                             concept_doc["direct_concept_name"] = str(primary_type_id)
                 except Exception as e:
-                    logger.warning(f"Could not lookup name for type {primary_type_id}: {e}")
+                    logger.warning(
+                        f"Could not lookup name for type {primary_type_id}: {e}"
+                    )
                     # Fallback: Extract readable name from type concept_id
-                    if isinstance(primary_type_id, str) and primary_type_id.startswith("#V#"):
+                    if isinstance(primary_type_id, str) and primary_type_id.startswith(
+                        "#V#"
+                    ):
                         type_name = primary_type_id[3:].replace("_", " ").title()
                         concept_doc["direct_concept_name"] = type_name
                     else:
@@ -986,25 +1127,31 @@ def list_concepts(
 
             concepts_list.append(concept_doc)
 
-        logger.debug(f"List concepts: query={query}, found {len(concepts_list)} concepts, total_count={total_count}")
+        logger.debug(
+            f"List concepts: query={query}, found {len(concepts_list)} concepts, total_count={total_count}"
+        )
         return concepts_list, total_count
 
     except PyMongoError as e:
         logger.error(f"Database error in list_concepts: {e}", exc_info=True)
         # Propagate as a service-level exception
         raise ConceptServiceError(f"Database error listing concepts: {str(e)}")
-    except Exception as e: # Catch any other unexpected errors
+    except Exception as e:  # Catch any other unexpected errors
         logger.error(f"Unexpected error in list_concepts: {e}", exc_info=True)
-        raise ConceptServiceError(f"An unexpected error occurred while listing concepts: {str(e)}")
+        raise ConceptServiceError(
+            f"An unexpected error occurred while listing concepts: {str(e)}"
+        )
+
 
 # REFACTORING_NOTE: Functions for 'user_concept_tracking' collection will go here.
 
+
 def track_concept_access(
     user_identifier: str,
-    concept_identifier: str, # vontology_path for "type", string _id for "individual"
-    concept_kind: str,       # "type" or "individual"
-    vontology_path: str,    # Full vontology path (e.g., "Concept/Person" or "Concept/Software/Project")
-    concept_name_for_display: str
+    concept_identifier: str,  # vontology_path for "type", string _id for "individual"
+    concept_kind: str,  # "type" or "individual"
+    vontology_path: str,  # Full vontology path (e.g., "Concept/Person" or "Concept/Software/Project")
+    concept_name_for_display: str,
 ) -> Dict[str, Any]:
     """Tracks access to an concept (type or individual) for a user.
     Creates a new tracking record or updates an existing one.
@@ -1013,21 +1160,35 @@ def track_concept_access(
     Adheres to the schema defined in Sub-Task 1.1 of concept_refactoring.md.
     """
     tracking_coll = get_user_concept_tracking_collection_service()
-    if tracking_coll is None: # MODIFIED
-        raise ConceptServiceError("Database collection 'user_concept_tracking' not available.")
+    if tracking_coll is None:  # MODIFIED
+        raise ConceptServiceError(
+            "Database collection 'user_concept_tracking' not available."
+        )
 
-    if not all([user_identifier, concept_identifier, concept_kind, vontology_path, concept_name_for_display]):
-        raise InvalidConceptDataError("Missing required fields for tracking concept access.")
+    if not all(
+        [
+            user_identifier,
+            concept_identifier,
+            concept_kind,
+            vontology_path,
+            concept_name_for_display,
+        ]
+    ):
+        raise InvalidConceptDataError(
+            "Missing required fields for tracking concept access."
+        )
 
     if concept_kind not in ["type", "individual"]:
-        raise InvalidConceptDataError(f"Invalid concept_kind: '{concept_kind}'. Must be 'type' or 'individual'.")
+        raise InvalidConceptDataError(
+            f"Invalid concept_kind: '{concept_kind}'. Must be 'type' or 'individual'."
+        )
 
     now = datetime.now(timezone.utc)
 
     query: MongoQuery = {
         "user_identifier": user_identifier,
         "concept_identifier": concept_identifier,
-        "concept_kind": concept_kind
+        "concept_kind": concept_kind,
     }
     # Prepare update payload using the provided parameters
     now = datetime.now(timezone.utc)
@@ -1037,102 +1198,113 @@ def track_concept_access(
                 "_id": None,
                 "name": concept_name_for_display,
                 "notes": "",
-                "concept_id": concept_identifier
+                "concept_id": concept_identifier,
             },
-            "last_accessed_timestamp": now
+            "last_accessed_timestamp": now,
         },
-        "$inc": {"access_count": 1}
+        "$inc": {"access_count": 1},
     }
 
     try:
         # Use upsert to create record if it doesn't exist and return the updated document
         updated_tracking_record = tracking_coll.find_one_and_update(
-            query,
-            update_payload,
-            upsert=True,
-            return_document=ReturnDocument.AFTER
+            query, update_payload, upsert=True, return_document=ReturnDocument.AFTER
         )
         if not updated_tracking_record:
-            raise ConceptServiceError("Failed to update or create concept tracking record.")
+            raise ConceptServiceError(
+                "Failed to update or create concept tracking record."
+            )
         # Normalize _id to string for callers
-        if '_id' in updated_tracking_record:
-            updated_tracking_record['id'] = str(updated_tracking_record.pop('_id'))
+        if "_id" in updated_tracking_record:
+            updated_tracking_record["id"] = str(updated_tracking_record.pop("_id"))
         return updated_tracking_record
     except Exception as e:
         logger.error(f"Error tracking concept access in database: {e}", exc_info=True)
         raise ConceptServiceError(f"Error tracking concept access in database: {e}")
 
+
 def get_recent_concepts(
     user_identifier: str,
     limit: int = 10,
-    concept_kind_filter: Optional[str] = None # Optional: "type" or "individual"
+    concept_kind_filter: Optional[str] = None,  # Optional: "type" or "individual"
 ) -> List[Dict[str, Any]]:
     """Retrieves a list of recently accessed concepts for a user, sorted by last_accessed_timestamp.
     REFACTORING_NOTE: Implements part of Sub-Task 3.3.
     Allows optional filtering by concept_kind.
     """
     tracking_coll = get_user_concept_tracking_collection_service()
-    if tracking_coll is None: # MODIFIED
-        raise ConceptServiceError("Database collection 'user_concept_tracking' not available.")
+    if tracking_coll is None:  # MODIFIED
+        raise ConceptServiceError(
+            "Database collection 'user_concept_tracking' not available."
+        )
 
     if not user_identifier:
-        raise InvalidConceptDataError("User identifier is required to fetch recent concepts.")
+        raise InvalidConceptDataError(
+            "User identifier is required to fetch recent concepts."
+        )
 
     if limit <= 0:
-        raise InvalidConceptDataError("Limit for recent concepts must be a positive integer.")
+        raise InvalidConceptDataError(
+            "Limit for recent concepts must be a positive integer."
+        )
 
     query: MongoQuery = {"user_identifier": user_identifier}
     if concept_kind_filter:
         if concept_kind_filter not in ["type", "individual"]:
-            raise InvalidConceptDataError(f"Invalid concept_kind_filter: '{concept_kind_filter}'. Must be 'type' or 'individual'.")
+            raise InvalidConceptDataError(
+                f"Invalid concept_kind_filter: '{concept_kind_filter}'. Must be 'type' or 'individual'."
+            )
         query["concept_kind"] = concept_kind_filter
 
     try:
         recent_concepts = list(
             tracking_coll.find(query)
-            .sort("last_accessed_timestamp", -1) # -1 for pymongo.DESCENDING
+            .sort("last_accessed_timestamp", -1)  # -1 for pymongo.DESCENDING
             .limit(limit)
         )
         return recent_concepts
     except Exception as e:
         # Log the error e
-        raise ConceptServiceError(f"Error retrieving recent concepts from database: {e}")
+        raise ConceptServiceError(
+            f"Error retrieving recent concepts from database: {e}"
+        )
+
 
 # REFACTORING_NOTE: This function was previously named set_key_concept_status.
 # Renaming to mark_concept_as_key to match the test expectation.
 def mark_concept_as_key(
-    user_identifier: str,
-    concept_identifier: str,
-    concept_kind: str,
-    is_key: bool
+    user_identifier: str, concept_identifier: str, concept_kind: str, is_key: bool
 ) -> Dict[str, Any]:
     """Sets or unsets an concept as a key concept for a user.
     REFACTORING_NOTE: Implements part of Sub-Task 3.3.
     """
     tracking_coll = get_user_concept_tracking_collection_service()
-    if tracking_coll is None: # MODIFIED
-        raise ConceptServiceError("Database collection 'user_concept_tracking' not available.")
+    if tracking_coll is None:  # MODIFIED
+        raise ConceptServiceError(
+            "Database collection 'user_concept_tracking' not available."
+        )
 
     if not all([user_identifier, concept_identifier, concept_kind]):
-        raise InvalidConceptDataError("Missing required fields for setting key concept status.")
+        raise InvalidConceptDataError(
+            "Missing required fields for setting key concept status."
+        )
 
     if concept_kind not in ["type", "individual"]:
-        raise InvalidConceptDataError(f"Invalid concept_kind: '{concept_kind}'. Must be 'type' or 'individual'.")
+        raise InvalidConceptDataError(
+            f"Invalid concept_kind: '{concept_kind}'. Must be 'type' or 'individual'."
+        )
 
     query: MongoQuery = {
         "user_identifier": user_identifier,
         "concept_identifier": concept_identifier,
-        "concept_kind": concept_kind
+        "concept_kind": concept_kind,
     }
 
     # REFACTORING_NOTE: Added last_accessed_timestamp update when marking as key,
     # as this is a significant interaction.
     now = datetime.now(timezone.utc)
     update_payload = {
-        "$set": {
-            "is_key_concept": is_key,
-            "last_accessed_timestamp": now
-            }
+        "$set": {"is_key_concept": is_key, "last_accessed_timestamp": now}
     }
 
     try:
@@ -1140,9 +1312,7 @@ def mark_concept_as_key(
         # If the record doesn't exist, it won't be created (upsert=False by default).
         # This implies an concept must have been accessed at least once to be marked as key.
         updated_record = tracking_coll.find_one_and_update(
-            query,
-            update_payload,
-            return_document=ReturnDocument.AFTER
+            query, update_payload, return_document=ReturnDocument.AFTER
         )
         if not updated_record:
             # REFACTORING_NOTE: Consider if this should create the record if it doesn't exist.
@@ -1152,43 +1322,49 @@ def mark_concept_as_key(
                 f"concept '{concept_identifier}' (kind: {concept_kind}). Cannot mark as key."
             )
         # Convert ObjectId to string if present
-        if updated_record and '_id' in updated_record:
-            updated_record['id'] = str(updated_record.pop('_id'))
+        if updated_record and "_id" in updated_record:
+            updated_record["id"] = str(updated_record.pop("_id"))
         return updated_record
-    except ConceptNotFoundError: # Re-raise specific error
+    except ConceptNotFoundError:  # Re-raise specific error
         raise
     except Exception as e:
         # Log the error e
-        logger.error(f"Error marking concept as key for user '{user_identifier}', concept '{concept_identifier}': {e}", exc_info=True)
+        logger.error(
+            f"Error marking concept as key for user '{user_identifier}', concept '{concept_identifier}': {e}",
+            exc_info=True,
+        )
         raise ConceptServiceError(f"Error setting key concept status in database: {e}")
 
 
 def get_key_concepts(
     user_identifier: str,
     limit: int = 20,
-    concept_kind_filter: Optional[str] = None # Optional: "type" or "individual"
+    concept_kind_filter: Optional[str] = None,  # Optional: "type" or "individual"
 ) -> List[Dict[str, Any]]:
     """Retrieves a list of key concepts for a user.
     REFACTORING_NOTE: Implements part of Sub-Task 3.3.
     Allows optional filtering by concept_kind.
     """
     tracking_coll = get_user_concept_tracking_collection_service()
-    if tracking_coll is None: # MODIFIED
-        raise ConceptServiceError("Database collection 'user_concept_tracking' not available.")
+    if tracking_coll is None:  # MODIFIED
+        raise ConceptServiceError(
+            "Database collection 'user_concept_tracking' not available."
+        )
 
-    query: MongoQuery = {
-        "user_identifier": user_identifier,
-        "is_key_concept": True
-    }
+    query: MongoQuery = {"user_identifier": user_identifier, "is_key_concept": True}
     if concept_kind_filter:
         if concept_kind_filter not in ["type", "individual"]:
-            raise InvalidConceptDataError(f"Invalid concept_kind_filter: '{concept_kind_filter}'. Must be 'type' or 'individual'.")
+            raise InvalidConceptDataError(
+                f"Invalid concept_kind_filter: '{concept_kind_filter}'. Must be 'type' or 'individual'."
+            )
         query["concept_kind"] = concept_kind_filter
 
     try:
         key_concepts = list(
             tracking_coll.find(query)
-            .sort("last_accessed_timestamp", -1) # Sort by most recently accessed among key concepts
+            .sort(
+                "last_accessed_timestamp", -1
+            )  # Sort by most recently accessed among key concepts
             .limit(limit)
         )
         return key_concepts
@@ -1198,27 +1374,31 @@ def get_key_concepts(
 
 
 def get_concept_tracking_info(
-    user_identifier: str,
-    concept_identifier: str,
-    concept_kind: str
+    user_identifier: str, concept_identifier: str, concept_kind: str
 ) -> Optional[Dict[str, Any]]:
     """Retrieves a specific concept tracking record for a user.
     Raises ConceptNotFoundError if the record is not found.
     """
     tracking_coll = get_user_concept_tracking_collection_service()
-    if tracking_coll is None: # MODIFIED
-        raise ConceptServiceError("Database collection 'user_concept_tracking' not available.")
+    if tracking_coll is None:  # MODIFIED
+        raise ConceptServiceError(
+            "Database collection 'user_concept_tracking' not available."
+        )
 
     if not all([user_identifier, concept_identifier, concept_kind]):
-        raise InvalidConceptDataError("User identifier, concept identifier, and concept kind are required for get_concept_tracking_info.")
+        raise InvalidConceptDataError(
+            "User identifier, concept identifier, and concept kind are required for get_concept_tracking_info."
+        )
 
     if concept_kind not in ["type", "individual"]:
-        raise InvalidConceptDataError(f"Invalid concept_kind: '{concept_kind}'. Must be 'type' or 'individual'.")
+        raise InvalidConceptDataError(
+            f"Invalid concept_kind: '{concept_kind}'. Must be 'type' or 'individual'."
+        )
 
     query: MongoQuery = {
         "user_identifier": user_identifier,
         "concept_identifier": concept_identifier,
-        "concept_kind": concept_kind
+        "concept_kind": concept_kind,
     }
 
     try:
@@ -1229,23 +1409,32 @@ def get_concept_tracking_info(
                 f"concept '{concept_identifier}' (kind: {concept_kind})."
             )
         # Convert ObjectId to string if present, similar to other service functions
-        if tracking_record and '_id' in tracking_record:
-            tracking_record['id'] = str(tracking_record.pop('_id'))
+        if tracking_record and "_id" in tracking_record:
+            tracking_record["id"] = str(tracking_record.pop("_id"))
         return tracking_record
-    except ConceptNotFoundError: # Re-raise specific error
+    except ConceptNotFoundError:  # Re-raise specific error
         raise
     except Exception as e:
-        logger.error(f"Error retrieving concept tracking info for user '{user_identifier}', concept '{concept_identifier}': {e}", exc_info=True)
-        raise ConceptServiceError(f"Error retrieving concept tracking info from database: {e}")
+        logger.error(
+            f"Error retrieving concept tracking info for user '{user_identifier}', concept '{concept_identifier}': {e}",
+            exc_info=True,
+        )
+        raise ConceptServiceError(
+            f"Error retrieving concept tracking info from database: {e}"
+        )
 
 
 # REFACTORING_NOTE: Helper functions to get collections.
 # These could be expanded with error handling or logging if needed.
 
+
 def get_concept_display_name(concept_doc):
     """Get a readable display name for a concept using the centralized accessor with language fallback."""
     try:
-        from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
+        from ..vontology.utils_vontology import (
+            get_concept_display_name_with_names_fallback,
+        )
+
         return get_concept_display_name_with_names_fallback(concept_doc)
     except Exception:
         # Legacy fallbacks
@@ -1278,21 +1467,21 @@ def suggest_concepts_for_text(text: str, limit: int = 6):
             match_type="substring",
             include_description=False,  # Name search only for annotations
             limit=limit,
-            use_two_pass=True  # Prefer prefix matches, fallback to substring
+            use_two_pass=True,  # Prefer prefix matches, fallback to substring
         )
 
         # Transform to expected format for annotations pipeline
         results = []
-        for result in search_result.get('results', []):
-            results.append({
-                "concept_id": result.get('concept_id'),
-                "name": result.get('name')
-            })
+        for result in search_result.get("results", []):
+            results.append(
+                {"concept_id": result.get("concept_id"), "name": result.get("name")}
+            )
 
         return results[:limit]
     except Exception as e:
         logger.exception(f"suggest_concepts_for_text failed for '{text}': {e}")
         return []
+
 
 # Backward compatibility alias (some routes/tests still reference concept_service.search_concepts)
 search_concepts = suggest_concepts_for_text
@@ -1311,7 +1500,10 @@ def get_concept_name_by_id(concept_id: str) -> Optional[str]:
         concept = concepts_coll.find_one({"concept_id": concept_id})
         if concept:
             try:
-                from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
+                from ..vontology.utils_vontology import (
+                    get_concept_display_name_with_names_fallback,
+                )
+
                 nm = get_concept_display_name_with_names_fallback(concept)
                 if nm:
                     return nm
@@ -1329,6 +1521,7 @@ def get_concept_name_by_id(concept_id: str) -> Optional[str]:
         logger.warning(f"Error looking up concept name for {concept_id}: {e}")
         return None
 
+
 def get_concepts_collection_DEPRECATED() -> Optional[Collection]:
     """DEPRECATED: This was incorrectly returning the 'concepts' collection.
     Use the correct get_concepts_collection() from mongo_client instead.
@@ -1342,6 +1535,7 @@ def get_concepts_collection_DEPRECATED() -> Optional[Collection]:
         logger.error(f"Failed to get 'concepts' collection: {e}", exc_info=True)
         return None
 
+
 def get_user_concept_tracking_collection_service() -> Optional[Collection]:
     """Helper to get the 'user_concept_tracking' collection.
     REFACTORING_NOTE: Centralizes access to the collection.
@@ -1352,10 +1546,14 @@ def get_user_concept_tracking_collection_service() -> Optional[Collection]:
             return None
         return db["user_concept_tracking"]
     except Exception as e:
-        logger.error(f"Failed to get 'user_concept_tracking' collection: {e}", exc_info=True)
+        logger.error(
+            f"Failed to get 'user_concept_tracking' collection: {e}", exc_info=True
+        )
         return None
 
+
 # --- Interaction Session Management ---
+
 
 def get_interaction_sessions_collection_service() -> Optional[Collection]:
     """Helper to get the 'interaction_sessions' collection."""
@@ -1365,10 +1563,15 @@ def get_interaction_sessions_collection_service() -> Optional[Collection]:
             return None
         return db[interaction_session_collection_name]
     except Exception as e:
-        logger.error(f"Failed to get 'interaction_sessions' collection: {e}", exc_info=True)
+        logger.error(
+            f"Failed to get 'interaction_sessions' collection: {e}", exc_info=True
+        )
         return None
 
-def start_interaction_session(concept_id: str, user_id: Optional[str], initial_notes: Optional[str] = None) -> Dict[str, Any]:
+
+def start_interaction_session(
+    concept_id: str, user_id: Optional[str], initial_notes: Optional[str] = None
+) -> Dict[str, Any]:
     """Starts a new interaction session with an concept.
 
     Args:
@@ -1385,7 +1588,9 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
     """
     if not user_id or not isinstance(user_id, str):
         raise ConceptServiceError("user_id is required to start an interaction session")
-    logger.info(f"Attempting to start interaction session for concept_id: {concept_id} by user_id: {user_id}")
+    logger.info(
+        f"Attempting to start interaction session for concept_id: {concept_id} by user_id: {user_id}"
+    )
 
     concepts_coll = ConceptsRepository.collection()
 
@@ -1408,7 +1613,9 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
         obj_id = ObjectId(concept_id)
     except Exception as e:
         obj_id = None
-        logger.debug(f"start_interaction_session: '{concept_id}' is not a valid ObjectId: {e}")
+        logger.debug(
+            f"start_interaction_session: '{concept_id}' is not a valid ObjectId: {e}"
+        )
 
     # Try by ObjectId
     if obj_id is not None:
@@ -1446,14 +1653,18 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
                 concept = concepts_coll.find_one({"concept_id": candidate})
                 if concept:
                     actual_concept_id = str(concept["_id"])
-                    logger.info(f"Found concept by concept_id {candidate}, actual ObjectId: {actual_concept_id}")
+                    logger.info(
+                        f"Found concept by concept_id {candidate}, actual ObjectId: {actual_concept_id}"
+                    )
                     break
 
         except Exception as e:
             logger.warning(f"Could not find concept by concept_id: {e}")
 
     if not concept:
-        logger.warning(f"concept not found with ID {concept_id} when trying to start interaction session.")
+        logger.warning(
+            f"concept not found with ID {concept_id} when trying to start interaction session."
+        )
         raise ConceptServiceError(f"concept not found with ID {concept_id}.")
 
     # Derive composite namespace for the session (user@org isolation for RAG/search)
@@ -1467,9 +1678,10 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
     role_in_org = None
     try:
         from flask import session as flask_session
+
         if flask_session:
-            org_id = flask_session.get('organisation_concept_id')
-            role_in_org = flask_session.get('role_in_org')
+            org_id = flask_session.get("organisation_concept_id")
+            role_in_org = flask_session.get("role_in_org")
     except Exception:
         pass
 
@@ -1491,8 +1703,12 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
             session_namespace = derive_namespace(user_slug)
             # No org context, no role
     except Exception as e:
-        logger.warning(f"Failed to derive composite namespace: {e}, falling back to default")
-        session_namespace = os.environ.get("VON_DEFAULT_NAMESPACE", "#V#default_namespace")
+        logger.warning(
+            f"Failed to derive composite namespace: {e}, falling back to default"
+        )
+        session_namespace = os.environ.get(
+            "VON_DEFAULT_NAMESPACE", "#V#default_namespace"
+        )
         org_id = None
         role_in_org = None
 
@@ -1501,27 +1717,33 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
         "user_id": user_id,
         "organisation_concept_id": org_id,  # Phase 1: org context
         "role_in_org": role_in_org,  # Phase 1: stubbed role
-        "start_time": datetime.now(timezone.utc), # Use timezone.utc
-        "last_updated_time": datetime.now(timezone.utc), # Use timezone.utc
+        "start_time": datetime.now(timezone.utc),  # Use timezone.utc
+        "last_updated_time": datetime.now(timezone.utc),  # Use timezone.utc
         "status": "active",
         "history": [],
         "indexing_status": "pending",
-        "namespace": session_namespace  # Composite: #V#user@org or #V#user
+        "namespace": session_namespace,  # Composite: #V#user@org or #V#user
     }
 
     if initial_notes:
-        session_doc["history"].append(InteractionEntry(
-            interaction_type="user_provided_initial_notes",
-            details={"notes": initial_notes},
-            timestamp=datetime.now(timezone.utc) # Use timezone.utc
-        ).model_dump())
+        session_doc["history"].append(
+            InteractionEntry(
+                interaction_type="user_provided_initial_notes",
+                details={"notes": initial_notes},
+                timestamp=datetime.now(timezone.utc),  # Use timezone.utc
+            ).model_dump()
+        )
 
     try:
         result: InsertOneResult = sessions_coll.insert_one(session_doc)
         inserted_session_id = result.inserted_id
-        logger.info(f"Started interaction session {inserted_session_id} for concept {actual_concept_id}")
+        logger.info(
+            f"Started interaction session {inserted_session_id} for concept {actual_concept_id}"
+        )
     except Exception as e:
-        logger.error(f"Error starting interaction session for concept {actual_concept_id}: {e}")
+        logger.error(
+            f"Error starting interaction session for concept {actual_concept_id}: {e}"
+        )
         raise ConceptServiceError(f"Could not start interaction session: {e}") from e
 
     # No static system question - the frontend will generate the first question dynamically
@@ -1531,10 +1753,13 @@ def start_interaction_session(concept_id: str, user_id: Optional[str], initial_n
         "interaction_id": str(inserted_session_id),
         "concept_id": actual_concept_id,
         "concept_name": concept.get("name", "Unknown concept"),
-        "session_start_time": session_doc["start_time"].isoformat()
+        "session_start_time": session_doc["start_time"].isoformat(),
     }
 
-def get_active_interactions_for_concept(concept_id: str, user_id: Optional[str]) -> List[Dict[str, Any]]:
+
+def get_active_interactions_for_concept(
+    concept_id: str, user_id: Optional[str]
+) -> List[Dict[str, Any]]:
     """Retrieves active interaction sessions for a specific concept and user.
 
     Args:
@@ -1549,7 +1774,9 @@ def get_active_interactions_for_concept(concept_id: str, user_id: Optional[str])
     """
     if not user_id or not isinstance(user_id, str):
         raise ConceptServiceError("user_id is required to fetch active interactions")
-    logger.info(f"Checking for active interactions for concept_id: {concept_id}, user_id: {user_id}")
+    logger.info(
+        f"Checking for active interactions for concept_id: {concept_id}, user_id: {user_id}"
+    )
     db = get_db()
     if db is None:
         logger.error("Database connection not available.")
@@ -1559,9 +1786,13 @@ def get_active_interactions_for_concept(concept_id: str, user_id: Optional[str])
 
     try:
         # Find active sessions for this concept and user
-        active_sessions = list(sessions_coll.find({
-            "concept_id": ObjectId(concept_id),
-        }).sort("last_updated_time", -1))  # Most recent first
+        active_sessions = list(
+            sessions_coll.find(
+                {
+                    "concept_id": ObjectId(concept_id),
+                }
+            ).sort("last_updated_time", -1)
+        )  # Most recent first
 
         # Convert ObjectId to string for JSON serialization
         for session in active_sessions:
@@ -1572,12 +1803,17 @@ def get_active_interactions_for_concept(concept_id: str, user_id: Optional[str])
             if isinstance(session.get("last_updated_time"), datetime):
                 session["last_updated_time"] = session["last_updated_time"].isoformat()
 
-        logger.info(f"Found {len(active_sessions)} active interactions for concept {concept_id}")
+        logger.info(
+            f"Found {len(active_sessions)} active interactions for concept {concept_id}"
+        )
         return active_sessions
 
     except Exception as e:
-        logger.error(f"Error retrieving active interactions for concept {concept_id}: {e}")
+        logger.error(
+            f"Error retrieving active interactions for concept {concept_id}: {e}"
+        )
         raise ConceptServiceError(f"Could not retrieve active interactions: {e}") from e
+
 
 def resume_interaction_session(interaction_id: str) -> Dict[str, Any]:
     """Resumes an existing interaction session by returning its current state.
@@ -1603,7 +1839,9 @@ def resume_interaction_session(interaction_id: str) -> Dict[str, Any]:
         concept_id = str(session.get("concept_id"))
         concept = get_concept_by_id(concept_id)
         if not concept:
-            raise ConceptServiceError(f"concept not found for interaction session {interaction_id}")
+            raise ConceptServiceError(
+                f"concept not found for interaction session {interaction_id}"
+            )
 
         # Find the last question/statement from the history
         last_question = "Continue the conversation..."  # Default fallback
@@ -1612,7 +1850,9 @@ def resume_interaction_session(interaction_id: str) -> Dict[str, Any]:
         for entry in reversed(history):
             if entry.get("interaction_type") in ["llm_question", "llm_statement"]:
                 details = entry.get("details", {})
-                last_question = details.get("question") or details.get("statement", last_question)
+                last_question = details.get("question") or details.get(
+                    "statement", last_question
+                )
                 break
 
         # Format recent history for display
@@ -1637,22 +1877,24 @@ def resume_interaction_session(interaction_id: str) -> Dict[str, Any]:
             "conversation_history": formatted_history,
             "session_start_time": session.get("start_time"),
             "last_updated_time": session.get("last_updated_time"),
-            "status": "resumed"
+            "status": "resumed",
         }
 
     except Exception as e:
         logger.error(f"Error resuming interaction session {interaction_id}: {e}")
         raise ConceptServiceError(f"Could not resume interaction session: {e}") from e
 
+
 # src/backend/services/concept_service.py  (keep it in the same module)
 
+
 def generate_concept_question(
-        *,                       # all-keyword args ⇒ easier to read
-        concept: dict,
-        db: Database,
-        interaction_history: str = "",
-        user_answer: str = "",
-        is_initial: bool = True
+    *,  # all-keyword args ⇒ easier to read
+    concept: dict,
+    db: Database,
+    interaction_history: str = "",
+    user_answer: str = "",
+    is_initial: bool = True,
 ) -> str:
     """
     Return a fully-rendered prompt for the LLM.
@@ -1661,11 +1903,13 @@ def generate_concept_question(
     - Falls back to a default template if none exists and **persists it** once
     """
     # ---------- gather basics ----------
-    concept_id   = str(concept.get("id") or concept.get("_id"))
-    concept_id  = concept.get("concept_id") \
-              or (concept.get("vontology_path") or [THING_PRIMARY_ID])[-1]
-    notes       = get_concept_notes(concept) or "No information recorded yet."
-    name        = concept.get("name", "this concept")
+    concept_id = str(concept.get("id") or concept.get("_id"))
+    concept_id = (
+        concept.get("concept_id")
+        or (concept.get("vontology_path") or [THING_PRIMARY_ID])[-1]
+    )
+    notes = get_concept_notes(concept) or "No information recorded yet."
+    name = concept.get("name", "this concept")
 
     # ---------- fetch or create template ----------
     template: str | None = None
@@ -1679,7 +1923,9 @@ def generate_concept_question(
         logger.warning(f"Could not fetch Vontology node for {concept_id}: {e}")
 
     # ---------- gather descriptive material (notes + type description) ----------
-    material = gather_descriptive_material(concept, vontology_node, include_notes_in_block=True)
+    material = gather_descriptive_material(
+        concept, vontology_node, include_notes_in_block=True
+    )
     concept_context = material.get("context_block", "")
     # Log the context block that will be injected (or prepended) into the prompt
     try:
@@ -1687,7 +1933,7 @@ def generate_concept_question(
             "[PromptContext] concept_id=%s is_initial=%s context_block:\n%s",
             concept_id,
             is_initial,
-            (concept_context if concept_context else "(empty)")
+            (concept_context if concept_context else "(empty)"),
         )
     except Exception:
         pass
@@ -1696,14 +1942,15 @@ def generate_concept_question(
     user_org_context = ""
     try:
         from ..server.routes.settings_routes import get_all_settings_data
+
         settings = get_all_settings_data()
 
         context_parts = []
-        current_user_name = settings.get('current_user_person_name')
+        current_user_name = settings.get("current_user_person_name")
         if current_user_name:
             context_parts.append(f"Current user: {current_user_name}")
 
-        current_org_name = settings.get('current_organisation_name')
+        current_org_name = settings.get("current_organisation_name")
         if current_org_name:
             context_parts.append(f"Organization: {current_org_name}")
 
@@ -1727,13 +1974,13 @@ def generate_concept_question(
         )
         # save once
     if vontology_node and not is_thing_id(concept_id):
-            try:
-                update_vontology_node_in_db(
-                    concept_id=concept_id,
-                    update_data={"attributes.prompt_template": template}
-                )
-            except Exception as e:
-                logger.error(f"Unable to persist default template on {concept_id}: {e}")
+        try:
+            update_vontology_node_in_db(
+                concept_id=concept_id,
+                update_data={"attributes.prompt_template": template},
+            )
+        except Exception as e:
+            logger.error(f"Unable to persist default template on {concept_id}: {e}")
 
     # ---------- person / pronoun logic ----------
     is_person = concept_id == "#V#person"
@@ -1741,8 +1988,9 @@ def generate_concept_question(
     is_current_user = False
     try:
         from flask import session, has_request_context
+
         if has_request_context():
-            current_user_concept_id = session.get('user_concept_id')
+            current_user_concept_id = session.get("user_concept_id")
             is_current_user = is_person and (current_user_concept_id == concept_id)
         else:
             # Outside request (e.g. unit tests) – treat as not current user
@@ -1758,11 +2006,13 @@ def generate_concept_question(
     # ---------- fill placeholders ----------
     history_section = (
         f"Ongoing interaction history (last few exchanges):\n{interaction_history}\n\n"
-        if interaction_history else ""
+        if interaction_history
+        else ""
     )
-    answer_section  = (
+    answer_section = (
         f"User's latest input: {user_answer}\n\n"
-        if (not is_initial and user_answer) else ""
+        if (not is_initial and user_answer)
+        else ""
     )
 
     # Check if template has user_org_context placeholder, if not add it at the beginning
@@ -1791,13 +2041,13 @@ def generate_concept_question(
 
     try:
         filled = template.format(
-            user_org_context = user_org_context,
-            concept_context  = concept_context,
-            concept_type = concept_id,
-            concept_name = name,
-            concept_notes= notes,
-            history_section = history_section,
-            answer_section  = answer_section
+            user_org_context=user_org_context,
+            concept_context=concept_context,
+            concept_type=concept_id,
+            concept_name=name,
+            concept_notes=notes,
+            history_section=history_section,
+            answer_section=answer_section,
         )
     except KeyError as e:
         # Handle templates that don't have all placeholders
@@ -1824,7 +2074,7 @@ def generate_concept_question(
             "[LLMPrompt] concept_id=%s is_initial=%s full_prompt:\n%s",
             concept_id,
             is_initial,
-            filled
+            filled,
         )
     except Exception:
         pass
@@ -1845,18 +2095,32 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
         logger.error("Invalid interaction_id provided.")
         return {"error": "Invalid interaction_id", "status": "error_validation"}
 
-    if not isinstance(user_answer, str): # Basic check, consider more validation
+    if not isinstance(user_answer, str):  # Basic check, consider more validation
         logger.error("Invalid user_answer provided (not a string).")
-        return {"error": "Invalid user_answer (must be a string)", "status": "error_validation"}
+        return {
+            "error": "Invalid user_answer (must be a string)",
+            "status": "error_validation",
+        }
 
-    if not isinstance(session, dict) or "concept_id" not in session or "history" not in session:
-        logger.error(f"Invalid session object provided for interaction_id: {interaction_id}. Session: {session}")
+    if (
+        not isinstance(session, dict)
+        or "concept_id" not in session
+        or "history" not in session
+    ):
+        logger.error(
+            f"Invalid session object provided for interaction_id: {interaction_id}. Session: {session}"
+        )
         return {"error": "Invalid session object", "status": "error_validation"}
 
     concept_id_from_session = session.get("concept_id")
-    if not concept_id_from_session: # Should not happen if session validation is robust
-        logger.error(f"concept_id missing from session for interaction_id: {interaction_id}")
-        return {"error": "concept_id missing from session", "status": "error_session_data"}
+    if not concept_id_from_session:  # Should not happen if session validation is robust
+        logger.error(
+            f"concept_id missing from session for interaction_id: {interaction_id}"
+        )
+        return {
+            "error": "concept_id missing from session",
+            "status": "error_session_data",
+        }
 
     # Ensure concept_id is a string for get_concept_by_id, if it's an ObjectId from the session
     concept_id_str = str(concept_id_from_session)
@@ -1864,23 +2128,37 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
     db = get_db()
     if db is None:
         logger.error("Database connection not available for submit_concept_answer.")
-        return {"error": "Database connection not available", "status": "error_db_connection"}
+        return {
+            "error": "Database connection not available",
+            "status": "error_db_connection",
+        }
 
     interactions_collection = db[interaction_session_collection_name]
 
-    concept = get_concept_by_id(concept_id_str) # Assumes get_concept_by_id handles ObjectId conversion or takes str
+    concept = get_concept_by_id(
+        concept_id_str
+    )  # Assumes get_concept_by_id handles ObjectId conversion or takes str
     if not concept:
-        logger.error(f"concept not found for concept_id: {concept_id_str} in session {interaction_id}")
-        return {"error": "concept not found for interaction", "status": "error_concept_not_found"}
+        logger.error(
+            f"concept not found for concept_id: {concept_id_str} in session {interaction_id}"
+        )
+        return {
+            "error": "concept not found for interaction",
+            "status": "error_concept_not_found",
+        }
 
     concept_type_concept_id = concept.get("concept_id")
     if not concept_type_concept_id:
         v_path = concept.get("vontology_path")
         if v_path and isinstance(v_path, list) and len(v_path) > 0:
             concept_type_concept_id = v_path[-1]
-            logger.info(f"Derived concept_type_concept_id '{concept_type_concept_id}' from vontology_path for concept {concept_id_str}")
+            logger.info(
+                f"Derived concept_type_concept_id '{concept_type_concept_id}' from vontology_path for concept {concept_id_str}"
+            )
         else:
-            logger.warning(f"concept {concept_id_str} has no 'concept_id' or derivable 'vontology_path'. Using a generic type for prompt.")
+            logger.warning(
+                f"concept {concept_id_str} has no 'concept_id' or derivable 'vontology_path'. Using a generic type for prompt."
+            )
             # Fallback to a generic type or handle as an error if type is strictly required
             concept_type_concept_id = THING_PRIMARY_ID  # Example generic fallback
             # return {"error": "concept type (concept_id or vontology_path) not found", "status": "error_concept_config"}
@@ -1889,32 +2167,38 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
     logger.info(f"concept type for prompt: {concept_type_concept_id}")
     logger.info(f"concept ID for prompt: {concept_id_str}")
 
-
-
     now_utc = datetime.now(timezone.utc)
     user_answer_interaction_entry = InteractionEntry(
         interaction_type="user_answer",
         details={"answer": user_answer},
-        timestamp=now_utc
+        timestamp=now_utc,
     )
     # Ensure session["history"] is a list before appending
     if not isinstance(session.get("history"), list):
         session["history"] = []
-    current_history = session["history"] # This is a reference, changes will reflect in session dict
+    current_history = session[
+        "history"
+    ]  # This is a reference, changes will reflect in session dict
     current_history.append(user_answer_interaction_entry.model_dump())
 
     # Find the previous question from history for synthesis
     previous_question = "What would you like to tell me?"  # Default fallback
-    for entry in reversed(current_history[:-1]):  # Look backwards, excluding the answer we just added
+    for entry in reversed(
+        current_history[:-1]
+    ):  # Look backwards, excluding the answer we just added
         if entry.get("interaction_type") in ["llm_question", "llm_statement"]:
             question_details = entry.get("details", {})
-            previous_question = question_details.get("question") or question_details.get("statement", previous_question)
+            previous_question = question_details.get(
+                "question"
+            ) or question_details.get("statement", previous_question)
             break
 
     # Get concept type name for later use in synthesis and prompt
-    concept_type_name_for_prompt = concept_type_concept_id # Default to ID
-    if concept.get("name"): # Fallback to concept name if type name is not available
-         concept_type_name_for_prompt = f"{concept.get('name')} (instance of {concept_type_concept_id})"
+    concept_type_name_for_prompt = concept_type_concept_id  # Default to ID
+    if concept.get("name"):  # Fallback to concept name if type name is not available
+        concept_type_name_for_prompt = (
+            f"{concept.get('name')} (instance of {concept_type_concept_id})"
+        )
 
     # IMPORTANT: Do synthesis FIRST before generating the next question
     # This ensures the next question is based on updated notes that include the current synthesis
@@ -1935,7 +2219,7 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
             concept_type_name=concept_type_name_for_prompt,
             ollama_client=llm_client,  # Pass the unified LLM client
             model=safe_model,
-            session=session  # Pass session to access initial notes
+            session=session,  # Pass session to access initial notes
         )
 
         # Fetch the updated concept from the database to ensure we have the latest notes
@@ -1946,15 +2230,27 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
                     concept = updated_concept  # Use the updated concept for the rest of the process
                     concept_notes = get_concept_notes(concept) or ""
                     try:
-                        logger.info(f"Re-fetched concept after synthesis. Updated notes length: {len(concept_notes)}")
-                        logger.info(f"Re-fetched concept notes preview: {concept_notes[:200]}...")
+                        logger.info(
+                            f"Re-fetched concept after synthesis. Updated notes length: {len(concept_notes)}"
+                        )
+                        logger.info(
+                            f"Re-fetched concept notes preview: {concept_notes[:200]}..."
+                        )
                     except Exception:
                         # In case concept_notes is not a string-like, coerce for logging
-                        concept_notes_str = str(concept_notes) if concept_notes is not None else ""
-                        logger.info(f"Re-fetched concept after synthesis. Updated notes length: {len(concept_notes_str)}")
-                        logger.info(f"Re-fetched concept notes preview: {concept_notes_str[:200]}...")
+                        concept_notes_str = (
+                            str(concept_notes) if concept_notes is not None else ""
+                        )
+                        logger.info(
+                            f"Re-fetched concept after synthesis. Updated notes length: {len(concept_notes_str)}"
+                        )
+                        logger.info(
+                            f"Re-fetched concept notes preview: {concept_notes_str[:200]}..."
+                        )
                 else:
-                    logger.warning(f"Could not re-fetch concept {concept_id_str} after synthesis")
+                    logger.warning(
+                        f"Could not re-fetch concept {concept_id_str} after synthesis"
+                    )
             except Exception as fetch_e:
                 logger.error(f"Error re-fetching concept after synthesis: {fetch_e}")
                 # Continue with the original concept
@@ -1965,30 +2261,40 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
 
     # NOW get the updated concept notes (after synthesis) for generating the next question
     concept_notes = get_concept_notes(concept) or ""
-    logger.info(f"Using concept notes for LLM prompt. Notes length: {len(concept_notes)}")
+    logger.info(
+        f"Using concept notes for LLM prompt. Notes length: {len(concept_notes)}"
+    )
     logger.info(f"concept notes preview for LLM: {concept_notes[:200]}...")
 
-    recent_history_entries = current_history[-6:] # Get user_answer + last 5 (or fewer)
-    interaction_history_formatted = "\\n".join([
-        f"{entry.get('interaction_type', 'Log')}: {entry.get('details', {}).get('question', entry.get('details', {}).get('answer', 'N/A'))}"
-        for entry in recent_history_entries
-    ])
+    recent_history_entries = current_history[-6:]  # Get user_answer + last 5 (or fewer)
+    interaction_history_formatted = "\\n".join(
+        [
+            f"{entry.get('interaction_type', 'Log')}: {entry.get('details', {}).get('question', entry.get('details', {}).get('answer', 'N/A'))}"
+            for entry in recent_history_entries
+        ]
+    )
 
     # concept_type_name_for_prompt was already calculated above, no need to recalculate
 
-
     try:
         final_prompt_for_llm = generate_concept_question(
-            concept               = concept,
-            db                   = db,
-            interaction_history  = interaction_history_formatted,
-            user_answer          = user_answer,
-            is_initial           = False
+            concept=concept,
+            db=db,
+            interaction_history=interaction_history_formatted,
+            user_answer=user_answer,
+            is_initial=False,
         )
-        logger.info(f"Generated final prompt using unified function (full):\n{final_prompt_for_llm}")
+        logger.info(
+            f"Generated final prompt using unified function (full):\n{final_prompt_for_llm}"
+        )
     except Exception as e:
-        logger.error(f"Error generating prompt with unified function: {e}", exc_info=True)
-        return {"error": "Failed to generate prompt", "status": "error_prompt_generation"}
+        logger.error(
+            f"Error generating prompt with unified function: {e}", exc_info=True
+        )
+        return {
+            "error": "Failed to generate prompt",
+            "status": "error_prompt_generation",
+        }
 
     llm_response_text = None
     try:
@@ -2001,16 +2307,20 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
 
         # Use the correct generate method with prompt parameter
         raw_llm_response = llm_client.generate(
-            prompt=final_prompt_for_llm,
-            model=selected_model
+            prompt=final_prompt_for_llm, model=selected_model
         )
         # The generate method returns a string directly
         if isinstance(raw_llm_response, str):
             llm_response_text = raw_llm_response
         else:
-            logger.error(f"Unexpected LLM response format: {type(raw_llm_response)}. Response: {raw_llm_response}")
-            llm_response_text = str(raw_llm_response) # Fallback to string conversion
-            return {"error": "Unexpected LLM response format", "status": "error_llm_response"}
+            logger.error(
+                f"Unexpected LLM response format: {type(raw_llm_response)}. Response: {raw_llm_response}"
+            )
+            llm_response_text = str(raw_llm_response)  # Fallback to string conversion
+            return {
+                "error": "Unexpected LLM response format",
+                "status": "error_llm_response",
+            }
 
     except requests.exceptions.ConnectionError as e:
         logger.error(f"Connection error with Ollama service: {e}")
@@ -2019,9 +2329,12 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
         logger.error(f"Error during LLM call: {e}", exc_info=True)
         return {"error": "LLM processing error", "status": "error_llm_processing"}
 
-    if not llm_response_text: # Check after attempting to extract content
+    if not llm_response_text:  # Check after attempting to extract content
         logger.error("LLM returned an empty or unparseable response.")
-        return {"error": "LLM returned empty or unparseable response", "status": "error_llm_empty_response"}
+        return {
+            "error": "LLM returned empty or unparseable response",
+            "status": "error_llm_empty_response",
+        }
 
     llm_interaction_type = "llm_question"
     llm_details_key = "question"
@@ -2032,48 +2345,69 @@ def submit_concept_answer(interaction_id: str, user_answer: str, session: dict) 
     llm_response_interaction_entry = InteractionEntry(
         interaction_type=llm_interaction_type,
         details={llm_details_key: llm_response_text},
-        timestamp=datetime.now(timezone.utc)
+        timestamp=datetime.now(timezone.utc),
     )
     current_history.append(llm_response_interaction_entry.model_dump())
 
     try:
         # Ensure interaction_id is ObjectId for MongoDB query
-        interaction_oid = ObjectId(interaction_id) if not isinstance(interaction_id, ObjectId) else interaction_id
+        interaction_oid = (
+            ObjectId(interaction_id)
+            if not isinstance(interaction_id, ObjectId)
+            else interaction_id
+        )
 
         update_result = interactions_collection.update_one(
             {"_id": interaction_oid},
             {
                 "$set": {
-                    "history": current_history, # current_history has already been updated
+                    "history": current_history,  # current_history has already been updated
                     "last_updated_time": datetime.now(timezone.utc),
-                    "indexing_status": "pending"
+                    "indexing_status": "pending",
                 }
-            }
+            },
         )
         if update_result.matched_count == 0:
-            logger.error(f"Interaction session {interaction_id} (OID: {interaction_oid}) not found for update.")
-            return {"error": "Interaction session not found for update", "status": "error_db_update_notfound"}
+            logger.error(
+                f"Interaction session {interaction_id} (OID: {interaction_oid}) not found for update."
+            )
+            return {
+                "error": "Interaction session not found for update",
+                "status": "error_db_update_notfound",
+            }
         logger.info(f"Successfully updated interaction session {interaction_id}")
     except PyMongoError as e:
-        logger.error(f"MongoDB error updating interaction session {interaction_id}: {e}")
-        return {"error": "Failed to update interaction session (DB error)", "status": "error_db_update"}
+        logger.error(
+            f"MongoDB error updating interaction session {interaction_id}: {e}"
+        )
+        return {
+            "error": "Failed to update interaction session (DB error)",
+            "status": "error_db_update",
+        }
     except Exception as e:
-        logger.error(f"Generic error updating interaction session {interaction_id}: {e}", exc_info=True)
-        return {"error": "Failed to update interaction session (general error)", "status": "error_session_update"}
+        logger.error(
+            f"Generic error updating interaction session {interaction_id}: {e}",
+            exc_info=True,
+        )
+        return {
+            "error": "Failed to update interaction session (general error)",
+            "status": "error_session_update",
+        }
 
     return {
         "next_step_type": llm_interaction_type,
         "next_step_content": llm_response_text,
         "status": "success",
-        "interaction_id": interaction_id, # Return the original string ID
+        "interaction_id": interaction_id,  # Return the original string ID
         "synthesis": synthesis_result,  # Include the synthesis result
         "concept": {
             "_id": str(concept.get("_id", concept_id_str)),
             "name": get_concept_display_name_with_names_fallback(concept),
             "notes": get_concept_notes(concept) or "",
-            "concept_id": concept.get("concept_id")
-        }
+            "concept_id": concept.get("concept_id"),
+        },
     }
+
 
 def update_concept_notes(concept_id: str, new_notes: str) -> bool:
     """Update concept notes using text_relations only (Phase 1 preserved_fields deprecation).
@@ -2086,9 +2420,13 @@ def update_concept_notes(concept_id: str, new_notes: str) -> bool:
     """
     try:
         # Confirm concept exists (cheap existence check without mutating preserved_fields)
-        concept_result = ConceptsRepository.find_one({"concept_id": concept_id}, projection={"_id": 1})
+        concept_result = ConceptsRepository.find_one(
+            {"concept_id": concept_id}, projection={"_id": 1}
+        )
         if not concept_result:
-            logger.warning(f"update_concept_notes: No concept found with ID '{concept_id}'. Notes not updated.")
+            logger.warning(
+                f"update_concept_notes: No concept found with ID '{concept_id}'. Notes not updated."
+            )
             return False
 
         try:
@@ -2097,7 +2435,10 @@ def update_concept_notes(concept_id: str, new_notes: str) -> bool:
                 predicate="hasNote",
                 text=new_notes,
                 lang="en",
-                provenance={"source": "update_concept_notes", "ts": datetime.now(timezone.utc).isoformat()},
+                provenance={
+                    "source": "update_concept_notes",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                },
                 context={"write_strategy": "relations_only_v2"},
             )
             new_text_value_id = tv_payload.get("text_value_id")
@@ -2106,7 +2447,9 @@ def update_concept_notes(concept_id: str, new_notes: str) -> bool:
                 f"update_concept_notes: Upserted text_value {new_text_value_id} via relation {relation_id} for concept {concept_id}."
             )
         except Exception as e:  # pragma: no cover - defensive
-            logger.error(f"Failed creating text_value for notes concept_id={concept_id}: {e}")
+            logger.error(
+                f"Failed creating text_value for notes concept_id={concept_id}: {e}"
+            )
             return False
 
         # Prune stale relations
@@ -2123,25 +2466,36 @@ def update_concept_notes(concept_id: str, new_notes: str) -> bool:
                         f"update_concept_notes: Removed {deleted.deleted_count} stale hasNote relations for concept {concept_id}."
                     )
         except Exception as e:  # pragma: no cover
-            logger.error(f"Failed pruning stale hasNote relations for concept {concept_id}: {e}")
+            logger.error(
+                f"Failed pruning stale hasNote relations for concept {concept_id}: {e}"
+            )
 
         # Touch last_updated_time separately (atomic minimal update)
         try:
             ConceptsRepository.update_one(
                 {"concept_id": concept_id},
-                {"$set": {"last_updated_time": datetime.now(timezone.utc)}}
+                {"$set": {"last_updated_time": datetime.now(timezone.utc)}},
             )
         except Exception as e:  # pragma: no cover
-            logger.warning(f"Non-fatal: failed to update last_updated_time for {concept_id}: {e}")
+            logger.warning(
+                f"Non-fatal: failed to update last_updated_time for {concept_id}: {e}"
+            )
 
-        logger.info(f"Successfully updated notes (relations only) for concept '{concept_id}'.")
+        logger.info(
+            f"Successfully updated notes (relations only) for concept '{concept_id}'."
+        )
         return True
     except PyMongoError as e:  # pragma: no cover
-        logger.error(f"MongoDB error while updating notes for concept '{concept_id}': {e}")
+        logger.error(
+            f"MongoDB error while updating notes for concept '{concept_id}': {e}"
+        )
         return False
     except Exception as e:  # pragma: no cover
-        logger.error(f"Unexpected error while updating notes for concept '{concept_id}': {e}")
+        logger.error(
+            f"Unexpected error while updating notes for concept '{concept_id}': {e}"
+        )
         return False
+
 
 def update_concept_description(concept_id: str, new_description: str) -> bool:
     """Update concept description using text_relations only (Phase 1 preserved_fields deprecation).
@@ -2153,18 +2507,29 @@ def update_concept_description(concept_id: str, new_description: str) -> bool:
     Read-only prompt concept remains protected by READ_ONLY_PROMPT_CONCEPT.
     Returns True on success, False otherwise.
     """
-    from .annotation_extraction_service import PROMPT_CONCEPT_ID  # local import to avoid cycles
+    from .annotation_extraction_service import (
+        PROMPT_CONCEPT_ID,
+    )  # local import to avoid cycles
     import os
-    if os.environ.get('READ_ONLY_PROMPT_CONCEPT') in ('1','true','True') and concept_id == PROMPT_CONCEPT_ID:
+
+    if (
+        os.environ.get("READ_ONLY_PROMPT_CONCEPT") in ("1", "true", "True")
+        and concept_id == PROMPT_CONCEPT_ID
+    ):
         logger.warning(
-            "update_concept_description: READ_ONLY_PROMPT_CONCEPT set; refusing to overwrite prompt concept %s", concept_id
+            "update_concept_description: READ_ONLY_PROMPT_CONCEPT set; refusing to overwrite prompt concept %s",
+            concept_id,
         )
         return False
     try:
         # Existence check
-        concept_result = ConceptsRepository.find_one({"concept_id": concept_id}, projection={"_id": 1})
+        concept_result = ConceptsRepository.find_one(
+            {"concept_id": concept_id}, projection={"_id": 1}
+        )
         if not concept_result:
-            logger.warning(f"update_concept_description: No concept found with ID '{concept_id}'. Description not updated.")
+            logger.warning(
+                f"update_concept_description: No concept found with ID '{concept_id}'. Description not updated."
+            )
             return False
 
         try:
@@ -2173,7 +2538,10 @@ def update_concept_description(concept_id: str, new_description: str) -> bool:
                 predicate="hasDescription",
                 text=new_description,
                 lang="en",
-                provenance={"source": "update_concept_description", "ts": datetime.now(timezone.utc).isoformat()},
+                provenance={
+                    "source": "update_concept_description",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                },
                 context={"write_strategy": "relations_only_v2"},
             )
             new_text_value_id = tv_payload.get("text_value_id")
@@ -2182,7 +2550,9 @@ def update_concept_description(concept_id: str, new_description: str) -> bool:
                 f"update_concept_description: Upserted text_value {new_text_value_id} via relation {relation_id} for concept {concept_id}."
             )
         except Exception as e:  # pragma: no cover
-            logger.error(f"Failed creating text_value for description concept_id={concept_id}: {e}")
+            logger.error(
+                f"Failed creating text_value for description concept_id={concept_id}: {e}"
+            )
             return False
 
         try:
@@ -2198,24 +2568,36 @@ def update_concept_description(concept_id: str, new_description: str) -> bool:
                         f"update_concept_description: Removed {deleted.deleted_count} stale hasDescription relations for concept {concept_id}."
                     )
         except Exception as e:  # pragma: no cover
-            logger.error(f"Failed pruning stale hasDescription relations for concept {concept_id}: {e}")
+            logger.error(
+                f"Failed pruning stale hasDescription relations for concept {concept_id}: {e}"
+            )
 
         try:
             ConceptsRepository.update_one(
                 {"concept_id": concept_id},
-                {"$set": {"last_updated_time": datetime.now(timezone.utc)}}
+                {"$set": {"last_updated_time": datetime.now(timezone.utc)}},
             )
         except Exception as e:  # pragma: no cover
-            logger.warning(f"Non-fatal: failed to update last_updated_time for {concept_id}: {e}")
+            logger.warning(
+                f"Non-fatal: failed to update last_updated_time for {concept_id}: {e}"
+            )
 
-        logger.info(f"Successfully updated description (relations only) for concept '{concept_id}'.")
+        logger.info(
+            f"Successfully updated description (relations only) for concept '{concept_id}'."
+        )
         return True
     except PyMongoError as e:  # pragma: no cover
-        logger.error(f"MongoDB error while updating description for concept '{concept_id}': {e}")
+        logger.error(
+            f"MongoDB error while updating description for concept '{concept_id}': {e}"
+        )
         return False
     except Exception as e:  # pragma: no cover
-        logger.error(f"Unexpected error while updating description for concept '{concept_id}': {e}")
+        logger.error(
+            f"Unexpected error while updating description for concept '{concept_id}': {e}"
+        )
         return False
+
+
 def get_interaction_session_by_id(interaction_id: str) -> Optional[Dict[str, Any]]:
     """Retrieves an interaction session by its ID.
 
@@ -2245,8 +2627,13 @@ def get_interaction_session_by_id(interaction_id: str) -> Optional[Dict[str, Any
             logger.warning(f"Interaction session not found with ID: {interaction_id}")
             return None
     except Exception as e:
-        logger.error(f"Error retrieving interaction session with ID {interaction_id}: {e}")
-        raise ConceptServiceError(f"Invalid interaction ID format or database error for ID {interaction_id}.") from e
+        logger.error(
+            f"Error retrieving interaction session with ID {interaction_id}: {e}"
+        )
+        raise ConceptServiceError(
+            f"Invalid interaction ID format or database error for ID {interaction_id}."
+        ) from e
+
 
 def synthesize_and_update_concept_notes(
     concept_id: str,
@@ -2256,7 +2643,7 @@ def synthesize_and_update_concept_notes(
     concept_type_name: str,
     ollama_client,  # Generic LLM client (keeping name for compatibility)
     model: str,
-    session: Optional[Dict[str, Any]] = None
+    session: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
     Synthesizes a Q&A exchange into a factual statement and updates the concept's notes.
@@ -2284,21 +2671,30 @@ def synthesize_and_update_concept_notes(
     initial_notes = ""
     if session and isinstance(session.get("history"), list):
         for entry in session["history"]:
-            if (entry.get("interaction_type") == "user_provided_initial_notes" and
-                isinstance(entry.get("details"), dict)):
+            if entry.get(
+                "interaction_type"
+            ) == "user_provided_initial_notes" and isinstance(
+                entry.get("details"), dict
+            ):
                 initial_notes = entry["details"].get("notes", "")
                 break
 
     # Use initial notes if concept notes are empty
     if not concept_notes and initial_notes:
         concept_notes = initial_notes
-        logger.info(f"Using initial notes from session for synthesis. Notes length: {len(concept_notes)}")
+        logger.info(
+            f"Using initial notes from session for synthesis. Notes length: {len(concept_notes)}"
+        )
     elif concept_notes and initial_notes and concept_notes != initial_notes:
         # If we have both database notes and initial notes, prefer database notes
         # but log this situation for debugging
-        logger.info(f"Found both database notes ({len(concept_notes)}) and initial notes ({len(initial_notes)}), using database notes")
+        logger.info(
+            f"Found both database notes ({len(concept_notes)}) and initial notes ({len(initial_notes)}), using database notes"
+        )
 
-    logger.info(f"concept notes for synthesis (first 200 chars): {concept_notes[:200]}...")
+    logger.info(
+        f"concept notes for synthesis (first 200 chars): {concept_notes[:200]}..."
+    )
 
     # Create a prompt to synthesize the Q&A into a knowledge statement
     # Todo [JVNAUTOSCI-200]: Store the synthesis prompt in the Vontology type node for future use as an explict prompt template concept
@@ -2320,10 +2716,7 @@ def synthesize_and_update_concept_notes(
     )
 
     # Get synthesis from LLM
-    synthesis_response = ollama_client.generate(
-        prompt=synthesis_prompt,
-        model=model
-    )
+    synthesis_response = ollama_client.generate(prompt=synthesis_prompt, model=model)
 
     if isinstance(synthesis_response, str):
         synthesis_text = synthesis_response.strip()
@@ -2333,7 +2726,7 @@ def synthesize_and_update_concept_notes(
     # Update concept notes if we got meaningful synthesis
     if synthesis_text and synthesis_text != "NO_UPDATE" and len(synthesis_text) > 10:
         updated_notes = concept_notes
-        if updated_notes and not updated_notes.endswith('.'):
+        if updated_notes and not updated_notes.endswith("."):
             updated_notes += ". "
         elif updated_notes:
             updated_notes += " "
@@ -2342,25 +2735,40 @@ def synthesize_and_update_concept_notes(
 
         # Update the concept in database using the repository
         # Use the correct concept ID field (_id for MongoDB ObjectId)
-        concept_filter = {"_id": ObjectId(concept_id)} if len(concept_id) == 24 else {"concept_id": concept_id}
+        concept_filter = (
+            {"_id": ObjectId(concept_id)}
+            if len(concept_id) == 24
+            else {"concept_id": concept_id}
+        )
 
-        logger.info(f"Updating concept notes in DB. concept ID: {concept_id}, Filter: {concept_filter}, Updated notes length: {len(updated_notes)}")
+        logger.info(
+            f"Updating concept notes in DB. concept ID: {concept_id}, Filter: {concept_filter}, Updated notes length: {len(updated_notes)}"
+        )
 
         # Use the canonical notes updater (relations only now) to persist
         if update_concept_notes(concept_id, updated_notes):
-            set_concept_notes(concept, updated_notes)  # in-memory convenience; still uses preserved_fields structure locally
-            logger.info(f"Successfully updated concept notes (relations only) for {concept_id}. Added: {synthesis_text}")
+            set_concept_notes(
+                concept, updated_notes
+            )  # in-memory convenience; still uses preserved_fields structure locally
+            logger.info(
+                f"Successfully updated concept notes (relations only) for {concept_id}. Added: {synthesis_text}"
+            )
             return synthesis_text
-        logger.warning(f"Failed to update concept notes for {concept_id} via relations updater.")
+        logger.warning(
+            f"Failed to update concept notes for {concept_id} via relations updater."
+        )
         return None
     else:
-        logger.info(f"No meaningful synthesis generated for Q&A pair. Synthesis: {synthesis_text}")
+        logger.info(
+            f"No meaningful synthesis generated for Q&A pair. Synthesis: {synthesis_text}"
+        )
         return None
+
 
 def export_concepts(
     concept_id: Optional[str] = None,
     include_descendants: bool = True,
-    format: str = "json"
+    format: str = "json",
 ) -> Tuple[List[Dict[str, Any]], int]:
     """
     Export concepts from the database in the specified format.
@@ -2380,7 +2788,9 @@ def export_concepts(
         InvalidConceptDataError: For invalid parameters
         ConceptServiceError: For database or other service errors
     """
-    logger.info(f"Exporting concepts: concept_id={concept_id}, include_descendants={include_descendants}, format={format}")
+    logger.info(
+        f"Exporting concepts: concept_id={concept_id}, include_descendants={include_descendants}, format={format}"
+    )
 
     # Use direct collection accessor so tests can patch get_concepts_collection
     concepts_coll = get_concepts_collection()
@@ -2390,7 +2800,9 @@ def export_concepts(
 
     # Validate format parameter
     if format not in ["json"]:
-        raise InvalidConceptDataError(f"Unsupported export format: '{format}'. Currently supported: 'json'")
+        raise InvalidConceptDataError(
+            f"Unsupported export format: '{format}'. Currently supported: 'json'"
+        )
 
     # Build query based on concept_id and include_descendants
     query: MongoQuery = {}
@@ -2402,18 +2814,29 @@ def export_concepts(
                 all_relevant_ids = get_vontology_node_and_descendant_ids(concept_id)
                 if all_relevant_ids:
                     query["concept_id"] = {"$in": all_relevant_ids}
-                    logger.info(f"Export query will include {len(all_relevant_ids)} concept IDs (including descendants)")
+                    logger.info(
+                        f"Export query will include {len(all_relevant_ids)} concept IDs (including descendants)"
+                    )
                 else:
                     # If no concepts are found (e.g., invalid ID), query for the ID directly as a fallback
                     query["concept_id"] = concept_id
-                    logger.warning(f"No descendants found for concept_id {concept_id}, using direct query")
+                    logger.warning(
+                        f"No descendants found for concept_id {concept_id}, using direct query"
+                    )
             else:
                 # Only query for the exact concept_id provided
                 query["concept_id"] = concept_id
-                logger.info(f"Export query will only include exact concept_id: {concept_id}")
+                logger.info(
+                    f"Export query will only include exact concept_id: {concept_id}"
+                )
         except Exception as e:
-            logger.error(f"Error resolving concept descendants for {concept_id}: {e}. Falling back to direct query.", exc_info=True)
-            query["concept_id"] = concept_id  # Fallback to querying only the given concept_id
+            logger.error(
+                f"Error resolving concept descendants for {concept_id}: {e}. Falling back to direct query.",
+                exc_info=True,
+            )
+            query["concept_id"] = (
+                concept_id  # Fallback to querying only the given concept_id
+            )
 
     try:
         # Get total count for reporting
@@ -2454,24 +2877,42 @@ def export_concepts(
 
             # Add direct concept name if concept_id exists (similar to list_concepts)
             direct_concept_id = concept_doc.get("concept_id")
-            concept_doc["direct_concept_name"] = None  # Initialize in case it's not found
+            concept_doc["direct_concept_name"] = (
+                None  # Initialize in case it's not found
+            )
 
             if direct_concept_id:
                 try:
-                    concept_details_list = get_concept_details_from_db(concept_name_or_id=direct_concept_id)
+                    concept_details_list = get_concept_details_from_db(
+                        concept_name_or_id=direct_concept_id
+                    )
                     if concept_details_list:
                         actual_concept_details = concept_details_list[0]
-                        if actual_concept_details and actual_concept_details.get("name"):
-                            concept_doc["direct_concept_name"] = actual_concept_details["name"]
+                        if actual_concept_details and actual_concept_details.get(
+                            "name"
+                        ):
+                            concept_doc["direct_concept_name"] = actual_concept_details[
+                                "name"
+                            ]
                     else:
-                        logger.warning(f"Could not find concept details for concept_id: {direct_concept_id} during export")
+                        logger.warning(
+                            f"Could not find concept details for concept_id: {direct_concept_id} during export"
+                        )
                 except Exception as e:
-                    logger.error(f"Error fetching concept details for {direct_concept_id} during export: {e}", exc_info=True)
+                    logger.error(
+                        f"Error fetching concept details for {direct_concept_id} during export: {e}",
+                        exc_info=True,
+                    )
 
             # Ensure display name present using centralized accessor with fallbacks
             try:
-                from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
-                resolved_name = get_concept_display_name_with_names_fallback(concept_doc)
+                from ..vontology.utils_vontology import (
+                    get_concept_display_name_with_names_fallback,
+                )
+
+                resolved_name = get_concept_display_name_with_names_fallback(
+                    concept_doc
+                )
                 if resolved_name:
                     concept_doc["name"] = resolved_name
                 else:
@@ -2489,7 +2930,9 @@ def export_concepts(
 
             concepts_list.append(concept_doc)
 
-        logger.info(f"Export completed successfully: {len(concepts_list)} concepts exported, total_count={total_count}")
+        logger.info(
+            f"Export completed successfully: {len(concepts_list)} concepts exported, total_count={total_count}"
+        )
         return concepts_list, total_count
 
     except PyMongoError as e:
@@ -2497,14 +2940,17 @@ def export_concepts(
         raise ConceptServiceError(f"Database error exporting concepts: {str(e)}")
     except Exception as e:
         logger.error(f"Unexpected error in export_concepts: {e}", exc_info=True)
-        raise ConceptServiceError(f"An unexpected error occurred while exporting concepts: {str(e)}")
+        raise ConceptServiceError(
+            f"An unexpected error occurred while exporting concepts: {str(e)}"
+        )
+
 
 def import_concepts(
     data: Any,
     *,
     conflict_resolution: str = "update",
     validate_concepts: bool = True,
-    dry_run: bool = False
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
     """
     Import concepts into the concepts collection.
@@ -2528,7 +2974,9 @@ def import_concepts(
         raise ConceptServiceError("Database collection 'concepts' not available.")
 
     if conflict_resolution not in {"update", "create_new", "skip"}:
-        raise InvalidConceptDataError("conflict_resolution must be one of: update, create_new, skip")
+        raise InvalidConceptDataError(
+            "conflict_resolution must be one of: update, create_new, skip"
+        )
 
     # Normalize incoming items
     items: List[Dict[str, Any]] = []
@@ -2570,7 +3018,11 @@ def import_concepts(
         try:
             # Normalize legacy fields (Phase 1 JVNAUTOSCI-545)
             try:
-                from .concept_normalization import normalize_concept_payload, LegacyFieldUsage
+                from .concept_normalization import (
+                    normalize_concept_payload,
+                    LegacyFieldUsage,
+                )
+
                 item = normalize_concept_payload(item, record_warnings=True)
             except LegacyFieldUsage as le:  # strict mode rejection
                 errors.append(f"Item {idx}: {le}")
@@ -2594,7 +3046,9 @@ def import_concepts(
                     type_concept_id = vpath[-1]
 
             if validate_concepts and not validate_type_concept(type_concept_id):
-                errors.append(f"Item {idx} ('{name}'): invalid or missing concept_id for type validation")
+                errors.append(
+                    f"Item {idx} ('{name}'): invalid or missing concept_id for type validation"
+                )
                 skipped += 1
                 continue
 
@@ -2639,27 +3093,52 @@ def import_concepts(
                 if existing:
                     if not dry_run:
                         # Update fields as usual
-                        ConceptsRepository.update_one({"_id": existing["_id"]}, {"$set": set_fields})
+                        ConceptsRepository.update_one(
+                            {"_id": existing["_id"]}, {"$set": set_fields}
+                        )
                         # Ensure names[] has NL entry; backfill from incoming name if necessary
                         try:
                             names_arr = existing.get("names")
                             has_nl = False
                             if isinstance(names_arr, list):
                                 for entry in names_arr:
-                                    if isinstance(entry, dict) and entry.get("type") == "NL" and str(entry.get("name", "")).strip():
+                                    if (
+                                        isinstance(entry, dict)
+                                        and entry.get("type") == "NL"
+                                        and str(entry.get("name", "")).strip()
+                                    ):
                                         has_nl = True
                                         break
                             if not has_nl and isinstance(name, str) and name.strip():
-                                ConceptsRepository.update_one({"_id": existing["_id"]}, {"$push": {"names": {"name": name.strip(), "language": "en-NZ", "type": "NL"}}})
+                                ConceptsRepository.update_one(
+                                    {"_id": existing["_id"]},
+                                    {
+                                        "$push": {
+                                            "names": {
+                                                "name": name.strip(),
+                                                "language": "en-NZ",
+                                                "type": "NL",
+                                            }
+                                        }
+                                    },
+                                )
                         except Exception as _e:
-                            logger.warning(f"Failed to backfill names[] during update for item {idx}: {_e}")
+                            logger.warning(
+                                f"Failed to backfill names[] during update for item {idx}: {_e}"
+                            )
                     updated += 1
                 else:
                     # Create new document: store display name in names[] (canonical) instead of legacy top-level name
                     new_doc = {
-                        "names": [{"name": name.strip(), "language": "en-NZ", "type": "NL"}],
+                        "names": [
+                            {"name": name.strip(), "language": "en-NZ", "type": "NL"}
+                        ],
                         "created_at": now,
-                        **{k: v for k, v in set_fields.items() if not k.startswith("concept_data.")},
+                        **{
+                            k: v
+                            for k, v in set_fields.items()
+                            if not k.startswith("concept_data.")
+                        },
                     }
                     # Legacy notes mapping removed (Phase 1)
                     if not dry_run:
@@ -2673,9 +3152,15 @@ def import_concepts(
                     # Simple deterministic suffix to avoid conflict
                     new_name = f"{name} (imported {now.strftime('%Y%m%d%H%M%S')})"
                 new_doc = {
-                    "names": [{"name": new_name.strip(), "language": "en-NZ", "type": "NL"}],
+                    "names": [
+                        {"name": new_name.strip(), "language": "en-NZ", "type": "NL"}
+                    ],
                     "created_at": now,
-                    **{k: v for k, v in set_fields.items() if not k.startswith("concept_data.")},
+                    **{
+                        k: v
+                        for k, v in set_fields.items()
+                        if not k.startswith("concept_data.")
+                    },
                 }
                 # Legacy notes mapping removed (Phase 1)
                 if not dry_run:
@@ -2687,9 +3172,15 @@ def import_concepts(
                     skipped += 1
                 else:
                     new_doc = {
-                        "names": [{"name": name.strip(), "language": "en-NZ", "type": "NL"}],
+                        "names": [
+                            {"name": name.strip(), "language": "en-NZ", "type": "NL"}
+                        ],
                         "created_at": now,
-                        **{k: v for k, v in set_fields.items() if not k.startswith("concept_data.")},
+                        **{
+                            k: v
+                            for k, v in set_fields.items()
+                            if not k.startswith("concept_data.")
+                        },
                     }
                     # Legacy notes mapping removed (Phase 1)
                     if not dry_run:
@@ -2702,7 +3193,9 @@ def import_concepts(
             skipped += 1
 
     total = created + updated + skipped
-    logger.info(f"Import concepts completed: total={total}, created={created}, updated={updated}, skipped={skipped}, errors={len(errors)}")
+    logger.info(
+        f"Import concepts completed: total={total}, created={created}, updated={updated}, skipped={skipped}, errors={len(errors)}"
+    )
     result_payload = {
         "success": True,
         "imported": total,
@@ -2715,6 +3208,7 @@ def import_concepts(
     # Attach legacy usage summary if available (added earlier in loop via normalization accumulation)
     try:  # best-effort, summary only present if items processed
         from .concept_normalization import summarize_legacy_usage  # inline import safe
+
         # Reconstruct summary from processed items only if not huge (cap for safety)
         # NOTE: For accuracy we'd have accumulated; if accumulation added later replace this re-scan.
         # Lightweight: just reuse original items slice (may include normalized fields)
@@ -2726,7 +3220,7 @@ def import_concepts(
             try:
                 db = get_db()
                 if db is not None:
-                    coll = db.get_collection('system_metrics')
+                    coll = db.get_collection("system_metrics")
                     now_iso = datetime.now(timezone.utc).isoformat()
                     inc_ops = {}
                     for field, count in summary["counts"].items():
@@ -2735,16 +3229,27 @@ def import_concepts(
                     if inc_ops:
                         coll.update_one(
                             {"_id": "legacy_import_counters"},
-                            {"$inc": inc_ops, "$set": {"updated_at": now_iso, "last_batch_total": summary["total"]}},
+                            {
+                                "$inc": inc_ops,
+                                "$set": {
+                                    "updated_at": now_iso,
+                                    "last_batch_total": summary["total"],
+                                },
+                            },
                             upsert=True,
                         )
             except Exception as persist_err:  # pragma: no cover
-                logger.warning(f"Failed persisting legacy import counters: {persist_err}")
+                logger.warning(
+                    f"Failed persisting legacy import counters: {persist_err}"
+                )
     except Exception as summary_err:  # pragma: no cover
         logger.debug(f"No legacy summary available: {summary_err}")
     return result_payload
 
-def generate_initial_question(concept_id: str, initial_notes: Optional[str] = None) -> dict:
+
+def generate_initial_question(
+    concept_id: str, initial_notes: Optional[str] = None
+) -> dict:
     """
     Ask the LLM for the *first* question to pose about an concept.
 
@@ -2762,12 +3267,16 @@ def generate_initial_question(concept_id: str, initial_notes: Optional[str] = No
     # ------------------------------------------------------------------ 1. concept
     # Support both Mongo _id and Vontology concept identifiers (e.g., '#V#person')
     try:
-        if isinstance(concept_id, str) and concept_id.startswith('#V#'):
+        if isinstance(concept_id, str) and concept_id.startswith("#V#"):
             concept = get_concept_by_concept_id(concept_id)
         else:
             concept = get_concept_by_id(concept_id)
     except ConceptNotFoundError as e:
-        logger.error("concept not found for generating initial question (ID: %s): %s", concept_id, e)
+        logger.error(
+            "concept not found for generating initial question (ID: %s): %s",
+            concept_id,
+            e,
+        )
         return {"error": str(e), "status": "error_concept_not_found"}
     if not concept:
         logger.error("concept not found for concept_id: %s", concept_id)
@@ -2786,21 +3295,28 @@ def generate_initial_question(concept_id: str, initial_notes: Optional[str] = No
             # Use initial notes if no existing notes
             combined_notes = initial_notes
         set_concept_notes(enhanced_concept, combined_notes)
-        logger.info("Combined concept notes with initial_notes for concept_id: %s", concept_id)
+        logger.info(
+            "Combined concept notes with initial_notes for concept_id: %s", concept_id
+        )
 
     # ------------------------------------------------------------------ 2. prompt
     try:
         db_for_templates = get_db()
         if db_for_templates is None:
-            raise ConceptServiceError("Database connection not available for prompt generation")
+            raise ConceptServiceError(
+                "Database connection not available for prompt generation"
+            )
         final_prompt = generate_concept_question(
-            concept       = enhanced_concept,  # Use enhanced concept with combined notes
-            db           = db_for_templates,   # for template lookup / persistence
-            is_initial   = True
+            concept=enhanced_concept,  # Use enhanced concept with combined notes
+            db=db_for_templates,  # for template lookup / persistence
+            is_initial=True,
         )
     except Exception as e:
         logger.error("Failed to build prompt: %s", e, exc_info=True)
-        return {"error": "Prompt construction failure", "status": "error_prompt_generation"}
+        return {
+            "error": "Prompt construction failure",
+            "status": "error_prompt_generation",
+        }
 
     # ------------------------------------------------------------------ 3. call LLM
     try:
@@ -2820,13 +3336,15 @@ def generate_initial_question(concept_id: str, initial_notes: Optional[str] = No
         initial_question = f"What would you like to tell me about {concept.get('name', 'this concept')}?"
 
     from ..vontology.utils_vontology import get_concept_display_name_with_names_fallback
+
     return {
         "question": initial_question,
-        "status":   "success",
+        "status": "success",
         "concept": {
-            "_id":       str(concept.get("_id", concept_id)),
-            "name":      get_concept_display_name_with_names_fallback(concept),
-            "notes":     get_concept_notes(enhanced_concept) or "",  # Use enhanced concept with combined notes
-            "concept_id": concept.get("concept_id")
-        }
+            "_id": str(concept.get("_id", concept_id)),
+            "name": get_concept_display_name_with_names_fallback(concept),
+            "notes": get_concept_notes(enhanced_concept)
+            or "",  # Use enhanced concept with combined notes
+            "concept_id": concept.get("concept_id"),
+        },
     }

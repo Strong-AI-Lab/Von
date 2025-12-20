@@ -23,10 +23,10 @@ from collections import defaultdict
 logger = logging.getLogger(__name__)
 
 # --- Salient predicate scope constants ---
-SALIENT_SCOPE_FIELD = 'salient_predicate_scopes'
-SALIENT_SCOPE_INSTANCE_KEY = 'instance_level'
-SALIENT_SCOPE_TYPE_KEY = 'type_level'
-SALIENT_SCOPE_UNCLASSIFIED_KEY = 'unclassified'
+SALIENT_SCOPE_FIELD = "salient_predicate_scopes"
+SALIENT_SCOPE_INSTANCE_KEY = "instance_level"
+SALIENT_SCOPE_TYPE_KEY = "type_level"
+SALIENT_SCOPE_UNCLASSIFIED_KEY = "unclassified"
 
 
 def _ordered_unique_identifiers(values: Iterable[Any] | Any) -> List[str]:
@@ -59,9 +59,9 @@ def normalise_salient_scope_map(scopes: Any) -> Dict[str, List[str]]:
                 return _ordered_unique_identifiers(scopes.get(key))
         return []
 
-    instance_vals = _fetch(SALIENT_SCOPE_INSTANCE_KEY, 'instance', 'instances')
-    type_vals = _fetch(SALIENT_SCOPE_TYPE_KEY, 'type', 'types')
-    unclassified_vals = _fetch(SALIENT_SCOPE_UNCLASSIFIED_KEY, 'unclassified', 'other')
+    instance_vals = _fetch(SALIENT_SCOPE_INSTANCE_KEY, "instance", "instances")
+    type_vals = _fetch(SALIENT_SCOPE_TYPE_KEY, "type", "types")
+    unclassified_vals = _fetch(SALIENT_SCOPE_UNCLASSIFIED_KEY, "unclassified", "other")
 
     return {
         SALIENT_SCOPE_INSTANCE_KEY: instance_vals,
@@ -97,12 +97,17 @@ def validate_concept_name_for_id(name: str) -> Tuple[bool, Optional[str]]:
         return False, "Concept name must be a non-empty string"
 
     if '"' in name or "'" in name:
-        return False, "Concept names cannot contain quotes (\" or '). These are reserved for text boundaries."
+        return (
+            False,
+            "Concept names cannot contain quotes (\" or '). These are reserved for text boundaries.",
+        )
 
     return True, None
 
 
-def extract_salient_scope_lists(document: Dict[str, Any] | None) -> Dict[str, List[str]]:
+def extract_salient_scope_lists(
+    document: Dict[str, Any] | None,
+) -> Dict[str, List[str]]:
     """Extract instance/type salient predicate identifiers with legacy fallbacks."""
     if not isinstance(document, dict):
         document = {}
@@ -114,40 +119,45 @@ def extract_salient_scope_lists(document: Dict[str, Any] | None) -> Dict[str, Li
         type_values = normalised.get(SALIENT_SCOPE_TYPE_KEY, [])
         unclassified_values = normalised.get(SALIENT_SCOPE_UNCLASSIFIED_KEY, [])
         return {
-            'instance': instance_values,
-            'type': type_values,
-            'unclassified': unclassified_values,
+            "instance": instance_values,
+            "type": type_values,
+            "unclassified": unclassified_values,
         }
 
     # Legacy fallbacks
-    direct_field = document.get('salient_binary_predicates_for_type')
+    direct_field = document.get("salient_binary_predicates_for_type")
     if isinstance(direct_field, dict):
-        direct_field = direct_field.get('salient_binary_predicates_for_type')
+        direct_field = direct_field.get("salient_binary_predicates_for_type")
     direct_values = _ordered_unique_identifiers(direct_field)
 
-    relationships = document.get('relationships') or {}
+    relationships = document.get("relationships") or {}
     if isinstance(relationships, dict):
-        rel_values = _ordered_unique_identifiers(relationships.get('#V#salient_binary_predicate_for_type'))
+        rel_values = _ordered_unique_identifiers(
+            relationships.get("#V#salient_binary_predicate_for_type")
+        )
         for value in rel_values:
             if value not in direct_values:
                 direct_values.append(value)
 
     return {
-        'instance': direct_values,
-        'type': [],
-        'unclassified': [],
+        "instance": direct_values,
+        "type": [],
+        "unclassified": [],
     }
+
 
 # --- Third-Party Imports ---
 import requests
 import bson.json_util as json_util
 from pymongo.collection import Collection
-from pymongo.errors import PyMongoError, OperationFailure # Added OperationFailure
+from pymongo.errors import PyMongoError, OperationFailure  # Added OperationFailure
 from bson.objectid import ObjectId
 from bson import errors as bson_errors  # ObjectId import corrected
-from bson.errors import InvalidId # Ensure InvalidId is imported
+from bson.errors import InvalidId  # Ensure InvalidId is imported
+
 # --- Optional markdown import (avoid hard dependency / lint error) ---
 import importlib
+
 _markdown_mod = None
 try:  # Attempt dynamic discovery first to suppress static unresolved-import warnings
     if importlib.util.find_spec("markdown") is not None:  # type: ignore[attr-defined]
@@ -158,21 +168,30 @@ except Exception:  # pragma: no cover - defensive
 if _markdown_mod is not None:
     markdown = _markdown_mod  # type: ignore
 else:
+
     class _MarkdownFallback:  # noqa: D401 - simple passthrough fallback
         """Fallback object providing markdown(markdown_text)->html passthrough."""
+
         @staticmethod
         def markdown(text: str):  # noqa: D401
             return text
+
     markdown = _MarkdownFallback()  # type: ignore
 
 # --- MongoDB Client Import ---
 try:
-    from ..db.mongo_client import get_db, get_concepts_collection, CONCEPTS_COLLECTION_NAME
+    from ..db.mongo_client import (
+        get_db,
+        get_concepts_collection,
+        CONCEPTS_COLLECTION_NAME,
+    )
 except ImportError:
     # Fallback for direct script usage or testing
     from ..db.mongo_client import get_db
 
-from ..db.repositories.concepts_repository import ConceptsRepository  # Added repository import
+from ..db.repositories.concepts_repository import (
+    ConceptsRepository,
+)  # Added repository import
 
 # --- Cached preferred language to avoid repeated DB calls ---
 _cached_preferred_language = None
@@ -185,14 +204,16 @@ _DEPRECATED_CALL_COUNTER = {
     "update_vontology_node_notes": 0,  # reserved for future parity
 }
 
+
 def _persist_deprecation_metric(key: str):
     """Increment a persistent counter in system_metrics collection.
-    Document schema: { _id: 'deprecation_counters', counters: { key: int, ... }, updated_at: ISO8601 }"""
+    Document schema: { _id: 'deprecation_counters', counters: { key: int, ... }, updated_at: ISO8601 }
+    """
     try:
         db = get_db()
         if db is None:
             return
-        coll = db.get_collection('system_metrics')
+        coll = db.get_collection("system_metrics")
         now = utc_iso_now()
         coll.update_one(
             {"_id": "deprecation_counters"},
@@ -201,6 +222,7 @@ def _persist_deprecation_metric(key: str):
         )
     except Exception:  # pragma: no cover
         pass
+
 
 # --- Performance Metrics ---
 def record_tree_build_performance(build_seconds: float):
@@ -224,7 +246,7 @@ def record_tree_build_performance(build_seconds: float):
         db = get_db()
         if db is None:
             return
-        coll = db.get_collection('system_metrics')
+        coll = db.get_collection("system_metrics")
         now_iso = utc_iso_now()
         coll.update_one(
             {"_id": "performance_counters"},
@@ -245,6 +267,7 @@ def record_tree_build_performance(build_seconds: float):
     except Exception:
         pass
 
+
 def record_name_normalization(kind: str = "generic"):
     """Persist a counter for UI name normalization events.
 
@@ -257,7 +280,7 @@ def record_name_normalization(kind: str = "generic"):
         db = get_db()
         if db is None:
             return
-        coll = db.get_collection('system_metrics')
+        coll = db.get_collection("system_metrics")
         now_iso = utc_iso_now()
         coll.update_one(
             {"_id": "ui_counters"},
@@ -273,7 +296,10 @@ def record_name_normalization(kind: str = "generic"):
     except Exception:
         pass
 
-def record_frontend_tree_load(load_ms: int, node_count: int | None = None, cache_hit: bool | None = None):
+
+def record_frontend_tree_load(
+    load_ms: int, node_count: int | None = None, cache_hit: bool | None = None
+):
     """Persist metrics for frontend Vontology tree loading performance.
 
     Document schema (_id: 'frontend_tree_load'):
@@ -290,45 +316,47 @@ def record_frontend_tree_load(load_ms: int, node_count: int | None = None, cache
         db = get_db()
         if db is None:
             return
-        coll = db.get_collection('system_metrics')
+        coll = db.get_collection("system_metrics")
         now_iso = utc_iso_now()
         import os
+
         pid = str(os.getpid())
         load_ms = int(load_ms) if load_ms is not None else 0
         inc_ops = {
-            'totals.count': 1,
-            'totals.total_ms': load_ms,
-            f'per_pid.{pid}.count': 1,
-            f'per_pid.{pid}.total_ms': load_ms,
+            "totals.count": 1,
+            "totals.total_ms": load_ms,
+            f"per_pid.{pid}.count": 1,
+            f"per_pid.{pid}.total_ms": load_ms,
         }
         if cache_hit is not None:
             inc_ops[f'cache.{"hits" if cache_hit else "misses"}'] = 1
         set_ops = {
-            'updated_at': now_iso,
-            'totals.last_ms': load_ms,
-            'totals.last_at': now_iso,
-            f'per_pid.{pid}.last_ms': load_ms,
-            f'per_pid.{pid}.last_at': now_iso,
+            "updated_at": now_iso,
+            "totals.last_ms": load_ms,
+            "totals.last_at": now_iso,
+            f"per_pid.{pid}.last_ms": load_ms,
+            f"per_pid.{pid}.last_at": now_iso,
         }
         if cache_hit is not None:
-            set_ops['cache.last_hit'] = bool(cache_hit)
+            set_ops["cache.last_hit"] = bool(cache_hit)
         if node_count is not None:
-            set_ops['nodes.last_count'] = int(node_count)
+            set_ops["nodes.last_count"] = int(node_count)
         coll.update_one(
-            {'_id': 'frontend_tree_load'},
+            {"_id": "frontend_tree_load"},
             {
-                '$inc': inc_ops,
-                '$set': set_ops,
-                '$max': {
-                    'totals.max_ms': load_ms,
-                    f'per_pid.{pid}.max_ms': load_ms,
-                    'nodes.max_count': int(node_count) if node_count is not None else 0,
-                }
+                "$inc": inc_ops,
+                "$set": set_ops,
+                "$max": {
+                    "totals.max_ms": load_ms,
+                    f"per_pid.{pid}.max_ms": load_ms,
+                    "nodes.max_count": int(node_count) if node_count is not None else 0,
+                },
             },
-            upsert=True
+            upsert=True,
         )
     except Exception:
         pass
+
 
 # --- Vontology Base Directory Definition ---
 # Version tracking for debugging
@@ -344,13 +372,15 @@ try:
     VONTOLOGY_BASE_DIR = _current_dir.parent.parent / "knowledge" / "vontology"
 except NameError:
     # Fallback if __file__ is not defined (e.g., interactive session)
-    logger.warning("Warning: __file__ not defined, attempting relative path for Vontology base.") # Changed print to logger.warning
-    VONTOLOGY_BASE_DIR = Path("./knowledge/vontology").resolve() # Adjust as needed
+    logger.warning(
+        "Warning: __file__ not defined, attempting relative path for Vontology base."
+    )  # Changed print to logger.warning
+    VONTOLOGY_BASE_DIR = Path("./knowledge/vontology").resolve()  # Adjust as needed
 
 VONTOLOGY_NODES_COLLECTION_NAME = "concepts"  # DEPRECATED: Use CONCEPTS_COLLECTION_NAME
 CONCEPTS_COLLECTION_NAME = "concepts"
 # --- Knowkat API URL Definition ---
-KNOWKAT_API_URL = "http://127.0.0.1:11686" # Default from docs
+KNOWKAT_API_URL = "http://127.0.0.1:11686"  # Default from docs
 
 # --- Relationship helpers (shared) ---
 VONTOLOGY_THING_IDS = {
@@ -418,18 +448,24 @@ def _get_cached_preferred_language() -> str:
     current_time = time.time()
 
     # Check if cache is still valid
-    if _cached_preferred_language is not None and (current_time - _cache_timestamp) < _cache_ttl:
+    if (
+        _cached_preferred_language is not None
+        and (current_time - _cache_timestamp) < _cache_ttl
+    ):
         return _cached_preferred_language
 
     # Cache is expired or empty, fetch new value
     try:
-        from ..services.settings_service import get_preferred_language  # Local import to avoid circular dependency
+        from ..services.settings_service import (
+            get_preferred_language,
+        )  # Local import to avoid circular dependency
+
         _cached_preferred_language = get_preferred_language()
         _cache_timestamp = current_time
         return _cached_preferred_language
     except Exception:
         # If fetching fails, return default but don't cache it
-        return 'en-NZ'
+        return "en-NZ"
 
 
 def clear_preferred_language_cache():
@@ -564,13 +600,13 @@ def is_predicate(node: dict) -> bool:
 
     # Known predicate types
     predicate_types = {
-        '#V#predicate',
-        '#V#binary_predicate',
-        '#V#unary_predicate',
-        '#V#n_ary_predicate',
-        '#V#ternary_predicate',
-        '#V#relation',
-        '#V#property'
+        "#V#predicate",
+        "#V#binary_predicate",
+        "#V#unary_predicate",
+        "#V#n_ary_predicate",
+        "#V#ternary_predicate",
+        "#V#relation",
+        "#V#property",
     }
 
     for type_id in types:
@@ -578,11 +614,13 @@ def is_predicate(node: dict) -> bool:
             continue
 
         # Direct match with known predicate types
-        if type_id in predicate_types or any(type_id.startswith(pt) for pt in predicate_types):
+        if type_id in predicate_types or any(
+            type_id.startswith(pt) for pt in predicate_types
+        ):
             return True
 
         # Check if type name contains "predicate" (case-insensitive)
-        if 'predicate' in type_id.lower():
+        if "predicate" in type_id.lower():
             return True
 
     return False
@@ -630,25 +668,33 @@ def compute_most_salient_type_dynamic(concept: dict) -> Optional[str]:
         for parent_type in parent_types:
             try:
                 # Count individuals that are instances of this type
-                usage_count = coll.count_documents({
-                    "relationships.is_an_instance_of": parent_type
-                })
+                usage_count = coll.count_documents(
+                    {"relationships.is_an_instance_of": parent_type}
+                )
                 parent_usage_counts[parent_type] = usage_count
-                logger.debug(f"Parent {parent_type} has {usage_count} individual instances")
+                logger.debug(
+                    f"Parent {parent_type} has {usage_count} individual instances"
+                )
             except Exception as e:
                 logger.warning(f"Error counting usage for parent {parent_type}: {e}")
-                parent_usage_counts[parent_type] = float('inf')  # Penalize errors
+                parent_usage_counts[parent_type] = float("inf")  # Penalize errors
 
         # Select parent with lowest usage count (most specific)
         if parent_usage_counts:
-            most_salient = min(parent_usage_counts.keys(), key=lambda p: parent_usage_counts[p])
-            logger.debug(f"Most salient type for {concept_id}: {most_salient} (usage: {parent_usage_counts[most_salient]})")
+            most_salient = min(
+                parent_usage_counts.keys(), key=lambda p: parent_usage_counts[p]
+            )
+            logger.debug(
+                f"Most salient type for {concept_id}: {most_salient} (usage: {parent_usage_counts[most_salient]})"
+            )
             return most_salient
 
         return parent_types[0]  # Fallback to first parent
 
     except Exception as e:
-        logger.error(f"Error computing most salient type for {concept.get('concept_id', 'unknown')}: {e}")
+        logger.error(
+            f"Error computing most salient type for {concept.get('concept_id', 'unknown')}: {e}"
+        )
         # Fallback to first parent if available
         parent_types = concept.get("relationships", {}).get("is_a_type_of", [])
         if isinstance(parent_types, str):
@@ -678,6 +724,7 @@ def get_most_salient_type(concept: dict, use_cache: bool = True) -> Optional[str
     # Compute dynamically
     return compute_most_salient_type_dynamic(concept)
 
+
 def to_pascal_case(text_str: str) -> str:
     """
     Converts a string to PascalCase.
@@ -697,26 +744,26 @@ def to_pascal_case(text_str: str) -> str:
     # Pre-processing: Remove problematic characters like {} and @
     # Replace them with nothing, as they are not separators.
     # Hyphens and underscores will be treated as separators later.
-    interim_text = text_str.replace('{', '').replace('}', '').replace('@', '')
+    interim_text = text_str.replace("{", "").replace("}", "").replace("@", "")
 
     # Insert a space before uppercase letters that follow a lowercase letter or digit,
     # or before an uppercase letter that is followed by a lowercase letter (to split acronyms from words like "LLMPrompt").
-    s1 = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', interim_text)
-    s2 = re.sub(r'([A-Z])([A-Z][a-z])', r'\1 \2', s1)
+    s1 = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", interim_text)
+    s2 = re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", s1)
     # Replace underscores and hyphens with spaces
-    s3 = s2.replace('_', ' ').replace('-', ' ')
+    s3 = s2.replace("_", " ").replace("-", " ")
 
-    words = s3.split(' ')
+    words = s3.split(" ")
     pascal_words = []
     for word in words:
         if not word:
             continue
-        if word.isupper(): # Preserve acronyms
+        if word.isupper():  # Preserve acronyms
             pascal_words.append(word)
         else:
             # Ensure word is not empty before accessing word[0] or word[1:]
-            if word: # Check if word is not empty
-                 pascal_words.append(word[0].upper() + word[1:].lower())
+            if word:  # Check if word is not empty
+                pascal_words.append(word[0].upper() + word[1:].lower())
 
     return "".join(pascal_words)
 
@@ -730,27 +777,38 @@ def generate_concept_id_from_name(pascal_case_name_str: str) -> str | None:
           "LLM" -> "#V#llm"
     """
     if not pascal_case_name_str:
-        logger.error("generate_concept_id_from_name called with empty input! Returning None.")
+        logger.error(
+            "generate_concept_id_from_name called with empty input! Returning None."
+        )
         return None
 
     # Convert PascalCase to snake_case.
     # Insert underscore before uppercase letters, except at the start.
     # Handles sequences of uppercase letters (acronyms) correctly.
-    s1 = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', pascal_case_name_str) # Corrected: r'\\1_\\2' -> r'\1_\2'
-    s2 = re.sub(r'([a-z\d])([A-Z])', r'\1_\2', s1).lower() # Corrected regex string
+    s1 = re.sub(
+        r"([A-Z]+)([A-Z][a-z])", r"\1_\2", pascal_case_name_str
+    )  # Corrected: r'\\1_\\2' -> r'\1_\2'
+    s2 = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", s1).lower()  # Corrected regex string
 
     # Normalize: remove any characters that are not lowercase letters, numbers, or underscore
-    normalized_name = re.sub(r'[^a-z0-9_]+', '', s2).strip('_')
+    normalized_name = re.sub(r"[^a-z0-9_]+", "", s2).strip("_")
 
-    if not normalized_name: # Handle cases where name becomes empty after normalization
-        fallback_name = re.sub(r'[^a-zA-Z0-9]+', '_', pascal_case_name_str.lower()).strip('_')
+    if not normalized_name:  # Handle cases where name becomes empty after normalization
+        fallback_name = re.sub(
+            r"[^a-zA-Z0-9]+", "_", pascal_case_name_str.lower()
+        ).strip("_")
         if not fallback_name:
-            logger.error(f"generate_concept_id_from_name: Could not generate fallback for '{pascal_case_name_str}'. Returning hash-based ID.")
-            return f"#V#{hashlib.md5(pascal_case_name_str.encode()).hexdigest()[:8]}" # very basic fallback
-        logger.warning(f"generate_concept_id_from_name: Used fallback for '{pascal_case_name_str}' -> '{fallback_name}'")
+            logger.error(
+                f"generate_concept_id_from_name: Could not generate fallback for '{pascal_case_name_str}'. Returning hash-based ID."
+            )
+            return f"#V#{hashlib.md5(pascal_case_name_str.encode()).hexdigest()[:8]}"  # very basic fallback
+        logger.warning(
+            f"generate_concept_id_from_name: Used fallback for '{pascal_case_name_str}' -> '{fallback_name}'"
+        )
         return f"#V#{fallback_name}"
 
     return f"#V#{normalized_name}"
+
 
 def canonicalize_label(label):
     """
@@ -758,12 +816,13 @@ def canonicalize_label(label):
     E.g., 'computer scientist' -> 'ComputerScientist', 'worker (skilled)' -> 'WorkerSkilled'
     """
     # Remove anything that's not a word character or space
-    label = re.sub(r'[^\\w\\s]', '', label) # Corrected regex string
+    label = re.sub(r"[^\\w\\s]", "", label)  # Corrected regex string
     # Split on whitespace, capitalize each part, join
     parts = label.split()
-    return ''.join(word.capitalize() for word in parts)
+    return "".join(word.capitalize() for word in parts)
 
-def parse_md_content(md_content, ignore_line_prefix='|'): # Added ignore_line_prefix
+
+def parse_md_content(md_content, ignore_line_prefix="|"):  # Added ignore_line_prefix
     """
     Parses markdown content to extract Vontology details.
     Lines starting with `ignore_line_prefix` will be skipped.
@@ -771,49 +830,71 @@ def parse_md_content(md_content, ignore_line_prefix='|'): # Added ignore_line_pr
     """
     details = {
         "name": "",
-        "concept_id": None, # Explicit concept_id from _Type.md
+        "concept_id": None,  # Explicit concept_id from _Type.md
         "source_concept": "",
-        "subconcept_of_names": [], # List of parent names or IDs
-        "description": ""
+        "subconcept_of_names": [],  # List of parent names or IDs
+        "description": "",
     }
     lines = md_content.splitlines()
     for i, line in enumerate(lines):
-        if ignore_line_prefix and line.startswith(ignore_line_prefix): # Added check for prefix
-            continue # Skip this line
+        if ignore_line_prefix and line.startswith(
+            ignore_line_prefix
+        ):  # Added check for prefix
+            continue  # Skip this line
 
         line_lower = line.lower()
-        if line.startswith("# "): # Main name of the concept
+        if line.startswith("# "):  # Main name of the concept
             details["name"] = line[2:].strip()
-        elif line_lower.startswith("**conceptid**:"): # Corrected: ensure lowercase 'conceptid'
+        elif line_lower.startswith(
+            "**conceptid**:"
+        ):  # Corrected: ensure lowercase 'conceptid'
             raw_id = line.split(":", 1)[1].strip()
             if raw_id and raw_id.lower() != "none":
                 details["concept_id"] = raw_id
             else:
-                logger.debug(f"Explicit 'None' or empty concept_id found for potential name: {details.get('name', 'Unknown (name not yet parsed)')}")
-                details["concept_id"] = None # Ensure it's None if explicitly "None"
+                logger.debug(
+                    f"Explicit 'None' or empty concept_id found for potential name: {details.get('name', 'Unknown (name not yet parsed)')}"
+                )
+                details["concept_id"] = None  # Ensure it's None if explicitly "None"
         elif line_lower.startswith("**source concept**:"):
             details["source_concept"] = line.split(":", 1)[1].strip()
         elif line_lower.startswith("**subconcept of**:"):
             parent_refs_str = line.split(":", 1)[1].strip()
-            if parent_refs_str and parent_refs_str.lower() not in ["none (root)", "none", ""]:
-                details["subconcept_of_names"] = [name.strip() for name in parent_refs_str.split(',') if name.strip()]
+            if parent_refs_str and parent_refs_str.lower() not in [
+                "none (root)",
+                "none",
+                "",
+            ]:
+                details["subconcept_of_names"] = [
+                    name.strip() for name in parent_refs_str.split(",") if name.strip()
+                ]
             else:
-                details["subconcept_of_names"] = [] # Explicitly no parents or root
+                details["subconcept_of_names"] = []  # Explicitly no parents or root
         elif line_lower.startswith("**description**:"):
             desc_lines = [line.split(":", 1)[1].strip()]
             for j in range(i + 1, len(lines)):
                 # Stop if another known field is encountered
-                if lines[j].lower().startswith(("**conceptid**:", "**source concept**:", "**subconcept of**:")):
+                if (
+                    lines[j]
+                    .lower()
+                    .startswith(
+                        ("**conceptid**:", "**source concept**:", "**subconcept of**:")
+                    )
+                ):
                     break
                 desc_lines.append(lines[j].strip())
             details["description"] = "\\n".join(desc_lines).strip()
-            break # Description is typically the last major field
+            break  # Description is typically the last major field
 
     # Log a warning if an explicit concept_id was not found and name is present
     if not details["concept_id"] and details["name"]:
-        logger.warning(f"No explicit 'ConceptID:' found in markdown for concept named '{details['name']}'. An ID will be generated if possible during scan_filesystem_to_mongodb.")
+        logger.warning(
+            f"No explicit 'ConceptID:' found in markdown for concept named '{details['name']}'. An ID will be generated if possible during scan_filesystem_to_mongodb."
+        )
     elif not details["name"] and details["concept_id"]:
-        logger.warning(f"Explicit 'ConceptID: {details['concept_id']}' found, but no H1 title ('# Name') found in markdown.")
+        logger.warning(
+            f"Explicit 'ConceptID: {details['concept_id']}' found, but no H1 title ('# Name') found in markdown."
+        )
 
     # If name is not set from H1, and concept_id is available and looks like a #V# id, try to infer name from it.
     # This is a fallback, ideally name is always present in H1.
@@ -822,7 +903,9 @@ def parse_md_content(md_content, ignore_line_prefix='|'): # Added ignore_line_pr
         inferred_name_from_id = concept_id[3:]  # Strip #V#
         # Attempt to make it more readable: replace underscores with spaces, capitalize words
         # This inferred name will be PascalCased later in scan_filesystem_to_mongodb if used.
-        details["name"] = ' '.join(word.capitalize() for word in inferred_name_from_id.split('_'))
+        details["name"] = " ".join(
+            word.capitalize() for word in inferred_name_from_id.split("_")
+        )
 
     return details
 
@@ -849,71 +932,137 @@ def get_concept_details_from_db(concept_name_or_id=None, collection_name="concep
         }
         # Ensure 'path' is included in the projection
         if repo is not None:
-            doc = repo.find_one(query, {"name": 1, "names": 1, "concept_id": 1, "relationships.is_a_type_of": 1, "path": 1})
+            doc = repo.find_one(
+                query,
+                {
+                    "name": 1,
+                    "names": 1,
+                    "concept_id": 1,
+                    "relationships.is_a_type_of": 1,
+                    "path": 1,
+                },
+            )
         else:
             db = get_db()
             if db is None:
-                logger.error("Database not available for collection '%s'", collection_name)
+                logger.error(
+                    "Database not available for collection '%s'", collection_name
+                )
                 return []
             coll = db[collection_name]
-            doc = coll.find_one(query, {"name": 1, "names": 1, "concept_id": 1, "relationships.is_a_type_of": 1, "path": 1})
+            doc = coll.find_one(
+                query,
+                {
+                    "name": 1,
+                    "names": 1,
+                    "concept_id": 1,
+                    "relationships.is_a_type_of": 1,
+                    "path": 1,
+                },
+            )
         if doc:
             raw_subconcept_of = doc.get("relationships", {}).get("is_a_type_of")
             processed_parent_ids = None
 
             if isinstance(raw_subconcept_of, list):
-                valid_parents = [p_id for p_id in raw_subconcept_of if isinstance(p_id, str) and p_id.strip() and p_id.strip().lower() not in ["none (root)", "none"]]
+                valid_parents = [
+                    p_id
+                    for p_id in raw_subconcept_of
+                    if isinstance(p_id, str)
+                    and p_id.strip()
+                    and p_id.strip().lower() not in ["none (root)", "none"]
+                ]
                 if valid_parents:
                     processed_parent_ids = valid_parents
             elif isinstance(raw_subconcept_of, str):
-                if raw_subconcept_of.strip() and raw_subconcept_of.strip().lower() not in ["", "none (root)", "none"]:
+                if (
+                    raw_subconcept_of.strip()
+                    and raw_subconcept_of.strip().lower()
+                    not in ["", "none (root)", "none"]
+                ):
                     processed_parent_ids = [raw_subconcept_of.strip()]
 
             resolved_name = get_concept_display_name_with_names_fallback(doc)
-            return [{
-                "name": resolved_name,
-                "id": doc.get("concept_id"), # Primary identifier
-                "parent_ids": processed_parent_ids,  # List of parent concept_ids or None
-                "path": doc.get("path") # Include the path
-            }]
+            return [
+                {
+                    "name": resolved_name,
+                    "id": doc.get("concept_id"),  # Primary identifier
+                    "parent_ids": processed_parent_ids,  # List of parent concept_ids or None
+                    "path": doc.get("path"),  # Include the path
+                }
+            ]
         return []
 
     # Fetch all concepts if no specific one is requested
     # Ensure 'path' is included in the projection
     if repo is not None:
-        all_docs_cursor = repo.find({}, {"name": 1, "names": 1, "concept_id": 1, "relationships.is_a_type_of": 1, "path": 1, "_id": 1})
+        all_docs_cursor = repo.find(
+            {},
+            {
+                "name": 1,
+                "names": 1,
+                "concept_id": 1,
+                "relationships.is_a_type_of": 1,
+                "path": 1,
+                "_id": 1,
+            },
+        )
     else:
         db = get_db()
         if db is None:
             logger.error("Database not available for collection '%s'", collection_name)
             return []
         coll = db[collection_name]
-        all_docs_cursor = coll.find({}, {"name": 1, "names": 1, "concept_id": 1, "relationships.is_a_type_of": 1, "path": 1, "_id": 1})
+        all_docs_cursor = coll.find(
+            {},
+            {
+                "name": 1,
+                "names": 1,
+                "concept_id": 1,
+                "relationships.is_a_type_of": 1,
+                "path": 1,
+                "_id": 1,
+            },
+        )
     concepts_list = []
     for doc in all_docs_cursor:
         concept_id = doc.get("concept_id")
-        if not concept_id: # Skip documents that are missing a concept_id
-            logger.warning(f"[get_concept_details_from_db] Warning: Document with _id {doc.get('_id')} is missing 'concept_id'. Skipping.")
+        if not concept_id:  # Skip documents that are missing a concept_id
+            logger.warning(
+                f"[get_concept_details_from_db] Warning: Document with _id {doc.get('_id')} is missing 'concept_id'. Skipping."
+            )
             continue
 
         raw_subconcept_of = doc.get("relationships", {}).get("is_a_type_of")
         processed_parent_ids = None
 
         if isinstance(raw_subconcept_of, list):
-            valid_parents = [p_id for p_id in raw_subconcept_of if isinstance(p_id, str) and p_id.strip() and p_id.strip().lower() not in ["none (root)", "none"]]
+            valid_parents = [
+                p_id
+                for p_id in raw_subconcept_of
+                if isinstance(p_id, str)
+                and p_id.strip()
+                and p_id.strip().lower() not in ["none (root)", "none"]
+            ]
             if valid_parents:
                 processed_parent_ids = valid_parents
         elif isinstance(raw_subconcept_of, str):
-            if raw_subconcept_of.strip() and raw_subconcept_of.strip().lower() not in ["", "none (root)", "none"]:
+            if raw_subconcept_of.strip() and raw_subconcept_of.strip().lower() not in [
+                "",
+                "none (root)",
+                "none",
+            ]:
                 processed_parent_ids = [raw_subconcept_of.strip()]
 
-        concepts_list.append({
-            "name": get_concept_display_name_with_names_fallback(doc),
-            "id": concept_id,
-            "parent_ids": processed_parent_ids, # List of parent concept_ids or None
-            "path": doc.get("path"), # Include the path
-            "mongo_id": str(doc.get("_id")) # Add the MongoDB _id as a string
-        })
+        concepts_list.append(
+            {
+                "name": get_concept_display_name_with_names_fallback(doc),
+                "id": concept_id,
+                "parent_ids": processed_parent_ids,  # List of parent concept_ids or None
+                "path": doc.get("path"),  # Include the path
+                "mongo_id": str(doc.get("_id")),  # Add the MongoDB _id as a string
+            }
+        )
     return concepts_list
 
 
@@ -936,24 +1085,41 @@ def update_vontology_node_description(identifier: str, description: str) -> dict
         resolved_concept_id = None
         if ObjectId.is_valid(identifier):
             try:
-                doc = ConceptsRepository.find_one({"_id": ObjectId(identifier)}, {"concept_id": 1})
+                doc = ConceptsRepository.find_one(
+                    {"_id": ObjectId(identifier)}, {"concept_id": 1}
+                )
                 if doc and doc.get("concept_id"):
                     resolved_concept_id = doc["concept_id"]
                 else:
-                    return {"success": False, "error": f"Node with identifier '{identifier}' not found."}
+                    return {
+                        "success": False,
+                        "error": f"Node with identifier '{identifier}' not found.",
+                    }
             except Exception as e:  # pragma: no cover
-                logger.error(f"Failed resolving ObjectId '{identifier}' to concept_id: {e}")
-                return {"success": False, "error": "Failed resolving identifier to concept_id."}
+                logger.error(
+                    f"Failed resolving ObjectId '{identifier}' to concept_id: {e}"
+                )
+                return {
+                    "success": False,
+                    "error": "Failed resolving identifier to concept_id.",
+                }
         elif identifier.startswith("#V#"):
             resolved_concept_id = identifier
         else:
-            return {"success": False, "error": "Invalid identifier format (expected ObjectId or #V# concept_id)."}
+            return {
+                "success": False,
+                "error": "Invalid identifier format (expected ObjectId or #V# concept_id).",
+            }
 
         # Lazy import to avoid circular dependencies
         try:
-            from ..services.concept_service import update_concept_description as _update_concept_description
+            from ..services.concept_service import (
+                update_concept_description as _update_concept_description,
+            )
         except Exception as e:  # pragma: no cover
-            logger.error(f"Unable to import concept_service.update_concept_description: {e}")
+            logger.error(
+                f"Unable to import concept_service.update_concept_description: {e}"
+            )
             return {"success": False, "error": "Internal import error."}
 
         try:
@@ -969,17 +1135,28 @@ def update_vontology_node_description(identifier: str, description: str) -> dict
 
         ok = _update_concept_description(resolved_concept_id, description)
         if not ok:
-            return {"success": False, "error": f"Failed to update description for '{resolved_concept_id}'."}
+            return {
+                "success": False,
+                "error": f"Failed to update description for '{resolved_concept_id}'.",
+            }
         return {"success": True, "concept_id": resolved_concept_id}
     except PyMongoError as e:
-        logger.error(f"MongoDB error while updating description for node '{identifier}': {e}")
+        logger.error(
+            f"MongoDB error while updating description for node '{identifier}': {e}"
+        )
         return {"success": False, "error": f"MongoDB error: {e}"}
     except Exception as e:  # pragma: no cover
-        logger.error(f"Unexpected error while updating description for node '{identifier}': {e}")
+        logger.error(
+            f"Unexpected error while updating description for node '{identifier}': {e}"
+        )
         return {"success": False, "error": f"Unexpected error: {e}"}
 
 
-def update_vontology_node_in_db(concept_id: str, update_data: dict, collection_name: str = VONTOLOGY_NODES_COLLECTION_NAME) -> bool:
+def update_vontology_node_in_db(
+    concept_id: str,
+    update_data: dict,
+    collection_name: str = VONTOLOGY_NODES_COLLECTION_NAME,
+) -> bool:
     """
     Updates a Vontology node in MongoDB based on its concept_id.
 
@@ -993,13 +1170,18 @@ def update_vontology_node_in_db(concept_id: str, update_data: dict, collection_n
         True if the update was successful (at least one document was modified), False otherwise.
     """
     if not concept_id or not update_data:
-        logger.error("update_vontology_node_in_db: concept_id and update_data must be provided.")
+        logger.error(
+            "update_vontology_node_in_db: concept_id and update_data must be provided."
+        )
         return False
 
     try:
         db = get_db()
         if db is None:
-            logger.error("update_vontology_node_in_db: Database not available for collection '%s'", collection_name)
+            logger.error(
+                "update_vontology_node_in_db: Database not available for collection '%s'",
+                collection_name,
+            )
             return False
         collection = db[collection_name]
 
@@ -1011,26 +1193,36 @@ def update_vontology_node_in_db(concept_id: str, update_data: dict, collection_n
         result = collection.update_one({"concept_id": concept_id}, update_payload)
 
         if result.matched_count == 0:
-            logger.warning(f"update_vontology_node_in_db: No Vontology node found with concept_id '{concept_id}'. No update performed.")
+            logger.warning(
+                f"update_vontology_node_in_db: No Vontology node found with concept_id '{concept_id}'. No update performed."
+            )
             return False
 
         if result.modified_count == 0 and result.matched_count > 0:
-            logger.info(f"update_vontology_node_in_db: Vontology node '{concept_id}' found, but the provided data did not change any existing values.")
+            logger.info(
+                f"update_vontology_node_in_db: Vontology node '{concept_id}' found, but the provided data did not change any existing values."
+            )
             # Still considered a success in terms of finding and processing, though no data changed.
             # Depending on strictness, this could return False if a change was expected.
             # For now, if it matched, we'll say it's fine.
 
-        logger.info(f"Successfully updated Vontology node '{concept_id}'. Matched: {result.matched_count}, Modified: {result.modified_count}")
+        logger.info(
+            f"Successfully updated Vontology node '{concept_id}'. Matched: {result.matched_count}, Modified: {result.modified_count}"
+        )
         return True
 
     except PyMongoError as e:
         logger.error(f"MongoDB error while updating Vontology node '{concept_id}': {e}")
         return False
     except Exception as e:
-        logger.error(f"Unexpected error while updating Vontology node '{concept_id}': {e}")
+        logger.error(
+            f"Unexpected error while updating Vontology node '{concept_id}': {e}"
+        )
         return False
 
+
 # --- Filesystem Scanning and MongoDB Synchronization ---
+
 
 def get_all_vontology_nodes_with_details(identifier: str = "Thing"):
     """
@@ -1074,9 +1266,9 @@ def get_all_vontology_nodes_with_details(identifier: str = "Thing"):
                         "connectFromField": "concept_id",
                         "connectToField": "is_a_type_of",
                         "as": "descendants",
-                        "depthField": "depth"
+                        "depthField": "depth",
                     }
-                }
+                },
             ]
             result = list(ConceptsRepository.aggregate(pipeline))
             if result:
@@ -1104,11 +1296,15 @@ def get_all_vontology_nodes_with_details(identifier: str = "Thing"):
         return []
 
     except PyMongoError as e:
-        logger.error(f"MongoDB error during $graphLookup for identifier '{identifier}': {e}")
+        logger.error(
+            f"MongoDB error during $graphLookup for identifier '{identifier}': {e}"
+        )
         return {"error": f"Database error while fetching subtree for '{identifier}'."}
     except Exception as e:
         logger.error(f"Unexpected error during subtree fetch for '{identifier}': {e}")
-        return {"error": f"An unexpected error occurred while fetching subtree for '{identifier}'."}
+        return {
+            "error": f"An unexpected error occurred while fetching subtree for '{identifier}'."
+        }
 
 
 def get_vontology_node_content(identifier: str) -> dict:
@@ -1137,8 +1333,10 @@ def get_vontology_node_content(identifier: str) -> dict:
                 f"Called from {caller.filename}:{caller.lineno} in {caller.function}"
             )
     except bson_errors.InvalidId:
-        logger.warning(f"Received an invalid BSON ObjectId string: {identifier}. Treating as path/name.")
-        query = {"path": identifier} # Fallback to path if ID is invalid
+        logger.warning(
+            f"Received an invalid BSON ObjectId string: {identifier}. Treating as path/name."
+        )
+        query = {"path": identifier}  # Fallback to path if ID is invalid
         # DEPRECATION WARNING
         caller = inspect.stack()[1]
         logger.warning(
@@ -1146,12 +1344,14 @@ def get_vontology_node_content(identifier: str) -> dict:
             f"Called from {caller.filename}:{caller.lineno} in {caller.function}"
         )
 
-    doc = ConceptsRepository.find_one(query) # Fetch with _id first
+    doc = ConceptsRepository.find_one(query)  # Fetch with _id first
 
     if not doc:
         # If it was a valid ObjectId but not found as string, try as ObjectId object
         if ObjectId.is_valid(identifier) and "_id" in query:
-            logger.info(f"Concept not found with string ID '{identifier}', trying as ObjectId.")
+            logger.info(
+                f"Concept not found with string ID '{identifier}', trying as ObjectId."
+            )
             query = {"_id": ObjectId(identifier)}
             doc = ConceptsRepository.find_one(query)
 
@@ -1162,15 +1362,18 @@ def get_vontology_node_content(identifier: str) -> dict:
             doc = ConceptsRepository.find_one({"name": identifier})
 
     if not doc:
-        logger.warning(f"Concept '{identifier}' not found in MongoDB (searched by id, path, and potentially name).")
+        logger.warning(
+            f"Concept '{identifier}' not found in MongoDB (searched by id, path, and potentially name)."
+        )
         return {"error": f"Concept '{identifier}' not found in MongoDB."}
 
     # Convert _id to string for JSON serialization before returning
-    if '_id' in doc:
-        doc['_id'] = str(doc['_id'])
+    if "_id" in doc:
+        doc["_id"] = str(doc["_id"])
 
     # Create a copy of doc for raw_doc that has all ObjectIds converted to strings
     import copy
+
     raw_doc_copy = copy.deepcopy(doc)
 
     # Recursively convert any ObjectIds in the raw_doc to strings
@@ -1193,26 +1396,32 @@ def get_vontology_node_content(identifier: str) -> dict:
     md_content = doc.get("md_content")
 
     if md_content is None:
-        logger.warning(f"Markdown content (md_content) missing for '{identifier}'. Reconstructing basic version.")
+        logger.warning(
+            f"Markdown content (md_content) missing for '{identifier}'. Reconstructing basic version."
+        )
         # Try to get name from multiple possible locations, with human-readable fallback
         # Prefer names[] "NL" entry; do not use metadata.title anymore
         name = get_concept_display_name_with_names_fallback(doc)
         # Use accessor functions for description and notes
         description = get_concept_description(doc)
         notes = get_concept_notes(doc)
-        subconcept_of = doc.get("relationships", {}).get("is_a_type_of", 'None (Root)')
-        instance_of = doc.get("relationships", {}).get("is_an_instance_of", 'None')
-        source_concept = doc.get('source_concept', 'N/A')
+        subconcept_of = doc.get("relationships", {}).get("is_a_type_of", "None (Root)")
+        instance_of = doc.get("relationships", {}).get("is_an_instance_of", "None")
+        source_concept = doc.get("source_concept", "N/A")
 
         subconcept_of_str = "None (Root)"
         if isinstance(subconcept_of, list):
-            subconcept_of_str = ", ".join(subconcept_of) if subconcept_of else "None (Root)"
+            subconcept_of_str = (
+                ", ".join(subconcept_of) if subconcept_of else "None (Root)"
+            )
         elif isinstance(subconcept_of, str) and subconcept_of:
             subconcept_of_str = subconcept_of
 
         instance_of_str = "None"
         if isinstance(instance_of, list):
-            instance_of_str = ", ".join(str(item) for item in instance_of) if instance_of else "None"
+            instance_of_str = (
+                ", ".join(str(item) for item in instance_of) if instance_of else "None"
+            )
         elif isinstance(instance_of, str) and instance_of:
             instance_of_str = instance_of
         elif instance_of:  # Handle other types like ObjectId
@@ -1255,20 +1464,26 @@ def get_vontology_node_content(identifier: str) -> dict:
         if "relationships" in raw_doc_copy:
             if not isinstance(raw_doc_copy["relationships"].get("is_a_type_of"), list):
                 val = raw_doc_copy["relationships"].get("is_a_type_of")
-                raw_doc_copy["relationships"]["is_a_type_of"] = [] if val is None else (val if isinstance(val, list) else [val])
-            if not isinstance(raw_doc_copy["relationships"].get("is_an_instance_of"), list):
+                raw_doc_copy["relationships"]["is_a_type_of"] = (
+                    [] if val is None else (val if isinstance(val, list) else [val])
+                )
+            if not isinstance(
+                raw_doc_copy["relationships"].get("is_an_instance_of"), list
+            ):
                 val = raw_doc_copy["relationships"].get("is_an_instance_of")
-                raw_doc_copy["relationships"]["is_an_instance_of"] = [] if val is None else (val if isinstance(val, list) else [val])
+                raw_doc_copy["relationships"]["is_an_instance_of"] = (
+                    [] if val is None else (val if isinstance(val, list) else [val])
+                )
     except Exception:
         pass
 
     # Compute kind using three-way classification: type, predicate, or individual
     if is_type(doc):
-        computed_kind = 'type'
+        computed_kind = "type"
     elif is_predicate(doc):
-        computed_kind = 'predicate'
+        computed_kind = "predicate"
     else:
-        computed_kind = 'individual'
+        computed_kind = "individual"
 
     # NOTE (JVNAUTOSCI-335): We intentionally no longer emit a top-level 'name' field.
     # Callers must use 'display_name' (preferred) or inspect names[] inside raw_doc.
@@ -1285,7 +1500,7 @@ def get_vontology_node_content(identifier: str) -> dict:
         "computed_kind": computed_kind,  # Keep for backward compatibility
         "source_concept": doc.get("source_concept"),
         "md_content": md_content,
-        "raw_doc": raw_doc_copy
+        "raw_doc": raw_doc_copy,
     }
     return payload
 
@@ -1307,12 +1522,23 @@ def get_vontology_node_parents(identifier: str) -> dict:
             query = {"concept_id": identifier}
         else:
             # Path-based lookup is not supported for this function
-            return {"error": "Path-based parent lookup is not supported. Please provide a concept_id or _id."}
+            return {
+                "error": "Path-based parent lookup is not supported. Please provide a concept_id or _id."
+            }
     except bson_errors.InvalidId:
         return {"error": f"Invalid BSON ObjectId string: {identifier}."}
 
     # Include names[] so display name can be resolved correctly, also include most_salient_type
-    node = ConceptsRepository.find_one(query, {"name": 1, "names": 1, "relationships.is_a_type_of": 1, "relationships.most_salient_type": 1, "concept_id": 1})
+    node = ConceptsRepository.find_one(
+        query,
+        {
+            "name": 1,
+            "names": 1,
+            "relationships.is_a_type_of": 1,
+            "relationships.most_salient_type": 1,
+            "concept_id": 1,
+        },
+    )
 
     if not node:
         return {"error": f"Concept '{identifier}' not found."}
@@ -1322,34 +1548,36 @@ def get_vontology_node_parents(identifier: str) -> dict:
     parent_ids = relationships.get("is_a_type_of", [])
     most_salient_parent = relationships.get("most_salient_type")
 
-    if isinstance(parent_ids, str): # Handle case where it might be a single string
+    if isinstance(parent_ids, str):  # Handle case where it might be a single string
         parent_ids = [parent_ids]
 
     parents = []
     if parent_ids:
         parent_cursor = ConceptsRepository.find(
             {"concept_id": {"$in": parent_ids}},
-            {"name": 1, "names": 1, "concept_id": 1}
+            {"name": 1, "names": 1, "concept_id": 1},
         )
         for p in parent_cursor:
             parent_info = {
                 "name": get_concept_display_name_with_names_fallback(p),
                 "concept_id": p.get("concept_id"),
-                "is_most_salient": p.get("concept_id") == most_salient_parent
+                "is_most_salient": p.get("concept_id") == most_salient_parent,
             }
             parents.append(parent_info)
 
     return {
         "node": {
             "name": get_concept_display_name_with_names_fallback(node),
-            "concept_id": node.get("concept_id")
+            "concept_id": node.get("concept_id"),
         },
         "parents": parents,
-        "most_salient_parent": most_salient_parent
+        "most_salient_parent": most_salient_parent,
     }
 
 
-def get_vontology_node_and_descendant_ids(identifier: str, include_descendants: bool = True):
+def get_vontology_node_and_descendant_ids(
+    identifier: str, include_descendants: bool = True
+):
     """
     Fetches the concept_id of a Vontology concept and all its descendants.
     Returns a list of concept_ids (ObjectIds as strings).
@@ -1379,17 +1607,19 @@ def get_vontology_node_and_descendant_ids(identifier: str, include_descendants: 
                 "startWith": "$concept_id",  # Start with the concept_id string
                 "connectFromField": "concept_id",  # Connect from concept_id string
                 "connectToField": "relationships.is_a_type_of",  # Connect to Phase 3 relationship structure
-                "as": "descendants"
+                "as": "descendants",
             }
         },
-        {"$project": {
-            "all_concept_ids": {
-                "$concatArrays": [
-                    ["$concept_id"],  # Include the starting node's concept_id
-                    "$descendants.concept_id"  # Include descendant concept_ids
-                ]
+        {
+            "$project": {
+                "all_concept_ids": {
+                    "$concatArrays": [
+                        ["$concept_id"],  # Include the starting node's concept_id
+                        "$descendants.concept_id",  # Include descendant concept_ids
+                    ]
+                }
             }
-        }}
+        },
     ]
 
     try:
@@ -1407,11 +1637,15 @@ def get_vontology_node_and_descendant_ids(identifier: str, include_descendants: 
         return list(set(all_concept_ids))  # Remove duplicates
 
     except PyMongoError as e:
-        logger.error(f"MongoDB error during get_vontology_node_and_descendant_ids for identifier '{identifier}': {e}")
+        logger.error(
+            f"MongoDB error during get_vontology_node_and_descendant_ids for identifier '{identifier}': {e}"
+        )
         return []
 
 
-def get_vontology_node_and_ancestor_instance_ids(identifier: str, target_concept_id: str = "#V#von_user"):
+def get_vontology_node_and_ancestor_instance_ids(
+    identifier: str, target_concept_id: str = "#V#von_user"
+):
     """
     For access control: check if a concept is an instance of a target concept (directly or indirectly through type hierarchy).
 
@@ -1461,7 +1695,9 @@ def get_vontology_node_and_ancestor_instance_ids(identifier: str, target_concept
 
         # Use existing function to get all descendants (subtypes) of this instance type
         try:
-            descendants = get_vontology_node_and_descendant_ids(instance_type, include_descendants=True)
+            descendants = get_vontology_node_and_descendant_ids(
+                instance_type, include_descendants=True
+            )
             if target_concept_id in descendants:
                 return True
         except Exception as e:
@@ -1469,6 +1705,7 @@ def get_vontology_node_and_ancestor_instance_ids(identifier: str, target_concept
             continue
 
     return False
+
 
 # --- Function to get Vontology tree structure ---
 def get_vontology_tree(root_concept: str = "Thing"):
@@ -1482,7 +1719,21 @@ def get_vontology_tree(root_concept: str = "Thing"):
     """
     logger.info(f"[get_vontology_tree] START (version={VONTOLOGY_UTILS_VERSION})")
     try:
-        docs = list(ConceptsRepository.find({}, {"concept_id": 1, "name": 1, "names": 1, "relationships.is_a_type_of": 1, "relationships.most_salient_type": 1, "relationships.is_an_instance_of": 1, "path": 1, "_id": 1}))
+        docs = list(
+            ConceptsRepository.find(
+                {},
+                {
+                    "concept_id": 1,
+                    "name": 1,
+                    "names": 1,
+                    "relationships.is_a_type_of": 1,
+                    "relationships.most_salient_type": 1,
+                    "relationships.is_an_instance_of": 1,
+                    "path": 1,
+                    "_id": 1,
+                },
+            )
+        )
         total = len(docs)
         if not total:
             return {"tree": []}
@@ -1497,7 +1748,9 @@ def get_vontology_tree(root_concept: str = "Thing"):
             if not d.get("concept_id"):
                 continue
             types.append(d)
-        logger.info(f"[get_vontology_tree] Loaded {total} docs; types={len(types)}; skipped_pure_instances={skipped}")
+        logger.info(
+            f"[get_vontology_tree] Loaded {total} docs; types={len(types)}; skipped_pure_instances={skipped}"
+        )
 
         # Build node shells
         id_to_node: dict[str, dict] = {}
@@ -1511,7 +1764,7 @@ def get_vontology_tree(root_concept: str = "Thing"):
                 "mongo_id": str(d.get("_id")) if d.get("_id") else "",
                 "name": get_concept_display_name_with_names_fallback(d),
                 "path": d.get("path") or cid,
-                "children": []
+                "children": [],
             }
 
         # Ensure Thing node exists (even if missing in DB)
@@ -1523,9 +1776,11 @@ def get_vontology_tree(root_concept: str = "Thing"):
                 "mongo_id": "",
                 "name": "Thing",
                 "path": thing_id,
-                "children": []
+                "children": [],
             }
-            logger.warning("[get_vontology_tree] Inserted placeholder Thing node (missing from DB).")
+            logger.warning(
+                "[get_vontology_tree] Inserted placeholder Thing node (missing from DB)."
+            )
 
         # Parent assignment map child->parent
         parent_of: dict[str, str] = {}
@@ -1544,7 +1799,9 @@ def get_vontology_tree(root_concept: str = "Thing"):
             if isinstance(parents_raw, str):
                 parents_list = [parents_raw]
             elif isinstance(parents_raw, list):
-                parents_list = [p for p in parents_raw if isinstance(p, str) and p.strip()]
+                parents_list = [
+                    p for p in parents_raw if isinstance(p, str) and p.strip()
+                ]
             else:
                 parents_list = []
 
@@ -1556,7 +1813,11 @@ def get_vontology_tree(root_concept: str = "Thing"):
                 parent = thing_id  # orphan fallback
 
             # Final fallback if chosen parent missing
-            if parent and parent not in id_to_node and parent not in VONTOLOGY_THING_IDS:
+            if (
+                parent
+                and parent not in id_to_node
+                and parent not in VONTOLOGY_THING_IDS
+            ):
                 # create lightweight placeholder (will appear unless later populated)
                 id_to_node[parent] = {
                     "id": parent,
@@ -1564,7 +1825,7 @@ def get_vontology_tree(root_concept: str = "Thing"):
                     "mongo_id": "",
                     "name": parent.replace("#V#", "").replace("_", " ").title(),
                     "path": parent,
-                    "children": []
+                    "children": [],
                 }
             if not parent or parent not in id_to_node:
                 parent = thing_id
@@ -1597,9 +1858,12 @@ def get_vontology_tree(root_concept: str = "Thing"):
             n["children"].sort(key=lambda c: c["name"].lower())
             for ch in n["children"]:
                 sort_rec(ch)
+
         sort_rec(thing_node)
 
-        logger.info(f"[get_vontology_tree] DONE. Nodes={len(id_to_node)}; Thing children={len(thing_node['children'])}")
+        logger.info(
+            f"[get_vontology_tree] DONE. Nodes={len(id_to_node)}; Thing children={len(thing_node['children'])}"
+        )
         return {"tree": [thing_node]}
     except Exception as e:
         logger.error(f"[get_vontology_tree] ERROR: {e}\n{traceback.format_exc()}")
@@ -1610,7 +1874,7 @@ def get_concept_hierarchical_paths(
     concept_ids: List[str],
     max_depth: int = 10,
     separator: str = " → ",
-    include_root: bool = True
+    include_root: bool = True,
 ) -> Dict[str, Dict[str, Any]]:
     """Build hierarchical paths for multiple concepts efficiently (batch operation).
 
@@ -1671,16 +1935,18 @@ def get_concept_hierarchical_paths(
     thing_id = "#V#thing"
     if thing_id in concept_ids:
         result[thing_id] = {
-            "paths": [{
-                "path": "thing" if not include_root else "thing",
-                "path_ids": [thing_id] if include_root else [],
-                "path_names": ["Thing"] if include_root else [],
-                "depth": 1 if include_root else 0
-            }],
+            "paths": [
+                {
+                    "path": "thing" if not include_root else "thing",
+                    "path_ids": [thing_id] if include_root else [],
+                    "path_names": ["Thing"] if include_root else [],
+                    "depth": 1 if include_root else 0,
+                }
+            ],
             "primary_path": "thing" if not include_root else "thing",
             "all_parents": [],
             "max_depth": 1 if include_root else 0,
-            "is_root": True
+            "is_root": True,
         }
 
     # Batch fetch all concepts we might need
@@ -1695,12 +1961,7 @@ def get_concept_hierarchical_paths(
         # Fetch this batch
         cursor = ConceptsRepository.find(
             {"concept_id": {"$in": list(concepts_to_fetch)}},
-            {
-                "concept_id": 1,
-                "names": 1,
-                "name": 1,
-                "relationships.is_a_type_of": 1
-            }
+            {"concept_id": 1, "names": 1, "name": 1, "relationships.is_a_type_of": 1},
         )
 
         newly_fetched = {}
@@ -1724,7 +1985,11 @@ def get_concept_hierarchical_paths(
 
             # Queue all parents for fetching if not already known
             for pid in parents:
-                if pid != thing_id and pid not in fetched_concepts and pid not in newly_fetched:
+                if (
+                    pid != thing_id
+                    and pid not in fetched_concepts
+                    and pid not in newly_fetched
+                ):
                     parent_ids_to_fetch.add(pid)
 
         fetched_concepts.update(newly_fetched)
@@ -1734,7 +1999,7 @@ def get_concept_hierarchical_paths(
     fetched_concepts[thing_id] = {
         "concept_id": thing_id,
         "names": [{"name": "Thing", "lang": "en"}],
-        "relationships": {}
+        "relationships": {},
     }
 
     # Build ALL paths for each requested concept (handles multiple inheritance)
@@ -1750,7 +2015,7 @@ def get_concept_hierarchical_paths(
                 "all_parents": [],
                 "max_depth": 0,
                 "is_root": False,
-                "error": "concept_not_found"
+                "error": "concept_not_found",
             }
             continue
 
@@ -1769,7 +2034,9 @@ def get_concept_hierarchical_paths(
         # Build all paths using BFS to explore multiple inheritance tree
         all_paths = []
 
-        def build_paths_recursive(current_id: str, current_path_ids: List[str], visited: set) -> None:
+        def build_paths_recursive(
+            current_id: str, current_path_ids: List[str], visited: set
+        ) -> None:
             """Recursively build all paths from current_id to root."""
             if len(current_path_ids) >= max_depth:
                 return
@@ -1788,14 +2055,20 @@ def get_concept_hierarchical_paths(
                     final_path_ids = list(reversed(current_path_ids))
                     final_path_names = list(reversed(path_names))
 
-                    path_str = separator.join(name.lower() for name in final_path_names) if final_path_names else None
+                    path_str = (
+                        separator.join(name.lower() for name in final_path_names)
+                        if final_path_names
+                        else None
+                    )
 
-                    all_paths.append({
-                        "path": path_str,
-                        "path_ids": final_path_ids,
-                        "path_names": final_path_names,
-                        "depth": len(final_path_ids)
-                    })
+                    all_paths.append(
+                        {
+                            "path": path_str,
+                            "path_ids": final_path_ids,
+                            "path_names": final_path_names,
+                            "depth": len(final_path_ids),
+                        }
+                    )
                 return
 
             visited_copy = visited.copy()
@@ -1826,19 +2099,29 @@ def get_concept_hierarchical_paths(
                 final_path_names = list(reversed(path_names))
 
                 # Optionally exclude root
-                if not include_root and final_path_ids and final_path_ids[0] == thing_id:
+                if (
+                    not include_root
+                    and final_path_ids
+                    and final_path_ids[0] == thing_id
+                ):
                     final_path_ids = final_path_ids[1:]
                     final_path_names = final_path_names[1:]
 
                 # Build path string (lowercase for readability)
-                path_str = separator.join(name.lower() for name in final_path_names) if final_path_names else None
+                path_str = (
+                    separator.join(name.lower() for name in final_path_names)
+                    if final_path_names
+                    else None
+                )
 
-                all_paths.append({
-                    "path": path_str,
-                    "path_ids": final_path_ids,
-                    "path_names": final_path_names,
-                    "depth": len(final_path_ids)
-                })
+                all_paths.append(
+                    {
+                        "path": path_str,
+                        "path_ids": final_path_ids,
+                        "path_names": final_path_names,
+                        "depth": len(final_path_ids),
+                    }
+                )
                 return
 
             # Get parents and recurse
@@ -1863,14 +2146,20 @@ def get_concept_hierarchical_paths(
                 final_path_ids = list(reversed(new_path_ids))
                 final_path_names = list(reversed(path_names))
 
-                path_str = separator.join(name.lower() for name in final_path_names) if final_path_names else None
+                path_str = (
+                    separator.join(name.lower() for name in final_path_names)
+                    if final_path_names
+                    else None
+                )
 
-                all_paths.append({
-                    "path": path_str,
-                    "path_ids": final_path_ids,
-                    "path_names": final_path_names,
-                    "depth": len(final_path_ids)
-                })
+                all_paths.append(
+                    {
+                        "path": path_str,
+                        "path_ids": final_path_ids,
+                        "path_names": final_path_names,
+                        "depth": len(final_path_ids),
+                    }
+                )
                 return
 
             # Recurse for each parent (multiple inheritance)
@@ -1892,7 +2181,7 @@ def get_concept_hierarchical_paths(
             "primary_path": primary_path,
             "all_parents": all_direct_parents,
             "max_depth": max_path_depth,
-            "is_root": False
+            "is_root": False,
         }
 
     return result
@@ -1919,7 +2208,10 @@ def delete_vontology_concept(concept_id: str) -> dict:
         concept_to_delete = ConceptsRepository.find_one({"concept_id": concept_id})
         if not concept_to_delete:
             logger.warning(f"Concept with id '{concept_id}' not found.")
-            return {"success": False, "message": f"Concept with id '{concept_id}' not found."}
+            return {
+                "success": False,
+                "message": f"Concept with id '{concept_id}' not found.",
+            }
 
         # Gather this node's direct parents (supertypes), normalize to list[str]
         parents_raw = concept_to_delete.get("relationships", {}).get("is_a_type_of", [])
@@ -1935,10 +2227,10 @@ def delete_vontology_concept(concept_id: str) -> dict:
             {
                 "$or": [
                     {"relationships.is_a_type_of": concept_id},
-                    {"relationships.is_a_type_of": {"$in": [concept_id]}}
+                    {"relationships.is_a_type_of": {"$in": [concept_id]}},
                 ]
             },
-            {"_id": 1, "concept_id": 1, "relationships.is_a_type_of": 1, "name": 1}
+            {"_id": 1, "concept_id": 1, "relationships.is_a_type_of": 1, "name": 1},
         )
 
         children_reparented = 0
@@ -1951,7 +2243,9 @@ def delete_vontology_concept(concept_id: str) -> dict:
 
             # Remove the deleted concept from the child's parent list
             try:
-                if ConceptsRepository.mutate_relationship_edge(child_id, "is_a_type_of", concept_id, action="remove"):
+                if ConceptsRepository.mutate_relationship_edge(
+                    child_id, "is_a_type_of", concept_id, action="remove"
+                ):
                     child_changed = True
             except ValueError:
                 pass
@@ -1961,7 +2255,9 @@ def delete_vontology_concept(concept_id: str) -> dict:
                 if not isinstance(sp, str) or not sp or sp == child_id:
                     continue
                 try:
-                    if ConceptsRepository.mutate_relationship_edge(child_id, "is_a_type_of", sp, action="add"):
+                    if ConceptsRepository.mutate_relationship_edge(
+                        child_id, "is_a_type_of", sp, action="add"
+                    ):
                         child_changed = True
                 except ValueError:
                     continue
@@ -1974,10 +2270,15 @@ def delete_vontology_concept(concept_id: str) -> dict:
             {
                 "$or": [
                     {"relationships.is_an_instance_of": concept_id},
-                    {"relationships.is_an_instance_of": {"$in": [concept_id]}}
+                    {"relationships.is_an_instance_of": {"$in": [concept_id]}},
                 ]
             },
-            {"_id": 1, "concept_id": 1, "relationships.is_an_instance_of": 1, "name": 1}
+            {
+                "_id": 1,
+                "concept_id": 1,
+                "relationships.is_an_instance_of": 1,
+                "name": 1,
+            },
         )
 
         instances_retyped = 0
@@ -1989,7 +2290,9 @@ def delete_vontology_concept(concept_id: str) -> dict:
             inst_changed = False
 
             try:
-                if ConceptsRepository.mutate_relationship_edge(inst_id, "is_an_instance_of", concept_id, action="remove"):
+                if ConceptsRepository.mutate_relationship_edge(
+                    inst_id, "is_an_instance_of", concept_id, action="remove"
+                ):
                     inst_changed = True
             except ValueError:
                 pass
@@ -1998,7 +2301,9 @@ def delete_vontology_concept(concept_id: str) -> dict:
                 if not isinstance(sp, str) or not sp:
                     continue
                 try:
-                    if ConceptsRepository.mutate_relationship_edge(inst_id, "is_an_instance_of", sp, action="add"):
+                    if ConceptsRepository.mutate_relationship_edge(
+                        inst_id, "is_an_instance_of", sp, action="add"
+                    ):
                         inst_changed = True
                 except ValueError:
                     continue
@@ -2010,7 +2315,10 @@ def delete_vontology_concept(concept_id: str) -> dict:
         delete_result = ConceptsRepository.delete_one({"concept_id": concept_id})
         if getattr(delete_result, "deleted_count", 0) == 0:
             logger.warning(f"Concept with id '{concept_id}' was not deleted.")
-            return {"success": False, "message": f"Concept with id '{concept_id}' was not deleted."}
+            return {
+                "success": False,
+                "message": f"Concept with id '{concept_id}' was not deleted.",
+            }
 
         logger.info(
             f"Deleted concept '{concept_id}'. Reparented {children_reparented} children and re-typed {instances_retyped} instances."
@@ -2022,7 +2330,9 @@ def delete_vontology_concept(concept_id: str) -> dict:
                 if not isinstance(parent_id, str) or not parent_id:
                     continue
                 try:
-                    ConceptsRepository.mutate_relationship_edge(parent_id, "has_subtype", concept_id, action="remove")
+                    ConceptsRepository.mutate_relationship_edge(
+                        parent_id, "has_subtype", concept_id, action="remove"
+                    )
                 except ValueError:
                     continue
 
@@ -2066,13 +2376,21 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
         - success: bool, whether the operation was successful
     """
     if not concept_id:
-        return {"success": False, "error": "concept_id required", "simulate": not execute}
+        return {
+            "success": False,
+            "error": "concept_id required",
+            "simulate": not execute,
+        }
 
     try:
         concept_doc = ConceptsRepository.find_one({"concept_id": concept_id})
         if not concept_doc:
             # Return dict only (avoid tuple) to satisfy declared return type
-            return {"success": False, "error": f"Concept '{concept_id}' not found", "simulate": not execute}
+            return {
+                "success": False,
+                "error": f"Concept '{concept_id}' not found",
+                "simulate": not execute,
+            }
 
         warnings: list[str] = []
         protected = False
@@ -2081,7 +2399,7 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
             protected = True
 
         # Guard for future governance: prevent deletion of code-linked concepts
-        rels = (concept_doc.get("relationships") or {})
+        rels = concept_doc.get("relationships") or {}
         inst_of = rels.get("is_an_instance_of") or []
         if isinstance(inst_of, str):
             inst_list = [inst_of]
@@ -2089,8 +2407,10 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
             inst_list = [i for i in inst_of if isinstance(i, str)]
         else:
             inst_list = []
-        if '#V#mentioned_in_von_code' in inst_list:
-            warnings.append("Concept is instance of #V#mentioned_in_von_code and is protected")
+        if "#V#mentioned_in_von_code" in inst_list:
+            warnings.append(
+                "Concept is instance of #V#mentioned_in_von_code and is protected"
+            )
             protected = True
 
         # Collect parents
@@ -2103,12 +2423,15 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
             parents = []
 
         # Children (types) referencing this as parent
-        child_cursor = ConceptsRepository.find({
-            "$or": [
-                {"relationships.is_a_type_of": concept_id},
-                {"relationships.is_a_type_of": {"$in": [concept_id]}}
-            ]
-        }, {"concept_id": 1, "relationships.is_a_type_of": 1})
+        child_cursor = ConceptsRepository.find(
+            {
+                "$or": [
+                    {"relationships.is_a_type_of": concept_id},
+                    {"relationships.is_a_type_of": {"$in": [concept_id]}},
+                ]
+            },
+            {"concept_id": 1, "relationships.is_a_type_of": 1},
+        )
         children = []
         for ch in child_cursor:
             cid = ch.get("concept_id")
@@ -2123,19 +2446,24 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
             for sp in parents:
                 if sp and sp not in new_parents and sp != cid:
                     new_parents.append(sp)
-            children.append({
-                "child_id": cid,
-                "old_parents": ch_list,
-                "new_parents": list(dict.fromkeys(new_parents)),
-            })
+            children.append(
+                {
+                    "child_id": cid,
+                    "old_parents": ch_list,
+                    "new_parents": list(dict.fromkeys(new_parents)),
+                }
+            )
 
         # Instances referencing this as type
-        inst_cursor = ConceptsRepository.find({
-            "$or": [
-                {"relationships.is_an_instance_of": concept_id},
-                {"relationships.is_an_instance_of": {"$in": [concept_id]}}
-            ]
-        }, {"concept_id": 1, "relationships.is_an_instance_of": 1})
+        inst_cursor = ConceptsRepository.find(
+            {
+                "$or": [
+                    {"relationships.is_an_instance_of": concept_id},
+                    {"relationships.is_an_instance_of": {"$in": [concept_id]}},
+                ]
+            },
+            {"concept_id": 1, "relationships.is_an_instance_of": 1},
+        )
         instances = []
         for inst in inst_cursor:
             iid = inst.get("concept_id")
@@ -2150,11 +2478,13 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
             for sp in parents:
                 if sp and sp not in new_types:
                     new_types.append(sp)
-            instances.append({
-                "instance_id": iid,
-                "old_types": t_list,
-                "new_types": list(dict.fromkeys(new_types)),
-            })
+            instances.append(
+                {
+                    "instance_id": iid,
+                    "old_types": t_list,
+                    "new_types": list(dict.fromkeys(new_types)),
+                }
+            )
 
         if not execute or protected:
             return {
@@ -2173,7 +2503,12 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
 
         del_result = None
 
-        def _sync_relationships(source_id: Optional[str], rel_kind: str, old_values: List[str], new_values: List[str]):
+        def _sync_relationships(
+            source_id: Optional[str],
+            rel_kind: str,
+            old_values: List[str],
+            new_values: List[str],
+        ):
             if not source_id:
                 return
             new_values_list = [v for v in new_values if isinstance(v, str) and v]
@@ -2183,10 +2518,7 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
                 if target not in new_values_list:
                     try:
                         ConceptsRepository.mutate_relationship_edge(
-                            source_id,
-                            rel_kind,
-                            target,
-                            action="remove"
+                            source_id, rel_kind, target, action="remove"
                         )
                     except ValueError:
                         continue
@@ -2194,23 +2526,30 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
             for target in new_values_list:
                 try:
                     ConceptsRepository.mutate_relationship_edge(
-                        source_id,
-                        rel_kind,
-                        target,
-                        action="add"
+                        source_id, rel_kind, target, action="add"
                     )
                 except ValueError:
                     continue
 
         for ch in children:
-            _sync_relationships(ch.get("child_id"), "is_a_type_of", ch.get("old_parents", []), ch.get("new_parents", []))
+            _sync_relationships(
+                ch.get("child_id"),
+                "is_a_type_of",
+                ch.get("old_parents", []),
+                ch.get("new_parents", []),
+            )
 
         for inst in instances:
-            _sync_relationships(inst.get("instance_id"), "is_an_instance_of", inst.get("old_types", []), inst.get("new_types", []))
+            _sync_relationships(
+                inst.get("instance_id"),
+                "is_an_instance_of",
+                inst.get("old_types", []),
+                inst.get("new_types", []),
+            )
 
         del_result = ConceptsRepository.delete_one({"concept_id": concept_id})
         return {
-            "success": getattr(del_result, 'deleted_count', 0) == 1,
+            "success": getattr(del_result, "deleted_count", 0) == 1,
             "simulate": False,
             "executed": True,
             "concept_id": concept_id,
@@ -2226,6 +2565,7 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
         logger.error("simulate_or_delete_concept error: %s", e, exc_info=True)
         return {"success": False, "error": str(e), "simulate": not execute}
 
+
 def is_opencyc_format(data: Union[List, Dict]) -> bool:
     """
     Detect if the input data is in OpenCyc format (nodes and edges structure).
@@ -2238,24 +2578,31 @@ def is_opencyc_format(data: Union[List, Dict]) -> bool:
     """
     if isinstance(data, dict):
         # Check for nodes and edges keys typical of OpenCyc format
-        has_nodes = 'nodes' in data and isinstance(data['nodes'], list)
-        has_edges = 'edges' in data and isinstance(data['edges'], list)
+        has_nodes = "nodes" in data and isinstance(data["nodes"], list)
+        has_edges = "edges" in data and isinstance(data["edges"], list)
 
-        if has_nodes and has_edges and len(data['nodes']) > 0:
+        if has_nodes and has_edges and len(data["nodes"]) > 0:
             # Check if nodes have OpenCyc-style structure (id, label, not concept_id)
-            sample_nodes = data['nodes'][:3]  # Check first 3 nodes
+            sample_nodes = data["nodes"][:3]  # Check first 3 nodes
             opencyc_indicators = 0
 
             for node in sample_nodes:
                 if isinstance(node, dict):
-                    has_id = 'id' in node
-                    has_label = 'label' in node
-                    no_concept_id = 'concept_id' not in node
+                    has_id = "id" in node
+                    has_label = "label" in node
+                    no_concept_id = "concept_id" not in node
 
                     # Strong indicator: OpenCyc URL
-                    if (has_id and has_label and no_concept_id and
-                        isinstance(node.get('id'), str) and
-                        ('opencyc.org' in node.get('id', '') or node.get('id', '').startswith('http://'))):
+                    if (
+                        has_id
+                        and has_label
+                        and no_concept_id
+                        and isinstance(node.get("id"), str)
+                        and (
+                            "opencyc.org" in node.get("id", "")
+                            or node.get("id", "").startswith("http://")
+                        )
+                    ):
                         opencyc_indicators += 1
                     # Weaker indicator: has id/label but no concept_id (Von format always has concept_id)
                     elif has_id and has_label and no_concept_id:
@@ -2265,6 +2612,7 @@ def is_opencyc_format(data: Union[List, Dict]) -> bool:
             return opencyc_indicators > 0
 
     return False
+
 
 def cyc_id_to_von_concept_id(cyc_id: str, label: str) -> str:
     """
@@ -2279,12 +2627,13 @@ def cyc_id_to_von_concept_id(cyc_id: str, label: str) -> str:
     """
     # Create a clean concept ID from the label
     # Remove special characters and convert to snake_case
-    clean_label = re.sub(r'[^\w\s-]', '', label.lower())
-    clean_label = re.sub(r'[-\s]+', '_', clean_label)
-    clean_label = clean_label.strip('_')
+    clean_label = re.sub(r"[^\w\s-]", "", label.lower())
+    clean_label = re.sub(r"[-\s]+", "_", clean_label)
+    clean_label = clean_label.strip("_")
 
     # Ensure it starts with #V#
     return f"#V#{clean_label}"
+
 
 def convert_opencyc_to_von_format(cyc_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -2296,11 +2645,13 @@ def convert_opencyc_to_von_format(cyc_data: Dict[str, Any]) -> List[Dict[str, An
     Returns:
         List of dictionaries in Von format
     """
-    nodes = cyc_data.get('nodes', [])
-    edges = cyc_data.get('edges', [])
+    nodes = cyc_data.get("nodes", [])
+    edges = cyc_data.get("edges", [])
 
     # Create a mapping from cyc_id to label for parent lookup
-    id_to_label = {node['id']: node['label'] for node in nodes if 'id' in node and 'label' in node}
+    id_to_label = {
+        node["id"]: node["label"] for node in nodes if "id" in node and "label" in node
+    }
 
     von_nodes = []
 
@@ -2308,12 +2659,14 @@ def convert_opencyc_to_von_format(cyc_data: Dict[str, Any]) -> List[Dict[str, An
         if not isinstance(cyc_node, dict):
             continue
 
-        cyc_id = cyc_node.get('id')
-        label = cyc_node.get('label')
-        comment = cyc_node.get('comment', '')
+        cyc_id = cyc_node.get("id")
+        label = cyc_node.get("label")
+        comment = cyc_node.get("comment", "")
 
         if not cyc_id or not label:
-            logger.warning(f"Skipping OpenCyc node with missing id or label: {cyc_node}")
+            logger.warning(
+                f"Skipping OpenCyc node with missing id or label: {cyc_node}"
+            )
             continue
 
         concept_id = cyc_id_to_von_concept_id(cyc_id, label)
@@ -2321,11 +2674,13 @@ def convert_opencyc_to_von_format(cyc_data: Dict[str, Any]) -> List[Dict[str, An
         # Find parent relationships from edges
         parent_ids = []
         for edge in edges:
-            if edge.get('to') == cyc_id:
-                parent_cyc_id = edge.get('from')
+            if edge.get("to") == cyc_id:
+                parent_cyc_id = edge.get("from")
                 if parent_cyc_id and parent_cyc_id in id_to_label:
                     parent_label = id_to_label[parent_cyc_id]
-                    parent_concept_id = cyc_id_to_von_concept_id(parent_cyc_id, parent_label)
+                    parent_concept_id = cyc_id_to_von_concept_id(
+                        parent_cyc_id, parent_label
+                    )
                     parent_ids.append(parent_concept_id)
 
         # Create Von format node in unified format (JVNAUTOSCI-315 fix)
@@ -2333,16 +2688,8 @@ def convert_opencyc_to_von_format(cyc_data: Dict[str, Any]) -> List[Dict[str, An
         von_node = {
             "concept_id": concept_id,
             "names": [
-                {
-                    "name": label.title(),
-                    "language": "en-US",
-                    "type": "NL"
-                },
-                {
-                    "name": cyc_id,
-                    "language": "cycL",
-                    "type": "CODE"
-                }
+                {"name": label.title(), "language": "en-US", "type": "NL"},
+                {"name": cyc_id, "language": "cycL", "type": "CODE"},
             ],
             "description": comment if comment else f"Concept representing {label}",
             "relationships": {
@@ -2350,45 +2697,38 @@ def convert_opencyc_to_von_format(cyc_data: Dict[str, Any]) -> List[Dict[str, An
                 "has_subtype": [],
                 "is_an_instance_of": [],
                 "has_instance": [],
-                "related_to": []
+                "related_to": [],
             },
             "metadata": {
                 "description": comment if comment else f"Concept representing {label}",
                 "concept_type": "collection",
                 "tags": [],
-                "classifications": []
+                "classifications": [],
             },
             "concept_data": {
                 "axioms": [],
                 "constraints": [],
-                "properties": {
-                    "md_content_hash": None
-                },
+                "properties": {"md_content_hash": None},
                 "source_attribution": {
                     "source_id": concept_id,
                     "source_type": "OpenCyc",
-                    "source_metadata": {
-                        "original_cyc_id": cyc_id
-                    }
-                }
+                    "source_metadata": {"original_cyc_id": cyc_id},
+                },
             },
-            "timestamps": {
-                "created_at": now,
-                "updated_at": now,
-                "accessed_at": None
-            },
+            "timestamps": {"created_at": now, "updated_at": now, "accessed_at": None},
             "created_by": "opencyc_import",
             "source": "OpenCyc",
             "original_cyc_id": cyc_id,
             "created_at": now.isoformat(),
             "last_db_update_timestamp": now,
-            "version": 1
+            "version": 1,
         }
 
         von_nodes.append(von_node)
 
     logger.info(f"Converted {len(von_nodes)} OpenCyc nodes to Von format")
     return von_nodes
+
 
 def normalize_node_to_unified_format(node: dict) -> dict:
     """
@@ -2408,7 +2748,9 @@ def normalize_node_to_unified_format(node: dict) -> dict:
 
     # Check if this is legacy format (has top-level is_a_type_of but no relationships)
     if "is_a_type_of" in unified_node and "relationships" not in unified_node:
-        logger.info(f"Converting node {unified_node.get('concept_id', 'Unknown')} from legacy format to unified format")
+        logger.info(
+            f"Converting node {unified_node.get('concept_id', 'Unknown')} from legacy format to unified format"
+        )
 
         # Extract legacy relationship data
         legacy_is_a_type_of = unified_node.pop("is_a_type_of", [])
@@ -2419,7 +2761,7 @@ def normalize_node_to_unified_format(node: dict) -> dict:
             "has_subtype": [],
             "is_an_instance_of": [],
             "has_instance": [],
-            "related_to": []
+            "related_to": [],
         }
     elif "relationships" not in unified_node:
         # Ensure we have the minimum unified format structure
@@ -2428,7 +2770,7 @@ def normalize_node_to_unified_format(node: dict) -> dict:
             "has_subtype": [],
             "is_an_instance_of": [],
             "has_instance": [],
-            "related_to": []
+            "related_to": [],
         }
 
     # Add metadata structure if missing
@@ -2437,7 +2779,7 @@ def normalize_node_to_unified_format(node: dict) -> dict:
             "description": unified_node.get("description", ""),
             "concept_type": "collection",  # Default type
             "tags": [],
-            "classifications": []
+            "classifications": [],
         }
 
     # Add concept_data structure if missing
@@ -2445,14 +2787,12 @@ def normalize_node_to_unified_format(node: dict) -> dict:
         unified_node["concept_data"] = {
             "axioms": [],
             "constraints": [],
-            "properties": {
-                "md_content_hash": None
-            },
+            "properties": {"md_content_hash": None},
             "source_attribution": {
                 "source_id": unified_node.get("concept_id", "unknown"),
                 "source_type": unified_node.get("source", "import"),
-                "source_metadata": None
-            }
+                "source_metadata": None,
+            },
         }
 
     # Add timestamps if missing
@@ -2461,7 +2801,7 @@ def normalize_node_to_unified_format(node: dict) -> dict:
         unified_node["timestamps"] = {
             "created_at": unified_node.get("created_at", now),
             "updated_at": now,
-            "accessed_at": None
+            "accessed_at": None,
         }
 
     # Add standard fields if missing
@@ -2473,17 +2813,14 @@ def normalize_node_to_unified_format(node: dict) -> dict:
 
     # Convert legacy 'name' field to 'names' array if needed
     if "name" in unified_node and "names" not in unified_node:
-        logger.info(f"Converting legacy 'name' field to 'names' array for {unified_node.get('concept_id', 'Unknown')}")
+        logger.info(
+            f"Converting legacy 'name' field to 'names' array for {unified_node.get('concept_id', 'Unknown')}"
+        )
         old_name = unified_node.pop("name")
-        unified_node["names"] = [
-            {
-                "name": old_name,
-                "language": "en-US",
-                "type": "NL"
-            }
-        ]
+        unified_node["names"] = [{"name": old_name, "language": "en-US", "type": "NL"}]
 
     return unified_node
+
 
 def detect_circular_references_in_import(nodes: list) -> dict:
     """Detect potential circular references in nodes to be imported.
@@ -2510,7 +2847,11 @@ def detect_circular_references_in_import(nodes: list) -> dict:
                 graph[concept_id].add(parent_id)
 
     try:
-        existing_concepts = list(ConceptsRepository.find({}, {"concept_id": 1, "relationships.is_a_type_of": 1}))
+        existing_concepts = list(
+            ConceptsRepository.find(
+                {}, {"concept_id": 1, "relationships.is_a_type_of": 1}
+            )
+        )
         for concept in existing_concepts:
             concept_id = concept.get("concept_id")
             if not concept_id or concept_id in node_map:
@@ -2522,7 +2863,9 @@ def detect_circular_references_in_import(nodes: list) -> dict:
                 if parent_id:
                     graph[concept_id].add(parent_id)
     except Exception as e:  # pragma: no cover
-        logger.warning(f"Could not load existing relationships for cycle detection: {e}")
+        logger.warning(
+            f"Could not load existing relationships for cycle detection: {e}"
+        )
 
     WHITE, GRAY, BLACK = 0, 1, 2
     color: dict[str, int] = defaultdict(int)
@@ -2572,6 +2915,7 @@ def detect_circular_references_in_import(nodes: list) -> dict:
         "cycle_count": len(unique_cycles),
     }
 
+
 def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
     """Attempt to break parent-link cycles among nodes to be imported by removing minimal edges.
 
@@ -2601,44 +2945,51 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
         # Map concept_id->node for imported nodes
         imported_map: dict[str, dict] = {}
         for n in nodes:
-            cid = n.get('concept_id')
+            cid = n.get("concept_id")
             if isinstance(cid, str):
                 imported_map[cid] = n
 
         if not imported_map:
             return {
-                'had_cycles': False,
-                'original_cycle_count': 0,
-                'removed_edge_count': 0,
-                'removed_edges': [],
-                'unresolved_cycle_count': 0,
-                'nodes_modified': nodes,
+                "had_cycles": False,
+                "original_cycle_count": 0,
+                "removed_edge_count": 0,
+                "removed_edges": [],
+                "unresolved_cycle_count": 0,
+                "nodes_modified": nodes,
             }
 
         # Fetch existing docs for imported concept_ids present already to classify existing edges
         existing_docs: dict[str, dict] = {}
         try:
-            existing_cursor = ConceptsRepository.find({"concept_id": {"$in": list(imported_map.keys())}}, {"concept_id": 1, "relationships.is_a_type_of": 1})
+            existing_cursor = ConceptsRepository.find(
+                {"concept_id": {"$in": list(imported_map.keys())}},
+                {"concept_id": 1, "relationships.is_a_type_of": 1},
+            )
             for doc in existing_cursor:
-                dcid = doc.get('concept_id')
+                dcid = doc.get("concept_id")
                 if isinstance(dcid, str):
-                    parents_raw = (doc.get('relationships') or {}).get('is_a_type_of', [])
+                    parents_raw = (doc.get("relationships") or {}).get(
+                        "is_a_type_of", []
+                    )
                     if isinstance(parents_raw, str):
                         parents_list = [parents_raw]
                     elif isinstance(parents_raw, list):
-                        parents_list = [p for p in parents_raw if isinstance(p, str) and p]
+                        parents_list = [
+                            p for p in parents_raw if isinstance(p, str) and p
+                        ]
                     else:
                         parents_list = []
-                    existing_docs[dcid] = {'parents': set(parents_list)}
+                    existing_docs[dcid] = {"parents": set(parents_list)}
         except Exception:
             existing_docs = {}
 
         # Helper to get current parent list for a node (handles legacy format)
         def get_parent_list(node: dict) -> list[str]:
-            if 'relationships' in node:
-                parents = node.get('relationships', {}).get('is_a_type_of', [])
+            if "relationships" in node:
+                parents = node.get("relationships", {}).get("is_a_type_of", [])
             else:
-                parents = node.get('is_a_type_of', [])
+                parents = node.get("is_a_type_of", [])
             if isinstance(parents, str):
                 return [parents]
             if isinstance(parents, list):
@@ -2655,7 +3006,12 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
             # Existing nodes outside import – only needed if they participate in cycles via imported edges
             try:
                 # Traverse parent chain breadth-first so cycles among existing nodes remain visible
-                initial_parents = {p for n in imported_map.values() for p in get_parent_list(n) if isinstance(p, str) and p}
+                initial_parents = {
+                    p
+                    for n in imported_map.values()
+                    for p in get_parent_list(n)
+                    if isinstance(p, str) and p
+                }
                 pending: list[str] = [p for p in initial_parents]
                 seen: set[str] = set()
                 while pending:
@@ -2664,9 +3020,12 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
                     pending = pending[50:]
                     if not batch:
                         continue
-                    parent_cursor = ConceptsRepository.find({"concept_id": {"$in": batch}}, {"concept_id": 1, "relationships.is_a_type_of": 1})
+                    parent_cursor = ConceptsRepository.find(
+                        {"concept_id": {"$in": batch}},
+                        {"concept_id": 1, "relationships.is_a_type_of": 1},
+                    )
                     for doc in parent_cursor:
-                        pcid = doc.get('concept_id')
+                        pcid = doc.get("concept_id")
                         if not isinstance(pcid, str):
                             continue
                         if pcid in seen:
@@ -2675,11 +3034,15 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
                         else:
                             seen.add(pcid)
                             g.setdefault(pcid, set())
-                        rel_parents = (doc.get('relationships') or {}).get('is_a_type_of', [])
+                        rel_parents = (doc.get("relationships") or {}).get(
+                            "is_a_type_of", []
+                        )
                         if isinstance(rel_parents, str):
                             rel_parents_list = [rel_parents]
                         elif isinstance(rel_parents, list):
-                            rel_parents_list = [p for p in rel_parents if isinstance(p, str) and p]
+                            rel_parents_list = [
+                                p for p in rel_parents if isinstance(p, str) and p
+                            ]
                         else:
                             rel_parents_list = []
                         for pp in rel_parents_list:
@@ -2732,31 +3095,41 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
 
         # Helper to classify edge & produce heuristic rank tuple
         def edge_rank(child: str, parent: str) -> tuple:
-            parent_is_union = 1 if parent.startswith('#V#the_union_of_') else 0
+            parent_is_union = 1 if parent.startswith("#V#the_union_of_") else 0
             existing_edge = 0
-            if child in existing_docs and parent in existing_docs[child]['parents']:
-                existing_edge = 1  # existing edge -> we prefer NOT to remove; invert later
+            if child in existing_docs and parent in existing_docs[child]["parents"]:
+                existing_edge = (
+                    1  # existing edge -> we prefer NOT to remove; invert later
+                )
             # We want new edges preferred, so is_new_edge = 1 when existing_edge == 0
             is_new_edge = 1 - existing_edge
             child_parents_count = len(get_parent_list(imported_map.get(child, {})))
             # Rank tuple ordered by heuristic priority
-            return (parent_is_union, is_new_edge, 1 if child_parents_count > 1 else 0, child, parent)
+            return (
+                parent_is_union,
+                is_new_edge,
+                1 if child_parents_count > 1 else 0,
+                child,
+                parent,
+            )
 
         # Apply removals iteratively
         iteration_guard = 0
         graph = build_graph()
         # Detect original cycles using DFS style from existing function for reference
-        orig_cycle_detection = detect_circular_references_in_import(list(imported_map.values()))
-        original_cycle_count = orig_cycle_detection.get('cycle_count', 0)
+        orig_cycle_detection = detect_circular_references_in_import(
+            list(imported_map.values())
+        )
+        original_cycle_count = orig_cycle_detection.get("cycle_count", 0)
         had_cycles = bool(original_cycle_count)
         if not had_cycles:
             return {
-                'had_cycles': False,
-                'original_cycle_count': 0,
-                'removed_edge_count': 0,
-                'removed_edges': [],
-                'unresolved_cycle_count': 0,
-                'nodes_modified': nodes,
+                "had_cycles": False,
+                "original_cycle_count": 0,
+                "removed_edge_count": 0,
+                "removed_edges": [],
+                "unresolved_cycle_count": 0,
+                "nodes_modified": nodes,
             }
 
         while iteration_guard < 100:  # safety cap
@@ -2778,13 +3151,17 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
             progress_this_round = False
             for comp in problem_sccs:
                 # Candidate removable edges inside this component where child is imported
-                cand_edges: list[tuple[tuple, str, str]] = []  # (rank_tuple, child, parent)
+                cand_edges: list[tuple[tuple, str, str]] = (
+                    []
+                )  # (rank_tuple, child, parent)
                 comp_set = set(comp)
                 for child in comp:
                     if child not in imported_map:
                         continue  # cannot modify existing-only node
                     for parent in get_parent_list(imported_map[child]):
-                        if parent in comp_set:  # only edges internal to SCC are relevant
+                        if (
+                            parent in comp_set
+                        ):  # only edges internal to SCC are relevant
                             rank = edge_rank(child, parent)
                             cand_edges.append((rank, child, parent))
                 if not cand_edges:
@@ -2796,25 +3173,39 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
                 node_ref = imported_map.get(best_child)
                 if node_ref:
                     # Modify both unified and legacy representations if present
-                    if 'relationships' in node_ref:
-                        parents_field = node_ref['relationships'].get('is_a_type_of', [])
+                    if "relationships" in node_ref:
+                        parents_field = node_ref["relationships"].get(
+                            "is_a_type_of", []
+                        )
                         if isinstance(parents_field, list):
-                            node_ref['relationships']['is_a_type_of'] = [p for p in parents_field if p != best_parent]
-                        elif isinstance(parents_field, str) and parents_field == best_parent:
-                            node_ref['relationships']['is_a_type_of'] = []
-                    if 'is_a_type_of' in node_ref:  # legacy parallel retention
-                        legacy_parents = node_ref.get('is_a_type_of')
+                            node_ref["relationships"]["is_a_type_of"] = [
+                                p for p in parents_field if p != best_parent
+                            ]
+                        elif (
+                            isinstance(parents_field, str)
+                            and parents_field == best_parent
+                        ):
+                            node_ref["relationships"]["is_a_type_of"] = []
+                    if "is_a_type_of" in node_ref:  # legacy parallel retention
+                        legacy_parents = node_ref.get("is_a_type_of")
                         if isinstance(legacy_parents, list):
-                            node_ref['is_a_type_of'] = [p for p in legacy_parents if p != best_parent]
-                        elif isinstance(legacy_parents, str) and legacy_parents == best_parent:
-                            node_ref['is_a_type_of'] = []
+                            node_ref["is_a_type_of"] = [
+                                p for p in legacy_parents if p != best_parent
+                            ]
+                        elif (
+                            isinstance(legacy_parents, str)
+                            and legacy_parents == best_parent
+                        ):
+                            node_ref["is_a_type_of"] = []
 
-                removed_edges.append({
-                    "child": best_child,
-                    "parent": best_parent,
-                    "reason": "Cycle resolution",
-                    "rank_tuple": best_rank
-                })
+                removed_edges.append(
+                    {
+                        "child": best_child,
+                        "parent": best_parent,
+                        "reason": "Cycle resolution",
+                        "rank_tuple": best_rank,
+                    }
+                )
 
             # Double-check: if we removed an edge that was also an existing edge, we may have introduced a new cycle.
             # If so, we can either revert this removal or apply a different strategy.
@@ -2827,28 +3218,44 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
                     # Strategy: remove the last added edge from removed_edges (if any)
                     if removed_edges:
                         last_removal = removed_edges.pop()
-                        logger.info(f"Reverting removal of edge {last_removal['child']} -> {last_removal['parent']}")
+                        logger.info(
+                            f"Reverting removal of edge {last_removal['child']} -> {last_removal['parent']}"
+                        )
                         # Re-add the edge to the node
                         node_ref = imported_map.get(last_removal["child"])
                         if node_ref:
                             # Modify both unified and legacy representations if present
-                            if 'relationships' in node_ref:
-                                parents_field = node_ref['relationships'].get('is_a_type_of', [])
+                            if "relationships" in node_ref:
+                                parents_field = node_ref["relationships"].get(
+                                    "is_a_type_of", []
+                                )
                                 if isinstance(parents_field, list):
-                                    node_ref['relationships']['is_a_type_of'].append(last_removal["parent"])
+                                    node_ref["relationships"]["is_a_type_of"].append(
+                                        last_removal["parent"]
+                                    )
                                 elif isinstance(parents_field, str):
-                                    node_ref['relationships']['is_a_type_of'] = [parents_field, last_removal["parent"]]
-                            if 'is_a_type_of' in node_ref:  # legacy parallel retention
-                                legacy_parents = node_ref.get('is_a_type_of')
+                                    node_ref["relationships"]["is_a_type_of"] = [
+                                        parents_field,
+                                        last_removal["parent"],
+                                    ]
+                            if "is_a_type_of" in node_ref:  # legacy parallel retention
+                                legacy_parents = node_ref.get("is_a_type_of")
                                 if isinstance(legacy_parents, list):
-                                    node_ref['is_a_type_of'].append(last_removal["parent"])
+                                    node_ref["is_a_type_of"].append(
+                                        last_removal["parent"]
+                                    )
                                 elif isinstance(legacy_parents, str):
-                                    node_ref['is_a_type_of'] = [legacy_parents, last_removal["parent"]]
+                                    node_ref["is_a_type_of"] = [
+                                        legacy_parents,
+                                        last_removal["parent"],
+                                    ]
                         # Rebuild graph and check cycles again
                         graph = build_graph()
                         sccs = tarjan_scc(graph)
                         if any(len(comp) > 1 for comp in sccs):
-                            logger.error("Reverted removal introduced new cycle! Manual intervention required.")
+                            logger.error(
+                                "Reverted removal introduced new cycle! Manual intervention required."
+                            )
                             # In case of failure, we could either stop here or attempt a different strategy.
                             # For now, let's break to avoid infinite loop.
                             break
@@ -2866,33 +3273,36 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
         sccs = tarjan_scc(graph)
         unresolved_cycles = [comp for comp in sccs if len(comp) > 1]
         if unresolved_cycles:
-            logger.warning(f"Unresolved cycles remain after breaking attempt: {unresolved_cycles}")
+            logger.warning(
+                f"Unresolved cycles remain after breaking attempt: {unresolved_cycles}"
+            )
         else:
             logger.info("No unresolved cycles remain.")
 
         return {
-            'had_cycles': had_cycles,
-            'original_cycle_count': original_cycle_count,
-            'removed_edge_count': len(removed_edges),
-            'removed_edges': removed_edges,
-            'unresolved_cycle_count': len(unresolved_cycles),
-            'nodes_modified': nodes,
+            "had_cycles": had_cycles,
+            "original_cycle_count": original_cycle_count,
+            "removed_edge_count": len(removed_edges),
+            "removed_edges": removed_edges,
+            "unresolved_cycle_count": len(unresolved_cycles),
+            "nodes_modified": nodes,
         }
     except Exception as e:
         logger.error(f"Error in break_cycles_in_import_nodes: {e}")
         return {
-            'had_cycles': False,
-            'original_cycle_count': 0,
-            'removed_edge_count': 0,
-            'removed_edges': [],
-            'unresolved_cycle_count': 0,
-            'nodes_modified': nodes,
+            "had_cycles": False,
+            "original_cycle_count": 0,
+            "removed_edge_count": 0,
+            "removed_edges": [],
+            "unresolved_cycle_count": 0,
+            "nodes_modified": nodes,
         }
 
 
 # --- Concept Field Accessors ---
 # These functions provide a consistent interface for accessing concept fields
 # that may be stored in different locations (legacy vs. new schema)
+
 
 def get_concept_description(concept: Dict[str, Any]) -> Optional[str]:
     """Get the description from a concept or vontology node.
@@ -2906,25 +3316,25 @@ def get_concept_description(concept: Dict[str, Any]) -> Optional[str]:
         return None
 
     # Check new schema location first
-    preserved = concept.get('concept_data', {}).get('preserved_fields', {})
-    if 'description' in preserved:
-        return preserved['description']
+    preserved = concept.get("concept_data", {}).get("preserved_fields", {})
+    if "description" in preserved:
+        return preserved["description"]
 
     # Check legacy top-level field
-    if 'description' in concept:
-        return concept['description']
+    if "description" in concept:
+        return concept["description"]
 
     # Check vontology node attributes
-    attributes = concept.get('attributes', {})
-    if 'description' in attributes:
-        return attributes['description']
+    attributes = concept.get("attributes", {})
+    if "description" in attributes:
+        return attributes["description"]
 
     return None
 
 
 def _extract_comment_text(concept: Dict[str, Any]) -> Optional[str]:
     """Return a trimmed comment field if present and non-empty."""
-    comment = concept.get('comment') if isinstance(concept, dict) else None
+    comment = concept.get("comment") if isinstance(concept, dict) else None
     if isinstance(comment, str):
         stripped = comment.strip()
         if stripped:
@@ -2954,18 +3364,18 @@ def get_concept_notes(concept: Dict[str, Any]) -> Optional[str]:
         return None
 
     # Check new schema location first
-    preserved = concept.get('concept_data', {}).get('preserved_fields', {})
-    if 'notes' in preserved:
-        return preserved['notes']
+    preserved = concept.get("concept_data", {}).get("preserved_fields", {})
+    if "notes" in preserved:
+        return preserved["notes"]
 
     # Check legacy top-level field
-    if 'notes' in concept:
-        return concept['notes']
+    if "notes" in concept:
+        return concept["notes"]
 
     # Check vontology node attributes
-    attributes = concept.get('attributes', {})
-    if 'notes' in attributes:
-        return attributes['notes']
+    attributes = concept.get("attributes", {})
+    if "notes" in attributes:
+        return attributes["notes"]
 
     return None
 
@@ -2978,12 +3388,12 @@ def set_concept_description(concept: Dict[str, Any], description: str) -> None:
     if not concept or not isinstance(concept, dict):
         return
 
-    if 'concept_data' not in concept:
-        concept['concept_data'] = {}
-    if 'preserved_fields' not in concept['concept_data']:
-        concept['concept_data']['preserved_fields'] = {}
+    if "concept_data" not in concept:
+        concept["concept_data"] = {}
+    if "preserved_fields" not in concept["concept_data"]:
+        concept["concept_data"]["preserved_fields"] = {}
 
-    concept['concept_data']['preserved_fields']['description'] = description
+    concept["concept_data"]["preserved_fields"]["description"] = description
 
 
 def set_concept_notes(concept: Dict[str, Any], notes: str) -> None:
@@ -2994,19 +3404,20 @@ def set_concept_notes(concept: Dict[str, Any], notes: str) -> None:
     if not concept or not isinstance(concept, dict):
         return
 
-    if 'concept_data' not in concept:
-        concept['concept_data'] = {}
-    if 'preserved_fields' not in concept['concept_data']:
-        concept['concept_data']['preserved_fields'] = {}
+    if "concept_data" not in concept:
+        concept["concept_data"] = {}
+    if "preserved_fields" not in concept["concept_data"]:
+        concept["concept_data"]["preserved_fields"] = {}
 
-    concept['concept_data']['preserved_fields']['notes'] = notes
+    concept["concept_data"]["preserved_fields"]["notes"] = notes
+
 
 def create_vontology_concept(
     parent_id: str,
     new_concept_name: str,
     create_as_instance: bool = False,
     notes: Optional[str] = None,
-    description: Optional[str] = None
+    description: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Creates a new concept in the Vontology.
@@ -3032,26 +3443,23 @@ def create_vontology_concept(
         # Validate concept name constraints upfront
         is_valid, error_msg = validate_concept_name_for_id(new_concept_name)
         if not is_valid:
-            return {
-                "success": False,
-                "message": error_msg,
-                "concept": None
-            }
+            return {"success": False, "message": error_msg, "concept": None}
 
         # Generate a base slug from the provided name (very lightweight normalisation)
         # Collapse space sequences to single underscores (defensive; spaces are rejected by validator)
-        base_slug = re.sub(r'\s+', '_', new_concept_name).lower().strip()
+        base_slug = re.sub(r"\s+", "_", new_concept_name).lower().strip()
         if not base_slug:
             return {
                 "success": False,
                 "message": "New concept name is empty after normalisation.",
-                "concept": None
+                "concept": None,
             }
 
         # If creating an INSTANCE we allow duplicate display names by disambiguating the concept_id
         # (Users commonly create multiple instances sharing a natural language name.)
         # For TYPES we retain strict uniqueness to avoid hierarchy ambiguity.
         from ..db.repositories.concepts_repository import ConceptsRepository
+
         candidate_concept_id = f"#V#{base_slug}"
         if create_as_instance:
             # Preflight existence check and append incremental suffix until free
@@ -3063,7 +3471,7 @@ def create_vontology_concept(
                     return {
                         "success": False,
                         "message": "Unable to allocate unique concept_id after 49 retries.",
-                        "concept": None
+                        "concept": None,
                     }
         else:
             # For type creation, fail fast if the concept_id already exists
@@ -3071,7 +3479,7 @@ def create_vontology_concept(
                 return {
                     "success": False,
                     "message": f"Type with id '{candidate_concept_id}' already exists.",
-                    "concept": None
+                    "concept": None,
                 }
 
         parent_concept_ids = [parent_id] if parent_id else []
@@ -3082,26 +3490,26 @@ def create_vontology_concept(
             parent_concept_ids=parent_concept_ids,
             create_as_instance=create_as_instance,
             description=description,
-            notes=notes
+            notes=notes,
         )
 
         if created_concept:
             return {
                 "success": True,
                 "message": f"Successfully created concept '{new_concept_name}'",
-                "concept": created_concept
+                "concept": created_concept,
             }
         return {
             "success": False,
             "message": f"Failed to create concept '{new_concept_name}'",
-            "concept": None
+            "concept": None,
         }
     except Exception as e:  # pragma: no cover - defensive catch
         logger.error(f"Error creating vontology concept '{new_concept_name}': {e}")
         return {
             "success": False,
             "message": f"Error creating concept: {str(e)}",
-            "concept": None
+            "concept": None,
         }
 
 
@@ -3138,16 +3546,14 @@ def ensure_thing_exists_and_link_orphans() -> Dict[str, Any]:
                 create_as_instance=False,  # It's a type
                 description="Thing is the root concept in an ontology, encompassing all entities, whether physical or abstract, real or conceptual. It serves as the broadest possible category, providing a common ancestor for every concept in the ontology.",
                 notes="This is the universal root following OWL (Web Ontology Language) conventions. All concepts without explicit parent relationships are children of Thing. This prevents orphaned concepts in the hierarchy.",
-                attributes={
-                    "domain": "Ontology",
-                    "role": "root",
-                    "standard": "OWL"
-                },
+                attributes={"domain": "Ontology", "role": "root", "standard": "OWL"},
                 system_tags=["root", "ontology", "foundational", "owl"],
-                user_tags=[]
+                user_tags=[],
             )
             thing_created = True
-            logger.info(f"[ensure_thing_exists] Created Thing with rich metadata: {thing_concept.get('concept_id')}")
+            logger.info(
+                f"[ensure_thing_exists] Created Thing with rich metadata: {thing_concept.get('concept_id')}"
+            )
         except Exception as e:
             logger.error(f"[ensure_thing_exists] Failed to create Thing: {e}")
             return {
@@ -3155,36 +3561,46 @@ def ensure_thing_exists_and_link_orphans() -> Dict[str, Any]:
                 "thing_concept_id": None,
                 "orphans_linked": 0,
                 "orphan_ids": [],
-                "error": str(e)
+                "error": str(e),
             }
     else:
         logger.info("[ensure_thing_exists] Thing already exists")
 
     # Find orphan concepts (types with empty or missing is_a_type_of)
-    orphan_concepts = list(ConceptsRepository.find({
-        "$and": [
-            # Has no instance-of (it's not an instance)
-            {"$or": [
-                {"relationships.is_an_instance_of": {"$exists": False}},
-                {"relationships.is_an_instance_of": []},
-                {"relationships.is_an_instance_of": ""}
-            ]},
-            # Has empty or missing is_a_type_of (it's an orphan type)
-            {"$or": [
-                {"relationships.is_a_type_of": {"$exists": False}},
-                {"relationships.is_a_type_of": []},
-                {"relationships.is_a_type_of": ""}
-            ]},
-            # Not Thing itself
-            {"concept_id": {"$ne": THING_PRIMARY_ID}}
-        ]
-    }))
+    orphan_concepts = list(
+        ConceptsRepository.find(
+            {
+                "$and": [
+                    # Has no instance-of (it's not an instance)
+                    {
+                        "$or": [
+                            {"relationships.is_an_instance_of": {"$exists": False}},
+                            {"relationships.is_an_instance_of": []},
+                            {"relationships.is_an_instance_of": ""},
+                        ]
+                    },
+                    # Has empty or missing is_a_type_of (it's an orphan type)
+                    {
+                        "$or": [
+                            {"relationships.is_a_type_of": {"$exists": False}},
+                            {"relationships.is_a_type_of": []},
+                            {"relationships.is_a_type_of": ""},
+                        ]
+                    },
+                    # Not Thing itself
+                    {"concept_id": {"$ne": THING_PRIMARY_ID}},
+                ]
+            }
+        )
+    )
 
     orphans_linked = 0
     orphan_ids = []
 
     if orphan_concepts:
-        logger.info(f"[ensure_thing_exists] Found {len(orphan_concepts)} orphan concepts, linking to Thing")
+        logger.info(
+            f"[ensure_thing_exists] Found {len(orphan_concepts)} orphan concepts, linking to Thing"
+        )
 
         for orphan in orphan_concepts:
             try:
@@ -3195,13 +3611,13 @@ def ensure_thing_exists_and_link_orphans() -> Dict[str, Any]:
                 # Update orphan to have Thing as parent
                 ConceptsRepository.update_one(
                     {"concept_id": orphan_id},
-                    {"$set": {"relationships.is_a_type_of": [THING_PRIMARY_ID]}}
+                    {"$set": {"relationships.is_a_type_of": [THING_PRIMARY_ID]}},
                 )
 
                 # Update Thing to have this orphan as child (reciprocal relationship)
                 ConceptsRepository.update_one(
                     {"concept_id": THING_PRIMARY_ID},
-                    {"$addToSet": {"relationships.has_subtype": orphan_id}}
+                    {"$addToSet": {"relationships.has_subtype": orphan_id}},
                 )
 
                 orphans_linked += 1
@@ -3209,20 +3625,26 @@ def ensure_thing_exists_and_link_orphans() -> Dict[str, Any]:
                 logger.info(f"[ensure_thing_exists] Linked orphan {orphan_id} to Thing")
 
             except Exception as e:
-                logger.warning(f"[ensure_thing_exists] Failed to link orphan {orphan_id}: {e}")
+                logger.warning(
+                    f"[ensure_thing_exists] Failed to link orphan {orphan_id}: {e}"
+                )
 
-    logger.info(f"[ensure_thing_exists] Complete - created={thing_created}, orphans_linked={orphans_linked}")
+    logger.info(
+        f"[ensure_thing_exists] Complete - created={thing_created}, orphans_linked={orphans_linked}"
+    )
 
     return {
         "thing_created": thing_created,
         "thing_concept_id": THING_PRIMARY_ID,
         "orphans_linked": orphans_linked,
-        "orphan_ids": orphan_ids
+        "orphan_ids": orphan_ids,
     }
 
 
 # Note: add_upward_closure_nodes defined later (duplicate removed - keeping complete implementation at line 2949)
-def _invalidate_vontology_caches_duplicate_removed(affected_concepts: list, correlation_id: str) -> None:
+def _invalidate_vontology_caches_duplicate_removed(
+    affected_concepts: list, correlation_id: str
+) -> None:
     """
     Invalidate in-memory vontology caches for affected concepts.
 
@@ -3234,7 +3656,9 @@ def _invalidate_vontology_caches_duplicate_removed(affected_concepts: list, corr
         correlation_id: Unique identifier for the operation (for logging)
     """
     try:
-        logger.info(f"[cache_invalidation] Invalidating caches for {len(affected_concepts)} concepts (correlation: {correlation_id})")
+        logger.info(
+            f"[cache_invalidation] Invalidating caches for {len(affected_concepts)} concepts (correlation: {correlation_id})"
+        )
 
         # Note: The actual cache variables (_TREE_CACHE, _INSTANCE_COUNTS_CACHE, _SALIENT_CACHE)
         # are defined in vontology_routes.py, not here. In a full implementation, this function
@@ -3245,10 +3669,14 @@ def _invalidate_vontology_caches_duplicate_removed(affected_concepts: list, corr
             logger.debug(f"[cache_invalidation] Affected concept: {concept_id}")
 
     except Exception as e:
-        logger.error(f"Error in invalidate_vontology_caches (correlation: {correlation_id}): {e}")
+        logger.error(
+            f"Error in invalidate_vontology_caches (correlation: {correlation_id}): {e}"
+        )
 
 
-def _ensure_import_description_relation(concept_id: str, description_text: Optional[str]) -> None:
+def _ensure_import_description_relation(
+    concept_id: str, description_text: Optional[str]
+) -> None:
     """Create a hasDescription text relation when importing concept nodes."""
     if not concept_id or not isinstance(concept_id, str):
         return
@@ -3262,7 +3690,9 @@ def _ensure_import_description_relation(concept_id: str, description_text: Optio
     try:
         from ..services import text_value_service as text_service
 
-        existing = text_service.get_texts_for_concept(concept_id, predicate="hasDescription", limit=10)
+        existing = text_service.get_texts_for_concept(
+            concept_id, predicate="hasDescription", limit=10
+        )
         for relation in existing:
             text = relation.get("text")
             if isinstance(text, str) and " ".join(text.split()).strip() == normalised:
@@ -3318,15 +3748,17 @@ def import_ontology_nodes(nodes: list, progress_callback=None) -> Dict[str, Any]
                     "original_cycle_count": 0,
                     "removed_edge_count": 0,
                     "removed_edges": [],
-                    "unresolved_cycle_count": 0
-                }
+                    "unresolved_cycle_count": 0,
+                },
             }
 
         logger.info(f"[import_ontology_nodes] Starting import of {len(nodes)} nodes")
 
         # Progress reporting
         if progress_callback:
-            progress_callback({"stage": "starting", "processed": 0, "total": len(nodes)})
+            progress_callback(
+                {"stage": "starting", "processed": 0, "total": len(nodes)}
+            )
 
         # Convert OpenCyc format if needed
         converted_from_opencyc = False
@@ -3340,12 +3772,18 @@ def import_ontology_nodes(nodes: list, progress_callback=None) -> Dict[str, Any]
                 processed_nodes.append(node)
 
             if progress_callback and i % 10 == 0:
-                progress_callback({"stage": "converting", "processed": i, "total": len(nodes)})
+                progress_callback(
+                    {"stage": "converting", "processed": i, "total": len(nodes)}
+                )
 
         # Detect cycles before optionally breaking them (env strict mode may bail early)
         cycle_detection = detect_circular_references_in_import(processed_nodes)
 
-        strict_env = os.getenv("VON_IMPORT_STRICT_CYCLES", "").lower() in {"1", "true", "yes"}
+        strict_env = os.getenv("VON_IMPORT_STRICT_CYCLES", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
         if cycle_detection.get("has_cycles") and strict_env:
             logger.warning(
                 "[import_ontology_nodes] Strict cycle mode enabled; aborting import due to detected cycles"  # noqa: E501
@@ -3370,7 +3808,12 @@ def import_ontology_nodes(nodes: list, progress_callback=None) -> Dict[str, Any]
         cycle_breaking = break_cycles_in_import_nodes(processed_nodes)
 
         if progress_callback:
-            progress_callback({"stage": "cycle_detection", "cycles_found": cycle_breaking["original_cycle_count"]})
+            progress_callback(
+                {
+                    "stage": "cycle_detection",
+                    "cycles_found": cycle_breaking["original_cycle_count"],
+                }
+            )
 
         # Process nodes for import
         imported_count = 0
@@ -3396,8 +3839,7 @@ def import_ontology_nodes(nodes: list, progress_callback=None) -> Dict[str, Any]
                 if existing:
                     # Update existing concept
                     ConceptsRepository.update_one(
-                        {"concept_id": concept_id},
-                        {"$set": unified_node}
+                        {"concept_id": concept_id}, {"$set": unified_node}
                     )
                     updated_count += 1
                 else:
@@ -3416,24 +3858,28 @@ def import_ontology_nodes(nodes: list, progress_callback=None) -> Dict[str, Any]
                     # Register vonID
                     upsert_text_for_concept(
                         subject_concept_id=concept_id,
-                        predicate='hasName',
+                        predicate="hasName",
                         text=concept_id,
-                        lang='en-NZ',
-                        context={'name_type': 'CODE'}
+                        lang="en-NZ",
+                        context={"name_type": "CODE"},
                     )
 
                     # Register GUID
-                    guid = unified_node.get('_id') or (existing.get('_id') if existing else None)
+                    guid = unified_node.get("_id") or (
+                        existing.get("_id") if existing else None
+                    )
                     if guid:
                         upsert_text_for_concept(
                             subject_concept_id=concept_id,
-                            predicate='hasName',
+                            predicate="hasName",
                             text=str(guid),
-                            lang='en-NZ',
-                            context={'name_type': 'CODE'}
+                            lang="en-NZ",
+                            context={"name_type": "CODE"},
                         )
                 except Exception as e:
-                    logger.warning(f"Failed to register auto-names for imported concept {concept_id}: {e}")
+                    logger.warning(
+                        f"Failed to register auto-names for imported concept {concept_id}: {e}"
+                    )
 
                 reconciliation_plan.append(
                     (
@@ -3444,29 +3890,37 @@ def import_ontology_nodes(nodes: list, progress_callback=None) -> Dict[str, Any]
                 )
 
                 if progress_callback and i % 5 == 0:
-                    progress_callback({
-                        "stage": "importing",
-                        "processed": i,
-                        "total": len(processed_nodes),
-                        "imported": imported_count,
-                        "updated": updated_count
-                    })
+                    progress_callback(
+                        {
+                            "stage": "importing",
+                            "processed": i,
+                            "total": len(processed_nodes),
+                            "imported": imported_count,
+                            "updated": updated_count,
+                        }
+                    )
 
             except Exception as e:
-                logger.warning(f"Failed to import node {node.get('concept_id', 'unknown')}: {e}")
+                logger.warning(
+                    f"Failed to import node {node.get('concept_id', 'unknown')}: {e}"
+                )
                 skipped_count += 1
 
         if progress_callback:
-            progress_callback({
-                "stage": "completed",
-                "processed": len(processed_nodes),
-                "total": len(processed_nodes),
-                "imported": imported_count,
-                "updated": updated_count,
-                "skipped": skipped_count
-            })
+            progress_callback(
+                {
+                    "stage": "completed",
+                    "processed": len(processed_nodes),
+                    "total": len(processed_nodes),
+                    "imported": imported_count,
+                    "updated": updated_count,
+                    "skipped": skipped_count,
+                }
+            )
 
-        logger.info(f"[import_ontology_nodes] Completed: imported={imported_count}, updated={updated_count}, skipped={skipped_count}")
+        logger.info(
+            f"[import_ontology_nodes] Completed: imported={imported_count}, updated={updated_count}, skipped={skipped_count}"
+        )
 
         # Second pass to enforce relationship invariants once all nodes exist
         for concept_id, relationships, previous_relationships in reconciliation_plan:
@@ -3489,7 +3943,7 @@ def import_ontology_nodes(nodes: list, progress_callback=None) -> Dict[str, Any]
             "updated_count": updated_count,
             "skipped_count": skipped_count,
             "converted_from_opencyc": converted_from_opencyc,
-            "cycle_breaking": cycle_breaking
+            "cycle_breaking": cycle_breaking,
         }
 
     except Exception as e:
@@ -3506,9 +3960,11 @@ def import_ontology_nodes(nodes: list, progress_callback=None) -> Dict[str, Any]
                 "original_cycle_count": 0,
                 "removed_edge_count": 0,
                 "removed_edges": [],
-                "unresolved_cycle_count": 0
-            }
+                "unresolved_cycle_count": 0,
+            },
         }
+
+
 def add_upward_closure_nodes(node_path: str) -> None:
     """
     Add upward closure nodes for transitive relationships.
@@ -3525,11 +3981,14 @@ def add_upward_closure_nodes(node_path: str) -> None:
 
         # Get the Flask app context to access the repository
         from flask import current_app
-        repo = current_app.config.get('concepts_repo') or ConceptsRepository
+
+        repo = current_app.config.get("concepts_repo") or ConceptsRepository
 
         # Recompute inherited salient predicates for the subtree starting from node_path
         # This will update the inherited_salient_binary_predicates field for the node and its descendants
-        summary = _recompute_inherited_for_subtree(repo, node_path, limit=None, dry_run=False)
+        summary = _recompute_inherited_for_subtree(
+            repo, node_path, limit=None, dry_run=False
+        )
 
         logger.info(f"Recomputed upward closure for {node_path}: {summary}")
 
@@ -3538,7 +3997,9 @@ def add_upward_closure_nodes(node_path: str) -> None:
         raise
 
 
-def invalidate_vontology_caches(affected_concepts: list[str], correlation_id: str) -> None:
+def invalidate_vontology_caches(
+    affected_concepts: list[str], correlation_id: str
+) -> None:
     """
     Invalidate in-memory caches that may be affected by changes to the given concepts.
 
@@ -3554,11 +4015,15 @@ def invalidate_vontology_caches(affected_concepts: list[str], correlation_id: st
         # We need to access the global cache variables defined there
         import sys
         import os
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'server', 'routes'))
+
+        sys.path.insert(
+            0, os.path.join(os.path.dirname(__file__), "..", "server", "routes")
+        )
 
         # Clear tree cache
         try:
             from ..server.routes.vontology_routes import _TREE_CACHE
+
             _TREE_CACHE.clear()
             logger.info(f"Cleared tree cache for correlation_id {correlation_id}")
         except (ImportError, NameError):
@@ -3567,20 +4032,26 @@ def invalidate_vontology_caches(affected_concepts: list[str], correlation_id: st
         # Clear instance counts cache
         try:
             from ..server.routes.vontology_routes import _INSTANCE_COUNTS_CACHE
+
             _INSTANCE_COUNTS_CACHE.clear()
-            logger.info(f"Cleared instance counts cache for correlation_id {correlation_id}")
+            logger.info(
+                f"Cleared instance counts cache for correlation_id {correlation_id}"
+            )
         except (ImportError, NameError):
             logger.debug("Instance counts cache not available for clearing")
 
         # Clear salient cache
         try:
             from ..server.routes.vontology_routes import _SALIENT_CACHE
+
             _SALIENT_CACHE.clear()
             logger.info(f"Cleared salient cache for correlation_id {correlation_id}")
         except (ImportError, NameError):
             logger.debug("Salient cache not available for clearing")
 
-        logger.info(f"Invalidated vontology caches for {len(affected_concepts)} affected concepts, correlation_id: {correlation_id}")
+        logger.info(
+            f"Invalidated vontology caches for {len(affected_concepts)} affected concepts, correlation_id: {correlation_id}"
+        )
 
     except Exception as e:
         logger.error(f"Error invalidating vontology caches: {e}")

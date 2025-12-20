@@ -6,9 +6,12 @@ from urllib.parse import urlparse
 
 from google_auth_oauthlib.flow import Flow
 from google.oauth2 import id_token
+
+
 @runtime_checkable
 class CredentialsProtocol(Protocol):  # Minimal shape we rely on for static checking
     id_token: str | None  # attribute provided when openid scope included
+
 
 try:  # pragma: no cover - defensive import
     from google.oauth2.credentials import Credentials as OAuthCredentials  # type: ignore
@@ -19,6 +22,7 @@ import requests
 
 # This is required for OpenID Connect and to get the user's profile info.
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
 
 class GoogleAuthService:
     def __init__(self):
@@ -39,19 +43,32 @@ class GoogleAuthService:
         parsed_redirect = urlparse(self.redirect_uri)
         # Derive canonical host (scheme://host:port) from configured redirect for validation
         if parsed_redirect.scheme and parsed_redirect.netloc:
-            self.canonical_origin = f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
+            self.canonical_origin = (
+                f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
+            )
         else:
             self.canonical_origin = None
         # Persist base path/query so dynamic hosts can reuse the callback path safely.
         self._redirect_path = parsed_redirect.path or "/von/api/auth/google/callback"
-        self._redirect_query = f"?{parsed_redirect.query}" if parsed_redirect.query else ""
+        self._redirect_query = (
+            f"?{parsed_redirect.query}" if parsed_redirect.query else ""
+        )
 
         # Allow runtime redirect adjustments (ngrok) when explicitly enabled via env var.
         flag_value = os.getenv("GOOGLE_OAUTH_ENABLE_DYNAMIC_REDIRECTS", "")
-        self.dynamic_redirects_enabled = flag_value.strip().lower() in {"1", "true", "yes", "on"}
+        self.dynamic_redirects_enabled = flag_value.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         raw_suffixes = os.getenv("GOOGLE_OAUTH_DYNAMIC_REDIRECT_SUFFIXES", "")
         if raw_suffixes.strip():
-            suffix_candidates = [suffix.strip().lower() for suffix in raw_suffixes.split(",") if suffix.strip()]
+            suffix_candidates = [
+                suffix.strip().lower()
+                for suffix in raw_suffixes.split(",")
+                if suffix.strip()
+            ]
         else:
             suffix_candidates = [".ngrok-free.app", ".ngrok.app", ".ngrok.io"]
         self.allowed_dynamic_suffixes = tuple(suffix_candidates)
@@ -71,9 +88,9 @@ class GoogleAuthService:
             scopes=[
                 "https://www.googleapis.com/auth/userinfo.profile",
                 "https://www.googleapis.com/auth/userinfo.email",
-                "openid"
+                "openid",
             ],
-            redirect_uri=self.redirect_uri
+            redirect_uri=self.redirect_uri,
         )
 
     def update_redirect(self, new_redirect_uri: str):
@@ -98,14 +115,18 @@ class GoogleAuthService:
         # Update canonical origin as well
         parsed_redirect = urlparse(self.redirect_uri)
         if parsed_redirect.scheme and parsed_redirect.netloc:
-            self.canonical_origin = f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
+            self.canonical_origin = (
+                f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
+            )
 
     def allows_dynamic_host(self, host: str) -> bool:
         """Return True when dynamic redirects are enabled and the host is trusted."""
         if not self.dynamic_redirects_enabled or not host:
             return False
         host_only = host.split(":", 1)[0].lower()
-        return any(host_only.endswith(suffix) for suffix in self.allowed_dynamic_suffixes)
+        return any(
+            host_only.endswith(suffix) for suffix in self.allowed_dynamic_suffixes
+        )
 
     def build_redirect_for_host(self, scheme: str, host: str) -> str:
         """Construct a redirect URI for the provided scheme/host using the default path."""
@@ -115,8 +136,7 @@ class GoogleAuthService:
     def get_authorization_url(self):
         """Generates the Google authorization URL."""
         authorization_url, state = self.flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true"
+            access_type="offline", include_granted_scopes="true"
         )
         return authorization_url, state
 
@@ -133,7 +153,9 @@ class GoogleAuthService:
         # Safely obtain id_token attribute (pyright previously flagged direct access).
         raw_id_token = getattr(credentials, "id_token", None)
         if not isinstance(raw_id_token, str) or not raw_id_token:
-            raise RuntimeError("Missing id_token on OAuth credentials after token exchange")
+            raise RuntimeError(
+                "Missing id_token on OAuth credentials after token exchange"
+            )
         id_info = id_token.verify_oauth2_token(
             id_token=raw_id_token,
             request=Request(),

@@ -1,4 +1,3 @@
-
 import sys
 import os
 import logging
@@ -14,6 +13,7 @@ from backend.models.chat_history_model import chat_history_collection_name
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 def index_all_chat_history():
     logger.info("Starting chat history indexing...")
@@ -57,6 +57,7 @@ def index_all_chat_history():
 
                 # Simple stable ID generation:
                 import hashlib
+
                 msg_timestamp = msg.get("timestamp")
                 if msg_timestamp:
                     if isinstance(msg_timestamp, datetime):
@@ -67,7 +68,7 @@ def index_all_chat_history():
                     ts_str = "no_timestamp"
 
                 unique_string = f"{user_id}_{session_id}_{ts_str}_{content[:100]}"
-                doc_id = hashlib.md5(unique_string.encode('utf-8')).hexdigest()
+                doc_id = hashlib.md5(unique_string.encode("utf-8")).hexdigest()
 
                 doc = {
                     "id": doc_id,
@@ -77,8 +78,8 @@ def index_all_chat_history():
                         "session_id": session_id,
                         "role": msg.get("role", "unknown"),
                         "timestamp": ts_str,
-                        "type": "chat_message"
-                    }
+                        "type": "chat_message",
+                    },
                 }
                 batch.append(doc)
                 total_messages += 1
@@ -94,7 +95,10 @@ def index_all_chat_history():
         logger.info(f"Indexing final batch of {len(batch)} messages...")
         rag.upsert_documents(batch, namespace="chat_history")
 
-    logger.info(f"Finished indexing. Processed {total_docs} sessions and {total_messages} messages.")
+    logger.info(
+        f"Finished indexing. Processed {total_docs} sessions and {total_messages} messages."
+    )
+
 
 if __name__ == "__main__":
     index_all_chat_history()

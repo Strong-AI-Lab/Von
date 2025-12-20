@@ -8,6 +8,7 @@ Flask application without modifying the test code.
 If a richer initialization is required later (e.g. real model listing/generation),
 those functions can be updated or injected via a different entrypoint.
 """
+
 from __future__ import annotations
 
 from typing import List, Dict, Optional
@@ -18,19 +19,26 @@ from .routes.vontology_routes import list_salient_predicates_for_instance  # typ
 
 # Lightweight dummy dependency functions
 
+
 def _list_models() -> List[str]:
     return ["dummy-model"]
 
 
-def _generate(prompt: str, context: Optional[List[Dict[str, str]]], model: Optional[str]) -> str:
+def _generate(
+    prompt: str, context: Optional[List[Dict[str, str]]], model: Optional[str]
+) -> str:
     return f"[dummy-response model={model or 'dummy-model'} prompt={prompt[:40]}]"
+
 
 # Expose the app object expected by legacy imports
 app = create_flask_app(_list_models, _generate)
 
 # Legacy alias: earlier tests call /api/vontology/predicates/salient but blueprint now mounted at /vontology/api/vontology
 # Provide a direct route bridging to the blueprint handler if not already registered.
-if '/api/vontology/predicates/salient' not in [r.rule for r in app.url_map.iter_rules()]:
-    @app.route('/api/vontology/predicates/salient', methods=['GET'])
+if "/api/vontology/predicates/salient" not in [
+    r.rule for r in app.url_map.iter_rules()
+]:
+
+    @app.route("/api/vontology/predicates/salient", methods=["GET"])
     def _legacy_salient_alias():  # pragma: no cover - simple delegation
         return list_salient_predicates_for_instance()

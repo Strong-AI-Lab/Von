@@ -4,7 +4,9 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.backend.integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
+from src.backend.integrations.internal_mcp.orchestrator import (
+    InternalMCPChatOrchestrator,
+)
 
 
 class DummyGateway:
@@ -40,12 +42,15 @@ class DummyLLM:
             raise RuntimeError("No responses left in DummyLLM")
         return self.responses.pop(0)
 
+
 def test_injects_default_gmail_profile_into_payload():
     gateway = DummyGateway()
-    llm = DummyLLM([
-        '{"action": "call_tool", "tool": "gmail_list_messages", "payload": {}}',
-        "Final response",
-    ])
+    llm = DummyLLM(
+        [
+            '{"action": "call_tool", "tool": "gmail_list_messages", "payload": {}}',
+            "Final response",
+        ]
+    )
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,  # type: ignore[arg-type]
         max_tool_invocations=1,
@@ -69,10 +74,12 @@ def test_injects_default_gmail_profile_into_payload():
 
 def test_gmail_profile_prefers_request_over_default():
     gateway = DummyGateway()
-    llm = DummyLLM([
-        '{"action": "call_tool", "tool": "gmail_list_messages", "payload": {}}',
-        "All good",
-    ])
+    llm = DummyLLM(
+        [
+            '{"action": "call_tool", "tool": "gmail_list_messages", "payload": {}}',
+            "All good",
+        ]
+    )
     orchestrator = InternalMCPChatOrchestrator(
         gateway=gateway,  # type: ignore[arg-type]
         max_tool_invocations=1,

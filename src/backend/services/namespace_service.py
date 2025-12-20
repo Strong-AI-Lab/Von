@@ -12,7 +12,9 @@ import re
 from typing import Dict, Optional, Tuple
 
 
-def derive_namespace(user_id: str, org_id: Optional[str] = None, role: Optional[str] = None) -> str:
+def derive_namespace(
+    user_id: str, org_id: Optional[str] = None, role: Optional[str] = None
+) -> str:
     """
     Derive a composite namespace from user and org identifiers.
 
@@ -77,7 +79,9 @@ def parse_namespace(namespace: str) -> Dict[str, Optional[str]]:
     if "@" in content:
         parts = content.split("@")
         if len(parts) != 2:
-            raise ValueError(f"Invalid namespace format (multiple @ symbols): {namespace}")
+            raise ValueError(
+                f"Invalid namespace format (multiple @ symbols): {namespace}"
+            )
 
         user_id, org_id = parts
         if not user_id or not org_id:

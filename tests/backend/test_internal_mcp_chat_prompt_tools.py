@@ -46,7 +46,9 @@ def test_chat_get_prompt_context_returns_prompt_metadata(monkeypatch):
         lambda _namespace: "Alpha\n\nBeta",
     )
 
-    result = _chat_get_prompt_context(namespace="#V#michael_witbrock", include_content=False)
+    result = _chat_get_prompt_context(
+        namespace="#V#michael_witbrock", include_content=False
+    )
     assert result.get("success") is True
     assert result["namespace"] == "#V#michael_witbrock"
     assert result["prompt_concept_ids"] == ["#V#prompt_a", "#V#prompt_b"]
@@ -54,7 +56,10 @@ def test_chat_get_prompt_context_returns_prompt_metadata(monkeypatch):
     assert result["prompt_text"] == "Alpha\n\nBeta"
 
     # No content when include_content=False
-    assert result["prompt_concepts"] == [{"concept_id": "#V#prompt_a"}, {"concept_id": "#V#prompt_b"}]
+    assert result["prompt_concepts"] == [
+        {"concept_id": "#V#prompt_a"},
+        {"concept_id": "#V#prompt_b"},
+    ]
 
 
 def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
@@ -69,9 +74,13 @@ def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
         lambda _namespace: "Alpha",
     )
 
-    result = _chat_get_prompt_context(namespace="#V#michael_witbrock", include_content=True)
+    result = _chat_get_prompt_context(
+        namespace="#V#michael_witbrock", include_content=True
+    )
     assert result.get("success") is True
-    assert result["prompt_concepts"] == [{"concept_id": "#V#prompt_a", "content": "Alpha"}]
+    assert result["prompt_concepts"] == [
+        {"concept_id": "#V#prompt_a", "content": "Alpha"}
+    ]
 
 
 def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
@@ -96,7 +105,9 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
         lambda **_kwargs: {"provider": "resolved", "model": "resolved-model"},
     )
 
-    result = _chat_introspect(namespace="#V#michael_witbrock", organisation_concept_id="#V#uoa")
+    result = _chat_introspect(
+        namespace="#V#michael_witbrock", organisation_concept_id="#V#uoa"
+    )
     assert result.get("success") is True
     assert result["active_model_name"] == "test-model"
     assert result["organisation_concept_id"] == "#V#uoa"

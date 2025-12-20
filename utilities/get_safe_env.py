@@ -72,7 +72,9 @@ def _parse_env_file(env_path: Path) -> Dict[str, str]:
         value = value.strip()
 
         # Strip surrounding quotes
-        if len(value) >= 2 and ((value[0] == value[-1] == '"') or (value[0] == value[-1] == "'")):
+        if len(value) >= 2 and (
+            (value[0] == value[-1] == '"') or (value[0] == value[-1] == "'")
+        ):
             value = value[1:-1]
 
         values[key] = value
@@ -109,7 +111,9 @@ def get_safe_env_value(env_path: Path, key: str) -> Optional[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Safely print allowlisted .env values (redacted).")
+    parser = argparse.ArgumentParser(
+        description="Safely print allowlisted .env values (redacted)."
+    )
     parser.add_argument("key", help="Environment variable key to display")
     parser.add_argument(
         "--env-path",

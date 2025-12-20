@@ -8,6 +8,27 @@ from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema
 
 
+def _run_async_compat(async_fn):
+    """Run an async function from sync code.
+
+    If we're already inside a running event loop (e.g. when called via the
+    internal chat orchestrator), running `asyncio.run()` would raise.
+    In that case, we execute the coroutine in a fresh event loop in a worker
+    thread and block until completion.
+    """
+
+    import asyncio
+    import concurrent.futures
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_fn())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(async_fn())).result()
+
+
 def _get_vontology_tree(**kwargs):
     from ...vontology.utils_vontology import get_vontology_tree
 
@@ -41,7 +62,9 @@ def _get_concept_by_concept_id(**kwargs):
     offset = kwargs.get("offset")
     include_concept_preview = kwargs.get("include_concept_preview", True)
 
-    if any([include_relations_arg1, include_relations_any_arg, include_text_relations_arg1]):
+    if any(
+        [include_relations_arg1, include_relations_any_arg, include_text_relations_arg1]
+    ):
         relations_payload = build_concept_relations_payload(
             concept,
             include_relations_arg1=include_relations_arg1,
@@ -61,7 +84,7 @@ def _get_context(**kwargs):
     from ...services.settings_service import (
         get_active_llm_setting,
         get_preferred_language,
-        get_setting
+        get_setting,
     )
     from datetime import datetime, timezone
 
@@ -71,12 +94,18 @@ def _get_context(**kwargs):
     context = {
         "user": None,
         "organisation": None,
-        "llm_model": model_setting.get("model") if isinstance(model_setting, dict) else model_setting,
-        "llm_provider": model_setting.get("provider") if isinstance(model_setting, dict) else None,
+        "llm_model": (
+            model_setting.get("model")
+            if isinstance(model_setting, dict)
+            else model_setting
+        ),
+        "llm_provider": (
+            model_setting.get("provider") if isinstance(model_setting, dict) else None
+        ),
         "language": get_preferred_language(),
         "fetch_counts_on_load": get_setting("fetch_counts_on_load"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "note": "User and organisation context managed client-side (localStorage) per JVNAUTOSCI-628"
+        "note": "User and organisation context managed client-side (localStorage) per JVNAUTOSCI-628",
     }
 
     # Try to get user info if available (deprecated, but kept for backward compatibility)
@@ -109,7 +138,7 @@ def _get_paper_metadata(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_metadata())
+    return _run_async_compat(_async_metadata)
 
 
 def _create_concepts(**kwargs):
@@ -133,25 +162,29 @@ def _create_concepts(**kwargs):
         kind = concept_data.get("kind", "type")  # Default to type
 
         if not name:
-            results.append({"error": "Concept missing required 'name' field", "data": concept_data})
+            results.append(
+                {"error": "Concept missing required 'name' field", "data": concept_data}
+            )
             continue
 
         # Map kind to create_as_instance parameter
-        create_as_instance = (kind == "instance")
+        create_as_instance = kind == "instance"
 
         result = create_vontology_concept(
             parent_id=parent_id,
             new_concept_name=name,
             create_as_instance=create_as_instance,
             description=concept_data.get("description"),
-            notes=concept_data.get("notes")
+            notes=concept_data.get("notes"),
         )
         results.append(result)
 
     return {
         "results": results,
         "total": len(concepts),
-        "successful": sum(1 for r in results if isinstance(r, dict) and r.get("success"))
+        "successful": sum(
+            1 for r in results if isinstance(r, dict) and r.get("success")
+        ),
     }
 
 
@@ -192,12 +225,12 @@ def _add_names_to_concept(**kwargs):
         # Handle both string and dict formats
         if isinstance(name_obj, str):
             name_text = name_obj
-            language = 'en-NZ'
-            name_type = 'NL'
+            language = "en-NZ"
+            name_type = "NL"
         elif isinstance(name_obj, dict):
-            name_text = name_obj.get('name')
-            language = name_obj.get('language', 'en-NZ')
-            name_type = name_obj.get('name_type', 'NL')
+            name_text = name_obj.get("name")
+            language = name_obj.get("language", "en-NZ")
+            name_type = name_obj.get("name_type", "NL")
         else:
             errors.append({"index": idx, "error": "Invalid name format"})
             continue
@@ -212,19 +245,23 @@ def _add_names_to_concept(**kwargs):
                 predicate="hasName",
                 text=name_text.strip(),
                 lang=language,
-                context={"name_type": name_type}
+                context={"name_type": name_type},
             )
             if result:
-                results.append({
-                    "index": idx,
-                    "name": name_text.strip(),
-                    "language": language,
-                    "name_type": name_type,
-                    "text_value_id": str(result["text_value_id"]),
-                    "relation_id": str(result["relation_id"])
-                })
+                results.append(
+                    {
+                        "index": idx,
+                        "name": name_text.strip(),
+                        "language": language,
+                        "name_type": name_type,
+                        "text_value_id": str(result["text_value_id"]),
+                        "relation_id": str(result["relation_id"]),
+                    }
+                )
             else:
-                errors.append({"index": idx, "name": name_text, "error": "Failed to add"})
+                errors.append(
+                    {"index": idx, "name": name_text, "error": "Failed to add"}
+                )
         except Exception as e:
             errors.append({"index": idx, "name": name_text, "error": str(e)})
 
@@ -234,7 +271,7 @@ def _add_names_to_concept(**kwargs):
         "added_count": len(results),
         "error_count": len(errors),
         "results": results,
-        "errors": errors if errors else []
+        "errors": errors if errors else [],
     }
 
 
@@ -263,17 +300,24 @@ def _add_relationship(**kwargs):
         # Check if source exists
         src = repo.find_one({"concept_id": source_id})
         if not src:
-            return {"success": False, "error": f"Source concept '{source_id}' not found"}
+            return {
+                "success": False,
+                "error": f"Source concept '{source_id}' not found",
+            }
 
         # Determine if this is a text predicate (binary_text_predicate instance)
         is_text_predicate = False
-        if predicate.startswith('#V#'):
-            pred_doc = repo.find_one({"concept_id": predicate}, {"relationships.is_an_instance_of": 1})
+        if predicate.startswith("#V#"):
+            pred_doc = repo.find_one(
+                {"concept_id": predicate}, {"relationships.is_an_instance_of": 1}
+            )
             if pred_doc:
-                instance_of = pred_doc.get('relationships', {}).get('is_an_instance_of', [])
+                instance_of = pred_doc.get("relationships", {}).get(
+                    "is_an_instance_of", []
+                )
                 if isinstance(instance_of, str):
                     instance_of = [instance_of]
-                is_text_predicate = '#V#binary_text_predicate' in instance_of
+                is_text_predicate = "#V#binary_text_predicate" in instance_of
 
         # Handle text predicates (target is text value, not concept)
         if is_text_predicate:
@@ -281,8 +325,8 @@ def _add_relationship(**kwargs):
                 subject_concept_id=source_id,
                 predicate=predicate,
                 text=target,
-                lang='en',
-                provenance={"source": "add_relationship"}
+                lang="en",
+                provenance={"source": "add_relationship"},
             )
             return {
                 "success": True,
@@ -291,7 +335,7 @@ def _add_relationship(**kwargs):
                 "predicate": predicate,
                 "target": target,
                 "text_value_id": str(result.get("text_value_id")),
-                "relation_id": str(result.get("relation_id"))
+                "relation_id": str(result.get("relation_id")),
             }
 
         # Handle concept-to-concept relationships
@@ -307,13 +351,16 @@ def _add_relationship(**kwargs):
             "type_of": "is_a_type_of",
             "typeOf": "is_a_type_of",
             "subtype": "has_subtype",
-            "instance": "has_instance"
+            "instance": "has_instance",
         }
         rel_kind = predicate_map.get(predicate, predicate)
 
         # Read current relationships
-        existing = repo.find_one({"concept_id": source_id}, {f"relationships.{rel_kind}": 1}) or {}
-        rels = (existing.get("relationships") or {})
+        existing = (
+            repo.find_one({"concept_id": source_id}, {f"relationships.{rel_kind}": 1})
+            or {}
+        )
+        rels = existing.get("relationships") or {}
         curr = rels.get(rel_kind)
 
         # Normalize to array
@@ -332,13 +379,13 @@ def _add_relationship(**kwargs):
                 "source_id": source_id,
                 "predicate": rel_kind,
                 "target": target,
-                "already_existed": True
+                "already_existed": True,
             }
 
         # Add the relationship
         update_result = repo.update_one(
             {"concept_id": source_id},
-            {"$addToSet": {f"relationships.{rel_kind}": target}}
+            {"$addToSet": {f"relationships.{rel_kind}": target}},
         )
 
         if update_result.modified_count > 0 or update_result.matched_count > 0:
@@ -347,7 +394,7 @@ def _add_relationship(**kwargs):
                 "source_id": source_id,
                 "predicate": rel_kind,
                 "target": target,
-                "added": update_result.modified_count > 0
+                "added": update_result.modified_count > 0,
             }
         else:
             return {"success": False, "error": "Failed to add relationship"}
@@ -376,7 +423,10 @@ def _remove_relationship(**kwargs):
         # Verify source concept exists
         src = repo.find_one({"concept_id": source_id})
         if not src:
-            return {"success": False, "error": f"Source concept '{source_id}' not found"}
+            return {
+                "success": False,
+                "error": f"Source concept '{source_id}' not found",
+            }
 
         # Map common predicate aliases to stored field names
         predicate_map = {
@@ -390,8 +440,11 @@ def _remove_relationship(**kwargs):
         rel_kind = predicate_map.get(predicate, predicate)
 
         # Ensure the relationship field exists (optional sanity)
-        existing = repo.find_one({"concept_id": source_id}, {f"relationships.{rel_kind}": 1}) or {}
-        rels = (existing.get("relationships") or {})
+        existing = (
+            repo.find_one({"concept_id": source_id}, {f"relationships.{rel_kind}": 1})
+            or {}
+        )
+        rels = existing.get("relationships") or {}
         curr = rels.get(rel_kind)
         # Normalise to list
         if isinstance(curr, str):
@@ -456,10 +509,7 @@ def _search_arxiv(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_search())
-
-
-
+    return _run_async_compat(_async_search)
 
 
 def _download_paper(**kwargs):
@@ -482,7 +532,7 @@ def _download_paper(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_download())
+    return _run_async_compat(_async_download)
 
 
 def _list_papers(**kwargs):
@@ -498,7 +548,7 @@ def _list_papers(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_list())
+    return _run_async_compat(_async_list)
 
 
 def _read_paper(**kwargs):
@@ -518,7 +568,7 @@ def _read_paper(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_read())
+    return _run_async_compat(_async_read)
 
 
 # Search MCP handlers
@@ -548,7 +598,7 @@ def _search_web(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_search())
+    return _run_async_compat(_async_search)
 
 
 def _context_search(**kwargs):
@@ -578,7 +628,7 @@ def _context_search(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_context_search())
+    return _run_async_compat(_async_context_search)
 
 
 def _qna_search(**kwargs):
@@ -602,7 +652,7 @@ def _qna_search(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_qna_search())
+    return _run_async_compat(_async_qna_search)
 
 
 def _extract_url(**kwargs):
@@ -622,7 +672,206 @@ def _extract_url(**kwargs):
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
-    return asyncio.run(_async_extract())
+    return _run_async_compat(_async_extract)
+
+
+def _resilient_extract_url(**kwargs):
+    """Extract content from a URL with deterministic fallbacks.
+
+    This is intended to handle common failure modes of `extract_url`, especially
+    JavaScript-rendered profile pages that return empty/blocked content. The
+    handler first attempts direct extraction. If that fails, it performs a web
+    search and attempts extraction on a small number of candidate URLs.
+    """
+
+    from urllib.parse import unquote, urlparse
+    import re
+
+    primary_url = kwargs.get("url")
+    if not primary_url:
+        return {"error": "Missing required parameter: url", "success": False}
+
+    fallback_query = kwargs.get("fallback_query")
+    context = kwargs.get("context")
+
+    max_fallback_results = int(kwargs.get("max_fallback_results", 5) or 5)
+    max_extracts = int(kwargs.get("max_extracts", 4) or 4)
+    max_chars = int(kwargs.get("max_chars", 12000) or 12000)
+    min_content_chars = int(kwargs.get("min_content_chars", 200) or 200)
+    search_depth = kwargs.get("search_depth", "basic")
+    include_domains = kwargs.get("include_domains")
+    exclude_domains = kwargs.get("exclude_domains")
+
+    def _safe_text(value):
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            return str(value)
+        return value
+
+    def _truncate(text: str) -> str:
+        if max_chars <= 0:
+            return text
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars]
+
+    def _summarise_attempt(result: dict, attempted_url: str) -> dict:
+        content = _safe_text(result.get("content"))
+        title = result.get("title")
+        return {
+            "url": attempted_url,
+            "success": bool(result.get("success")) and bool(content.strip()),
+            "title": title,
+            "content_chars": len(content),
+            "error": result.get("error"),
+        }
+
+    def _derive_query(url: str) -> str:
+        parsed = urlparse(url)
+        host = parsed.netloc or ""
+        last_segment = parsed.path.rstrip("/").split("/")[-1]
+        last_segment = unquote(last_segment)
+        last_segment = re.sub(r"[-_]+", " ", last_segment)
+        last_segment = re.sub(r"\s+", " ", last_segment).strip()
+        if last_segment and host:
+            return f"{last_segment} {host}"
+        if last_segment:
+            return last_segment
+        return host or url
+
+    attempted: list[dict] = []
+
+    primary_result = _extract_url(url=primary_url)
+    attempted.append(_summarise_attempt(primary_result, primary_url))
+    primary_content = _safe_text(primary_result.get("content"))
+    if bool(primary_result.get("success")) and primary_content.strip():
+        return {
+            "success": True,
+            "primary_url": primary_url,
+            "extracted_from_url": primary_url,
+            "title": primary_result.get("title"),
+            "content": _truncate(primary_content),
+            "attempted": attempted,
+            "search": {
+                "attempted": False,
+                "query": None,
+                "used_context": False,
+                "results_count": 0,
+                "candidate_urls": [],
+            },
+        }
+
+    if not isinstance(fallback_query, str) or not fallback_query.strip():
+        fallback_query = _derive_query(primary_url)
+
+    if context:
+        search_result = _context_search(
+            query=fallback_query,
+            context=context,
+            max_results=max_fallback_results,
+            search_depth=search_depth,
+            include_answer=False,
+        )
+        used_context = True
+    else:
+        search_result = _search_web(
+            query=fallback_query,
+            max_results=max_fallback_results,
+            search_depth=search_depth,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            include_answer=False,
+            include_raw_content=False,
+            include_images=False,
+        )
+        used_context = False
+
+    results = search_result.get("results") or []
+    candidate_urls: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        candidate_url = item.get("url")
+        if not isinstance(candidate_url, str) or not candidate_url:
+            continue
+        if candidate_url == primary_url:
+            continue
+        if candidate_url in candidate_urls:
+            continue
+        candidate_urls.append(candidate_url)
+
+    best_payload: dict | None = None
+    best_score: float | None = None
+
+    for candidate_url in candidate_urls[: max(0, max_extracts)]:
+        candidate_result = _extract_url(url=candidate_url)
+        attempted.append(_summarise_attempt(candidate_result, candidate_url))
+        candidate_content = _safe_text(candidate_result.get("content")).strip()
+        if not (bool(candidate_result.get("success")) and candidate_content):
+            continue
+        if len(candidate_content) < min_content_chars:
+            continue
+
+        score = float(len(candidate_content))
+        lowered = candidate_content.lower()
+        for needle in (
+            "biography",
+            "research",
+            "publications",
+            "education",
+            "university",
+        ):
+            if needle in lowered:
+                score += 250.0
+
+        if best_score is None or score > best_score:
+            best_score = score
+            best_payload = {
+                "url": candidate_url,
+                "title": candidate_result.get("title"),
+                "content": candidate_content,
+            }
+
+    if best_payload is not None:
+        return {
+            "success": True,
+            "primary_url": primary_url,
+            "extracted_from_url": best_payload.get("url"),
+            "title": best_payload.get("title"),
+            "content": _truncate(_safe_text(best_payload.get("content"))),
+            "attempted": attempted,
+            "search": {
+                "attempted": True,
+                "query": fallback_query,
+                "used_context": used_context,
+                "results_count": len(results) if isinstance(results, list) else 0,
+                "candidate_urls": candidate_urls,
+            },
+        }
+
+    error_message = primary_result.get("error")
+    if not error_message and isinstance(search_result, dict):
+        error_message = search_result.get("error")
+    if not error_message:
+        error_message = "No extractable fallback sources found"
+
+    return {
+        "success": False,
+        "primary_url": primary_url,
+        "extracted_from_url": None,
+        "title": None,
+        "content": None,
+        "attempted": attempted,
+        "search": {
+            "attempted": True,
+            "query": fallback_query,
+            "used_context": used_context,
+            "results_count": len(results) if isinstance(results, list) else 0,
+            "candidate_urls": candidate_urls,
+        },
+        "error": error_message,
+    }
 
 
 def _delete_concept(**kwargs):
@@ -664,7 +913,11 @@ def _update_concept(**kwargs):
     try:
         result = update_concept(concept_id=concept_id, update_data=update_data)
         if result:
-            return {"success": True, "concept_id": concept_id, "updated_fields": list(update_data.keys())}
+            return {
+                "success": True,
+                "concept_id": concept_id,
+                "updated_fields": list(update_data.keys()),
+            }
         else:
             return {"success": False, "error": "Update failed or concept not found"}
     except Exception as e:
@@ -833,19 +1086,19 @@ def _add_relationship_output_schema() -> Schema:
             "success": bool,
         },
         optional={
+            "relationship_type": (str, type(None)),
+            "message": (str, type(None)),
             "source_id": (str, type(None)),
             "predicate": (str, type(None)),
             "target": (str, type(None)),
-            "relationship_type": (str, type(None)),
+            "already_existed": (bool, type(None)),
+            "added": (bool, type(None)),
             "text_value_id": (str, type(None)),
             "relation_id": (str, type(None)),
-            "added": (bool, type(None)),
-            "already_existed": (bool, type(None)),
-            "message": (str, type(None)),
             "error": (str, type(None)),
         },
         allow_unknown=True,
-        description="add_relationship output: success (bool), source_id, predicate, target, and optional fields: relationship_type ('text_relation' or omitted for concept relations), text_value_id/relation_id (for text predicates), added (bool, false if already existed), already_existed (bool), message, error",
+        description="add_relationship output: success (bool), relationship_type (str), message (str), source_id (str), predicate (str), target (str), already_existed (bool), added (bool), text_value_id (str), relation_id (str), error (str)",
     )
 
 
@@ -858,7 +1111,7 @@ def _remove_relationship_input_schema() -> Schema:
         },
         optional={},
         allow_unknown=True,
-        description="remove_relationship input: source_id (str), predicate (alias or field name), target (str). Removes concept-to-concept relations only; text relations removal not supported here.",
+        description="remove_relationship input: source_id (str, concept ID), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate), target (str, target concept ID). Only concept-to-concept relationships are supported.",
     )
 
 
@@ -908,9 +1161,6 @@ def _search_arxiv_output_schema() -> Schema:
         allow_unknown=True,
         description="search_arxiv output: results (list of papers with id, title, authors, summary, published), total (int), or error (str) if failed",
     )
-
-
-
 
 
 def _download_paper_input_schema() -> Schema:
@@ -1057,7 +1307,6 @@ def _get_paper_metadata_output_schema() -> Schema:
     )
 
 
-
 def _context_search_input_schema() -> Schema:
     return Schema(
         required={
@@ -1142,21 +1391,72 @@ def _extract_url_output_schema() -> Schema:
     )
 
 
+def _resilient_extract_url_input_schema() -> Schema:
+    return Schema(
+        required={
+            "url": str,
+        },
+        optional={
+            "fallback_query": (str,),
+            "context": (str,),
+            "max_fallback_results": (int,),
+            "max_extracts": (int,),
+            "search_depth": (str,),
+            "max_chars": (int,),
+            "min_content_chars": (int,),
+            "include_domains": (list,),
+            "exclude_domains": (list,),
+        },
+        allow_unknown=True,
+        description=(
+            "resilient_extract_url input: url (str, required), optional fallback_query (str, overrides derived search query), "
+            "context (str, optional context for context_search), max_fallback_results (int, default 5), max_extracts (int, default 4), "
+            "search_depth ('basic'|'advanced', default 'basic'), max_chars (int, default 12000), min_content_chars (int, default 200), "
+            "include_domains/exclude_domains (list of domains)."
+        ),
+    )
+
+
+def _resilient_extract_url_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "primary_url": (str, type(None)),
+            "extracted_from_url": (str, type(None)),
+            "title": (str, type(None)),
+            "content": (str, type(None)),
+            "attempted": (list, type(None)),
+            "search": (dict, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "resilient_extract_url output: best-effort extraction with fallbacks. Returns content/title plus attempted extractions and search provenance."
+        ),
+    )
+
+
 def _delete_concept_input_schema() -> Schema:
     return Schema(
         required={"concept_id": str},
         optional={"simulate": (bool,)},
         allow_unknown=True,
-        description="delete_concept input: concept_id (str), simulate (bool, default true)"
+        description="delete_concept input: concept_id (str), simulate (bool, default true)",
     )
 
 
 def _delete_concept_output_schema() -> Schema:
     return Schema(
         required={"success": bool},
-        optional={"simulate": (bool,), "error": (str,), "operations": (list,), "warnings": (list,)},
+        optional={
+            "simulate": (bool,),
+            "error": (str,),
+            "operations": (list,),
+            "warnings": (list,),
+        },
         allow_unknown=True,
-        description="delete_concept output"
+        description="delete_concept output",
     )
 
 
@@ -1165,16 +1465,21 @@ def _merge_concepts_input_schema() -> Schema:
         required={"source_id": str, "target_id": str},
         optional={"simulate": (bool,)},
         allow_unknown=True,
-        description="merge_concepts input: source_id (str), target_id (str), simulate (bool, default true)"
+        description="merge_concepts input: source_id (str), target_id (str), simulate (bool, default true)",
     )
 
 
 def _merge_concepts_output_schema() -> Schema:
     return Schema(
         required={"success": bool},
-        optional={"simulate": (bool,), "error": (str,), "operations": (list,), "warnings": (list,)},
+        optional={
+            "simulate": (bool,),
+            "error": (str,),
+            "operations": (list,),
+            "warnings": (list,),
+        },
         allow_unknown=True,
-        description="merge_concepts output"
+        description="merge_concepts output",
     )
 
 
@@ -1183,7 +1488,7 @@ def _update_concept_input_schema() -> Schema:
         required={"concept_id": str, "update_data": dict},
         optional={},
         allow_unknown=True,
-        description="update_concept input: concept_id (str), update_data (dict). Use dot notation for nested fields (e.g. {'relationships.is_an_instance_of': [...]}) to avoid overwriting entire objects."
+        description="update_concept input: concept_id (str), update_data (dict). Use dot notation for nested fields (e.g. {'relationships.is_an_instance_of': [...]}) to avoid overwriting entire objects.",
     )
 
 
@@ -1192,7 +1497,7 @@ def _update_concept_output_schema() -> Schema:
         required={"success": bool},
         optional={"concept_id": (str,), "updated_fields": (list,), "error": (str,)},
         allow_unknown=True,
-        description="update_concept output"
+        description="update_concept output",
     )
 
 
@@ -1222,21 +1527,26 @@ def _search_knowledge_base(**kwargs):
             return {
                 "error": "namespace_required",
                 "message": "RAG search requires authenticated user context (namespace)",
-                "success": False
+                "success": False,
             }
 
         # Build permissions context from Flask session for org-scoped RAG filtering
         permissions_context = {}
         try:
             from flask import session as flask_session
+
             if flask_session.get("user_id"):
                 permissions_context["user_id"] = flask_session.get("user_id")
             if flask_session.get("org_id"):
-                permissions_context["organisation_concept_id"] = flask_session.get("org_id")
+                permissions_context["organisation_concept_id"] = flask_session.get(
+                    "org_id"
+                )
         except (ImportError, RuntimeError):
             # Not in Flask context - use user_id from kwargs if available
             if isinstance(user_id, str) and user_id.strip():
-                permissions_context["user_id"] = user_id.strip().lower().replace(' ', '_')
+                permissions_context["user_id"] = (
+                    user_id.strip().lower().replace(" ", "_")
+                )
 
         results = service.query(
             query_text=query_text,
@@ -1244,11 +1554,7 @@ def _search_knowledge_base(**kwargs):
             namespace=ns,
             permissions_context=permissions_context if permissions_context else None,
         )
-        return {
-            "results": results,
-            "count": len(results),
-            "success": True
-        }
+        return {"results": results, "count": len(results), "success": True}
     except RAGBackendUnavailable as e:
         return {"error": f"RAG service unavailable: {e}", "success": False}
     except Exception as e:
@@ -1376,13 +1682,15 @@ def _jira_generic_output_schema(action: str) -> Schema:
         ),
     )
 
+
 # RAG metadata/content MCP tools
 def _rag_get_status(**kwargs):
     import requests
     import os
+
     try:
-        ns = kwargs.get('namespace') or os.environ.get('VON_DEFAULT_NAMESPACE')
-        url = 'http://127.0.0.1:5002/admin/rag_status'
+        ns = kwargs.get("namespace") or os.environ.get("VON_DEFAULT_NAMESPACE")
+        url = "http://127.0.0.1:5002/admin/rag_status"
         if ns:
             url = f"{url}?namespace={ns}"
         res = requests.get(url, timeout=5)
@@ -1396,12 +1704,13 @@ def _rag_get_status(**kwargs):
 def _rag_list_indexed(**kwargs):
     from ...db.connection_manager import get_db
     import os
+
     db = get_db()
     if db is None:
         return {"error": "db_unavailable", "success": False}
-    coll = db['interaction_sessions']
-    limit = int(kwargs.get('limit', 20))
-    offset = int(kwargs.get('offset', 0))
+    coll = db["interaction_sessions"]
+    limit = int(kwargs.get("limit", 20))
+    offset = int(kwargs.get("offset", 0))
 
     # Resolve effective namespace: prefer explicit, else env, else derive from user.id if provided
     ns = kwargs.get("namespace")
@@ -1418,42 +1727,61 @@ def _rag_list_indexed(**kwargs):
         return {
             "error": "namespace_required",
             "message": "RAG access requires authenticated user context (namespace)",
-            "success": False
+            "success": False,
         }
 
     # Build query with namespace filter
     query = {"indexing_status": "indexed", "namespace": ns}
 
-    cursor = coll.find(query, {"_id": 1, "indexed_at": 1, "summary": 1, "history": 1, "namespace": 1}).skip(offset).limit(limit)
+    cursor = (
+        coll.find(
+            query,
+            {"_id": 1, "indexed_at": 1, "summary": 1, "history": 1, "namespace": 1},
+        )
+        .skip(offset)
+        .limit(limit)
+    )
     items = []
     for doc in cursor:
         preview_len = 0
-        if isinstance(doc.get('summary'), str):
-            preview_len += len(doc['summary'])
-        history = doc.get('history') or []
+        if isinstance(doc.get("summary"), str):
+            preview_len += len(doc["summary"])
+        history = doc.get("history") or []
         if isinstance(history, list):
             for h in history:
-                content = h.get('content')
+                content = h.get("content")
                 if isinstance(content, str):
                     preview_len += len(content)
-        items.append({
-            "session_id": str(doc.get('_id')),
-            "indexed_at": str(doc.get('indexed_at')) if doc.get('indexed_at') else None,
-            "preview_length": preview_len,
-            "namespace": doc.get('namespace')
-        })
+        items.append(
+            {
+                "session_id": str(doc.get("_id")),
+                "indexed_at": (
+                    str(doc.get("indexed_at")) if doc.get("indexed_at") else None
+                ),
+                "preview_length": preview_len,
+                "namespace": doc.get("namespace"),
+            }
+        )
     total = coll.count_documents(query)
-    return {"items": items, "total": total, "limit": limit, "offset": offset, "namespace": ns, "success": True}
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "namespace": ns,
+        "success": True,
+    }
 
 
 def _rag_get_item(**kwargs):
     from ...db.connection_manager import get_db
     from bson import ObjectId
     import os
+
     db = get_db()
     if db is None:
         return {"error": "db_unavailable", "success": False}
-    session_id = kwargs.get('session_id')
+    session_id = kwargs.get("session_id")
     if not session_id:
         return {"error": "Missing session_id", "success": False}
 
@@ -1467,15 +1795,15 @@ def _rag_get_item(**kwargs):
         if isinstance(user_id, str) and user_id.strip():
             ns = f"#V#{user_id.strip().lower().replace(' ', '_')}"
 
-# SECURITY: Require namespace for RAG access - prevents cross-user data leakage
+    # SECURITY: Require namespace for RAG access - prevents cross-user data leakage
     if not ns:
         return {
             "error": "namespace_required",
             "message": "RAG access requires authenticated user context (namespace)",
-            "success": False
+            "success": False,
         }
 
-    coll = db['interaction_sessions']
+    coll = db["interaction_sessions"]
     try:
         query = {"_id": ObjectId(session_id), "namespace": ns}
     except Exception:
@@ -1486,21 +1814,21 @@ def _rag_get_item(**kwargs):
         return {"error": "not_found", "success": False}
     # Build a safe preview
     preview = []
-    if isinstance(doc.get('summary'), str):
-        preview.append(doc['summary'])
-    history = doc.get('history') or []
+    if isinstance(doc.get("summary"), str):
+        preview.append(doc["summary"])
+    history = doc.get("history") or []
     if isinstance(history, list):
         for h in history:
-            c = h.get('content')
+            c = h.get("content")
             if isinstance(c, str):
                 preview.append(c)
     return {
-        "session_id": str(doc.get('_id')),
-        "indexing_status": doc.get('indexing_status'),
-        "indexed_at": str(doc.get('indexed_at')) if doc.get('indexed_at') else None,
-        "namespace": doc.get('namespace'),
+        "session_id": str(doc.get("_id")),
+        "indexing_status": doc.get("indexing_status"),
+        "indexed_at": str(doc.get("indexed_at")) if doc.get("indexed_at") else None,
+        "namespace": doc.get("namespace"),
         "preview": "\n\n".join(preview)[:4000],
-        "success": True
+        "success": True,
     }
 
 
@@ -1534,7 +1862,10 @@ def _gmail_get_message(**kwargs):
     profile = kwargs.get("profile") or kwargs.get("profile_id")
     message_id = kwargs.get("message_id")
     if not profile or not message_id:
-        return {"error": "Missing required parameters: profile and message_id", "success": False}
+        return {
+            "error": "Missing required parameters: profile and message_id",
+            "success": False,
+        }
 
     try:
         return gs.get_message(
@@ -1558,7 +1889,10 @@ def _gmail_get_attachment(**kwargs):
     message_id = kwargs.get("message_id")
     attachment_id = kwargs.get("attachment_id")
     if not profile or not message_id or not attachment_id:
-        return {"error": "Missing required parameters: profile, message_id, attachment_id", "success": False}
+        return {
+            "error": "Missing required parameters: profile, message_id, attachment_id",
+            "success": False,
+        }
 
     try:
         return gs.get_attachment(
@@ -1602,9 +1936,15 @@ def _gmail_modify_labels(**kwargs):
     message_id = kwargs.get("message_id")
     allow_mutation = bool(kwargs.get("allow_mutation"))
     if not profile or not message_id:
-        return {"error": "Missing required parameters: profile and message_id", "success": False}
+        return {
+            "error": "Missing required parameters: profile and message_id",
+            "success": False,
+        }
     if not allow_mutation:
-        return {"error": "allow_mutation must be true to modify labels", "success": False}
+        return {
+            "error": "allow_mutation must be true to modify labels",
+            "success": False,
+        }
 
     try:
         return gs.modify_labels(
@@ -1642,7 +1982,7 @@ def _jira_search(**kwargs):
         )
 
     try:
-        return asyncio.run(_async_search())
+        return _run_async_compat(_async_search)
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -1660,7 +2000,7 @@ def _jira_get_issue(**kwargs):
         return await proxy.get_issue(issue_key=issue_key, fields=kwargs.get("fields"))
 
     try:
-        return asyncio.run(_async_get_issue())
+        return _run_async_compat(_async_get_issue)
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -1672,14 +2012,17 @@ def _jira_add_comment(**kwargs):
     issue_key = kwargs.get("issue_key")
     comment = kwargs.get("comment")
     if not issue_key or not comment:
-        return {"error": "Missing required parameters: issue_key and comment", "success": False}
+        return {
+            "error": "Missing required parameters: issue_key and comment",
+            "success": False,
+        }
 
     async def _async_comment():
         proxy = await get_jira_proxy()
         return await proxy.add_comment(issue_key=issue_key, comment=comment)
 
     try:
-        return asyncio.run(_async_comment())
+        return _run_async_compat(_async_comment)
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -1691,14 +2034,19 @@ def _jira_transition_issue(**kwargs):
     issue_key = kwargs.get("issue_key")
     transition_id = kwargs.get("transition_id")
     if not issue_key or not transition_id:
-        return {"error": "Missing required parameters: issue_key and transition_id", "success": False}
+        return {
+            "error": "Missing required parameters: issue_key and transition_id",
+            "success": False,
+        }
 
     async def _async_transition():
         proxy = await get_jira_proxy()
-        return await proxy.transition_issue(issue_key=issue_key, transition_id=transition_id)
+        return await proxy.transition_issue(
+            issue_key=issue_key, transition_id=transition_id
+        )
 
     try:
-        return asyncio.run(_async_transition())
+        return _run_async_compat(_async_transition)
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -1712,7 +2060,7 @@ def _jira_get_myself(**kwargs):
         return await proxy.get_myself()
 
     try:
-        return asyncio.run(_async_get_myself())
+        return _run_async_compat(_async_get_myself)
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -1758,11 +2106,20 @@ def _chat_get_prompt_context(
     )
 
     fragments = get_user_specific_prompt_fragments(namespace)
-    prompt_concept_ids = [f.get("concept_id") for f in fragments if isinstance(f.get("concept_id"), str)]
+    prompt_concept_ids = [
+        f.get("concept_id") for f in fragments if isinstance(f.get("concept_id"), str)
+    ]
 
     prompt_text = build_user_specific_system_prompt(namespace)
-    if isinstance(prompt_text, str) and max_chars_int and len(prompt_text) > max_chars_int:
-        prompt_text = prompt_text[:max_chars_int] + f"\n... [truncated {len(prompt_text) - max_chars_int} chars]"
+    if (
+        isinstance(prompt_text, str)
+        and max_chars_int
+        and len(prompt_text) > max_chars_int
+    ):
+        prompt_text = (
+            prompt_text[:max_chars_int]
+            + f"\n... [truncated {len(prompt_text) - max_chars_int} chars]"
+        )
 
     prompt_concepts = []
     for fragment in fragments:
@@ -1785,7 +2142,12 @@ def _chat_get_prompt_context(
     }
 
 
-def _settings_get_public(*, user_concept_id: str | None = None, organisation_concept_id: str | None = None, **_kwargs):
+def _settings_get_public(
+    *,
+    user_concept_id: str | None = None,
+    organisation_concept_id: str | None = None,
+    **_kwargs,
+):
     """Return a safe subset of settings (no secrets).
 
     This intentionally excludes any secret values (API tokens, passwords). It may
@@ -1827,9 +2189,14 @@ def _chat_introspect(
 
     import hashlib
 
-    from src.backend.integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
+    from src.backend.integrations.internal_mcp.orchestrator import (
+        InternalMCPChatOrchestrator,
+    )
     from src.backend.languagemodels.llm_interface import get_active_model_name
-    from src.backend.services.settings_service import get_active_llm_setting, resolve_llm_setting
+    from src.backend.services.settings_service import (
+        get_active_llm_setting,
+        resolve_llm_setting,
+    )
 
     if not namespace or not isinstance(namespace, str) or not namespace.strip():
         return {"success": False, "error": "namespace is required"}
@@ -1851,7 +2218,9 @@ def _chat_introspect(
     )
 
     fragments = get_user_specific_prompt_fragments(namespace)
-    prompt_concept_ids = [f.get("concept_id") for f in fragments if isinstance(f.get("concept_id"), str)]
+    prompt_concept_ids = [
+        f.get("concept_id") for f in fragments if isinstance(f.get("concept_id"), str)
+    ]
     auxiliary_prompt_text = build_user_specific_system_prompt(namespace) or ""
 
     prompt_concepts: list[dict] = []
@@ -1877,7 +2246,9 @@ def _chat_introspect(
         active_llm = None
 
     try:
-        resolved_llm = resolve_llm_setting(user_concept_id=namespace, org_concept_id=organisation_concept_id)
+        resolved_llm = resolve_llm_setting(
+            user_concept_id=namespace, org_concept_id=organisation_concept_id
+        )
     except Exception:
         resolved_llm = None
 
@@ -1890,7 +2261,9 @@ def _chat_introspect(
             gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
             orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
             gateway_enabled = getattr(gateway, "enabled", None)
-            orchestrator_max_tool_invocations = getattr(orchestrator, "_max_tool_invocations", None)
+            orchestrator_max_tool_invocations = getattr(
+                orchestrator, "_max_tool_invocations", None
+            )
         except Exception:
             gateway_enabled = None
             orchestrator_max_tool_invocations = None
@@ -1910,12 +2283,15 @@ def _chat_introspect(
         except Exception:
             live_orchestrator = None
 
-        if live_orchestrator is not None and hasattr(live_orchestrator, "_instruction_message"):
+        if live_orchestrator is not None and hasattr(
+            live_orchestrator, "_instruction_message"
+        ):
             tool_guidance_text = live_orchestrator._instruction_message(  # type: ignore[attr-defined]
                 user_namespace=namespace,
                 auxiliary_system_prompt=auxiliary_prompt_text,
             )
         else:
+
             class _StubGateway:
                 def describe_methods(self):
                     return {}
@@ -1926,7 +2302,9 @@ def _chat_introspect(
                 auxiliary_system_prompt=auxiliary_prompt_text,
             )
 
-        tool_guidance_hash = hashlib.sha256(tool_guidance_text.encode("utf-8")).hexdigest()
+        tool_guidance_hash = hashlib.sha256(
+            tool_guidance_text.encode("utf-8")
+        ).hexdigest()
         if include_tool_guidance_preview and max_preview_chars_int:
             tool_guidance_preview = tool_guidance_text[:max_preview_chars_int]
     except Exception:
@@ -1969,25 +2347,25 @@ def build_default_catalogue() -> MethodCatalogue:
             "max_results": (int, type(None)),
         },
         allow_unknown=False,
-        description="List Gmail messages for a profile with optional query/labels (read-only)."
+        description="List Gmail messages for a profile with optional query/labels (read-only).",
     )
     gmail_get_message_input_schema = Schema(
         required={"profile": str, "message_id": str},
         optional={"format": str},
         allow_unknown=False,
-        description="Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal)."
+        description="Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal).",
     )
     gmail_get_attachment_input_schema = Schema(
         required={"profile": str, "message_id": str, "attachment_id": str},
         optional={},
         allow_unknown=False,
-        description="Fetch a Gmail attachment for a profile (base64 payload)."
+        description="Fetch a Gmail attachment for a profile (base64 payload).",
     )
     gmail_list_labels_input_schema = Schema(
         required={"profile": str},
         optional={},
         allow_unknown=False,
-        description="List Gmail labels for a profile (read-only)."
+        description="List Gmail labels for a profile (read-only).",
     )
     gmail_modify_labels_input_schema = Schema(
         required={"profile": str, "message_id": str, "allow_mutation": bool},
@@ -1996,7 +2374,7 @@ def build_default_catalogue() -> MethodCatalogue:
             "remove_labels": list,
         },
         allow_unknown=False,
-        description="Add/remove labels on a Gmail message. Requires allow_mutation=true and gmail.modify scope."
+        description="Add/remove labels on a Gmail message. Requires allow_mutation=true and gmail.modify scope.",
     )
     definitions: List[MethodDefinition] = [
         MethodDefinition(
@@ -2006,23 +2384,23 @@ def build_default_catalogue() -> MethodCatalogue:
                 required={},
                 optional={},
                 allow_unknown=False,
-                description="get_context input: no parameters required"
+                description="get_context input: no parameters required",
             ),
             output_schema=Schema(
                 required={
                     "llm_model": (str, type(None)),
                     "language": str,
-                    "timestamp": str
+                    "timestamp": str,
                 },
                 optional={
                     "user": (dict, type(None)),
                     "organisation": (dict, type(None)),
                     "llm_provider": (str, type(None)),
                     "fetch_counts_on_load": (bool, type(None)),
-                    "note": (str, type(None))
+                    "note": (str, type(None)),
                 },
                 allow_unknown=True,
-                description="get_context output: context info including user, org, llm_model (string), llm_provider, language. User/org managed client-side per JVNAUTOSCI-628."
+                description="get_context output: context info including user, org, llm_model (string), llm_provider, language. User/org managed client-side per JVNAUTOSCI-628.",
             ),
             category="read",
             description="Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
@@ -2249,7 +2627,6 @@ def build_default_catalogue() -> MethodCatalogue:
             timeout_sec=20.0,
             description="Get detailed metadata for a single arXiv paper (title, authors, abstract, categories, DOI, pdf_url). Use when a user needs paper details without downloading the PDF.",
         ),
-
         MethodDefinition(
             name="download_paper",
             handler=_download_paper,
@@ -2314,12 +2691,30 @@ def build_default_catalogue() -> MethodCatalogue:
             timeout_sec=15.0,
             description="Extract and return the main text content from a specific URL. Use when user provides a URL and wants to read, analyse, or extract information from that specific web page. Returns cleaned text content and page title. Useful for reading articles, documentation, or any web page content. Example: 'read this article: https://example.com/article', 'extract content from this URL'.",
         ),
+        MethodDefinition(
+            name="resilient_extract_url",
+            handler=_resilient_extract_url,
+            input_schema=_resilient_extract_url_input_schema(),
+            output_schema=_resilient_extract_url_output_schema(),
+            category="read",
+            timeout_sec=30.0,
+            description=(
+                "Extract main text from a URL with deterministic fallbacks. First tries direct extraction; if the page is empty/blocked "
+                "(common for JavaScript-rendered profile pages), it falls back to web search and attempts extraction from a small set of "
+                "candidate URLs. Returns content plus provenance (attempted URLs and search query)."
+            ),
+        ),
         # Gmail MCP tools (read-only surface)
         MethodDefinition(
             name="gmail_list_messages",
             handler=_gmail_list_messages,
             input_schema=gmail_list_messages_input_schema,
-            output_schema=Schema(required={}, optional={}, allow_unknown=True, description="Gmail API list response"),
+            output_schema=Schema(
+                required={},
+                optional={},
+                allow_unknown=True,
+                description="Gmail API list response",
+            ),
             category="read",
             timeout_sec=20.0,
             description="List Gmail messages for a profile with optional query and label filters. Read-only; relies on pre-provisioned tokens per profile.",
@@ -2328,7 +2723,12 @@ def build_default_catalogue() -> MethodCatalogue:
             name="gmail_get_message",
             handler=_gmail_get_message,
             input_schema=gmail_get_message_input_schema,
-            output_schema=Schema(required={}, optional={}, allow_unknown=True, description="Gmail API message response"),
+            output_schema=Schema(
+                required={},
+                optional={},
+                allow_unknown=True,
+                description="Gmail API message response",
+            ),
             category="read",
             timeout_sec=20.0,
             description="Fetch a Gmail message for a profile. Supports Gmail API formats metadata|full|raw|minimal. Read-only; profile token required.",
@@ -2337,7 +2737,12 @@ def build_default_catalogue() -> MethodCatalogue:
             name="gmail_get_attachment",
             handler=_gmail_get_attachment,
             input_schema=gmail_get_attachment_input_schema,
-            output_schema=Schema(required={}, optional={}, allow_unknown=True, description="Gmail API attachment response"),
+            output_schema=Schema(
+                required={},
+                optional={},
+                allow_unknown=True,
+                description="Gmail API attachment response",
+            ),
             category="read",
             timeout_sec=20.0,
             description="Fetch a Gmail attachment for a profile (base64 data). Read-only; profile token required.",
@@ -2346,7 +2751,12 @@ def build_default_catalogue() -> MethodCatalogue:
             name="gmail_list_labels",
             handler=_gmail_list_labels,
             input_schema=gmail_list_labels_input_schema,
-            output_schema=Schema(required={}, optional={}, allow_unknown=True, description="Gmail API labels response"),
+            output_schema=Schema(
+                required={},
+                optional={},
+                allow_unknown=True,
+                description="Gmail API labels response",
+            ),
             category="read",
             timeout_sec=15.0,
             description="List Gmail labels for a profile. Read-only; useful to discover label IDs for queries.",
@@ -2355,7 +2765,12 @@ def build_default_catalogue() -> MethodCatalogue:
             name="gmail_modify_labels",
             handler=_gmail_modify_labels,
             input_schema=gmail_modify_labels_input_schema,
-            output_schema=Schema(required={}, optional={}, allow_unknown=True, description="Gmail API modify response"),
+            output_schema=Schema(
+                required={},
+                optional={},
+                allow_unknown=True,
+                description="Gmail API modify response",
+            ),
             category="write",
             timeout_sec=20.0,
             description="Add/remove labels on a Gmail message. Requires allow_mutation=true and profile with gmail.modify scope.",
@@ -2432,27 +2847,43 @@ def build_default_catalogue() -> MethodCatalogue:
         MethodDefinition(
             name="rag_get_status",
             handler=_rag_get_status,
-            input_schema=Schema(required={}, optional={}, allow_unknown=True, description="No input"),
+            input_schema=Schema(
+                required={}, optional={}, allow_unknown=True, description="No input"
+            ),
             output_schema=None,
             category="read",
-            description="Get RAG status: totals, eligible counts, indexed/pending/failed/skipped. Mirrors /admin/rag_status."
+            description="Get RAG status: totals, eligible counts, indexed/pending/failed/skipped. Mirrors /admin/rag_status.",
         ),
         MethodDefinition(
             name="rag_list_indexed",
             handler=_rag_list_indexed,
-            input_schema=Schema(required={}, optional={"limit": (int,), "offset": (int,), "namespace": (str, type(None))}, allow_unknown=True, description="List indexed sessions with optional namespace filter"),
+            input_schema=Schema(
+                required={},
+                optional={
+                    "limit": (int,),
+                    "offset": (int,),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="List indexed sessions with optional namespace filter",
+            ),
             output_schema=None,
             category="read",
-            description="List all RAG-indexed chat sessions/conversations for the current user. Returns total count and session metadata. Use this to answer 'how many RAG sessions' or 'what conversations are indexed'. Namespace filtered automatically."
+            description="List all RAG-indexed chat sessions/conversations for the current user. Returns total count and session metadata. Use this to answer 'how many RAG sessions' or 'what conversations are indexed'. Namespace filtered automatically.",
         ),
         MethodDefinition(
             name="rag_get_item",
             handler=_rag_get_item,
-            input_schema=Schema(required={"session_id": str}, optional={"namespace": (str, type(None))}, allow_unknown=True, description="Fetch one indexed session with optional namespace filter"),
+            input_schema=Schema(
+                required={"session_id": str},
+                optional={"namespace": (str, type(None))},
+                allow_unknown=True,
+                description="Fetch one indexed session with optional namespace filter",
+            ),
             output_schema=None,
             category="read",
-            description="Get one indexed item (session) with a safe text preview. Respects namespace isolation."
-        )
+            description="Get one indexed item (session) with a safe text preview. Respects namespace isolation.",
+        ),
     ]
 
     for definition in definitions:

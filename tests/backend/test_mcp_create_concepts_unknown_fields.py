@@ -28,9 +28,9 @@ def test_create_concepts_accepts_namespace_field():
             {
                 "name": unique_name,
                 "kind": "type",
-                "description": "Test concept with namespace in payload"
+                "description": "Test concept with namespace in payload",
             }
-        ]
+        ],
     }
 
     # Act: call create_concepts with extra field
@@ -58,9 +58,7 @@ def test_create_concepts_rejects_missing_required_fields():
     # Arrange: payload missing required 'parent_id'
     payload = {
         "namespace": "#V#test_user",  # Extra field
-        "concepts": [
-            {"name": "test_concept", "kind": "type"}
-        ]
+        "concepts": [{"name": "test_concept", "kind": "type"}],
     }
 
     # Act & Assert: should fail due to missing required field
@@ -79,9 +77,7 @@ def test_create_concepts_accepts_multiple_unknown_fields():
         "namespace": "#V#test_user",
         "session_id": "abc123",
         "user_context": {"name": "Test User"},
-        "concepts": [
-            {"name": "multi_extra_test", "kind": "instance"}
-        ]
+        "concepts": [{"name": "multi_extra_test", "kind": "instance"}],
     }
 
     # Act

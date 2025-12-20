@@ -104,7 +104,9 @@ def _extract_preserved_content(concept: Dict[str, Any]) -> List[str]:
     return collected
 
 
-def _resolve_related_concepts(concept_ids: Iterable[str]) -> Dict[str, Tuple[str, Optional[str]]]:
+def _resolve_related_concepts(
+    concept_ids: Iterable[str],
+) -> Dict[str, Tuple[str, Optional[str]]]:
     resolved: Dict[str, Tuple[str, Optional[str]]] = {}
     missing: List[str] = []
     for cid in concept_ids:
@@ -262,7 +264,9 @@ def build_concept_embedding(concept: Dict[str, Any]) -> np.ndarray:
     return _tokens_to_embedding(tokens)
 
 
-def search_similar_concepts(query: str, limit: int = 10) -> List[ConceptSimilarityResult]:
+def search_similar_concepts(
+    query: str, limit: int = 10
+) -> List[ConceptSimilarityResult]:
     if not query or not isinstance(query, str):
         return []
     if limit <= 0:
@@ -273,7 +277,9 @@ def search_similar_concepts(query: str, limit: int = 10) -> List[ConceptSimilari
         raise ConceptSimilarityServiceError("Concepts collection not available")
 
     if faiss is None:
-        raise ConceptSimilarityServiceError("FAISS library is required for similarity search") from _FAISS_IMPORT_ERROR
+        raise ConceptSimilarityServiceError(
+            "FAISS library is required for similarity search"
+        ) from _FAISS_IMPORT_ERROR
 
     query_tokens = _normalise_tokens(query)
     if not query_tokens:
@@ -283,7 +289,13 @@ def search_similar_concepts(query: str, limit: int = 10) -> List[ConceptSimilari
     embeddings: List[np.ndarray] = []
     metadata: List[Tuple[str, str]] = []
 
-    projection = {"concept_id": 1, "names": 1, "concept_data": 1, "relationships": 1, "attributes": 1}
+    projection = {
+        "concept_id": 1,
+        "names": 1,
+        "concept_data": 1,
+        "relationships": 1,
+        "attributes": 1,
+    }
     cursor = ConceptsRepository.find({}, projection=projection)
     for concept in cursor:
         concept_id = concept.get("concept_id")

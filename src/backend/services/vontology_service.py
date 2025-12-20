@@ -4,27 +4,34 @@
 # and retrieving elaboration prompts associated with types.
 
 import os
-import re # For parsing prompts
-from typing import Optional, Dict, List, Any # For type hinting
+import re  # For parsing prompts
+from typing import Optional, Dict, List, Any  # For type hinting
 
 # REFACTORING_NOTE: Define Vontology base path, potentially from config later
-VONTOLOGY_BASE_PATH = "knowledge/vontology" # Relative to project root
+VONTOLOGY_BASE_PATH = "knowledge/vontology"  # Relative to project root
+
 
 class VontologyServiceError(Exception):
     pass
 
+
 class VontologyTypeNotFoundError(VontologyServiceError):
     pass
 
+
 # REFACTORING_NOTE: Functions for Vontology interaction will go here.
+
 
 def get_vontology_root_path() -> str:
     # REFACTORING_NOTE: This helper function constructs the absolute path to the vontology root.
     # It assumes this service file is in src/backend/services and vontology is in knowledge/vontology.
     # This might need adjustment based on actual project structure or a configuration setting.
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(current_dir, "..", "..", "..")) # src/backend/services -> src/backend -> src -> project_root
+    project_root = os.path.abspath(
+        os.path.join(current_dir, "..", "..", "..")
+    )  # src/backend/services -> src/backend -> src -> project_root
     return os.path.join(project_root, VONTOLOGY_BASE_PATH)
+
 
 def get_type_definition(vontology_path: str) -> Dict[str, Any]:
     """Retrieves the definition of a Vontology type, including its content and prompts.
@@ -57,7 +64,9 @@ def get_type_definition(vontology_path: str) -> Dict[str, Any]:
     # For now, assume internal use where path is trusted or pre-validated.
     # Ensure no leading slashes on vontology_path if absolute_vontology_root is already absolute.
     clean_vontology_path = vontology_path.strip("/")
-    type_file_path = os.path.join(absolute_vontology_root, clean_vontology_path, "_Type.md")
+    type_file_path = os.path.join(
+        absolute_vontology_root, clean_vontology_path, "_Type.md"
+    )
 
     if not os.path.exists(type_file_path) or not os.path.isfile(type_file_path):
         raise VontologyTypeNotFoundError(
@@ -65,10 +74,12 @@ def get_type_definition(vontology_path: str) -> Dict[str, Any]:
         )
 
     try:
-        with open(type_file_path, 'r', encoding='utf-8') as f:
+        with open(type_file_path, "r", encoding="utf-8") as f:
             full_content = f.read()
     except IOError as e:
-        raise VontologyServiceError(f"Error reading Vontology type file '{type_file_path}': {e}")
+        raise VontologyServiceError(
+            f"Error reading Vontology type file '{type_file_path}': {e}"
+        )
 
     # Parse content for prompts and other sections
     elaboration_prompts: List[str] = []
@@ -80,7 +91,7 @@ def get_type_definition(vontology_path: str) -> Dict[str, Any]:
     lines = full_content.splitlines()
 
     for line in lines:
-        h2_match = re.match(r"^##\s+(.*)", line.strip()) # Match H2 headings
+        h2_match = re.match(r"^##\s+(.*)", line.strip())  # Match H2 headings
         if h2_match:
             # If there was a previous section, save it
             if current_section_title and current_section_content:
@@ -91,12 +102,14 @@ def get_type_definition(vontology_path: str) -> Dict[str, Any]:
                         if prompt_match:
                             elaboration_prompts.append(prompt_match.group(1).strip())
                 else:
-                    other_sections[current_section_title] = "\n".join(current_section_content).strip()
+                    other_sections[current_section_title] = "\n".join(
+                        current_section_content
+                    ).strip()
 
             # Start new section
             current_section_title = h2_match.group(1).strip()
             current_section_content = []
-        elif current_section_title: # Only collect content if under a heading
+        elif current_section_title:  # Only collect content if under a heading
             current_section_content.append(line)
 
     # Save the last section after the loop
@@ -107,14 +120,17 @@ def get_type_definition(vontology_path: str) -> Dict[str, Any]:
                 if prompt_match:
                     elaboration_prompts.append(prompt_match.group(1).strip())
         else:
-            other_sections[current_section_title] = "\n".join(current_section_content).strip()
+            other_sections[current_section_title] = "\n".join(
+                current_section_content
+            ).strip()
 
     return {
         "vontology_path": vontology_path,
         "full_content": full_content,
         "elaboration_prompts": elaboration_prompts,
-        "other_sections": other_sections
+        "other_sections": other_sections,
     }
+
 
 def list_types(
     parent_path: Optional[str] = None,
@@ -148,8 +164,12 @@ def list_types(
     if parent_path:
         clean_parent_path = parent_path.strip("/")
         current_search_path = os.path.join(absolute_vontology_root, clean_parent_path)
-        if not os.path.exists(current_search_path) or not os.path.isdir(current_search_path):
-            raise VontologyServiceError(f"Parent Vontology path not found or is not a directory: {parent_path}")
+        if not os.path.exists(current_search_path) or not os.path.isdir(
+            current_search_path
+        ):
+            raise VontologyServiceError(
+                f"Parent Vontology path not found or is not a directory: {parent_path}"
+            )
 
     found_types: List[Dict[str, Any]] = []
 
@@ -159,32 +179,43 @@ def list_types(
             if os.path.isdir(item_path):
                 # A directory is considered a Vontology type if it contains a _Type.md file
                 type_marker_file = os.path.join(item_path, "_Type.md")
-                if os.path.exists(type_marker_file) and os.path.isfile(type_marker_file):
+                if os.path.exists(type_marker_file) and os.path.isfile(
+                    type_marker_file
+                ):
                     # Construct the vontology_path relative to the VONTOLOGY_BASE_PATH
-                    relative_item_path = os.path.relpath(item_path, absolute_vontology_root)
+                    relative_item_path = os.path.relpath(
+                        item_path, absolute_vontology_root
+                    )
                     # Convert to forward slashes for consistent Vontology path format
-                    type_vontology_path = relative_item_path.replace(os.sep, '/')
+                    type_vontology_path = relative_item_path.replace(os.sep, "/")
 
                     # Check if this type has children (subdirectories that are also types)
                     has_children = False
                     for sub_item_name in os.listdir(item_path):
                         sub_item_path = os.path.join(item_path, sub_item_name)
-                        if os.path.isdir(sub_item_path) and os.path.exists(os.path.join(sub_item_path, "_Type.md")):
+                        if os.path.isdir(sub_item_path) and os.path.exists(
+                            os.path.join(sub_item_path, "_Type.md")
+                        ):
                             has_children = True
                             break
 
-                    found_types.append({
-                        "name": item_name,
-                        "vontology_path": type_vontology_path,
-                        "has_children": has_children
-                    })
+                    found_types.append(
+                        {
+                            "name": item_name,
+                            "vontology_path": type_vontology_path,
+                            "has_children": has_children,
+                        }
+                    )
     except OSError as e:
-        root_label = parent_path or 'root'
-        raise VontologyServiceError(f"Error listing Vontology types under '{root_label}': {e}")
+        root_label = parent_path or "root"
+        raise VontologyServiceError(
+            f"Error listing Vontology types under '{root_label}': {e}"
+        )
 
     # Sort by name for consistent ordering
     found_types.sort(key=lambda x: x["name"])
     return found_types
+
 
 def search_types(
     query: str,
@@ -230,10 +261,16 @@ def search_types(
                 item_abs_path = os.path.join(current_dir_abs, item_name)
                 if os.path.isdir(item_abs_path):
                     type_marker_file = os.path.join(item_abs_path, "_Type.md")
-                    current_item_vontology_path = f"{current_vontology_prefix}/{item_name}" if current_vontology_prefix else item_name
+                    current_item_vontology_path = (
+                        f"{current_vontology_prefix}/{item_name}"
+                        if current_vontology_prefix
+                        else item_name
+                    )
                     current_item_vontology_path = current_item_vontology_path.strip("/")
 
-                    if os.path.exists(type_marker_file) and os.path.isfile(type_marker_file):
+                    if os.path.exists(type_marker_file) and os.path.isfile(
+                        type_marker_file
+                    ):
                         name_match = False
                         content_match = False
                         content_snippet = None
@@ -245,18 +282,35 @@ def search_types(
                         # Check content match if requested
                         if search_in_content:
                             try:
-                                type_def = get_type_definition(current_item_vontology_path)
+                                type_def = get_type_definition(
+                                    current_item_vontology_path
+                                )
                                 if query_lower in type_def["full_content"].lower():
                                     content_match = True
                                     # Create a simple snippet
                                     try:
-                                        match_index = type_def["full_content"].lower().index(query_lower)
+                                        match_index = (
+                                            type_def["full_content"]
+                                            .lower()
+                                            .index(query_lower)
+                                        )
                                         start = max(0, match_index - 30)
-                                        end = min(len(type_def["full_content"]), match_index + len(query) + 30)
-                                        content_snippet = "..." + type_def["full_content"][start:end] + "..."
-                                    except ValueError: # Should not happen if query_lower in content
+                                        end = min(
+                                            len(type_def["full_content"]),
+                                            match_index + len(query) + 30,
+                                        )
+                                        content_snippet = (
+                                            "..."
+                                            + type_def["full_content"][start:end]
+                                            + "..."
+                                        )
+                                    except (
+                                        ValueError
+                                    ):  # Should not happen if query_lower in content
                                         pass
-                            except VontologyServiceError: # Ignore types that can't be read for content search
+                            except (
+                                VontologyServiceError
+                            ):  # Ignore types that can't be read for content search
                                 pass
 
                         match_type_str = None
@@ -271,8 +325,12 @@ def search_types(
                             # Check for children (re-using some logic from list_types)
                             has_children = False
                             for sub_item_name in os.listdir(item_abs_path):
-                                sub_item_path = os.path.join(item_abs_path, sub_item_name)
-                                if os.path.isdir(sub_item_path) and os.path.exists(os.path.join(sub_item_path, "_Type.md")):
+                                sub_item_path = os.path.join(
+                                    item_abs_path, sub_item_name
+                                )
+                                if os.path.isdir(sub_item_path) and os.path.exists(
+                                    os.path.join(sub_item_path, "_Type.md")
+                                ):
                                     has_children = True
                                     break
 
@@ -280,7 +338,7 @@ def search_types(
                                 "name": item_name,
                                 "vontology_path": current_item_vontology_path,
                                 "has_children": has_children,
-                                "match_type": match_type_str
+                                "match_type": match_type_str,
                             }
                             if content_snippet:
                                 type_info["content_snippet"] = content_snippet
@@ -293,7 +351,7 @@ def search_types(
             # Log or handle error, but try to continue searching other branches if possible
             # For simplicity, we raise if the root listing fails.
             if current_dir_abs == absolute_vontology_root:
-                 raise VontologyServiceError(f"Error searching Vontology types: {e}")
+                raise VontologyServiceError(f"Error searching Vontology types: {e}")
             # else: could log error for a sub-path and continue
 
     _recursive_search(absolute_vontology_root, "")

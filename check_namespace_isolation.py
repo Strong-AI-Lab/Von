@@ -1,5 +1,7 @@
 """Quick check of namespace isolation in RAG indexed sessions."""
+
 from src.backend.db.connection_manager import get_db
+
 
 def main():
     db = get_db()
@@ -22,7 +24,7 @@ def main():
     pipeline = [
         {"$match": {"indexing_status": "indexed"}},
         {"$group": {"_id": "$namespace", "count": {"$sum": 1}}},
-        {"$sort": {"count": -1}}
+        {"$sort": {"count": -1}},
     ]
     by_namespace = list(coll.aggregate(pipeline))
 
@@ -33,16 +35,21 @@ def main():
         print(f"  {ns}: {count}")
 
     # Check if sessions without namespace exist
-    no_ns = coll.count_documents({
-        "$or": [
-            {"namespace": {"$exists": False}},
-            {"namespace": None},
-            {"namespace": ""}
-        ]
-    })
+    no_ns = coll.count_documents(
+        {
+            "$or": [
+                {"namespace": {"$exists": False}},
+                {"namespace": None},
+                {"namespace": ""},
+            ]
+        }
+    )
     if no_ns > 0:
         print(f"\n⚠️  {no_ns} sessions have no namespace set!")
-        print("Run backfill: pdm run python src/backend/utilities/backfill_session_namespace.py")
+        print(
+            "Run backfill: pdm run python src/backend/utilities/backfill_session_namespace.py"
+        )
+
 
 if __name__ == "__main__":
     main()
