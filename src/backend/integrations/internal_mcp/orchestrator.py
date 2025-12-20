@@ -6,7 +6,16 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+)
 
 from .gateway import InternalMCPGateway
 
@@ -92,7 +101,9 @@ class InternalMCPChatOrchestrator:
             value = default
         return max(min_value, min(max_value, int(value)))
 
-    def _limit_context_for_llm(self, messages: List[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
+    def _limit_context_for_llm(
+        self, messages: List[Mapping[str, Any]]
+    ) -> List[Mapping[str, Any]]:
         """Limit context size to avoid runaway prompt growth.
 
         Keeps the system message (index 0) and then includes as many of the most
@@ -139,26 +150,57 @@ class InternalMCPChatOrchestrator:
             )
         return trimmed
 
-    def _truncate_nested_for_llm(self, value: Any, *, max_string_chars: int, max_list_items: int = 50) -> Any:
+    def _truncate_nested_for_llm(
+        self, value: Any, *, max_string_chars: int, max_list_items: int = 50
+    ) -> Any:
         """Truncate nested tool payloads so they remain useful but bounded."""
         if isinstance(value, str):
             if len(value) <= max_string_chars:
                 return value
-            return value[:max_string_chars] + f"\n... [truncated {len(value) - max_string_chars} chars]"
+            return (
+                value[:max_string_chars]
+                + f"\n... [truncated {len(value) - max_string_chars} chars]"
+            )
         if isinstance(value, list):
             if len(value) <= max_list_items:
-                return [self._truncate_nested_for_llm(v, max_string_chars=max_string_chars, max_list_items=max_list_items) for v in value]
+                return [
+                    self._truncate_nested_for_llm(
+                        v,
+                        max_string_chars=max_string_chars,
+                        max_list_items=max_list_items,
+                    )
+                    for v in value
+                ]
             head = value[: max_list_items - 1]
             tail = value[-1:]
             truncated = [
-                *[self._truncate_nested_for_llm(v, max_string_chars=max_string_chars, max_list_items=max_list_items) for v in head],
-                {"_truncated": True, "_omitted_items": len(value) - len(head) - len(tail)},
-                *[self._truncate_nested_for_llm(v, max_string_chars=max_string_chars, max_list_items=max_list_items) for v in tail],
+                *[
+                    self._truncate_nested_for_llm(
+                        v,
+                        max_string_chars=max_string_chars,
+                        max_list_items=max_list_items,
+                    )
+                    for v in head
+                ],
+                {
+                    "_truncated": True,
+                    "_omitted_items": len(value) - len(head) - len(tail),
+                },
+                *[
+                    self._truncate_nested_for_llm(
+                        v,
+                        max_string_chars=max_string_chars,
+                        max_list_items=max_list_items,
+                    )
+                    for v in tail
+                ],
             ]
             return truncated
         if isinstance(value, dict):
             return {
-                str(k): self._truncate_nested_for_llm(v, max_string_chars=max_string_chars, max_list_items=max_list_items)
+                str(k): self._truncate_nested_for_llm(
+                    v, max_string_chars=max_string_chars, max_list_items=max_list_items
+                )
                 for k, v in value.items()
             }
         return value
@@ -227,14 +269,14 @@ class InternalMCPChatOrchestrator:
             "You have access to internal MCP tools.\n\n"
             "⚠️ WHEN TO USE TOOLS (CHECK THESE FIRST) ⚠️\n"
             "If user asks for RECENT, CURRENT, LATEST, NEW, or BREAKING information → USE search_web\n"
-            "If user mentions specific dates (2024+, 2025+, \"this year\", \"this month\") → USE search_web\n"
-            "If user explicitly says \"search\", \"look up\", \"find information on\" → USE search_web\n"
-            "If user asks \"what's new\", \"recent developments\", \"latest research\" → USE search_web\n"
+            'If user mentions specific dates (2024+, 2025+, "this year", "this month") → USE search_web\n'
+            'If user explicitly says "search", "look up", "find information on" → USE search_web\n'
+            'If user asks "what\'s new", "recent developments", "latest research" → USE search_web\n'
             "If user provides a URL to analyse or extract content from → USE extract_url (or resilient_extract_url for JS-heavy/blocked pages)\n"
             "If user asks a direct factual question needing verification → USE qna_search\n"
             "If searching within specific domain/context (e.g., site:example.com) → USE context_search\n"
             "If user asks about arXiv papers by author, topic, or ID → USE list_papers or read_paper\n"
-            "If user asks about RAG sessions/conversations (\"how many\", \"what's indexed\", \"list sessions\") → USE rag_list_indexed\n"
+            'If user asks about RAG sessions/conversations ("how many", "what\'s indexed", "list sessions") → USE rag_list_indexed\n'
             "If user wants to see RAG content from a specific session → USE rag_get_item\n"
             "If user wants to search their indexed conversations by topic/keyword → USE search_knowledge_base\n\n"
             "CRITICAL: Your training data has a cutoff date. For anything described as current/recent/new, "
@@ -242,9 +284,9 @@ class InternalMCPChatOrchestrator:
             "HOW TO INVOKE A TOOL:\n"
             "Respond with EITHER a single tool-call JSON object OR a JSON array of tool-call objects:\n"
             "Single:\n"
-            "{\"action\": \"call_tool\", \"tool\": \"tool_name\", \"payload\": {\"param\": \"value\"}}\n"
+            '{"action": "call_tool", "tool": "tool_name", "payload": {"param": "value"}}\n'
             "Batch (preferred for multi-step workflows; keep it small):\n"
-            "[{\"action\": \"call_tool\", \"tool\": \"tool_a\", \"payload\": {}}, {\"action\": \"call_tool\", \"tool\": \"tool_b\", \"payload\": {}}]\n\n"
+            '[{"action": "call_tool", "tool": "tool_a", "payload": {}}, {"action": "call_tool", "tool": "tool_b", "payload": {}}]\n\n'
             "INVOCATION RULES:\n"
             "- DO NOT explain what you're going to do - just do it\n"
             "- DO NOT output JSON as an example or description - only output JSON when you want to invoke a tool NOW\n"
@@ -258,7 +300,11 @@ class InternalMCPChatOrchestrator:
             f"{listing}"
         )
 
-        if auxiliary_system_prompt and isinstance(auxiliary_system_prompt, str) and auxiliary_system_prompt.strip():
+        if (
+            auxiliary_system_prompt
+            and isinstance(auxiliary_system_prompt, str)
+            and auxiliary_system_prompt.strip()
+        ):
             base_message += (
                 "\n\n"
                 "USER-SPECIFIC SYSTEM PROMPT (from Vontology):\n"
@@ -376,8 +422,8 @@ class InternalMCPChatOrchestrator:
 
         # Check if entire response is a single JSON object or a JSON array.
         if not (
-            (stripped.startswith('{') and stripped.endswith('}'))
-            or (stripped.startswith('[') and stripped.endswith(']'))
+            (stripped.startswith("{") and stripped.endswith("}"))
+            or (stripped.startswith("[") and stripped.endswith("]"))
         ):
             return False
 
@@ -387,14 +433,20 @@ class InternalMCPChatOrchestrator:
             if isinstance(parsed, list):
                 if not parsed:
                     return False
-                return any(self._is_json_action_response(json.dumps(item)) for item in parsed)
+                return any(
+                    self._is_json_action_response(json.dumps(item)) for item in parsed
+                )
             if not isinstance(parsed, dict):
                 return False
 
             # Exact match for tool call pattern
             has_action = parsed.get(self._ACTION_FIELD) == self._CALL_ACTION
-            has_tool = self._TOOL_FIELD in parsed and isinstance(parsed[self._TOOL_FIELD], str)
-            has_payload = self._PAYLOAD_FIELD in parsed and isinstance(parsed[self._PAYLOAD_FIELD], dict)
+            has_tool = self._TOOL_FIELD in parsed and isinstance(
+                parsed[self._TOOL_FIELD], str
+            )
+            has_payload = self._PAYLOAD_FIELD in parsed and isinstance(
+                parsed[self._PAYLOAD_FIELD], dict
+            )
 
             # Some models omit the action field even when they are clearly
             # attempting a tool call. Treat this as a likely tool call response
@@ -406,11 +458,15 @@ class InternalMCPChatOrchestrator:
                 and set(parsed.keys()) <= {self._TOOL_FIELD, self._PAYLOAD_FIELD}
             )
 
-            return (has_action and has_tool and has_payload) or missing_action_but_tool_shape
+            return (
+                has_action and has_tool and has_payload
+            ) or missing_action_but_tool_shape
         except (json.JSONDecodeError, TypeError):
             return False
 
-    def _extract_tool_calls(self, text: str) -> Optional[List[MutableMapping[str, Any]]]:
+    def _extract_tool_calls(
+        self, text: str
+    ) -> Optional[List[MutableMapping[str, Any]]]:
         """Extract one or more tool-call objects from the model response.
 
         Accepts either a single tool-call JSON object or a JSON array of tool-call
@@ -433,13 +489,10 @@ class InternalMCPChatOrchestrator:
         fence_idx = normalised.find("```")
         if fence_idx != -1:
             prefix = normalised[:fence_idx]
-            prefix_ok = (
-                not prefix.strip()
-                or (
-                    len(prefix) <= 200
-                    and prefix.count("\n") <= 2
-                    and all(token not in prefix for token in ("{", "[", "}"))
-                )
+            prefix_ok = not prefix.strip() or (
+                len(prefix) <= 200
+                and prefix.count("\n") <= 2
+                and all(token not in prefix for token in ("{", "[", "}"))
             )
             if prefix_ok:
                 fenced = normalised[fence_idx:]
@@ -455,7 +508,10 @@ class InternalMCPChatOrchestrator:
                             post_fence_trailing = fenced[close_line_end:].strip()
                             raw = fenced[open_line_end + 1 : close_idx].strip()
 
-        looks_like_tool_call = any(token in raw for token in (f'"{self._ACTION_FIELD}"', f'"{self._TOOL_FIELD}"'))
+        looks_like_tool_call = any(
+            token in raw
+            for token in (f'"{self._ACTION_FIELD}"', f'"{self._TOOL_FIELD}"')
+        )
 
         if not (raw.startswith("{") or raw.startswith("[")):
             return None
@@ -475,11 +531,16 @@ class InternalMCPChatOrchestrator:
                 return None
 
             has_tool = isinstance(candidate.get(self._TOOL_FIELD), str)
-            has_payload = isinstance(candidate.get(self._PAYLOAD_FIELD, {}), MutableMapping)
+            has_payload = isinstance(
+                candidate.get(self._PAYLOAD_FIELD, {}), MutableMapping
+            )
             has_action = candidate.get(self._ACTION_FIELD) == self._CALL_ACTION
 
             missing_action = self._ACTION_FIELD not in candidate
-            strict_shape = set(candidate.keys()) <= {self._TOOL_FIELD, self._PAYLOAD_FIELD}
+            strict_shape = set(candidate.keys()) <= {
+                self._TOOL_FIELD,
+                self._PAYLOAD_FIELD,
+            }
 
             if missing_action and has_tool and has_payload and strict_shape:
                 catalogue = None
@@ -540,7 +601,9 @@ class InternalMCPChatOrchestrator:
             )
 
         if post_fence_trailing:
-            if post_fence_trailing.startswith("{") or post_fence_trailing.startswith("["):
+            if post_fence_trailing.startswith("{") or post_fence_trailing.startswith(
+                "["
+            ):
                 raise ToolCallParsingError(
                     "Tool call was not executed: multiple JSON values were emitted in one response."
                 )
@@ -582,13 +645,10 @@ class InternalMCPChatOrchestrator:
             # Some models add a short one-line preface before the fenced tool
             # call. Tolerate that as long as it is small and does not itself
             # contain JSON-like openers.
-            prefix_ok = (
-                not prefix.strip()
-                or (
-                    len(prefix) <= 200
-                    and prefix.count("\n") <= 2
-                    and all(token not in prefix for token in ("{", "[", "}"))
-                )
+            prefix_ok = not prefix.strip() or (
+                len(prefix) <= 200
+                and prefix.count("\n") <= 2
+                and all(token not in prefix for token in ("{", "[", "}"))
             )
             if prefix_ok:
                 fenced = normalised[fence_idx:]
@@ -604,7 +664,10 @@ class InternalMCPChatOrchestrator:
                             post_fence_trailing = fenced[close_line_end:].strip()
                             raw = fenced[open_line_end + 1 : close_idx].strip()
 
-        looks_like_tool_call = any(token in raw for token in (f'"{self._ACTION_FIELD}"', f'"{self._TOOL_FIELD}"'))
+        looks_like_tool_call = any(
+            token in raw
+            for token in (f'"{self._ACTION_FIELD}"', f'"{self._TOOL_FIELD}"')
+        )
 
         # Only consider a tool call if the model output begins with a JSON
         # object (or a fenced block containing one). This avoids false
@@ -624,7 +687,9 @@ class InternalMCPChatOrchestrator:
         is_tool_call = False
         if isinstance(parsed, MutableMapping):
             has_tool = isinstance(parsed.get(self._TOOL_FIELD), str)
-            has_payload = isinstance(parsed.get(self._PAYLOAD_FIELD, {}), MutableMapping)
+            has_payload = isinstance(
+                parsed.get(self._PAYLOAD_FIELD, {}), MutableMapping
+            )
 
             has_action = parsed.get(self._ACTION_FIELD) == self._CALL_ACTION
 
@@ -674,7 +739,9 @@ class InternalMCPChatOrchestrator:
             trailing = ""
 
         if post_fence_trailing and is_tool_call:
-            if post_fence_trailing.startswith("{") or post_fence_trailing.startswith("["):
+            if post_fence_trailing.startswith("{") or post_fence_trailing.startswith(
+                "["
+            ):
                 raise ToolCallParsingError(
                     "Tool call was not executed: multiple tool calls were emitted in one response."
                 )
@@ -710,7 +777,14 @@ class InternalMCPChatOrchestrator:
 
         return parsed
 
-    def _format_tool_result(self, tool_name: str, payload: Any, duration_ms: float | None, status: str, error: str | None = None) -> str:
+    def _format_tool_result(
+        self,
+        tool_name: str,
+        payload: Any,
+        duration_ms: float | None,
+        status: str,
+        error: str | None = None,
+    ) -> str:
         result: Dict[str, Any] = {
             "tool": tool_name,
             "status": status,
@@ -734,7 +808,9 @@ class InternalMCPChatOrchestrator:
             preview = result.get("payload")
             preview_str = json.dumps(preview, default=str)
             if len(preview_str) > self._max_tool_result_chars:
-                preview_str = preview_str[: self._max_tool_result_chars] + "\n... [truncated]"
+                preview_str = (
+                    preview_str[: self._max_tool_result_chars] + "\n... [truncated]"
+                )
             result["payload"] = {
                 "_truncated": True,
                 "_original_chars": len(encoded),
@@ -770,7 +846,8 @@ class InternalMCPChatOrchestrator:
             self._logger.warning(
                 "[mcp_orchestrator] Large instruction message: %d chars (%d KB). "
                 "This may cause token limit issues.",
-                instruction_chars, instruction_chars // 1024
+                instruction_chars,
+                instruction_chars // 1024,
             )
 
         base.insert(0, {"role": "system", "content": instruction_msg})
@@ -806,7 +883,9 @@ class InternalMCPChatOrchestrator:
                         extra_messages=(),
                         tool_invocations=(),
                     )
-            return OrchestratorResult(response_text=response, extra_messages=(), tool_invocations=())
+            return OrchestratorResult(
+                response_text=response, extra_messages=(), tool_invocations=()
+            )
 
         augmented_context = self._build_augmented_context(
             context,
@@ -836,12 +915,15 @@ class InternalMCPChatOrchestrator:
             # Recovery: if the model strongly indicates it intended to perform a
             # tool-backed action but did not emit a tool call, ask once more for
             # the actual tool-call JSON.
-            should_retry = (
-                self._looks_like_missing_tool_call(response)
-                or self._contains_fenced_tool_call_json(response)
-            )
+            should_retry = self._looks_like_missing_tool_call(
+                response
+            ) or self._contains_fenced_tool_call_json(response)
             if should_retry:
-                reason = "fenced JSON detected" if self._contains_fenced_tool_call_json(response) else "missing tool call language"
+                reason = (
+                    "fenced JSON detected"
+                    if self._contains_fenced_tool_call_json(response)
+                    else "missing tool call language"
+                )
                 self._logger.info(
                     "[mcp_orchestrator] Model response looks like a missing tool call (%s); retrying once (model=%s).",
                     reason,
@@ -851,7 +933,9 @@ class InternalMCPChatOrchestrator:
                     "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
                     "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects (no prose, no Markdown)."
                 )
-                retry_response = llm_client.generate(retry_prompt, context=augmented_context, model=model)
+                retry_response = llm_client.generate(
+                    retry_prompt, context=augmented_context, model=model
+                )
                 try:
                     retry_calls = self._extract_tool_calls(retry_response)
                 except ToolCallParsingError:
@@ -862,9 +946,13 @@ class InternalMCPChatOrchestrator:
                     has_valid_tool_call = True
                 else:
                     # Fall back to returning the original response.
-                    return OrchestratorResult(response_text=response, extra_messages=(), tool_invocations=())
+                    return OrchestratorResult(
+                        response_text=response, extra_messages=(), tool_invocations=()
+                    )
             else:
-                return OrchestratorResult(response_text=response, extra_messages=(), tool_invocations=())
+                return OrchestratorResult(
+                    response_text=response, extra_messages=(), tool_invocations=()
+                )
 
         assert tool_calls is not None
         self._logger.debug("[mcp_orchestrator] Extracted tool requests: %s", tool_calls)
@@ -893,12 +981,16 @@ class InternalMCPChatOrchestrator:
 
             # Add the assistant JSON response once per batch.
             if iteration_count == 0:
-                augmented_context.extend([
-                    {"role": "user", "content": prompt},
-                    {"role": "assistant", "content": current_response},
-                ])
+                augmented_context.extend(
+                    [
+                        {"role": "user", "content": prompt},
+                        {"role": "assistant", "content": current_response},
+                    ]
+                )
             else:
-                augmented_context.append({"role": "assistant", "content": current_response})
+                augmented_context.append(
+                    {"role": "assistant", "content": current_response}
+                )
 
             for tool_request in tool_calls:
                 iteration_count += 1
@@ -932,18 +1024,18 @@ class InternalMCPChatOrchestrator:
                             self._logger.info(
                                 "[mcp_orchestrator] Injected namespace=%s into tool=%s payload",
                                 user_namespace,
-                                tool_name
+                                tool_name,
                             )
                         elif user_namespace:
                             self._logger.info(
                                 "[mcp_orchestrator] Tool=%s already has namespace=%s in payload",
                                 tool_name,
-                                payload.get("namespace")
+                                payload.get("namespace"),
                             )
                         else:
                             self._logger.warning(
                                 "[mcp_orchestrator] No user_namespace available for tool=%s (unauthenticated request)",
-                                tool_name
+                                tool_name,
                             )
                     else:
                         # Gmail tools must not receive namespace; profile is sufficient for routing
@@ -951,22 +1043,32 @@ class InternalMCPChatOrchestrator:
                             payload.pop("namespace", None)
                             self._logger.info(
                                 "[mcp_orchestrator] Removed namespace from Gmail tool=%s payload to satisfy MCP schema",
-                                tool_name
+                                tool_name,
                             )
 
                     result = self._gateway.invoke(tool_name, payload)
-                    tool_payload = self._format_tool_result(tool_name, result.payload, result.duration_ms, "ok")
+                    tool_payload = self._format_tool_result(
+                        tool_name, result.payload, result.duration_ms, "ok"
+                    )
                     invocations.append({"tool": tool_name, "payload": dict(payload)})
                     self._logger.info(
                         "[mcp_orchestrator] Tool invocation #%d: tool=%s, model=%s",
                         iteration_count,
                         tool_name,
-                        model or "default"
+                        model or "default",
                     )
-                except Exception as exc:  # pragma: no cover - error handling path validated separately
-                    tool_payload = self._format_tool_result(tool_name, None, None, "error", str(exc))
-                    invocations.append({"tool": tool_name, "payload": dict(payload), "error": str(exc)})
-                    self._logger.warning("[mcp_orchestrator] Tool %s failed: %s", tool_name, exc)
+                except (
+                    Exception
+                ) as exc:  # pragma: no cover - error handling path validated separately
+                    tool_payload = self._format_tool_result(
+                        tool_name, None, None, "error", str(exc)
+                    )
+                    invocations.append(
+                        {"tool": tool_name, "payload": dict(payload), "error": str(exc)}
+                    )
+                    self._logger.warning(
+                        "[mcp_orchestrator] Tool %s failed: %s", tool_name, exc
+                    )
 
                 augmented_context.append({"role": "tool", "content": tool_payload})
                 tool_messages.append({"role": "tool", "content": tool_payload})
@@ -976,14 +1078,19 @@ class InternalMCPChatOrchestrator:
                 "If the tool failed, explain the error. "
                 "If you need to call another tool, you may do so."
             )
-            current_response = llm_client.generate(follow_up_prompt, context=augmented_context, model=model)
+            current_response = llm_client.generate(
+                follow_up_prompt, context=augmented_context, model=model
+            )
 
         # Log if we hit the iteration limit
-        if iteration_count >= self._max_tool_invocations and self._is_json_action_response(current_response):
+        if (
+            iteration_count >= self._max_tool_invocations
+            and self._is_json_action_response(current_response)
+        ):
             self._logger.warning(
                 "[mcp_orchestrator] Reached max tool invocation limit (%d), "
                 "but LLM still wants to call tools. Returning current response.",
-                self._max_tool_invocations
+                self._max_tool_invocations,
             )
 
         return OrchestratorResult(

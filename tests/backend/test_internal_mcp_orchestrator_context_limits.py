@@ -1,7 +1,9 @@
 import json
 from typing import Any, cast
 
-from src.backend.integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
+from src.backend.integrations.internal_mcp.orchestrator import (
+    InternalMCPChatOrchestrator,
+)
 
 
 class _StubResult:
@@ -52,7 +54,9 @@ def test_orchestrator_retries_when_model_claims_tool_action_but_emits_no_tool_ca
         ]
     )
 
-    result = orchestrator.run(prompt="enrich Prof Green", context=[], llm_client=llm, model=None)
+    result = orchestrator.run(
+        prompt="enrich Prof Green", context=[], llm_client=llm, model=None
+    )
 
     assert result.response_text == "done"
     assert result.tool_invocations
@@ -63,7 +67,7 @@ def test_orchestrator_retries_when_model_claims_tool_action_but_emits_no_tool_ca
 
 def test_orchestrator_retries_when_tool_call_json_in_fence_after_prose():
     """Regression test for JVNAUTOSCI-800: fenced JSON after prose doesn't execute.
-    
+
     This matches the exact failure pattern from the user's transcript where the model
     outputs substantial prose followed by a fenced JSON tool call, which the strict
     extraction logic rejects.
@@ -92,12 +96,23 @@ def test_orchestrator_retries_when_tool_call_json_in_fence_after_prose():
     llm = _CapturingLLM(
         [
             prose_then_fence,  # First response: prose + fenced JSON (extraction should fail)
-            json.dumps({"action": "call_tool", "tool": "create_concepts", "payload": {"parent_id": "#V#person", "concepts": [{"name": "Alvaro Orsi"}]}}),  # Retry: pure JSON
+            json.dumps(
+                {
+                    "action": "call_tool",
+                    "tool": "create_concepts",
+                    "payload": {
+                        "parent_id": "#V#person",
+                        "concepts": [{"name": "Alvaro Orsi"}],
+                    },
+                }
+            ),  # Retry: pure JSON
             "Concept created successfully.",  # Follow-up natural language
         ]
     )
 
-    result = orchestrator.run(prompt="Create Alvaro Orsi", context=[], llm_client=llm, model=None)
+    result = orchestrator.run(
+        prompt="Create Alvaro Orsi", context=[], llm_client=llm, model=None
+    )
 
     assert result.response_text == "Concept created successfully."
     assert result.tool_invocations
@@ -127,8 +142,7 @@ def test_orchestrator_limits_context_by_chars():
 
     # Create a very large chat history with unique contents so trimming is testable.
     context = [
-        {"role": "user", "content": f"msg-{i}:" + ("a" * 2_000)}
-        for i in range(100)
+        {"role": "user", "content": f"msg-{i}:" + ("a" * 2_000)} for i in range(100)
     ]
 
     llm = _CapturingLLM(["hello world"])
@@ -149,9 +163,7 @@ def test_orchestrator_limits_context_by_chars():
     # The newest user message should be present; the oldest should be trimmed.
     assert sent_context[-1]["content"].startswith("msg-99:")
     # After trimming, the earliest preserved message index should be > 0.
-    first_preserved = next(
-        msg for msg in sent_context[1:] if msg.get("role") == "user"
-    )
+    first_preserved = next(msg for msg in sent_context[1:] if msg.get("role") == "user")
     assert first_preserved["content"].startswith("msg-")
     first_idx = int(first_preserved["content"].split(":", 1)[0].split("-", 1)[1])
     assert first_idx > 0

@@ -29,14 +29,22 @@ class MetaRelationsRepository:
 
     # Basic wrappers
     @staticmethod
-    def find_one(filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    def find_one(
+        filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
         coll = MetaRelationsRepository.collection()
         if coll is None:
             return None
         return coll.find_one(filter, projection)
 
     @staticmethod
-    def find(filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None, sort: Optional[List] = None, skip: int = 0, limit: int = 0):
+    def find(
+        filter: Dict[str, Any],
+        projection: Optional[Dict[str, Any]] = None,
+        sort: Optional[List] = None,
+        skip: int = 0,
+        limit: int = 0,
+    ):
         coll = MetaRelationsRepository.collection()
         if coll is None:
             return []
@@ -57,7 +65,9 @@ class MetaRelationsRepository:
         return coll.insert_one(document)
 
     @staticmethod
-    def update_one(filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
+    def update_one(
+        filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False
+    ):
         coll = MetaRelationsRepository.collection()
         if coll is None:
             raise RuntimeError("meta_relations collection not available")

@@ -5,7 +5,11 @@ from pymongo.collection import Collection
 from pymongo.database import Database
 import logging
 
-from ..mongo_client import get_db, get_text_values_collection, get_text_relations_collection
+from ..mongo_client import (
+    get_db,
+    get_text_values_collection,
+    get_text_relations_collection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +27,22 @@ class TextValuesRepository:
 
     # Basic wrappers
     @staticmethod
-    def find_one(filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    def find_one(
+        filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
         coll = TextValuesRepository.collection()
         if coll is None:
             return None
         return coll.find_one(filter, projection)
 
     @staticmethod
-    def find(filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None, sort: Optional[List] = None, skip: int = 0, limit: int = 0):
+    def find(
+        filter: Dict[str, Any],
+        projection: Optional[Dict[str, Any]] = None,
+        sort: Optional[List] = None,
+        skip: int = 0,
+        limit: int = 0,
+    ):
         coll = TextValuesRepository.collection()
         if coll is None:
             return []
@@ -51,7 +63,9 @@ class TextValuesRepository:
         return coll.insert_one(document)
 
     @staticmethod
-    def update_one(filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
+    def update_one(
+        filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False
+    ):
         coll = TextValuesRepository.collection()
         if coll is None:
             raise RuntimeError("text_values collection not available")
@@ -65,7 +79,9 @@ class TextValuesRepository:
         return coll.update_many(filter, update)
 
     @staticmethod
-    def find_one_and_update(filter: Dict[str, Any], update: Dict[str, Any], return_document: bool = False):
+    def find_one_and_update(
+        filter: Dict[str, Any], update: Dict[str, Any], return_document: bool = False
+    ):
         coll = TextValuesRepository.collection()
         if coll is None:
             return None
@@ -113,14 +129,22 @@ class TextRelationsRepository:
 
     # Basic wrappers
     @staticmethod
-    def find_one(filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    def find_one(
+        filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
         coll = TextRelationsRepository.collection()
         if coll is None:
             return None
         return coll.find_one(filter, projection)
 
     @staticmethod
-    def find(filter: Dict[str, Any], projection: Optional[Dict[str, Any]] = None, sort: Optional[List] = None, skip: int = 0, limit: int = 0):
+    def find(
+        filter: Dict[str, Any],
+        projection: Optional[Dict[str, Any]] = None,
+        sort: Optional[List] = None,
+        skip: int = 0,
+        limit: int = 0,
+    ):
         coll = TextRelationsRepository.collection()
         if coll is None:
             return []
@@ -141,7 +165,9 @@ class TextRelationsRepository:
         return coll.insert_one(document)
 
     @staticmethod
-    def update_one(filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
+    def update_one(
+        filter: Dict[str, Any], update: Dict[str, Any], upsert: bool = False
+    ):
         coll = TextRelationsRepository.collection()
         if coll is None:
             raise RuntimeError("text_relations collection not available")
@@ -155,7 +181,9 @@ class TextRelationsRepository:
         return coll.update_many(filter, update)
 
     @staticmethod
-    def find_one_and_update(filter: Dict[str, Any], update: Dict[str, Any], return_document: bool = False):
+    def find_one_and_update(
+        filter: Dict[str, Any], update: Dict[str, Any], return_document: bool = False
+    ):
         coll = TextRelationsRepository.collection()
         if coll is None:
             return None

@@ -74,4 +74,3 @@ print("  - Tool WITHOUT namespace should return 'namespace_required' error")
 print("  - Tool WITH namespace should filter to that user's sessions only")
 print("  - michael_witbrock should have 10 indexed sessions")
 print("  - von_archivist should have 16 indexed sessions")
-

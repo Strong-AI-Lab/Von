@@ -2,7 +2,9 @@ import pytest
 
 
 def test_build_user_specific_system_prompt_returns_none_for_blank_user_id(monkeypatch):
-    from src.backend.services.chat_auxiliary_prompt_service import build_user_specific_system_prompt
+    from src.backend.services.chat_auxiliary_prompt_service import (
+        build_user_specific_system_prompt,
+    )
 
     assert build_user_specific_system_prompt("") is None
     assert build_user_specific_system_prompt("   ") is None
@@ -92,7 +94,9 @@ def test_get_user_specific_prompt_fragments_falls_back_to_text_relations(monkeyp
         ],
     )
 
-    monkeypatch.setattr(service, "get_concept_by_concept_id", lambda _cid: {"concept_id": _cid})
+    monkeypatch.setattr(
+        service, "get_concept_by_concept_id", lambda _cid: {"concept_id": _cid}
+    )
     monkeypatch.setattr(
         service,
         "get_texts_for_concept",

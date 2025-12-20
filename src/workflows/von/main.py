@@ -4,8 +4,8 @@ import sys
 import os
 import importlib
 from importlib import util as importlib_util
-project_root_str = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../.."))
+
+project_root_str = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 src_root = os.path.join(project_root_str, "src")
 if src_root not in sys.path:
     sys.path.insert(0, src_root)
@@ -32,8 +32,7 @@ from backend.languagemodels.llm_interface import OllamaClient  # type: ignore
 
 DEBUG_ATTACH_ENV = "VON_DEBUGPY"  # if set, enable debugpy attach
 MEM_LOG_INTERVAL = int(os.environ.get("VON_MEM_LOG_INTERVAL", "60"))  # seconds
-ENABLE_MEM_LOG = os.environ.get(
-    "VON_MEM_LOG", "1") not in ("0", "false", "False")
+ENABLE_MEM_LOG = os.environ.get("VON_MEM_LOG", "1") not in ("0", "false", "False")
 
 # --- Logging Setup --- ADDED BLOCK
 PROJECT_ROOT = Path(project_root_str)
@@ -53,18 +52,19 @@ root_logger.setLevel(logging.DEBUG)  # Set the root logger to the lowest level
 # Use 'w' mode to overwrite the log file each time the script runs for ease of debugging.
 # We'll use 'a' mode once we are in production to append logs.
 file_handler = logging.FileHandler(
-    LOG_FILE_PATH, mode='w', encoding='utf-8')  # Use 'a' for append mode
+    LOG_FILE_PATH, mode="w", encoding="utf-8"
+)  # Use 'a' for append mode
 file_handler.setLevel(logging.DEBUG)  # Log DEBUG and higher to file
 file_formatter = logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(module)s:%(lineno)d - %(message)s')
+    "%(asctime)s - %(name)s - %(levelname)s - %(module)s:%(lineno)d - %(message)s"
+)
 file_handler.setFormatter(file_formatter)
 root_logger.addHandler(file_handler)  # Add to root logger
 
 # Console Handler - for less detailed logging to the console
-console_handler = logging.StreamHandler(
-    sys.stdout)  # Explicitly use sys.stdout
+console_handler = logging.StreamHandler(sys.stdout)  # Explicitly use sys.stdout
 console_handler.setLevel(logging.INFO)  # Log INFO and higher to console
-console_formatter = logging.Formatter('%(levelname)s: %(message)s')
+console_formatter = logging.Formatter("%(levelname)s: %(message)s")
 console_handler.setFormatter(console_formatter)
 root_logger.addHandler(console_handler)  # Add to root logger
 
@@ -164,20 +164,23 @@ sys.excepthook = _global_excepthook
 if os.environ.get(DEBUG_ATTACH_ENV):  # pragma: no cover
     try:
         import importlib
+
         # type: ignore[attr-defined]
         if importlib_util.find_spec("debugpy") is not None:
             debugpy = importlib.import_module("debugpy")  # type: ignore
             host = os.environ.get("VON_DEBUGPY_HOST", "127.0.0.1")
             port = int(os.environ.get("VON_DEBUGPY_PORT", "5678"))
             debugpy.listen((host, port))  # type: ignore[attr-defined]
-            logger.warning("debugpy listening on %s:%s (set %s=1)",
-                           host, port, DEBUG_ATTACH_ENV)
+            logger.warning(
+                "debugpy listening on %s:%s (set %s=1)", host, port, DEBUG_ATTACH_ENV
+            )
             if os.environ.get("VON_DEBUGPY_WAIT"):
                 logger.warning("Waiting for debugger attach...")
                 debugpy.wait_for_client()  # type: ignore[attr-defined]
         else:
             logger.warning(
-                "DEBUGPY requested via %s but package not installed.", DEBUG_ATTACH_ENV)
+                "DEBUGPY requested via %s but package not installed.", DEBUG_ATTACH_ENV
+            )
     except Exception as _e:  # pragma: no cover
         logger.error("Failed to initialize debugpy: %s", _e)
 
@@ -187,6 +190,7 @@ def _periodic_mem_logger():  # pragma: no cover
         return
     try:
         import importlib
+
         # type: ignore[attr-defined]
         if importlib_util.find_spec("psutil") is None:
             logger.debug("psutil not installed; memory logger disabled.")
@@ -194,16 +198,14 @@ def _periodic_mem_logger():  # pragma: no cover
         psutil = importlib.import_module("psutil")  # type: ignore
         proc = psutil.Process()  # type: ignore[attr-defined]
         while True:
-            rss = proc.memory_info().rss / (1024*1024)
-            logger.info("[diag] RSS=%.1fMB threads=%d",
-                        rss, proc.num_threads())
+            rss = proc.memory_info().rss / (1024 * 1024)
+            logger.info("[diag] RSS=%.1fMB threads=%d", rss, proc.num_threads())
             time.sleep(MEM_LOG_INTERVAL)
     except Exception as _e:
         logger.debug("Memory logger exiting: %s", _e)
 
 
-threading.Thread(target=_periodic_mem_logger,
-                 name="von-mem-log", daemon=True).start()
+threading.Thread(target=_periodic_mem_logger, name="von-mem-log", daemon=True).start()
 # --- End Logging Setup ---
 
 # Now we can import the necessary functions/modules
@@ -211,14 +213,15 @@ threading.Thread(target=_periodic_mem_logger,
 
 def main():
     import socket
-    parser = argparse.ArgumentParser(
-        description="Run the Flask Chat LLM server.")
-    parser.add_argument("--host", default="127.0.0.1",
-                        help="Host address to bind the server to.")
-    parser.add_argument("--port", type=int, default=5000,
-                        help="Port number to run the server on.")
-    parser.add_argument("--debug", action="store_true",
-                        help="Enable Flask debug mode.")
+
+    parser = argparse.ArgumentParser(description="Run the Flask Chat LLM server.")
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="Host address to bind the server to."
+    )
+    parser.add_argument(
+        "--port", type=int, default=5000, help="Port number to run the server on."
+    )
+    parser.add_argument("--debug", action="store_true", help="Enable Flask debug mode.")
     # Add arguments for LLM client configuration if needed (e.g., API keys, host)
     # parser.add_argument("--llm-host", default="http://localhost:11434", help="Ollama host URL.")
     # parser.add_argument("--llm-model", default="granite3.3:2b", help="Default LLM model.")
@@ -231,17 +234,18 @@ def main():
 
     original_port = args.port
     while is_port_in_use(args.port, args.host):
-        logger.warning(
-            f"Port {args.port} is already in use. Trying next port...")
+        logger.warning(f"Port {args.port} is already in use. Trying next port...")
         args.port += 1
     if args.port != original_port:
         print(
-            f"[INFO] Port {original_port} is in use. The UI will start on port {args.port} instead.")
+            f"[INFO] Port {original_port} is in use. The UI will start on port {args.port} instead."
+        )
 
     # --- Instantiate the LLM Client ---
     # Use the unified LLM client factory that respects user settings
     try:
         from backend.languagemodels.llm_interface import get_llm_client  # type: ignore
+
         llm_client = get_llm_client()
         logger.info(f"Using {type(llm_client).__name__} for LLM interactions.")
     except Exception as e:  # pragma: no cover - startup failure path
@@ -256,46 +260,46 @@ def main():
 
     # ADDED: Route for the settings tab
     # This one is kept as it appears first and is correctly placed before blueprint registration.
-    @app.route('/settings')
+    @app.route("/settings")
     def serve_settings_tab_route():
         """Serves the settings tab."""
-        return render_template('settings_tab.html')
+        return render_template("settings_tab.html")
 
     # ADDED: Routes for individual tab templates (modular architecture)
-    @app.route('/chat_tab')
+    @app.route("/chat_tab")
     def serve_chat_tab_route():
         """Serves the chat tab template."""
-        return render_template('chat_tab.html')
+        return render_template("chat_tab.html")
 
-    @app.route('/vontology_tab')
+    @app.route("/vontology_tab")
     def serve_vontology_tab_route():
         """Serves the vontology tab template."""
-        return render_template('vontology_tab.html')
+        return render_template("vontology_tab.html")
 
-    @app.route('/import_export_tab')
+    @app.route("/import_export_tab")
     def serve_import_export_tab_route():
         """Serves the import/export tab template."""
-        return render_template('import_export_tab.html')
+        return render_template("import_export_tab.html")
 
-    @app.route('/entity_tab')
+    @app.route("/entity_tab")
     def serve_entity_tab_route():
         """Serves the entity tab template."""
-        return render_template('entity_tab.html')
+        return render_template("entity_tab.html")
 
-    @app.route('/concept_tab')
+    @app.route("/concept_tab")
     def serve_concept_tab_route():
         """Serves the concept tab template."""
-        return render_template('concept_tab.html')
+        return render_template("concept_tab.html")
 
-    @app.route('/annotation_tab')
+    @app.route("/annotation_tab")
     def serve_annotation_tab_route():
         """Serves the annotation demo tab template."""
-        return render_template('annotation_tab.html')
+        return render_template("annotation_tab.html")
 
-    @app.route('/settings_tab')
+    @app.route("/settings_tab")
     def serve_settings_tab_content_route():
         """Serves the settings tab content for AJAX loading."""
-        return render_template('settings_tab.html')
+        return render_template("settings_tab.html")
 
     # Initialize Flask app and other configurations as before
     # app = Flask(__name__, static_folder='../../frontend/web/von_interface/static', template_folder='../../frontend/web/von_interface/templates')
@@ -312,19 +316,26 @@ def main():
     # ... (other blueprints)
 
     logger.info(f"Starting Flask server on http://{args.host}:{args.port}")
-    logger.debug("Args: host=%s port=%s debug=%s cwd=%s python=%s",
-                 args.host, args.port, args.debug, os.getcwd(), sys.executable)
+    logger.debug(
+        "Args: host=%s port=%s debug=%s cwd=%s python=%s",
+        args.host,
+        args.port,
+        args.debug,
+        os.getcwd(),
+        sys.executable,
+    )
 
     # --- Auto-open browser ONCE on server startup (not per-request) ---
     import threading
     import webbrowser
+
     # def open_browser_once():
     #   url = f"http://{args.host}:{args.port}/von/" # MODIFIED
     #  threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
     # if not os.environ.get("VON_SKIP_BROWSER_LAUNCH"):
     #   open_browser_once()
-# --- Delay browser launch until app is live ---
+    # --- Delay browser launch until app is live ---
 
     def open_browser_once_delayed():
         import threading
@@ -343,7 +354,8 @@ def main():
                 except Exception:
                     time.sleep(1)
             print(
-                f"[WARN] Flask did not become ready in time, skipping browser launch.")
+                f"[WARN] Flask did not become ready in time, skipping browser launch."
+            )
 
         threading.Thread(target=check_server_and_open).start()
 
@@ -356,18 +368,19 @@ def main():
     else:
         try:
             import importlib
+
             serve = None
             # type: ignore[attr-defined]
             if importlib_util.find_spec("waitress") is not None:
-                waitress_mod = importlib.import_module(
-                    "waitress")  # type: ignore
+                waitress_mod = importlib.import_module("waitress")  # type: ignore
                 serve = getattr(waitress_mod, "serve", None)
             if callable(serve):
                 logger.info("Running with Waitress production server.")
                 serve(app, host=args.host, port=args.port)
             else:
                 logger.warning(
-                    "Waitress not found. Falling back to Flask development server (not recommended for production).")
+                    "Waitress not found. Falling back to Flask development server (not recommended for production)."
+                )
                 app.run(host=args.host, port=args.port, debug=False)
         except Exception as e:
             # Capture catastrophic server failures

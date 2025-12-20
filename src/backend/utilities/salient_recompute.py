@@ -3,6 +3,7 @@
 This module hosts the authoritative logic for the salient predicate recompute
 workflow so it can be imported both by Flask routes and CLI entrypoints.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -19,10 +20,10 @@ from ..vontology.utils_vontology import (  # type: ignore
     normalise_salient_scope_map,
 )
 
-DIRECT_FIELD = '#V#salient_binary_predicate_for_type'
-INHERITED_FIELD = 'inherited_salient_binary_predicates'
-STAMP_FIELD = 'inherited_salient_computed_at'
-ERROR_FIELD = 'inherited_salient_error'
+DIRECT_FIELD = "#V#salient_binary_predicate_for_type"
+INHERITED_FIELD = "inherited_salient_binary_predicates"
+STAMP_FIELD = "inherited_salient_computed_at"
+ERROR_FIELD = "inherited_salient_error"
 UPDATED_LIST_LIMIT = 100
 
 
@@ -30,39 +31,39 @@ def fetch_type_docs(limit: Optional[int] = None):
     """Fetch all type documents (concept ids beginning with #V#)."""
     db = get_db()
     if db is None:
-        raise RuntimeError('Database unavailable (get_db returned None)')
+        raise RuntimeError("Database unavailable (get_db returned None)")
 
     coll = db[CONCEPTS_COLLECTION_NAME]
     cursor = coll.find(
+        {"concept_id": {"$regex": "^#V#"}},
         {
-            'concept_id': {'$regex': '^#V#'}
-        },
-        {
-            'concept_id': 1,
-            'relationships.is_a_type_of': 1,
-            f'relationships.{DIRECT_FIELD}': 1,
+            "concept_id": 1,
+            "relationships.is_a_type_of": 1,
+            f"relationships.{DIRECT_FIELD}": 1,
             INHERITED_FIELD: 1,
             STAMP_FIELD: 1,
             SALIENT_SCOPE_FIELD: 1,
-        }
+        },
     )
     if limit:
         cursor = cursor.limit(int(limit))
     return list(cursor)
 
 
-def build_graph(type_docs: Iterable[dict]) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, int]]:
+def build_graph(
+    type_docs: Iterable[dict],
+) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, int]]:
     """Construct parent, child, and indegree mappings for the type graph."""
     parents_map: Dict[str, List[str]] = {}
     children_map: Dict[str, List[str]] = {}
     indegree: Dict[str, int] = {}
 
     for doc in type_docs:
-        cid = doc.get('concept_id')
+        cid = doc.get("concept_id")
         if not isinstance(cid, str):
             continue
-        rels = (doc.get('relationships') or {})
-        parents = rels.get('is_a_type_of') or []
+        rels = doc.get("relationships") or {}
+        parents = rels.get("is_a_type_of") or []
         plist = [p for p in parents if isinstance(p, str)]
         parents_map[cid] = plist
         indegree[cid] = len(plist)
@@ -85,12 +86,14 @@ def ordered_union(*lists: List[str]) -> List[str]:
     return out
 
 
-def recompute_salient_predicates(*, force: bool = False, limit: Optional[int] = None, dry_run: bool = False) -> dict:
+def recompute_salient_predicates(
+    *, force: bool = False, limit: Optional[int] = None, dry_run: bool = False
+) -> dict:
     """Recompute inherited salient predicates for all ontology types."""
     start = time.time()
     docs = fetch_type_docs(limit)
     parents_map, _, _ = build_graph(docs)
-    doc_by_id = {d['concept_id']: d for d in docs if 'concept_id' in d}
+    doc_by_id = {d["concept_id"]: d for d in docs if "concept_id" in d}
 
     processed = len(doc_by_id)
     updated = 0
@@ -100,21 +103,25 @@ def recompute_salient_predicates(*, force: bool = False, limit: Optional[int] = 
     # Extract direct salient predicate lists once for reuse
     direct_map: Dict[str, List[str]] = {}
     for cid, doc in doc_by_id.items():
-        rels = (doc.get('relationships') or {})
+        rels = doc.get("relationships") or {}
         direct_list = rels.get(DIRECT_FIELD) or []
         if isinstance(direct_list, str):
             direct_list = [direct_list]
         direct_map[cid] = [v for v in direct_list if isinstance(v, str)]
 
     # Iterative fixed-point propagation to handle cycles without discarding state
-    inherited_cache: Dict[str, List[str]] = {cid: list(direct_map.get(cid, [])) for cid in doc_by_id}
+    inherited_cache: Dict[str, List[str]] = {
+        cid: list(direct_map.get(cid, [])) for cid in doc_by_id
+    }
     max_iterations = max(4 * max(1, len(doc_by_id)), 32)
     iterations = 0
     while iterations < max_iterations:
         iterations += 1
         changed = False
         for cid in doc_by_id:
-            parent_lists = [inherited_cache.get(parent, []) for parent in parents_map.get(cid, [])]
+            parent_lists = [
+                inherited_cache.get(parent, []) for parent in parents_map.get(cid, [])
+            ]
             new_list = ordered_union(*parent_lists, direct_map.get(cid, []))
             if new_list != inherited_cache.get(cid, []):
                 inherited_cache[cid] = new_list
@@ -131,7 +138,9 @@ def recompute_salient_predicates(*, force: bool = False, limit: Optional[int] = 
     # Write / dry-run accounting
     db = get_db()
     if db is None:
-        raise RuntimeError('Database unavailable (get_db returned None) during write phase')
+        raise RuntimeError(
+            "Database unavailable (get_db returned None) during write phase"
+        )
     coll = db[CONCEPTS_COLLECTION_NAME]
     now_stamp = int(time.time())
     scope_updates = 0
@@ -144,9 +153,13 @@ def recompute_salient_predicates(*, force: bool = False, limit: Optional[int] = 
             direct_values = direct_map.get(cid, [])
             scope_existing = normalise_salient_scope_map(doc.get(SALIENT_SCOPE_FIELD))
             scope_target = {
-                SALIENT_SCOPE_INSTANCE_KEY: list(scope_existing.get(SALIENT_SCOPE_INSTANCE_KEY, [])),
+                SALIENT_SCOPE_INSTANCE_KEY: list(
+                    scope_existing.get(SALIENT_SCOPE_INSTANCE_KEY, [])
+                ),
                 SALIENT_SCOPE_TYPE_KEY: ordered_union(direct_values),
-                SALIENT_SCOPE_UNCLASSIFIED_KEY: list(scope_existing.get(SALIENT_SCOPE_UNCLASSIFIED_KEY, [])),
+                SALIENT_SCOPE_UNCLASSIFIED_KEY: list(
+                    scope_existing.get(SALIENT_SCOPE_UNCLASSIFIED_KEY, [])
+                ),
             }
             scope_changed = scope_target != scope_existing
             changed = force or existing != inherited_list
@@ -159,7 +172,7 @@ def recompute_salient_predicates(*, force: bool = False, limit: Optional[int] = 
                 }
                 if scope_changed:
                     update_doc[SALIENT_SCOPE_FIELD] = scope_target
-                coll.update_one({'concept_id': cid}, {'$set': update_doc})
+                coll.update_one({"concept_id": cid}, {"$set": update_doc})
                 updated += 1
                 if len(updated_ids) < UPDATED_LIST_LIMIT:
                     updated_ids.append(cid)
@@ -172,9 +185,13 @@ def recompute_salient_predicates(*, force: bool = False, limit: Optional[int] = 
             direct_values = direct_map.get(cid, [])
             scope_existing = normalise_salient_scope_map(doc.get(SALIENT_SCOPE_FIELD))
             scope_target = {
-                SALIENT_SCOPE_INSTANCE_KEY: list(scope_existing.get(SALIENT_SCOPE_INSTANCE_KEY, [])),
+                SALIENT_SCOPE_INSTANCE_KEY: list(
+                    scope_existing.get(SALIENT_SCOPE_INSTANCE_KEY, [])
+                ),
                 SALIENT_SCOPE_TYPE_KEY: ordered_union(direct_values),
-                SALIENT_SCOPE_UNCLASSIFIED_KEY: list(scope_existing.get(SALIENT_SCOPE_UNCLASSIFIED_KEY, [])),
+                SALIENT_SCOPE_UNCLASSIFIED_KEY: list(
+                    scope_existing.get(SALIENT_SCOPE_UNCLASSIFIED_KEY, [])
+                ),
             }
             scope_changed = scope_target != scope_existing
             if force or existing != inherited_list or scope_changed or cycles_detected:
@@ -186,19 +203,19 @@ def recompute_salient_predicates(*, force: bool = False, limit: Optional[int] = 
 
     duration_ms = int((time.time() - start) * 1000)
     summary = {
-        'success': True,
-        'types_processed': processed,
-        'types_total': len(doc_by_id),
-        'types_updated': updated,
-        'duration_ms': duration_ms,
-        'max_inherited_length': max_len,
-        'cycles_detected': cycles_detected,
-        'force': force,
-        'dry_run': dry_run,
-        'scope_updates': scope_updates,
+        "success": True,
+        "types_processed": processed,
+        "types_total": len(doc_by_id),
+        "types_updated": updated,
+        "duration_ms": duration_ms,
+        "max_inherited_length": max_len,
+        "cycles_detected": cycles_detected,
+        "force": force,
+        "dry_run": dry_run,
+        "scope_updates": scope_updates,
     }
     if updated and updated <= UPDATED_LIST_LIMIT:
-        summary['updated_concepts'] = updated_ids
+        summary["updated_concepts"] = updated_ids
     return summary
 
 
@@ -206,20 +223,31 @@ def _print_summary(summary: dict) -> None:
     """Pretty-print summary for CLI usage."""
     pretty = json.dumps(summary, indent=2)
     print(pretty)
-    print(json.dumps(summary, separators=(',', ':')))
+    print(json.dumps(summary, separators=(",", ":")))
 
 
 def cli(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--force', action='store_true', help='Rewrite even if unchanged')
-    parser.add_argument('--limit', type=int, default=None, help='Limit number of type docs to process (debug)')
-    parser.add_argument('--dry-run', action='store_true', help='Compute but do not write changes')
+    parser.add_argument(
+        "--force", action="store_true", help="Rewrite even if unchanged"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit number of type docs to process (debug)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Compute but do not write changes"
+    )
     args = parser.parse_args(argv)
 
     try:
-        summary = recompute_salient_predicates(force=args.force, limit=args.limit, dry_run=args.dry_run)
+        summary = recompute_salient_predicates(
+            force=args.force, limit=args.limit, dry_run=args.dry_run
+        )
     except Exception as exc:  # pragma: no cover - surfaced to caller
-        print(json.dumps({'success': False, 'error': str(exc)}), flush=True)
+        print(json.dumps({"success": False, "error": str(exc)}), flush=True)
         return 1
 
     _print_summary(summary)
@@ -233,10 +261,10 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 
 __all__ = [
-    'recompute_salient_predicates',
-    'fetch_type_docs',
-    'build_graph',
-    'ordered_union',
-    'cli',
-    'main',
+    "recompute_salient_predicates",
+    "fetch_type_docs",
+    "build_graph",
+    "ordered_union",
+    "cli",
+    "main",
 ]

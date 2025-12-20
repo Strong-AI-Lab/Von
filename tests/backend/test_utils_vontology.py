@@ -1,5 +1,3 @@
-
-
 import os
 import sys
 
@@ -21,7 +19,9 @@ def clean_vontology_nodes():
         db["vontology_nodes"].delete_many({})
 
 
-@pytest.mark.skip(reason="Functions scan_filesystem_to_mongodb, verify_vontology_db_vs_filesystem, and recreate_filesystem_from_mongodb have been removed as obsolete")
+@pytest.mark.skip(
+    reason="Functions scan_filesystem_to_mongodb, verify_vontology_db_vs_filesystem, and recreate_filesystem_from_mongodb have been removed as obsolete"
+)
 def test_scan_and_recreate(tmp_path):
     # Setup: Copy a small sample of the real vontology dir to tmp_path
     sample_dir = tmp_path / "vontology"
@@ -37,7 +37,9 @@ def test_scan_and_recreate(tmp_path):
     pytest.skip("Required functions have been removed during refactoring")
 
 
-@pytest.mark.skip(reason="Functions scan_filesystem_to_mongodb and verify_vontology_db_vs_filesystem have been removed as obsolete")
+@pytest.mark.skip(
+    reason="Functions scan_filesystem_to_mongodb and verify_vontology_db_vs_filesystem have been removed as obsolete"
+)
 def test_content_mismatch_detection(tmp_path):
     # Setup as before
     sample_dir = tmp_path / "vontology"
@@ -51,7 +53,10 @@ def test_content_mismatch_detection(tmp_path):
     # Test is skipped - these functions have been removed
     pytest.skip("Required functions have been removed during refactoring")
 
-@pytest.mark.skip(reason="Functions scan_filesystem_to_mongodb and verify_vontology_db_vs_filesystem have been removed as obsolete")
+
+@pytest.mark.skip(
+    reason="Functions scan_filesystem_to_mongodb and verify_vontology_db_vs_filesystem have been removed as obsolete"
+)
 def test_fs_only_and_db_only(tmp_path):
     # Setup as before
     sample_dir = tmp_path / "vontology"
@@ -64,6 +69,7 @@ def test_fs_only_and_db_only(tmp_path):
 
     # Test is skipped - these functions have been removed
     pytest.skip("Required functions have been removed during refactoring")
+
 
 if __name__ == "__main__":
     pytest.main([__file__])

@@ -54,9 +54,15 @@ def test_get_profile_missing(monkeypatch):
 
 
 @patch("src.backend.integrations.google.gmail_service.build")
-@patch("src.backend.integrations.google.gmail_service.os.path.exists", return_value=True)
-@patch("src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file")
-def test_get_service_uses_existing_credentials(mock_creds_loader, mock_exists, mock_build, monkeypatch):
+@patch(
+    "src.backend.integrations.google.gmail_service.os.path.exists", return_value=True
+)
+@patch(
+    "src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file"
+)
+def test_get_service_uses_existing_credentials(
+    mock_creds_loader, mock_exists, mock_build, monkeypatch
+):
     creds = MagicMock(valid=True, expired=False, refresh_token=None)
     mock_creds_loader.return_value = creds
 
@@ -73,9 +79,15 @@ def test_get_service_uses_existing_credentials(mock_creds_loader, mock_exists, m
 
 @patch("src.backend.integrations.google.gmail_service._persist_credentials")
 @patch("src.backend.integrations.google.gmail_service.build")
-@patch("src.backend.integrations.google.gmail_service.os.path.exists", return_value=True)
-@patch("src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file")
-def test_get_service_refreshes_and_persists(mock_creds_loader, mock_exists, mock_build, mock_persist, monkeypatch):
+@patch(
+    "src.backend.integrations.google.gmail_service.os.path.exists", return_value=True
+)
+@patch(
+    "src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file"
+)
+def test_get_service_refreshes_and_persists(
+    mock_creds_loader, mock_exists, mock_build, mock_persist, monkeypatch
+):
     creds = MagicMock(valid=False, expired=True, refresh_token="token")
     mock_creds_loader.return_value = creds
 
@@ -92,7 +104,9 @@ def test_get_service_refreshes_and_persists(mock_creds_loader, mock_exists, mock
 @patch("src.backend.integrations.google.gmail_service.get_service")
 @patch("src.backend.integrations.google.gmail_service.get_profile")
 def test_list_and_get_message(mock_get_profile, mock_get_service):
-    mock_profile = SimpleNamespace(user_id="me", label_filter=["INBOX"], query_prefix="from:someone")
+    mock_profile = SimpleNamespace(
+        user_id="me", label_filter=["INBOX"], query_prefix="from:someone"
+    )
     mock_get_profile.return_value = mock_profile
 
     messages_mock = MagicMock()
@@ -133,15 +147,23 @@ def test_modify_labels_guard(monkeypatch):
     }
 
     with pytest.raises(ValueError):
-        gs.modify_labels("p", "mid", add_labels=["X"], allow_mutation=False, profiles=profiles)
+        gs.modify_labels(
+            "p", "mid", add_labels=["X"], allow_mutation=False, profiles=profiles
+        )
 
     profiles["p"].scopes = [gs.MUTATION_SCOPE]
-    with patch("src.backend.integrations.google.gmail_service.get_service") as mock_service:
+    with patch(
+        "src.backend.integrations.google.gmail_service.get_service"
+    ) as mock_service:
         svc = MagicMock()
         mock_service.return_value = svc
-        svc.users.return_value.messages.return_value.modify.return_value.execute.return_value = {"id": "mid"}
+        svc.users.return_value.messages.return_value.modify.return_value.execute.return_value = {
+            "id": "mid"
+        }
 
-        result = gs.modify_labels("p", "mid", add_labels=["X"], allow_mutation=True, profiles=profiles)
+        result = gs.modify_labels(
+            "p", "mid", add_labels=["X"], allow_mutation=True, profiles=profiles
+        )
 
         assert result == {"id": "mid"}
         svc.users.return_value.messages.return_value.modify.assert_called_once()

@@ -1,7 +1,10 @@
 import asyncio
 import time
 
-from src.backend.mcp_server.mcp_stdio_server import _run_blocking_with_timeout, VonChatRunTimeout
+from src.backend.mcp_server.mcp_stdio_server import (
+    _run_blocking_with_timeout,
+    VonChatRunTimeout,
+)
 
 
 def test_run_blocking_with_timeout_times_out():

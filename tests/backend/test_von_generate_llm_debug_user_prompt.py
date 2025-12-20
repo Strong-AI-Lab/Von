@@ -66,20 +66,26 @@ def test_generate_includes_user_prompt_debug_metadata(app):
     assert llm_debug["user_prompt"]["effective_user_concept_id"] == "#V#test_user"
     assert llm_debug["user_prompt"]["loaded"] is True
     assert llm_debug["user_prompt"]["chars"] > 0
-    assert llm_debug["user_prompt"]["prompt_concept_ids"] == ["#V#prompt1", "#V#prompt2"]
+    assert llm_debug["user_prompt"]["prompt_concept_ids"] == [
+        "#V#prompt1",
+        "#V#prompt2",
+    ]
 
     llm_calls = app.config["TEST_LLM"].calls
     assert len(llm_calls) == 1
 
     sent_context = llm_calls[0]["context"]
     assert any(
-        msg.get("role") == "system" and "USER-SPECIFIC SYSTEM PROMPT" in msg.get("content", "")
+        msg.get("role") == "system"
+        and "USER-SPECIFIC SYSTEM PROMPT" in msg.get("content", "")
         for msg in sent_context
     )
 
     injected_msg = next(
-        msg for msg in sent_context
-        if msg.get("role") == "system" and "USER-SPECIFIC SYSTEM PROMPT" in msg.get("content", "")
+        msg
+        for msg in sent_context
+        if msg.get("role") == "system"
+        and "USER-SPECIFIC SYSTEM PROMPT" in msg.get("content", "")
     )
     assert "First prompt." in injected_msg.get("content", "")
     assert "Second prompt." in injected_msg.get("content", "")

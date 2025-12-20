@@ -17,6 +17,7 @@ import mcp.types as types
 
 load_dotenv()
 
+
 def _get_env(key: str, fallback: str | None = None) -> str | None:
     value = os.getenv(key)
     if value:
@@ -28,15 +29,20 @@ def _clean_env_value(value: str | None) -> str | None:
     if value is None:
         return None
     cleaned = value.strip()
-    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ("\"", "'"):
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
         cleaned = cleaned[1:-1].strip()
     return cleaned or None
 
 
 # Prefer ATLASSIAN_* but fall back to legacy JIRA_MCP_* to reduce configuration errors
-JIRA_BASE_URL = _clean_env_value(_get_env("ATLASSIAN_BASE_URL", os.getenv("JIRA_MCP_BASE_URL"))) or "https://naoinstitute.atlassian.net"
+JIRA_BASE_URL = (
+    _clean_env_value(_get_env("ATLASSIAN_BASE_URL", os.getenv("JIRA_MCP_BASE_URL")))
+    or "https://naoinstitute.atlassian.net"
+)
 JIRA_EMAIL = _clean_env_value(_get_env("ATLASSIAN_EMAIL", os.getenv("JIRA_MCP_EMAIL")))
-JIRA_API_TOKEN = _clean_env_value(_get_env("ATLASSIAN_API_TOKEN", os.getenv("JIRA_MCP_API_TOKEN")))
+JIRA_API_TOKEN = _clean_env_value(
+    _get_env("ATLASSIAN_API_TOKEN", os.getenv("JIRA_MCP_API_TOKEN"))
+)
 
 JIRA_BASE_URL = JIRA_BASE_URL.rstrip("/")
 
@@ -72,7 +78,13 @@ def _jira_error_hint(status_code: int, *, url: str) -> str | None:
     return None
 
 
-def _request_json(method: str, url: str, *, params: Dict[str, Any] | None = None, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def _request_json(
+    method: str,
+    url: str,
+    *,
+    params: Dict[str, Any] | None = None,
+    payload: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     try:
         if method.upper() == "GET":
             resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
@@ -122,6 +134,7 @@ def jira_post(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 server = Server("jira-mcp")
 
+
 # 1) Tell the client which tools exist
 @server.list_tools()
 async def list_tools() -> List[types.Tool]:
@@ -132,10 +145,7 @@ async def list_tools() -> List[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "jql": {
-                        "type": "string",
-                        "description": "JQL query string"
-                    }
+                    "jql": {"type": "string", "description": "JQL query string"}
                 },
                 "required": ["jql"],
             },
@@ -148,7 +158,7 @@ async def list_tools() -> List[types.Tool]:
                 "properties": {
                     "issue_key": {
                         "type": "string",
-                        "description": "Issue key, e.g. JVNAUTOSCI-371"
+                        "description": "Issue key, e.g. JVNAUTOSCI-371",
                     }
                 },
                 "required": ["issue_key"],
@@ -175,7 +185,7 @@ async def list_tools() -> List[types.Tool]:
                     "issue_key": {"type": "string"},
                     "transition_id": {
                         "type": "string",
-                        "description": "Transition ID from Jira"
+                        "description": "Transition ID from Jira",
                     },
                 },
                 "required": ["issue_key", "transition_id"],

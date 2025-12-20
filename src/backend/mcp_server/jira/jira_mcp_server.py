@@ -29,7 +29,9 @@ except ImportError:
 # ---------------------------------------------------------
 
 # Find project root (where .env lives)
-project_root = Path(__file__).resolve().parents[4]  # Go up from jira/ -> mcp_server/ -> backend/ -> src/ -> Von/
+project_root = (
+    Path(__file__).resolve().parents[4]
+)  # Go up from jira/ -> mcp_server/ -> backend/ -> src/ -> Von/
 dotenv_path = project_root / ".env"
 load_dotenv(dotenv_path=dotenv_path)
 

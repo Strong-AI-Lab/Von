@@ -40,17 +40,18 @@ def _parse_tavily_text_response(text: str) -> Dict[str, Any]:
         {
             "title": match.group("title").strip(),
             "url": match.group("url").strip(),
-            "content": match.group("content").strip().replace('\n', ' '),
+            "content": match.group("content").strip().replace("\n", " "),
         }
         for match in pattern.finditer(text)
     ]
 
-    return {'results': results}
+    return {"results": results}
 
 
 @dataclass
 class SearchProxyConfig:
     """Configuration for Search MCP subprocess."""
+
     api_key: str
     command: str = "npx"
     timeout_sec: float = 30.0
@@ -98,7 +99,9 @@ class SearchMCPProxy:
             # `tavily-extract` frequently returns JSON; forcing the search parser can
             # incorrectly yield empty results (e.g., {"results": []}) and mask the
             # underlying content.
-            text_parser = _parse_tavily_text_response if tool_name == "tavily-search" else None
+            text_parser = (
+                _parse_tavily_text_response if tool_name == "tavily-search" else None
+            )
             return await self._client.call_tool(
                 tool_name,
                 arguments,
@@ -264,9 +267,7 @@ class SearchMCPProxy:
             else:
                 title = raw.get("title") if isinstance(raw.get("title"), str) else None
                 content = (
-                    raw.get("content")
-                    or raw.get("raw_content")
-                    or raw.get("text")
+                    raw.get("content") or raw.get("raw_content") or raw.get("text")
                 )
 
         if content is not None and not isinstance(content, str):
@@ -281,7 +282,9 @@ class SearchMCPProxy:
             # Treat that as an empty extraction.
             if stripped.lower() in {"detailed results:", "detailed results"}:
                 content = None
-            elif stripped.lower().startswith("detailed results:") and len(stripped) <= 40:
+            elif (
+                stripped.lower().startswith("detailed results:") and len(stripped) <= 40
+            ):
                 content = None
 
         if content:
@@ -328,6 +331,7 @@ async def get_search_proxy() -> SearchMCPProxy:
 
     async with _proxy_lock:
         if _proxy_instance is None:
+
             def _try_load_tavily_key_from_dotenv() -> str | None:
                 """Attempt to load TAVILY_API_KEY from repo-root .env.
 

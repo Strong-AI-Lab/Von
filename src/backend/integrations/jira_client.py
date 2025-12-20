@@ -30,25 +30,40 @@ class JiraClient:
       - ATLASSIAN_SITE_BASE (e.g. https://example.atlassian.net)
     """
 
-    def __init__(self, site_base: t.Optional[str] = None, email: t.Optional[str] = None, token: t.Optional[str] = None):
-        self.site_base = (site_base or os.environ.get("ATLASSIAN_SITE_BASE", "")).rstrip("/")
+    def __init__(
+        self,
+        site_base: t.Optional[str] = None,
+        email: t.Optional[str] = None,
+        token: t.Optional[str] = None,
+    ):
+        self.site_base = (
+            site_base or os.environ.get("ATLASSIAN_SITE_BASE", "")
+        ).rstrip("/")
         self.email = email or os.environ.get("ATLASSIAN_API_EMAIL", "")
         self.token = token or os.environ.get("ATLASSIAN_API_TOKEN", "")
         if not (self.site_base and self.email and self.token):
             pass
         self._session = requests.Session()
         if self.email and self.token:
-            self._session.headers["Authorization"] = _build_basic_auth_header(self.email, self.token)
+            self._session.headers["Authorization"] = _build_basic_auth_header(
+                self.email, self.token
+            )
         self._session.headers.setdefault("Accept", "application/json")
 
     def _ensure_config(self):
         if not (self.site_base and self.email and self.token):
-            missing = [n for n, v in [
-                ("ATLASSIAN_SITE_BASE", self.site_base),
-                ("ATLASSIAN_API_EMAIL", self.email),
-                ("ATLASSIAN_API_TOKEN", self.token),
-            ] if not v]
-            raise JiraConfigurationError("Missing Jira configuration: " + ", ".join(missing))
+            missing = [
+                n
+                for n, v in [
+                    ("ATLASSIAN_SITE_BASE", self.site_base),
+                    ("ATLASSIAN_API_EMAIL", self.email),
+                    ("ATLASSIAN_API_TOKEN", self.token),
+                ]
+                if not v
+            ]
+            raise JiraConfigurationError(
+                "Missing Jira configuration: " + ", ".join(missing)
+            )
 
     def get_issue(self, key: str) -> dict:
         self._ensure_config()
@@ -57,11 +72,19 @@ class JiraClient:
         if resp.status_code == 401:
             raise JiraConfigurationError("Unauthorized: check email/token validity")
         if resp.status_code == 403:
-            raise JiraConfigurationError("Forbidden: account lacks permission to view issue")
+            raise JiraConfigurationError(
+                "Forbidden: account lacks permission to view issue"
+            )
         resp.raise_for_status()
         return resp.json()
 
-    def search(self, jql: str, fields: t.Optional[t.List[str]] = None, max_results: int = 50, start_at: int = 0) -> dict:
+    def search(
+        self,
+        jql: str,
+        fields: t.Optional[t.List[str]] = None,
+        max_results: int = 50,
+        start_at: int = 0,
+    ) -> dict:
         self._ensure_config()
         payload = {
             "jql": jql,

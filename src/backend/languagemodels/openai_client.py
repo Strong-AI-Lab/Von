@@ -7,6 +7,7 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
+
 class OpenAIClient:
     def __init__(self, api_key_env_var="OPENAI_API_KEY"):
         self.api_key = os.getenv(api_key_env_var)
@@ -31,8 +32,8 @@ class OpenAIClient:
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": prompt}
-                ]
+                    {"role": "user", "content": prompt},
+                ],
             )
             return response.choices[0].message.content
         except Exception as e:

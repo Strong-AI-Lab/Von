@@ -18,9 +18,13 @@ class _CapturingOrchestrator:
     def run(self, **kwargs):
         self.calls.append(kwargs)
 
-        from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+        from src.backend.integrations.internal_mcp.orchestrator import (
+            OrchestratorResult,
+        )
 
-        return OrchestratorResult(response_text="ok", extra_messages=[], tool_invocations=[])
+        return OrchestratorResult(
+            response_text="ok", extra_messages=[], tool_invocations=[]
+        )
 
 
 @pytest.fixture()
@@ -38,7 +42,9 @@ def app(monkeypatch):
     # Stub auxiliary prompt loader.
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _user_id: [{"concept_id": "#V#test_prompt", "content": "Please be terse."}],
+        lambda _user_id: [
+            {"concept_id": "#V#test_prompt", "content": "Please be terse."}
+        ],
     )
 
     llm = _CapturingLLM()
@@ -71,7 +77,9 @@ def test_generate_passes_auxiliary_prompt_to_orchestrator(app):
     client = app.test_client()
     resp = client.post("/von/generate", json={"prompt": "Hello"})
     if resp.status_code != 200:
-        raise AssertionError(f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}")
+        raise AssertionError(
+            f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}"
+        )
 
     assert orchestrator.calls, "expected orchestrator.run() to be called"
     call = orchestrator.calls[0]
@@ -85,7 +93,9 @@ def test_generate_includes_auxiliary_prompt_without_orchestrator(app):
     client = app.test_client()
     resp = client.post("/von/generate", json={"prompt": "Hello"})
     if resp.status_code != 200:
-        raise AssertionError(f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}")
+        raise AssertionError(
+            f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}"
+        )
 
     llm = app.config["_TEST_LLM"]
     assert llm.calls, "expected llm.generate() to be called"

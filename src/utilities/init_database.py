@@ -39,7 +39,7 @@ def get_database_info() -> Dict[str, Any]:
             "type": "mock",
             "uri": "in-memory",
             "database": "mock_db",
-            "connected": True
+            "connected": True,
         }
 
     # Redact credentials from URI
@@ -51,14 +51,18 @@ def get_database_info() -> Dict[str, Any]:
             user = creds.split(":", 1)[0] if ":" in creds else creds
             redacted_uri = f"{prefix}://{user}:***@{hostpart}"
 
-    host = redacted_uri.split("@")[-1].split("/")[0] if "@" in redacted_uri else redacted_uri.split("://")[1].split("/")[0]
+    host = (
+        redacted_uri.split("@")[-1].split("/")[0]
+        if "@" in redacted_uri
+        else redacted_uri.split("://")[1].split("/")[0]
+    )
     db_type = "local" if ("localhost" in host or "127.0.0.1" in host) else "remote"
 
     return {
         "type": db_type,
         "uri": redacted_uri,
         "database": DATABASE_NAME,
-        "connected": False  # Will be set by connection test
+        "connected": False,  # Will be set by connection test
     }
 
 
@@ -83,7 +87,7 @@ def test_connection() -> bool:
             return True
 
         # Test actual connection
-        db.client.admin.command('ping')
+        db.client.admin.command("ping")
         print(f"✅ Connected to {info['type'].upper()} MongoDB successfully")
         return True
 
@@ -91,7 +95,7 @@ def test_connection() -> bool:
         print(f"❌ Connection failed: {e}")
         print()
         print("Troubleshooting:")
-        if info['type'] == 'local':
+        if info["type"] == "local":
             print("  • Ensure MongoDB is installed and running")
             print("  • Check Windows Services for 'MongoDB' service")
             print("  • Install from: https://www.mongodb.com/try/download/community")
@@ -116,28 +120,34 @@ def initialize_collections() -> bool:
         # Define collections with their indexes
         collections_config = {
             "concepts": [
-                {"keys": [("concept_id", 1)], "unique": True, "name": "concept_id_unique"},
+                {
+                    "keys": [("concept_id", 1)],
+                    "unique": True,
+                    "name": "concept_id_unique",
+                },
                 {"keys": [("created_at", -1)], "name": "created_at_desc"},
-                {"keys": [("names.name", 1)], "name": "names_name_idx"}
+                {"keys": [("names.name", 1)], "name": "names_name_idx"},
             ],
             "text_values": [
                 {"keys": [("content", "text")], "name": "content_text_search"},
-                {"keys": [("created_at", -1)], "name": "created_at_desc"}
+                {"keys": [("created_at", -1)], "name": "created_at_desc"},
             ],
             "text_relations": [
                 {"keys": [("source_id", 1)], "name": "source_id_idx"},
-                {"keys": [("target_id", 1)], "name": "target_id_idx"}
+                {"keys": [("target_id", 1)], "name": "target_id_idx"},
             ],
             "meta_relations": [
-                {"keys": [("relation_type", 1)], "unique": True, "name": "relation_type_unique"}
+                {
+                    "keys": [("relation_type", 1)],
+                    "unique": True,
+                    "name": "relation_type_unique",
+                }
             ],
             "interactions": [
                 {"keys": [("timestamp", -1)], "name": "timestamp_desc"},
-                {"keys": [("user_id", 1)], "name": "user_id_idx"}
+                {"keys": [("user_id", 1)], "name": "user_id_idx"},
             ],
-            "settings": [
-                {"keys": [("key", 1)], "unique": True, "name": "key_unique"}
-            ]
+            "settings": [{"keys": [("key", 1)], "unique": True, "name": "key_unique"}],
         }
 
         for collection_name, indexes in collections_config.items():
@@ -150,12 +160,12 @@ def initialize_collections() -> bool:
 
             # Create indexes
             collection = db[collection_name]
-            existing_indexes = {idx['name'] for idx in collection.list_indexes()}
+            existing_indexes = {idx["name"] for idx in collection.list_indexes()}
 
             for index_spec in indexes:
-                index_name = index_spec.get('name')
+                index_name = index_spec.get("name")
                 if index_name not in existing_indexes:
-                    keys = index_spec.pop('keys')
+                    keys = index_spec.pop("keys")
                     collection.create_index(keys, **index_spec)
                     print(f"   ✅ Created index: {index_name}")
                 else:
@@ -190,12 +200,12 @@ def load_starter_ontology() -> bool:
 
     try:
         # Load JSON
-        with open(ontology_path, 'r', encoding='utf-8') as f:
+        with open(ontology_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        metadata = data.get('metadata', {})
-        concepts = data.get('concepts', [])
-        meta_relations = data.get('meta_relations', [])
+        metadata = data.get("metadata", {})
+        concepts = data.get("concepts", [])
+        meta_relations = data.get("meta_relations", [])
 
         print(f"📄 Loaded: {metadata.get('description', 'Starter Ontology')}")
         print(f"   Version: {metadata.get('version', 'unknown')}")
@@ -210,13 +220,15 @@ def load_starter_ontology() -> bool:
         # Load meta relations first
         if meta_relations:
             print("Loading meta relations...")
-            meta_rel_collection = db['meta_relations']
+            meta_rel_collection = db["meta_relations"]
 
             for meta_rel in meta_relations:
-                relation_type = meta_rel.get('relation_type')
+                relation_type = meta_rel.get("relation_type")
 
                 # Check if already exists
-                existing = meta_rel_collection.find_one({"relation_type": relation_type})
+                existing = meta_rel_collection.find_one(
+                    {"relation_type": relation_type}
+                )
                 if existing:
                     print(f"   ℹ️  Meta relation exists: {relation_type}")
                 else:
@@ -228,13 +240,13 @@ def load_starter_ontology() -> bool:
         # Load concepts
         if concepts:
             print("Loading concepts...")
-            concepts_collection = db['concepts']
+            concepts_collection = db["concepts"]
 
             # First pass: Create all concepts
             concept_id_map = {}  # concept_id -> concept_id (for validation)
 
             for concept_data in concepts:
-                concept_id = concept_data.get('concept_id')
+                concept_id = concept_data.get("concept_id")
                 if not concept_id:
                     print(f"   ⚠️  Skipping concept without concept_id")
                     continue
@@ -250,29 +262,29 @@ def load_starter_ontology() -> bool:
                 now = datetime.now(timezone.utc)
                 concept_doc = {
                     "concept_id": concept_id,
-                    "names": concept_data.get('names', []),
-                    "attributes": concept_data.get('attributes', {}),
-                    "system_tags": concept_data.get('system_tags', []),
-                    "user_tags": concept_data.get('user_tags', []),
-                    "relationships": concept_data.get('relationships', {}),
+                    "names": concept_data.get("names", []),
+                    "attributes": concept_data.get("attributes", {}),
+                    "system_tags": concept_data.get("system_tags", []),
+                    "user_tags": concept_data.get("user_tags", []),
+                    "relationships": concept_data.get("relationships", {}),
                     "created_at": now,
-                    "updated_at": now
+                    "updated_at": now,
                 }
 
                 # Handle preserved_fields (description and notes)
-                preserved = concept_data.get('preserved_fields', {})
+                preserved = concept_data.get("preserved_fields", {})
                 if preserved:
-                    if 'concept_data' not in concept_doc:
-                        concept_doc['concept_data'] = {}
-                    concept_doc['concept_data']['preserved_fields'] = preserved
+                    if "concept_data" not in concept_doc:
+                        concept_doc["concept_data"] = {}
+                    concept_doc["concept_data"]["preserved_fields"] = preserved
 
                 result = concepts_collection.insert_one(concept_doc)
                 concept_id_map[concept_id] = concept_id
 
                 # Get primary name for display
                 primary_name = concept_id
-                if concept_doc['names']:
-                    primary_name = concept_doc['names'][0].get('name', concept_id)
+                if concept_doc["names"]:
+                    primary_name = concept_doc["names"][0].get("name", concept_id)
 
                 print(f"   ✅ Created concept: {primary_name} ({concept_id})")
 
@@ -301,6 +313,7 @@ def load_starter_ontology() -> bool:
     except Exception as e:
         print(f"❌ Failed to load starter ontology: {e}")
         import traceback
+
         traceback.print_exc()
         print()
         return False
@@ -321,25 +334,25 @@ Examples:
 
   # Full setup (init + starter)
   python src/utilities/init_database.py --full-setup
-        """
+        """,
     )
 
     parser.add_argument(
-        '--init',
-        action='store_true',
-        help='Initialize database collections and indexes'
+        "--init",
+        action="store_true",
+        help="Initialize database collections and indexes",
     )
 
     parser.add_argument(
-        '--load-starter',
-        action='store_true',
-        help='Load starter ontology (requires --init or existing collections)'
+        "--load-starter",
+        action="store_true",
+        help="Load starter ontology (requires --init or existing collections)",
     )
 
     parser.add_argument(
-        '--full-setup',
-        action='store_true',
-        help='Full setup: initialize collections + load starter ontology'
+        "--full-setup",
+        action="store_true",
+        help="Full setup: initialize collections + load starter ontology",
     )
 
     args = parser.parse_args()

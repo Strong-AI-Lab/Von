@@ -64,7 +64,9 @@ def _matches(value: Any, expected: JsonCompatibleType) -> bool:
     return any(isinstance(value, typ) for typ in allowed)
 
 
-def validate_payload(schema: Schema, payload: Mapping[str, Any]) -> Tuple[bool, list[str]]:
+def validate_payload(
+    schema: Schema, payload: Mapping[str, Any]
+) -> Tuple[bool, list[str]]:
     """Validate payload against schema returning success flag and error list."""
 
     errors: list[str] = []
@@ -78,8 +80,12 @@ def validate_payload(schema: Schema, payload: Mapping[str, Any]) -> Tuple[bool, 
             continue
         value = payload[key]
         if not _matches(value, expected):
-            typ_names = ", ".join(sorted({t.__name__ for t in _normalise_expected(expected)}))
-            errors.append(f"Field '{key}' expected type {typ_names} but received {type(value).__name__}.")
+            typ_names = ", ".join(
+                sorted({t.__name__ for t in _normalise_expected(expected)})
+            )
+            errors.append(
+                f"Field '{key}' expected type {typ_names} but received {type(value).__name__}."
+            )
 
     if not schema.allow_unknown:
         known_keys = set(schema.required.keys()) | set(schema.optional.keys())
@@ -94,16 +100,22 @@ def validate_payload(schema: Schema, payload: Mapping[str, Any]) -> Tuple[bool, 
         allowed = _normalise_expected(expected)
         if value is None and NoneType not in allowed:
             typ_names = ", ".join(sorted({t.__name__ for t in allowed}))
-            errors.append(f"Optional field '{key}' expected type {typ_names} but received NoneType.")
+            errors.append(
+                f"Optional field '{key}' expected type {typ_names} but received NoneType."
+            )
             continue
         if not _matches(value, expected):
             typ_names = ", ".join(sorted({t.__name__ for t in allowed}))
-            errors.append(f"Optional field '{key}' expected type {typ_names} but received {type(value).__name__}.")
+            errors.append(
+                f"Optional field '{key}' expected type {typ_names} but received {type(value).__name__}."
+            )
 
     return not errors, errors
 
 
-def coerce_payload(schema: Schema, payload: MutableMapping[str, Any]) -> Tuple[MutableMapping[str, Any], list[str]]:
+def coerce_payload(
+    schema: Schema, payload: MutableMapping[str, Any]
+) -> Tuple[MutableMapping[str, Any], list[str]]:
     """Validate and return payload with errors for convenience.
 
     The helper mirrors :func:`validate_payload` but keeps the mutable payload so

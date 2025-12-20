@@ -43,8 +43,8 @@ def test_extract_tool_calls_accepts_fenced_json_array_batch():
     text = (
         "Here is the tool batch:\n"
         "```json\n"
-        "[{\"action\":\"call_tool\",\"tool\":\"test\",\"payload\":{}},"
-        "{\"action\":\"call_tool\",\"tool\":\"test\",\"payload\":{}}]\n"
+        '[{"action":"call_tool","tool":"test","payload":{}},'
+        '{"action":"call_tool","tool":"test","payload":{}}]\n'
         "```"
     )
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
@@ -72,11 +72,13 @@ def test_extract_tool_calls_rejects_concatenated_json_objects():
     with pytest.raises(ToolCallParsingError):
         orchestrator._extract_tool_calls(text)
 
+
 def test_extract_json_blob_pure_json():
     text = '{"action": "call_tool", "tool": "test", "payload": {}}'
     orchestrator = InternalMCPChatOrchestrator(gateway=None)  # type: ignore[arg-type]
     result = orchestrator._extract_json_blob(text)
     assert result == {"action": "call_tool", "tool": "test", "payload": {}}
+
 
 def test_extract_json_blob_code_block():
     text = 'Here is the tool call:\n```json\n{"action": "call_tool", "tool": "test", "payload": {}}\n```'
@@ -87,21 +89,25 @@ def test_extract_json_blob_code_block():
         "payload": {},
     }
 
+
 def test_extract_json_blob_embedded():
     text = 'I will call the tool now.\n{"action": "call_tool", "tool": "test", "payload": {}}\nThis should work.'
     orchestrator = InternalMCPChatOrchestrator(gateway=None)  # type: ignore[arg-type]
     assert orchestrator._extract_json_blob(text) is None
+
 
 def test_extract_json_blob_embedded_with_newlines():
     text = 'Explanation...\n{\n  "action": "call_tool",\n  "tool": "test",\n  "payload": {}\n}\nEnd.'
     orchestrator = InternalMCPChatOrchestrator(gateway=None)  # type: ignore[arg-type]
     assert orchestrator._extract_json_blob(text) is None
 
+
 def test_extract_json_blob_invalid():
-    text = 'Just some text.'
+    text = "Just some text."
     orchestrator = InternalMCPChatOrchestrator(gateway=None)  # type: ignore[arg-type]
     result = orchestrator._extract_json_blob(text)
     assert result is None
+
 
 def test_extract_json_blob_malformed_json():
     text = '{"action": "call_tool", ...'

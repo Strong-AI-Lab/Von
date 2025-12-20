@@ -10,7 +10,14 @@ from typing import Iterable, Dict, Any, Optional, List, Tuple
 from ..rag_service import RAGService, RAGBackendUnavailable
 
 try:
-    from llama_index import VectorStoreIndex, Document, ServiceContext, StorageContext, load_index_from_storage
+    from llama_index import (
+        VectorStoreIndex,
+        Document,
+        ServiceContext,
+        StorageContext,
+        load_index_from_storage,
+    )
+
     # from llama_index.llms import OpenAI
     # from llama_index.embeddings import OpenAIEmbedding
 except ImportError as e:
@@ -33,8 +40,12 @@ class LlamaIndexRAGService(RAGService):
 
         # Try to load existing index
         try:
-            storage_context = StorageContext.from_defaults(persist_dir=self.persistence_dir)
-            self.index = load_index_from_storage(storage_context, service_context=self.service_context)
+            storage_context = StorageContext.from_defaults(
+                persist_dir=self.persistence_dir
+            )
+            self.index = load_index_from_storage(
+                storage_context, service_context=self.service_context
+            )
         except Exception:
             # If load fails (e.g. empty dir), start with empty index
             self.index = None
@@ -134,19 +145,31 @@ class LlamaIndexRAGService(RAGService):
         filters = None
         if permissions_context:
             try:
-                from llama_index.vector_stores.types import MetadataFilters, MetadataFilter
+                from llama_index.vector_stores.types import (
+                    MetadataFilters,
+                    MetadataFilter,
+                )
+
                 filter_list = []
 
                 # Filter by user_id if present
                 if "user_id" in permissions_context:
                     filter_list.append(
-                        MetadataFilter(key="user_id", value=permissions_context["user_id"])
+                        MetadataFilter(
+                            key="user_id", value=permissions_context["user_id"]
+                        )
                     )
 
                 # Filter by organisation_concept_id if present (org-scoped access)
-                if "organisation_concept_id" in permissions_context and permissions_context["organisation_concept_id"]:
+                if (
+                    "organisation_concept_id" in permissions_context
+                    and permissions_context["organisation_concept_id"]
+                ):
                     filter_list.append(
-                        MetadataFilter(key="organisation_concept_id", value=permissions_context["organisation_concept_id"])
+                        MetadataFilter(
+                            key="organisation_concept_id",
+                            value=permissions_context["organisation_concept_id"],
+                        )
                     )
 
                 if filter_list:
@@ -160,12 +183,14 @@ class LlamaIndexRAGService(RAGService):
 
         results = []
         for node in nodes:
-            results.append({
-                "id": node.node.ref_doc_id or node.node.node_id,
-                "text": node.node.get_content(),
-                "metadata": node.node.metadata,
-                "score": node.score
-            })
+            results.append(
+                {
+                    "id": node.node.ref_doc_id or node.node.node_id,
+                    "text": node.node.get_content(),
+                    "metadata": node.node.metadata,
+                    "score": node.score,
+                }
+            )
 
         return results
 

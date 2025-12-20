@@ -4,10 +4,18 @@ from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
-LEGACY_FIELDS = ["name", "notes", "description", "metadata.description", "metadata.title", "entities"]
+LEGACY_FIELDS = [
+    "name",
+    "notes",
+    "description",
+    "metadata.description",
+    "metadata.title",
+    "entities",
+]
 STRICT_ENV_VAR = "CONCEPT_IMPORT_STRICT"
 DISABLE_PRESERVED_ENV = "VON_DISABLE_PRESERVED_FIELDS"
 STRICT_GUARD_ENV = "VON_CONCEPT_DATA_GUARD_STRICT"
+
 
 class LegacyFieldUsage(Exception):
     """Raised when strict mode is enabled and legacy fields are detected."""
@@ -15,18 +23,26 @@ class LegacyFieldUsage(Exception):
 
 def _flatten_legacy_presence(concept: Dict[str, Any]) -> List[str]:
     present = []
-    if "name" in concept: present.append("name")
-    if "notes" in concept: present.append("notes")
-    if "description" in concept: present.append("description")
+    if "name" in concept:
+        present.append("name")
+    if "notes" in concept:
+        present.append("notes")
+    if "description" in concept:
+        present.append("description")
     metadata = concept.get("metadata") or {}
     if isinstance(metadata, dict):
-        if "description" in metadata: present.append("metadata.description")
-        if "title" in metadata: present.append("metadata.title")
-    if "entities" in concept: present.append("entities")
+        if "description" in metadata:
+            present.append("metadata.description")
+        if "title" in metadata:
+            present.append("metadata.title")
+    if "entities" in concept:
+        present.append("entities")
     return present
 
 
-def normalize_concept_payload(raw: Dict[str, Any], *, strict: bool | None = None, record_warnings: bool = True) -> Dict[str, Any]:
+def normalize_concept_payload(
+    raw: Dict[str, Any], *, strict: bool | None = None, record_warnings: bool = True
+) -> Dict[str, Any]:
     """Normalize a single concept-like payload to unified schema.
 
     Transformations (non-destructive where possible):
@@ -52,14 +68,18 @@ def normalize_concept_payload(raw: Dict[str, Any], *, strict: bool | None = None
 
     legacy_present = _flatten_legacy_presence(concept)
     if strict and legacy_present:
-        raise LegacyFieldUsage(f"Legacy fields disallowed in strict mode: {legacy_present}")
+        raise LegacyFieldUsage(
+            f"Legacy fields disallowed in strict mode: {legacy_present}"
+        )
 
     # names[] handling
     if "name" in concept:
         nl_value = concept["name"]
         if nl_value and isinstance(nl_value, str):
             names = concept.get("names") or []
-            if not any(isinstance(n, dict) and n.get("name") == nl_value for n in names):
+            if not any(
+                isinstance(n, dict) and n.get("name") == nl_value for n in names
+            ):
                 names.append({"name": nl_value, "kind": "NL"})
                 concept["names"] = names
         if record_warnings:
@@ -76,19 +96,25 @@ def normalize_concept_payload(raw: Dict[str, Any], *, strict: bool | None = None
 
 def summarize_legacy_usage(concepts: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Return counts of legacy field presence for a batch (supports metrics/log decisions)."""
-    counts: Dict[str, int] = {k:0 for k in LEGACY_FIELDS}
+    counts: Dict[str, int] = {k: 0 for k in LEGACY_FIELDS}
     for c in concepts:
-        if "name" in c: counts["name"] += 1
-        if "notes" in c: counts["notes"] += 1
-        if "description" in c: counts["description"] += 1
+        if "name" in c:
+            counts["name"] += 1
+        if "notes" in c:
+            counts["notes"] += 1
+        if "description" in c:
+            counts["description"] += 1
         md = c.get("metadata") or {}
         if isinstance(md, dict):
-            if "description" in md: counts["metadata.description"] += 1
-            if "title" in md: counts["metadata.title"] += 1
-        if "entities" in c: counts["entities"] += 1
+            if "description" in md:
+                counts["metadata.description"] += 1
+            if "title" in md:
+                counts["metadata.title"] += 1
+        if "entities" in c:
+            counts["entities"] += 1
     total = len(concepts) or 1
     return {
         "counts": counts,
-        "percentages": {k: (v/total)*100 for k,v in counts.items()},
+        "percentages": {k: (v / total) * 100 for k, v in counts.items()},
         "total": total,
     }

@@ -5,6 +5,7 @@ for Von's agent and user mailboxes. Profiles are loaded from environment
 variables to avoid hardcoding credentials. The helpers are intentionally
 read-only and require explicit opt-in for any mutation scopes.
 """
+
 from __future__ import annotations
 
 import json
@@ -56,7 +57,9 @@ class GmailProfile:
                 f"Token file not found for profile '{self.profile_id}': {self.token_path}"
             )
 
-        creds = Credentials.from_authorized_user_file(self.token_path, scopes=self.scopes)
+        creds = Credentials.from_authorized_user_file(
+            self.token_path, scopes=self.scopes
+        )
 
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -107,7 +110,9 @@ def _log_gmail_audit(
         }
         record = {k: v for k, v in record.items() if v is not None}
         if audit_context:
-            record["audit_context"] = {k: v for k, v in audit_context.items() if v is not None}
+            record["audit_context"] = {
+                k: v for k, v in audit_context.items() if v is not None
+            }
         logger.info("[gmail_audit] action=%s payload=%s", action, record)
     except Exception:  # pragma: no cover - audit should never break callers
         logger.exception("[gmail_audit] Failed to log Gmail action: %s", action)
@@ -133,7 +138,9 @@ def _parse_profiles(raw: str) -> Dict[str, GmailProfile]:
         if not profile_id or not token_path:
             raise ValueError("Each profile requires profile_id and token_path")
 
-        credentials_path = entry.get("credentials_path") or entry.get("client_secret_path", "")
+        credentials_path = entry.get("credentials_path") or entry.get(
+            "client_secret_path", ""
+        )
         scopes = entry.get("scopes") or list(DEFAULT_SCOPES)
         label_filter = entry.get("label_filter")
         query_prefix = entry.get("query_prefix")
@@ -174,16 +181,19 @@ def load_profiles_from_env() -> Dict[str, GmailProfile]:
         return {}
 
     labels_raw = os.getenv("VON_GMAIL_LABELS")
-    label_filter = [label.strip() for label in labels_raw.split(",") if label.strip()] if labels_raw else None
+    label_filter = (
+        [label.strip() for label in labels_raw.split(",") if label.strip()]
+        if labels_raw
+        else None
+    )
 
     return {
         "von-service": GmailProfile(
             profile_id="von-service",
             token_path=token_path,
-            credentials_path=
-                os.getenv("VON_GMAIL_CLIENT_SECRET_PATH")
-                or os.getenv("GOOGLE_CLIENT_SECRET_PATH")
-                or "",
+            credentials_path=os.getenv("VON_GMAIL_CLIENT_SECRET_PATH")
+            or os.getenv("GOOGLE_CLIENT_SECRET_PATH")
+            or "",
             user_id=os.getenv("VON_GMAIL_USER", "me"),
             scopes=_pick_scopes(os.getenv("VON_GMAIL_MUTATION", "false")),
             label_filter=label_filter,
@@ -199,14 +209,20 @@ def _pick_scopes(request_mutation: str) -> List[str]:
     return list(DEFAULT_SCOPES)
 
 
-def get_profile(profile_id: str, profiles: Optional[Dict[str, GmailProfile]] = None) -> GmailProfile:
+def get_profile(
+    profile_id: str, profiles: Optional[Dict[str, GmailProfile]] = None
+) -> GmailProfile:
     candidates = profiles or load_profiles_from_env()
     if not candidates:
-        raise RuntimeError("No Gmail profiles configured. Set VON_GMAIL_PROFILES or VON_GMAIL_TOKEN_PATH.")
+        raise RuntimeError(
+            "No Gmail profiles configured. Set VON_GMAIL_PROFILES or VON_GMAIL_TOKEN_PATH."
+        )
 
     profile = candidates.get(profile_id)
     if not profile:
-        raise KeyError(f"Profile '{profile_id}' not found. Available: {sorted(candidates.keys())}")
+        raise KeyError(
+            f"Profile '{profile_id}' not found. Available: {sorted(candidates.keys())}"
+        )
     return profile
 
 
@@ -252,7 +268,12 @@ def list_messages(
     request = (
         service.users()
         .messages()
-        .list(userId=profile.user_id, q=composed_query, labelIds=label_ids, maxResults=max_results)
+        .list(
+            userId=profile.user_id,
+            q=composed_query,
+            labelIds=label_ids,
+            maxResults=max_results,
+        )
     )
     return request.execute() or {}
 

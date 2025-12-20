@@ -60,7 +60,9 @@ def app(monkeypatch):
     return flask_app
 
 
-def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_user(app):
+def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_user(
+    app,
+):
     client = app.test_client()
 
     resp = client.post("/von/generate", json={"prompt": "Hello"})

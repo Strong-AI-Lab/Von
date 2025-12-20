@@ -11,6 +11,7 @@ from .mongo_client import get_db, APPLICATION_SETTINGS_COLLECTION_NAME
 
 logger = logging.getLogger(__name__)
 
+
 def get_application_settings_collection() -> Collection | None:
     """
     Returns the 'application_settings' collection instance from MongoDB.
@@ -19,7 +20,7 @@ def get_application_settings_collection() -> Collection | None:
     Returns:
         A PyMongo Collection object for the application settings, or None if an error occurs.
     """
-    db = get_db() # get_db() is imported from mongo_client and handles DB connection
+    db = get_db()  # get_db() is imported from mongo_client and handles DB connection
     if db is None:
         logger.error(
             "Could not get database instance (via mongo_client.get_db()). Cannot access application_settings collection."
@@ -43,14 +44,15 @@ def get_application_settings_collection() -> Collection | None:
             e,
         )
         return None
-    except Exception as e: # Catch any other unexpected errors
+    except Exception as e:  # Catch any other unexpected errors
         logger.warning(
             "An unexpected error occurred while getting application settings collection: %s",
             e,
         )
         return None
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     # This block allows for direct testing of this script.
     # Note: For this to run, MongoDB must be accessible as configured in mongo_client.py,
     # and the script needs to be run from a context where 'src.backend.db.mongo_client' can be resolved,
