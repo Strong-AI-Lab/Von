@@ -66,7 +66,13 @@ from src.backend.services.concept_relation_service import (
     build_concept_relations_payload,
 )
 from src.backend.services.concept_search_service import search_concepts
-from src.backend.services.text_value_service import upsert_text_for_concept
+from src.backend.services.text_value_service import (
+    upsert_text_for_concept,
+    get_texts_for_concept,
+    update_text_relation_text,
+    delete_text_relation,
+    delete_text_relation_by_predicate_and_text,
+)
 from src.backend.services.annotation_extraction_service import extract_annotations
 from src.backend.services.concept_merge_service import merge_concepts
 from src.backend.services.settings_service import (
@@ -310,6 +316,120 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["name"],
+            },
+        ),
+        Tool(
+            name="upsert_text_relation",
+            description="Add or update ANY text relation (hasContent, hasDescription, hasNote, custom predicates, etc.). Use for attaching text content to concepts with flexible predicate types.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept to attach text to (e.g., '#V#my_concept')",
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "The text relation predicate (e.g., 'hasContent', 'hasDescription', 'hasNote')",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The text content to attach",
+                    },
+                    "language": {
+                        "type": "string",
+                        "default": "en-NZ",
+                        "description": "Language code (ISO 639-1/BCP 47): en-NZ (default), en-US, fr, de, mi, zh, etc.",
+                    },
+                    "context": {
+                        "type": "object",
+                        "description": "Optional metadata (e.g., {'text_type': 'NL', 'author': 'system'})",
+                    },
+                },
+                "required": ["concept_id", "predicate", "text"],
+            },
+        ),
+        Tool(
+            name="get_text_relations",
+            description="Retrieve text relations for a concept, optionally filtered by predicate/language. Returns all text attachments (hasContent, hasDescription, hasName, etc.).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept to query text relations for",
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Optional: filter by predicate (e.g., 'hasContent', 'hasName')",
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Optional: filter by language code (e.g., 'en-NZ', 'fr')",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 50,
+                        "description": "Maximum number of results to return",
+                    },
+                },
+                "required": ["concept_id"],
+            },
+        ),
+        Tool(
+            name="update_text_relation",
+            description="Modify the text content of an existing text relation by relation ID. Updates the text value while preserving the relation structure.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept owning the text relation",
+                    },
+                    "relation_id": {
+                        "type": "string",
+                        "description": "The ID of the text relation to update",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "The new text content",
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Optional: update the language code",
+                    },
+                },
+                "required": ["concept_id", "relation_id", "new_text"],
+            },
+        ),
+        Tool(
+            name="delete_text_relation",
+            description="Delete a specific text relation by relation ID or by predicate+text match. Optionally garbage-collects orphaned text values.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept owning the text relation",
+                    },
+                    "relation_id": {
+                        "type": "string",
+                        "description": "Optional: delete by relation ID (preferred method)",
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Optional: delete by predicate + text match",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Optional: exact text to match (used with predicate)",
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Optional: language code for predicate+text deletion",
+                    },
+                },
+                "required": ["concept_id"],
             },
         ),
         Tool(
@@ -1315,6 +1435,162 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
     return [_json_text(payload)]
 
 
+async def _handle_upsert_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle upsert_text_relation tool call."""
+    concept_id = arguments.get("concept_id")
+    predicate = arguments.get("predicate")
+    text = arguments.get("text")
+    language = arguments.get("language", "en-NZ")
+    context = arguments.get("context")
+
+    if not concept_id:
+        return [_json_error("Missing concept_id parameter")]
+    if not predicate:
+        return [_json_error("Missing predicate parameter")]
+    if not text:
+        return [_json_error("Missing text parameter")]
+
+    try:
+        result = upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate=predicate,
+            text=text,
+            lang=language,
+            context=context,
+        )
+
+        text_preview = text[:100] + "..." if len(text) > 100 else text
+        payload = {
+            "success": True,
+            "text_value_id": str(result.get("text_value_id")),
+            "relation_id": str(result.get("relation_id")),
+            "relation_created": result.get("relation_created"),
+            "predicate": predicate,
+            "text_preview": text_preview,
+            "language": language,
+        }
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [_json_error(f"Failed to upsert text relation: {exc}")]
+
+
+async def _handle_get_text_relations(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle get_text_relations tool call."""
+    concept_id = arguments.get("concept_id")
+    predicate = arguments.get("predicate")
+    language = arguments.get("language")
+    limit = arguments.get("limit", 50)
+
+    if not concept_id:
+        return [_json_error("Missing concept_id parameter")]
+
+    try:
+        relations = get_texts_for_concept(
+            subject_concept_id=concept_id,
+            predicate=predicate,
+            lang=language,
+            limit=limit,
+        )
+
+        # Add text previews for long content
+        for relation in relations:
+            text = relation.get("text", "")
+            if len(text) > 200:
+                relation["text_preview"] = text[:200] + "..."
+
+        payload = {
+            "concept_id": concept_id,
+            "relations_found": len(relations),
+            "relations": relations,
+        }
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [_json_error(f"Failed to get text relations: {exc}")]
+
+
+async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle update_text_relation tool call."""
+    concept_id = arguments.get("concept_id")
+    relation_id = arguments.get("relation_id")
+    new_text = arguments.get("new_text")
+    language = arguments.get("language", "en-NZ")
+
+    if not concept_id:
+        return [_json_error("Missing concept_id parameter")]
+    if not relation_id:
+        return [_json_error("Missing relation_id parameter")]
+    if not new_text:
+        return [_json_error("Missing new_text parameter")]
+
+    try:
+        result = update_text_relation_text(
+            subject_concept_id=concept_id,
+            relation_id=relation_id,
+            new_text=new_text,
+            lang=language,
+        )
+
+        old_preview = str(result.get("old_text", ""))[:100]
+        new_preview = new_text[:100] + "..." if len(new_text) > 100 else new_text
+
+        payload = {
+            "success": True,
+            "relation_id": relation_id,
+            "old_text_preview": old_preview,
+            "new_text_preview": new_preview,
+            "text_value_id": str(result.get("text_value_id")),
+        }
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [_json_error(f"Failed to update text relation: {exc}")]
+
+
+async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
+    """Handle delete_text_relation tool call."""
+    concept_id = arguments.get("concept_id")
+    relation_id = arguments.get("relation_id")
+    predicate = arguments.get("predicate")
+    text = arguments.get("text")
+    language = arguments.get("language")
+
+    if not concept_id:
+        return [_json_error("Missing concept_id parameter")]
+
+    try:
+        if relation_id:
+            # Delete by relation ID (preferred)
+            result = delete_text_relation(
+                subject_concept_id=concept_id,
+                relation_id=relation_id,
+            )
+            payload = {
+                "success": True,
+                "deleted_relation_id": relation_id,
+                "deleted_text_preview": str(result.get("text", ""))[:100],
+                "text_value_cleaned_up": result.get("orphaned", False),
+            }
+        elif predicate and text:
+            # Delete by predicate + text match
+            result = delete_text_relation_by_predicate_and_text(
+                subject_concept_id=concept_id,
+                predicate=predicate,
+                text=text,
+                lang=language,
+            )
+            payload = {
+                "success": True,
+                "deleted_relation_id": result.get("relation_id"),
+                "deleted_text_preview": text[:100],
+                "text_value_cleaned_up": result.get("orphaned_text_value_deleted", False),
+            }
+        else:
+            return [_json_error("Must provide either relation_id or both predicate and text")]
+
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [_json_error(f"Failed to delete text relation: {exc}")]
+
+
 async def _handle_add_names(arguments: dict[str, Any]) -> list[TextContent]:
     concept_id = arguments.get("concept_id")
     names = arguments.get("names")
@@ -1806,6 +2082,10 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "find_subconcepts": _handle_find_subconcepts,
     "find_concepts_by_name": _handle_find_concepts_by_name,
     "von_chat_run": _handle_von_chat_run,
+    "upsert_text_relation": _handle_upsert_text_relation,
+    "get_text_relations": _handle_get_text_relations,
+    "update_text_relation": _handle_update_text_relation,
+    "delete_text_relation": _handle_delete_text_relation,
     "add_names": _handle_add_names,
     "get_tree": _handle_get_tree,
     "fetch_concept": _handle_fetch_concept,
