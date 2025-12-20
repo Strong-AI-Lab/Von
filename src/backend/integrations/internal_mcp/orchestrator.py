@@ -27,6 +27,7 @@ class OrchestratorResult:
     response_text: str
     extra_messages: Sequence[Mapping[str, Any]]
     tool_invocations: Sequence[Mapping[str, Any]]
+    aux_llm_calls: Sequence[Mapping[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -553,6 +554,7 @@ class InternalMCPChatOrchestrator:
         llm_client: Any,
         *,
         fallback_model: Optional[str],
+        aux_log: Optional[List[Mapping[str, Any]]] = None,
     ) -> Optional[bool]:
         """Run the Vontology-configured detector LLM to classify the response.
 
@@ -594,6 +596,21 @@ class InternalMCPChatOrchestrator:
 
         if not isinstance(classifier_output, str):
             return None
+
+        try:
+            if aux_log is not None:
+                aux_log.append(
+                    {
+                        "type": "missing_tool_call_classifier",
+                        "model": model_name or fallback_model or "default",
+                        "prompt_preview": prompt_text[:800],
+                        "response_preview": classifier_output[:800],
+                        "truncated": len(prompt_text) > 800
+                        or len(classifier_output) > 800,
+                    }
+                )
+        except Exception:  # pragma: no cover - defensive
+            pass
 
         verdict = classifier_output.strip().lower()
         if verdict.startswith("yes"):
@@ -1114,6 +1131,7 @@ class InternalMCPChatOrchestrator:
         gmail_profile: Optional[str] = None,
         auxiliary_system_prompt: str | None = None,
     ) -> OrchestratorResult:
+        aux_llm_calls: List[Mapping[str, Any]] = []
         if not self._gateway.enabled or self._max_tool_invocations <= 0:
             response = llm_client.generate(prompt, context=context, model=model)
             # If the model emitted a tool-call JSON blob but the gateway is disabled,
@@ -1132,9 +1150,13 @@ class InternalMCPChatOrchestrator:
                         ),
                         extra_messages=(),
                         tool_invocations=(),
+                        aux_llm_calls=(),
                     )
             return OrchestratorResult(
-                response_text=response, extra_messages=(), tool_invocations=()
+                response_text=response,
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=tuple(aux_llm_calls),
             )
 
         augmented_context = self._build_augmented_context(
@@ -1167,7 +1189,10 @@ class InternalMCPChatOrchestrator:
                 retry_reason = "fenced tool-call JSON detected"
             else:
                 llm_flag = self._llm_detects_missing_tool_call(
-                    response, llm_client, fallback_model=model
+                    response,
+                    llm_client,
+                    fallback_model=model,
+                    aux_log=aux_llm_calls,
                 )
 
                 if llm_flag is True:
@@ -1200,11 +1225,17 @@ class InternalMCPChatOrchestrator:
                     has_valid_tool_call = True
                 else:
                     return OrchestratorResult(
-                        response_text=response, extra_messages=(), tool_invocations=()
+                        response_text=response,
+                        extra_messages=(),
+                        tool_invocations=(),
+                        aux_llm_calls=tuple(aux_llm_calls),
                     )
             else:
                 return OrchestratorResult(
-                    response_text=response, extra_messages=(), tool_invocations=()
+                    response_text=response,
+                    extra_messages=(),
+                    tool_invocations=(),
+                    aux_llm_calls=tuple(aux_llm_calls),
                 )
 
         assert tool_calls is not None
@@ -1350,6 +1381,7 @@ class InternalMCPChatOrchestrator:
             response_text=current_response,
             extra_messages=tuple(tool_messages),
             tool_invocations=tuple(invocations),
+            aux_llm_calls=tuple(aux_llm_calls),
         )
 
 
