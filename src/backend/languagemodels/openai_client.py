@@ -1,7 +1,12 @@
 # src/backend/languagemodels/openai_client.py
 
 import os
+import logging
 from openai import OpenAI
+
+
+logger = logging.getLogger(__name__)
+
 
 class OpenAIClient:
     def __init__(self, api_key_env_var="OPENAI_API_KEY"):
@@ -17,7 +22,7 @@ class OpenAIClient:
             # Filter for GPT models that are likely to be useful for generation
             return [model.id for model in models if "gpt" in model.id.lower()]
         except Exception as e:
-            print(f"Error listing OpenAI models: {e}")
+            logger.warning("Error listing OpenAI models: %s", e)
             return []
 
     def generate(self, prompt, model="gpt-4"):
@@ -27,10 +32,10 @@ class OpenAIClient:
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": prompt}
-                ]
+                    {"role": "user", "content": prompt},
+                ],
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"Error generating response from OpenAI: {e}")
+            logger.warning("Error generating response from OpenAI: %s", e)
             return f"Error: {e}"

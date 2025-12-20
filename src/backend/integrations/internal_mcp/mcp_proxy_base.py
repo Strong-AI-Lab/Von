@@ -99,7 +99,9 @@ class MCPStdIOClient:
                     result = await session.call_tool(tool_name, arguments)
                     self._call_count += 1
                     return self._parse_result(result, text_parser=text_parser)
-        except Exception as exc:  # pragma: no cover - MCP failures are environment dependent
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - MCP failures are environment dependent
             self._error_count += 1
             logger.error("%s Tool call failed: %s", self._config.log_tag, exc)
             raise MCPToolClientError(str(exc)) from exc

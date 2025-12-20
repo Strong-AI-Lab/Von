@@ -91,7 +91,9 @@ def build_user_specific_system_prompt(user_concept_id: str) -> Optional[str]:
     """
 
     fragments = get_user_specific_prompt_fragments(user_concept_id)
-    prompt_texts = [fragment["content"] for fragment in fragments if fragment.get("content")]
+    prompt_texts = [
+        fragment["content"] for fragment in fragments if fragment.get("content")
+    ]
     if not prompt_texts:
         return None
 

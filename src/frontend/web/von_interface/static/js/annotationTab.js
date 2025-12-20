@@ -568,6 +568,8 @@ export function initializeAnnotationTab(suffix = '') {
   const sampleBtn = document.getElementById(`sampleTextButton${idSuffix}`);
   const clearBtn = document.getElementById(`clearTextButton${idSuffix}`);
   const spinner = document.getElementById(`annotationSpinner${idSuffix}`);
+  let lastLlmInteraction = { prompt: '', output: '' };
+  let lastAuxLlmCalls = [];
   // Fallback: attempt to recover last LLM I/O (history endpoint) if page reloaded after a run.
   (async () => {
     try {
@@ -578,6 +580,7 @@ export function initializeAnnotationTab(suffix = '') {
           if (data && data.status === 'ok' && data.llm_io && data.llm_io.prompt) {
             container.__llm_io = data.llm_io;
             try { if (results && !results.__llm_io) results.__llm_io = data.llm_io; } catch (_) { /* ignore */ }
+            try { if (Array.isArray(data.llm_io.aux_llm_calls)) lastAuxLlmCalls = data.llm_io.aux_llm_calls; } catch (_) { /* ignore */ }
             // Force header bar render even before any new run
             try { renderResults(results, container.__suggestions || [], container.__lastTurnId); } catch (_) { /* ignore */ }
           }
@@ -595,9 +598,9 @@ export function initializeAnnotationTab(suffix = '') {
   const llmPromptPre = document.getElementById(`llmInteractionPrompt${idSuffix}`);
   const llmOutputPre = document.getElementById(`llmInteractionOutput${idSuffix}`);
   const llmMetaDiv = document.getElementById(`llmInteractionMeta${idSuffix}`);
+  const llmAuxSection = document.getElementById(`llmInteractionAuxSection${idSuffix}`);
+  const llmAuxPre = document.getElementById(`llmInteractionAux${idSuffix}`);
   const promptConceptBtn = document.getElementById(`promptConceptButton${idSuffix}`);
-  // Store last fetched full (untruncated) prompt/output for copy
-  let lastLlmInteraction = { prompt: '', output: '' };
 
   // Insert classification legend (idempotent) near counts area
   try {
@@ -678,10 +681,27 @@ export function initializeAnnotationTab(suffix = '') {
     }
   }
 
+  function renderAuxLlmCalls() {
+    if (!llmAuxSection || !llmAuxPre) return;
+    const hasAux = Array.isArray(lastAuxLlmCalls) && lastAuxLlmCalls.length > 0;
+    if (hasAux) {
+      llmAuxSection.classList.remove('hidden');
+      try {
+        llmAuxPre.textContent = JSON.stringify(lastAuxLlmCalls, null, 2);
+      } catch (e) {
+        llmAuxPre.textContent = 'Error formatting auxiliary LLM calls';
+      }
+    } else {
+      llmAuxSection.classList.add('hidden');
+      llmAuxPre.textContent = '(no auxiliary LLM calls)';
+    }
+  }
+
   function openLlmPopup() {
     if (!llmPopup) return;
     llmPopup.classList.remove('hidden');
     llmPopup.setAttribute('aria-hidden', 'false');
+    renderAuxLlmCalls();
     fetchFullLlmInteraction(input.value.trim());
   }
   function closeLlmPopup() {
@@ -711,7 +731,7 @@ export function initializeAnnotationTab(suffix = '') {
   if (llmCopyBtn) {
     attachOnce(llmCopyBtn, 'click', 'llmCopyJson', () => {
       const promptConceptId = (promptConceptBtn && (promptConceptBtn.dataset.conceptId || promptConceptBtn.textContent)) || '#V#find_concepts_in_text_prompt';
-      const record = { prompt: lastLlmInteraction.prompt || '', output: lastLlmInteraction.output || '', prompt_concept: promptConceptId };
+      const record = { prompt: lastLlmInteraction.prompt || '', output: lastLlmInteraction.output || '', prompt_concept: promptConceptId, aux_llm_calls: Array.isArray(lastAuxLlmCalls) ? lastAuxLlmCalls : [] };
       try { navigator.clipboard.writeText(JSON.stringify(record, null, 2)); llmCopyBtn.textContent = 'Copied'; setTimeout(() => { llmCopyBtn.textContent = 'Copy JSON'; }, 1500); } catch (e) { console.warn('Clipboard write failed', e); }
     });
   }
@@ -739,11 +759,15 @@ export function initializeAnnotationTab(suffix = '') {
         if (resp && resp.suggestions) {
           // Attach last LLM I/O (backend already truncates if large). Needed for LLM I/O button.
           try { if (resp.llm_io) { results.__llm_io = resp.llm_io; } } catch (_) { /* ignore */ }
+          try { if (resp.llm_debug) { results.__llm_debug = resp.llm_debug; } } catch (_) { /* ignore */ }
+          const auxCalls = (resp && resp.llm_debug && resp.llm_debug.aux_llm_calls) || (resp && resp.llm_io && resp.llm_io.aux_llm_calls) || [];
+          lastAuxLlmCalls = Array.isArray(auxCalls) ? auxCalls : [];
           try { await resolveSuggestedTypes(resp.suggestions); } catch (_) { /* ignore */ }
           container.__lastTurnId = turnId;
           container.__suggestions = resp.suggestions;
           // Backward compatibility: some earlier code inspected container.__llm_io
           try { if (resp.llm_io) { container.__llm_io = resp.llm_io; } } catch (_) { /* ignore */ }
+          renderAuxLlmCalls();
           renderResults(results, resp.suggestions, turnId);
           renderHighlights(highlightPane, text, resp.suggestions);
           updateCounts(countsEl, resp.suggestions);
@@ -771,6 +795,8 @@ export function initializeAnnotationTab(suffix = '') {
           }
           status.textContent = `Got ${resp.suggestions.length} spans in ${ms} ms${modeInfo}${srcParts.length ? ' [' + srcParts.join(', ') + ']' : ''}${timingPart}.`;
         } else {
+          lastAuxLlmCalls = [];
+          renderAuxLlmCalls();
           status.textContent = `No suggestions (took ${ms} ms)`;
           results.innerHTML = '';
           renderHighlights(highlightPane, text, []);

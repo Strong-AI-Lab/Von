@@ -790,8 +790,10 @@ function showLlmDebugPopup(turnId) {
     const responsePre = document.getElementById('chatLlmDebugResponse');
     const toolsSection = document.getElementById('chatLlmDebugToolsSection');
     const toolsPre = document.getElementById('chatLlmDebugTools');
+    const auxSection = document.getElementById('chatLlmDebugAuxSection');
+    const auxPre = document.getElementById('chatLlmDebugAux');
 
-    if (!popup || !metaDiv || !messagesPre || !responsePre || !toolsSection || !toolsPre) {
+    if (!popup || !metaDiv || !messagesPre || !responsePre || !toolsSection || !toolsPre || !auxSection || !auxPre) {
         console.error('[chatTab] LLM debug popup elements missing');
         return;
     }
@@ -864,6 +866,18 @@ function showLlmDebugPopup(turnId) {
         }
     } else {
         toolsSection.classList.add('hidden');
+    }
+
+    // Display auxiliary LLM calls if any
+    if (debugData.aux_llm_calls && debugData.aux_llm_calls.length > 0) {
+        auxSection.classList.remove('hidden');
+        try {
+            auxPre.textContent = JSON.stringify(debugData.aux_llm_calls, null, 2);
+        } catch (e) {
+            auxPre.textContent = 'Error formatting auxiliary LLM calls';
+        }
+    } else {
+        auxSection.classList.add('hidden');
     }
 
     // Store full data for copy function

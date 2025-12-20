@@ -12,11 +12,17 @@ from ...services import chat_history_service
 # From this file (src/backend/server/routes/von_routes.py) we need to traverse up THREE levels
 # to reach the 'src' directory, then descend into frontend/web/von_interface/templates
 # would raise TemplateNotFound for 'von_interface.html'.
-_TEMPLATE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../frontend/web/von_interface/templates"))
-von_bp = Blueprint('von', __name__, template_folder=_TEMPLATE_DIR)
+_TEMPLATE_DIR = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__), "../../../frontend/web/von_interface/templates"
+    )
+)
+von_bp = Blueprint("von", __name__, template_folder=_TEMPLATE_DIR)
 
 
-def _truncate_large_tool_results(messages: list[dict], max_tool_content_chars: int = 5000) -> list[dict]:
+def _truncate_large_tool_results(
+    messages: list[dict], max_tool_content_chars: int = 5000
+) -> list[dict]:
     """
     Truncate large tool result content to prevent context explosion.
 
@@ -37,7 +43,10 @@ def _truncate_large_tool_results(messages: list[dict], max_tool_content_chars: i
             content = msg.get("content", "")
             if isinstance(content, str) and len(content) > max_tool_content_chars:
                 # Truncate and add indicator
-                truncated_content = content[:max_tool_content_chars] + f"\n... [truncated {len(content) - max_tool_content_chars} chars]"
+                truncated_content = (
+                    content[:max_tool_content_chars]
+                    + f"\n... [truncated {len(content) - max_tool_content_chars} chars]"
+                )
                 result.append({**msg, "content": truncated_content})
             else:
                 result.append(msg)
@@ -66,7 +75,7 @@ def _limit_context_size(context: list[dict], max_messages: int = 20) -> list[dic
     # Check if first message is system message
     if context and context[0].get("role") == "system":
         system_msg = [context[0]]
-        recent_msgs = context[-(max_messages-1):]  # Keep room for system message
+        recent_msgs = context[-(max_messages - 1) :]  # Keep room for system message
         return system_msg + recent_msgs
     else:
         return context[-max_messages:]
@@ -86,7 +95,7 @@ def _calculate_context_stats(messages: list[dict]) -> dict:
         "total_messages": len(messages),
         "by_role": {},
         "total_chars": 0,
-        "largest_message": {"role": None, "chars": 0}
+        "largest_message": {"role": None, "chars": 0},
     }
 
     for msg in messages:
@@ -121,7 +130,7 @@ def _calculate_tool_stats(tool_messages: list[dict]) -> dict:
         "tool_count": len(tool_messages),
         "total_chars": 0,
         "truncated_count": 0,
-        "tools": []
+        "tools": [],
     }
 
     for msg in tool_messages:
@@ -143,19 +152,22 @@ def _calculate_tool_stats(tool_messages: list[dict]) -> dict:
         tool_name = "unknown"
         try:
             import json
-            parsed = json.loads(content_str.split("[truncated")[0] if was_truncated else content_str)
+
+            parsed = json.loads(
+                content_str.split("[truncated")[0] if was_truncated else content_str
+            )
             if isinstance(parsed, dict):
                 tool_name = parsed.get("tool", "unknown")
         except:
             pass
 
-        stats["tools"].append({
-            "name": tool_name,
-            "chars": content_len,
-            "truncated": was_truncated
-        })
+        stats["tools"].append(
+            {"name": tool_name, "chars": content_len, "truncated": was_truncated}
+        )
 
     return stats
+
+
 @von_bp.route("/onboard_new_member", methods=["POST"])
 def onboard_new_member():
     """Onboards a new lab member."""
@@ -167,10 +179,14 @@ def onboard_new_member():
 
     try:
         run_onboarding_workflow(member_name)
-        return jsonify({"message": f"Onboarding workflow started for {member_name}."}), 200
+        return (
+            jsonify({"message": f"Onboarding workflow started for {member_name}."}),
+            200,
+        )
     except Exception as e:
-        print(f"Error during onboarding: {e}") # Add server-side logging
+        print(f"Error during onboarding: {e}")  # Add server-side logging
         return jsonify({"error": f"Error during onboarding: {str(e)}"}), 500
+
 
 @von_bp.route("/update_model", methods=["POST"])
 def update_model():
@@ -180,24 +196,26 @@ def update_model():
 
     if new_model:
         current_app.config["MODEL"] = new_model
-        print(f"Model updated to: {new_model}") # Add server-side logging
+        print(f"Model updated to: {new_model}")  # Add server-side logging
         return jsonify({"message": f"Model updated to {new_model}"}), 200
     else:
         return jsonify({"error": "No model provided."}), 400
+
 
 @von_bp.route("/")
 def serve_page():
     """Serve the main chat interface (HTML file)."""
     try:
         # Ensure template changes (e.g., recent fixes) are picked up even in production mode
-        jenv = getattr(current_app, 'jinja_env', None)
-        cache = getattr(jenv, 'cache', None)
-        clear_fn = getattr(cache, 'clear', None)
+        jenv = getattr(current_app, "jinja_env", None)
+        cache = getattr(jenv, "cache", None)
+        clear_fn = getattr(cache, "clear", None)
         if callable(clear_fn):
             clear_fn()
     except Exception:
         pass  # Defensive: don't block page serving if cache clear fails
     return render_template("von_interface.html")
+
 
 @von_bp.route("/generate", methods=["POST"])
 def generate():
@@ -205,7 +223,9 @@ def generate():
     data = request.get_json()
     prompt_text = data.get("prompt", "")
 
-    interaction_timestamp_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    interaction_timestamp_utc = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
 
     # Get user/org context from request body (sent by frontend from localStorage)
     request_user_id = data.get("user_id")
@@ -226,11 +246,11 @@ def generate():
     else:
         context = current_app.config.get("CONTEXT", [])
 
-
     # REFACTORING_NOTE: Use the new factory to get the correct client and model
     # Get user and org context for per-user/org LLM settings
     try:
         from ...security.access_control import get_effective_user_concept_id
+
         user_concept_id = get_effective_user_concept_id()
 
         # SECURITY: Do NOT trust client-provided user_id - require proper authentication
@@ -242,10 +262,10 @@ def generate():
             current_app.logger.info(
                 "[AUTH] No authenticated user for this request. RAG and user-scoped tools will be unavailable. "
                 "Client-provided user_id '%s' is ignored for security.",
-                request_user_id or "(none)"
+                request_user_id or "(none)",
             )
 
-        org_concept_id = session.get('organisation_concept_id') if session else None
+        org_concept_id = session.get("organisation_concept_id") if session else None
 
         # Store user_concept_id in session for history tracking
         if user_concept_id:
@@ -255,7 +275,9 @@ def generate():
         org_concept_id = None
 
     try:
-        llm_client = get_llm_client(user_concept_id=user_concept_id, org_concept_id=org_concept_id)
+        llm_client = get_llm_client(
+            user_concept_id=user_concept_id, org_concept_id=org_concept_id
+        )
         model_name = get_active_model_name()
     except Exception as e:
         return jsonify({"error": f"Could not get LLM client: {e}"}), 500
@@ -279,13 +301,16 @@ def generate():
         }
         if user_concept_id:
             try:
-                from ...services.chat_auxiliary_prompt_service import get_user_specific_prompt_fragments
+                from ...services.chat_auxiliary_prompt_service import (
+                    get_user_specific_prompt_fragments,
+                )
 
                 prompt_fragments = get_user_specific_prompt_fragments(user_concept_id)
                 user_prompt_debug["prompt_concept_ids"] = [
                     frag.get("concept_id")
                     for frag in prompt_fragments
-                    if isinstance(frag, dict) and isinstance(frag.get("concept_id"), str)
+                    if isinstance(frag, dict)
+                    and isinstance(frag.get("concept_id"), str)
                 ]
                 prompt_texts = []
                 for frag in prompt_fragments:
@@ -297,8 +322,12 @@ def generate():
                     if not content.strip():
                         continue
                     prompt_texts.append(content)
-                auxiliary_system_prompt = "\n\n".join(text.strip() for text in prompt_texts if text and text.strip())
-                auxiliary_system_prompt = auxiliary_system_prompt.strip() if auxiliary_system_prompt else None
+                auxiliary_system_prompt = "\n\n".join(
+                    text.strip() for text in prompt_texts if text and text.strip()
+                )
+                auxiliary_system_prompt = (
+                    auxiliary_system_prompt.strip() if auxiliary_system_prompt else None
+                )
 
                 if auxiliary_system_prompt:
                     user_prompt_debug["loaded"] = True
@@ -402,7 +431,9 @@ def generate():
                     else:
                         lines.append(f"  - {name}")
             lines.append("")
-            lines.append("Note: Some tools (especially RAG) require a user namespace to avoid cross-user data leakage.")
+            lines.append(
+                "Note: Some tools (especially RAG) require a user namespace to avoid cross-user data leakage."
+            )
             return "\n".join(lines)
 
         # ---------------------------------------------------------
@@ -413,7 +444,12 @@ def generate():
             import os
 
             flag_value = os.getenv("VON_DETERMINISTIC_INTROSPECTION", "0")
-            deterministic_introspection_enabled = str(flag_value).strip().lower() in {"1", "true", "yes", "on"}
+            deterministic_introspection_enabled = str(flag_value).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
         except Exception:
             deterministic_introspection_enabled = False
 
@@ -462,7 +498,11 @@ def generate():
                     tool_invocations = [
                         {
                             "tool": "chat_get_prompt_context",
-                            "payload": {"namespace": user_concept_id, "include_content": True, "max_chars": 5000},
+                            "payload": {
+                                "namespace": user_concept_id,
+                                "include_content": True,
+                                "max_chars": 5000,
+                            },
                             "duration_ms": duration_ms,
                             "direct_user_call": False,
                         }
@@ -491,19 +531,27 @@ def generate():
                             f"Result: {payload}"
                         )
                 except Exception as exc:
-                    current_app.logger.warning("[mcp_orchestrator] Prompt introspection tool failed: %s", exc)
+                    current_app.logger.warning(
+                        "[mcp_orchestrator] Prompt introspection tool failed: %s", exc
+                    )
 
             # Fallback: use already-loaded prompt fragments (no tool required)
             if response_text is None:
-                prompt_ids = user_prompt_debug.get("prompt_concept_ids") if isinstance(user_prompt_debug, dict) else []
+                prompt_ids = (
+                    user_prompt_debug.get("prompt_concept_ids")
+                    if isinstance(user_prompt_debug, dict)
+                    else []
+                )
                 if not isinstance(prompt_ids, list):
                     prompt_ids = []
                 prompt_text_value = auxiliary_system_prompt or ""
-                prompt_text_value = prompt_text_value.strip() if isinstance(prompt_text_value, str) else str(prompt_text_value)
+                prompt_text_value = (
+                    prompt_text_value.strip()
+                    if isinstance(prompt_text_value, str)
+                    else str(prompt_text_value)
+                )
                 if not prompt_text_value:
-                    response_text = (
-                        "No user-specific system prompt is currently active (no prompt content was loaded from Vontology)."
-                    )
+                    response_text = "No user-specific system prompt is currently active (no prompt content was loaded from Vontology)."
                 else:
                     response_text = (
                         "Here is your current user-specific system prompt (from Vontology).\n\n"
@@ -513,21 +561,45 @@ def generate():
 
             # Store messages in history/context, matching the direct-tool-call pattern.
             if user_concept_id:
-                chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "user", "content": prompt_text})
-                for tool_msg in _truncate_large_tool_results(tool_messages, max_tool_content_chars=5000):
-                    chat_history_service.add_message_to_history(user_concept_id, session_id, tool_msg)
-                chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "assistant", "content": response_text})
+                chat_history_service.add_message_to_history(
+                    user_concept_id,
+                    session_id,
+                    {"role": "user", "content": prompt_text},
+                )
+                for tool_msg in _truncate_large_tool_results(
+                    tool_messages, max_tool_content_chars=5000
+                ):
+                    chat_history_service.add_message_to_history(
+                        user_concept_id, session_id, tool_msg
+                    )
+                chat_history_service.add_message_to_history(
+                    user_concept_id,
+                    session_id,
+                    {"role": "assistant", "content": response_text},
+                )
             else:
-                current_app.config["CONTEXT"].append({"role": "user", "content": prompt_text})
-                for tool_msg in _truncate_large_tool_results(tool_messages, max_tool_content_chars=5000):
+                current_app.config["CONTEXT"].append(
+                    {"role": "user", "content": prompt_text}
+                )
+                for tool_msg in _truncate_large_tool_results(
+                    tool_messages, max_tool_content_chars=5000
+                ):
                     current_app.config["CONTEXT"].append(tool_msg)
-                current_app.config["CONTEXT"].append({"role": "assistant", "content": response_text})
+                current_app.config["CONTEXT"].append(
+                    {"role": "assistant", "content": response_text}
+                )
 
-            current_app.config["CONTEXT"] = _limit_context_size(current_app.config["CONTEXT"], max_messages=20)
+            current_app.config["CONTEXT"] = _limit_context_size(
+                current_app.config["CONTEXT"], max_messages=20
+            )
 
-            current_turn_messages = [{"role": "user", "content": prompt_text}] + tool_messages
+            current_turn_messages = [
+                {"role": "user", "content": prompt_text}
+            ] + tool_messages
             context_stats = _calculate_context_stats(context)
-            current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
+            current_context_stats = _calculate_context_stats(
+                current_app.config["CONTEXT"]
+            )
             tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
 
             llm_debug_info = {
@@ -542,7 +614,10 @@ def generate():
                 },
                 "tool_stats": tool_stats,
                 "tool_invocations": tool_invocations,
-                "prompt_introspection_fastpath": {"used_tool": used_tool, "enabled": True},
+                "prompt_introspection_fastpath": {
+                    "used_tool": used_tool,
+                    "enabled": True,
+                },
                 "fastpath": {
                     "name": "prompt_introspection",
                     "bypassed_llm": True,
@@ -551,16 +626,24 @@ def generate():
                 },
             }
 
-            return jsonify({
-                "response": response_text,
-                "fastpath": {"name": "prompt_introspection", "bypassed_llm": True, "used_tool": used_tool},
-                "llm_debug": llm_debug_info,
-            })
+            return jsonify(
+                {
+                    "response": response_text,
+                    "fastpath": {
+                        "name": "prompt_introspection",
+                        "bypassed_llm": True,
+                        "used_tool": used_tool,
+                    },
+                    "llm_debug": llm_debug_info,
+                }
+            )
 
         # ---------------------------------------------------------
         # Deterministic tool inventory (avoid LLM narration)
         # ---------------------------------------------------------
-        if deterministic_introspection_enabled and _is_tool_introspection_question(prompt_text):
+        if deterministic_introspection_enabled and _is_tool_introspection_question(
+            prompt_text
+        ):
             gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
 
             response_text = None
@@ -575,11 +658,15 @@ def generate():
                 except Exception as exc:
                     response_text = f"Could not retrieve tool inventory from the internal gateway: {exc}"
             else:
-                response_text = "Internal MCP gateway is disabled; tool inventory is unavailable."
+                response_text = (
+                    "Internal MCP gateway is disabled; tool inventory is unavailable."
+                )
 
             current_turn_messages = [{"role": "user", "content": prompt_text}]
             context_stats = _calculate_context_stats(context)
-            current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
+            current_context_stats = _calculate_context_stats(
+                current_app.config["CONTEXT"]
+            )
 
             llm_debug_info = {
                 "interaction_timestamp_utc": interaction_timestamp_utc,
@@ -592,17 +679,19 @@ def generate():
                     "stored_context": current_context_stats,
                 },
                 "tool_stats": None,
-                "tool_invocations": [
-                    {
-                        "tool": "gateway.describe_methods",
-                        "payload": {},
-                        "duration_ms": None,
-                        "direct_user_call": False,
-                        "ok": bool(methods_snapshot is not None),
-                    }
-                ]
-                if used_tool
-                else [],
+                "tool_invocations": (
+                    [
+                        {
+                            "tool": "gateway.describe_methods",
+                            "payload": {},
+                            "duration_ms": None,
+                            "direct_user_call": False,
+                            "ok": bool(methods_snapshot is not None),
+                        }
+                    ]
+                    if used_tool
+                    else []
+                ),
                 "fastpath": {
                     "name": "tool_inventory",
                     "bypassed_llm": True,
@@ -613,18 +702,38 @@ def generate():
 
             # Persist minimal history for continuity.
             if user_concept_id:
-                chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "user", "content": prompt_text})
-                chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "assistant", "content": response_text})
+                chat_history_service.add_message_to_history(
+                    user_concept_id,
+                    session_id,
+                    {"role": "user", "content": prompt_text},
+                )
+                chat_history_service.add_message_to_history(
+                    user_concept_id,
+                    session_id,
+                    {"role": "assistant", "content": response_text},
+                )
             else:
-                current_app.config["CONTEXT"].append({"role": "user", "content": prompt_text})
-                current_app.config["CONTEXT"].append({"role": "assistant", "content": response_text})
-            current_app.config["CONTEXT"] = _limit_context_size(current_app.config["CONTEXT"], max_messages=20)
+                current_app.config["CONTEXT"].append(
+                    {"role": "user", "content": prompt_text}
+                )
+                current_app.config["CONTEXT"].append(
+                    {"role": "assistant", "content": response_text}
+                )
+            current_app.config["CONTEXT"] = _limit_context_size(
+                current_app.config["CONTEXT"], max_messages=20
+            )
 
-            return jsonify({
-                "response": response_text,
-                "fastpath": {"name": "tool_inventory", "bypassed_llm": True, "used_tool": used_tool},
-                "llm_debug": llm_debug_info,
-            })
+            return jsonify(
+                {
+                    "response": response_text,
+                    "fastpath": {
+                        "name": "tool_inventory",
+                        "bypassed_llm": True,
+                        "used_tool": used_tool,
+                    },
+                    "llm_debug": llm_debug_info,
+                }
+            )
 
         # ---------------------------------------------------------
         # Deterministic RAG status (avoid LLM narration)
@@ -675,28 +784,59 @@ def generate():
                         }
                     ]
 
-                    response_text = "Here is your current RAG status (server-truth):\n\n" + _json.dumps(payload, indent=2, default=str)
+                    response_text = (
+                        "Here is your current RAG status (server-truth):\n\n"
+                        + _json.dumps(payload, indent=2, default=str)
+                    )
                 except Exception as exc:
-                    response_text = f"I could not retrieve RAG status via internal tools: {exc}"
+                    response_text = (
+                        f"I could not retrieve RAG status via internal tools: {exc}"
+                    )
             else:
-                response_text = "Internal MCP gateway is disabled; RAG status is unavailable."
+                response_text = (
+                    "Internal MCP gateway is disabled; RAG status is unavailable."
+                )
 
             # Persist messages in history/context.
             if user_concept_id:
-                chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "user", "content": prompt_text})
-                for tool_msg in _truncate_large_tool_results(tool_messages, max_tool_content_chars=5000):
-                    chat_history_service.add_message_to_history(user_concept_id, session_id, tool_msg)
-                chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "assistant", "content": response_text})
+                chat_history_service.add_message_to_history(
+                    user_concept_id,
+                    session_id,
+                    {"role": "user", "content": prompt_text},
+                )
+                for tool_msg in _truncate_large_tool_results(
+                    tool_messages, max_tool_content_chars=5000
+                ):
+                    chat_history_service.add_message_to_history(
+                        user_concept_id, session_id, tool_msg
+                    )
+                chat_history_service.add_message_to_history(
+                    user_concept_id,
+                    session_id,
+                    {"role": "assistant", "content": response_text},
+                )
             else:
-                current_app.config["CONTEXT"].append({"role": "user", "content": prompt_text})
-                for tool_msg in _truncate_large_tool_results(tool_messages, max_tool_content_chars=5000):
+                current_app.config["CONTEXT"].append(
+                    {"role": "user", "content": prompt_text}
+                )
+                for tool_msg in _truncate_large_tool_results(
+                    tool_messages, max_tool_content_chars=5000
+                ):
                     current_app.config["CONTEXT"].append(tool_msg)
-                current_app.config["CONTEXT"].append({"role": "assistant", "content": response_text})
-            current_app.config["CONTEXT"] = _limit_context_size(current_app.config["CONTEXT"], max_messages=20)
+                current_app.config["CONTEXT"].append(
+                    {"role": "assistant", "content": response_text}
+                )
+            current_app.config["CONTEXT"] = _limit_context_size(
+                current_app.config["CONTEXT"], max_messages=20
+            )
 
-            current_turn_messages = [{"role": "user", "content": prompt_text}] + tool_messages
+            current_turn_messages = [
+                {"role": "user", "content": prompt_text}
+            ] + tool_messages
             context_stats = _calculate_context_stats(context)
-            current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
+            current_context_stats = _calculate_context_stats(
+                current_app.config["CONTEXT"]
+            )
             tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
 
             llm_debug_info = {
@@ -719,40 +859,60 @@ def generate():
                 },
             }
 
-            return jsonify({
-                "response": response_text,
-                "fastpath": {"name": "rag_status", "bypassed_llm": True, "used_tool": used_tool},
-                "llm_debug": llm_debug_info,
-            })
+            return jsonify(
+                {
+                    "response": response_text,
+                    "fastpath": {
+                        "name": "rag_status",
+                        "bypassed_llm": True,
+                        "used_tool": used_tool,
+                    },
+                    "llm_debug": llm_debug_info,
+                }
+            )
 
         # Try to get user name from concept if user_id provided
         if request_user_id:
             try:
                 from ...services.concept_service import get_concept_by_concept_id
+
                 user_concept = get_concept_by_concept_id(request_user_id)
                 if user_concept:
-                    user_name = user_concept.get('name') or request_user_id
-                    system_message_parts.append(f"Current user: {user_name} ({request_user_id})")
-                    current_app.logger.info(f"User context: {user_name} ({request_user_id})")
+                    user_name = user_concept.get("name") or request_user_id
+                    system_message_parts.append(
+                        f"Current user: {user_name} ({request_user_id})"
+                    )
+                    current_app.logger.info(
+                        f"User context: {user_name} ({request_user_id})"
+                    )
                 else:
                     system_message_parts.append(f"Current user ID: {request_user_id}")
             except Exception as e:
-                current_app.logger.warning(f"Could not fetch user concept {request_user_id}: {e}")
+                current_app.logger.warning(
+                    f"Could not fetch user concept {request_user_id}: {e}"
+                )
                 system_message_parts.append(f"Current user ID: {request_user_id}")
 
         # Try to get organization name from concept if org_id provided
         if request_org_id:
             try:
                 from ...services.concept_service import get_concept_by_concept_id
+
                 org_concept = get_concept_by_concept_id(request_org_id)
                 if org_concept:
-                    org_name = org_concept.get('name') or request_org_id
-                    system_message_parts.append(f"Organization: {org_name} ({request_org_id})")
-                    current_app.logger.info(f"Organization context: {org_name} ({request_org_id})")
+                    org_name = org_concept.get("name") or request_org_id
+                    system_message_parts.append(
+                        f"Organization: {org_name} ({request_org_id})"
+                    )
+                    current_app.logger.info(
+                        f"Organization context: {org_name} ({request_org_id})"
+                    )
                 else:
                     system_message_parts.append(f"Organization ID: {request_org_id}")
             except Exception as e:
-                current_app.logger.warning(f"Could not fetch org concept {request_org_id}: {e}")
+                current_app.logger.warning(
+                    f"Could not fetch org concept {request_org_id}: {e}"
+                )
                 system_message_parts.append(f"Organization ID: {request_org_id}")
 
         # Add language preference if provided
@@ -763,23 +923,30 @@ def generate():
         enhanced_context = context.copy()
         if system_message_parts:
             # Create system message
-            system_message = "You are Von, an AI assistant. " + " | ".join(system_message_parts)
+            system_message = "You are Von, an AI assistant. " + " | ".join(
+                system_message_parts
+            )
 
             # Insert system message at the beginning if not already present
             if not enhanced_context or enhanced_context[0].get("role") != "system":
-                enhanced_context.insert(0, {"role": "system", "content": system_message})
+                enhanced_context.insert(
+                    0, {"role": "system", "content": system_message}
+                )
             else:
                 # Update existing system message to include user/org context
                 existing_system = enhanced_context[0]["content"]
                 if not any(part in existing_system for part in system_message_parts):
-                    enhanced_context[0]["content"] = f"{existing_system} | {' | '.join(system_message_parts)}"
+                    enhanced_context[0][
+                        "content"
+                    ] = f"{existing_system} | {' | '.join(system_message_parts)}"
 
         # Ensure user-specific system prompt is included even when the orchestrator
         # is disabled/unavailable.
         if auxiliary_system_prompt:
             user_prompt_message = {
                 "role": "system",
-                "content": "USER-SPECIFIC SYSTEM PROMPT (from Vontology):\n" + auxiliary_system_prompt,
+                "content": "USER-SPECIFIC SYSTEM PROMPT (from Vontology):\n"
+                + auxiliary_system_prompt,
             }
             if not enhanced_context or enhanced_context[0].get("role") != "system":
                 enhanced_context.insert(0, user_prompt_message)
@@ -787,9 +954,13 @@ def generate():
                 enhanced_context.insert(1, user_prompt_message)
 
         # Log the enhanced context being sent to the model for debugging
-        current_app.logger.info(f"Enhanced context being sent to model: {len(enhanced_context)} messages")
+        current_app.logger.info(
+            f"Enhanced context being sent to model: {len(enhanced_context)} messages"
+        )
         for i, msg in enumerate(enhanced_context):
-            current_app.logger.info(f"Message {i}: role={msg.get('role')}, content_preview={msg.get('content', '')[:100]}...")
+            current_app.logger.info(
+                f"Message {i}: role={msg.get('role')}, content_preview={msg.get('content', '')[:100]}..."
+            )
 
         orchestrator = current_app.config.get("INTERNAL_MCP_ORCHESTRATOR")
         gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
@@ -800,16 +971,21 @@ def generate():
         if user_concept_id:
             # Convert concept ID to namespace format (#V#michael_witbrock)
             # Handle both full concept ID and person ID formats
-            if user_concept_id.startswith('#V#'):
+            if user_concept_id.startswith("#V#"):
                 user_namespace = user_concept_id
             else:
                 # Normalize to namespace format
-                user_id_normalized = user_concept_id.lower().replace(' ', '_').replace('#v#', '').replace('#', '')
+                user_id_normalized = (
+                    user_concept_id.lower()
+                    .replace(" ", "_")
+                    .replace("#v#", "")
+                    .replace("#", "")
+                )
                 user_namespace = f"#V#{user_id_normalized}"
             current_app.logger.info(
                 "[NAMESPACE] Derived user_namespace=%s from user_concept_id=%s",
                 user_namespace,
-                user_concept_id
+                user_concept_id,
             )
         else:
             current_app.logger.warning(
@@ -821,7 +997,9 @@ def generate():
         # ---------------------------------------------------------
         # This is disabled by default because it bypasses the LLM's behavioural
         # guardrails. When enabled, only read-category tools are permitted.
-        allow_user_tool_calls = os.getenv("VON_INTERNAL_MCP_ALLOW_USER_TOOL_CALLS", "0").lower() in {"1", "true"}
+        allow_user_tool_calls = os.getenv(
+            "VON_INTERNAL_MCP_ALLOW_USER_TOOL_CALLS", "0"
+        ).lower() in {"1", "true"}
         if allow_user_tool_calls and orchestrator is not None and gateway is not None:
             try:
                 direct_request = orchestrator._extract_json_blob(prompt_text)  # type: ignore[attr-defined]
@@ -833,10 +1011,16 @@ def generate():
                 tool_name = direct_request.get("tool")
                 payload = direct_request.get("payload") or {}
 
-                if action == "call_tool" and isinstance(tool_name, str) and isinstance(payload, dict):
+                if (
+                    action == "call_tool"
+                    and isinstance(tool_name, str)
+                    and isinstance(payload, dict)
+                ):
                     try:
                         meta = gateway.describe_methods().get(tool_name)  # type: ignore[union-attr]
-                        category = meta.get("category") if isinstance(meta, dict) else None
+                        category = (
+                            meta.get("category") if isinstance(meta, dict) else None
+                        )
                     except Exception:
                         category = None
 
@@ -860,32 +1044,71 @@ def generate():
                             tool_payload = orchestrator._format_tool_result(tool_name, result.payload, result.duration_ms, "ok")  # type: ignore[attr-defined]
                             response_text = tool_payload
                             tool_messages = [{"role": "tool", "content": tool_payload}]
-                            tool_invocations = [{"tool": tool_name, "payload": dict(payload), "direct_user_call": True}]
+                            tool_invocations = [
+                                {
+                                    "tool": tool_name,
+                                    "payload": dict(payload),
+                                    "direct_user_call": True,
+                                }
+                            ]
                         except Exception as exc:
                             tool_payload = orchestrator._format_tool_result(tool_name, None, None, "error", str(exc))  # type: ignore[attr-defined]
                             response_text = tool_payload
                             tool_messages = [{"role": "tool", "content": tool_payload}]
-                            tool_invocations = [{"tool": tool_name, "payload": dict(payload), "error": str(exc), "direct_user_call": True}]
+                            tool_invocations = [
+                                {
+                                    "tool": tool_name,
+                                    "payload": dict(payload),
+                                    "error": str(exc),
+                                    "direct_user_call": True,
+                                }
+                            ]
 
                     # Skip LLM generation for direct tool calls
                     if user_concept_id:
-                        chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "user", "content": prompt_text})
-                        for tool_msg in _truncate_large_tool_results(tool_messages, max_tool_content_chars=5000):
-                            chat_history_service.add_message_to_history(user_concept_id, session_id, tool_msg)
-                        chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "assistant", "content": response_text})
+                        chat_history_service.add_message_to_history(
+                            user_concept_id,
+                            session_id,
+                            {"role": "user", "content": prompt_text},
+                        )
+                        for tool_msg in _truncate_large_tool_results(
+                            tool_messages, max_tool_content_chars=5000
+                        ):
+                            chat_history_service.add_message_to_history(
+                                user_concept_id, session_id, tool_msg
+                            )
+                        chat_history_service.add_message_to_history(
+                            user_concept_id,
+                            session_id,
+                            {"role": "assistant", "content": response_text},
+                        )
                     else:
-                        current_app.config["CONTEXT"].append({"role": "user", "content": prompt_text})
-                        for tool_msg in _truncate_large_tool_results(tool_messages, max_tool_content_chars=5000):
+                        current_app.config["CONTEXT"].append(
+                            {"role": "user", "content": prompt_text}
+                        )
+                        for tool_msg in _truncate_large_tool_results(
+                            tool_messages, max_tool_content_chars=5000
+                        ):
                             current_app.config["CONTEXT"].append(tool_msg)
-                        current_app.config["CONTEXT"].append({"role": "assistant", "content": response_text})
+                        current_app.config["CONTEXT"].append(
+                            {"role": "assistant", "content": response_text}
+                        )
 
-                    current_app.config["CONTEXT"] = _limit_context_size(current_app.config["CONTEXT"], max_messages=20)
+                    current_app.config["CONTEXT"] = _limit_context_size(
+                        current_app.config["CONTEXT"], max_messages=20
+                    )
 
                     # Return immediately with debug info
-                    current_turn_messages = [{"role": "user", "content": prompt_text}] + tool_messages
+                    current_turn_messages = [
+                        {"role": "user", "content": prompt_text}
+                    ] + tool_messages
                     context_stats = _calculate_context_stats(enhanced_context)
-                    current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
-                    tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
+                    current_context_stats = _calculate_context_stats(
+                        current_app.config["CONTEXT"]
+                    )
+                    tool_stats = (
+                        _calculate_tool_stats(tool_messages) if tool_messages else None
+                    )
 
                     llm_debug_info = {
                         "interaction_timestamp_utc": interaction_timestamp_utc,
@@ -899,21 +1122,27 @@ def generate():
                         },
                         "tool_stats": tool_stats,
                         "tool_invocations": tool_invocations,
+                        "aux_llm_calls": [],
                     }
 
-                    return jsonify({
-                        "response": response_text,
-                        "llm_debug": llm_debug_info,
-                    })
+                    return jsonify(
+                        {
+                            "response": response_text,
+                            "llm_debug": llm_debug_info,
+                        }
+                    )
 
+        auxiliary_llm_calls: list[dict] = []
         if orchestrator is None:
-            response_text = llm_client.generate(prompt_text, context=enhanced_context, model=model_name)
+            response_text = llm_client.generate(
+                prompt_text, context=enhanced_context, model=model_name
+            )
             tool_invocations = []
         else:
             try:
                 current_app.logger.info(
                     "[NAMESPACE] Calling orchestrator.run() with user_namespace=%s",
-                    user_namespace
+                    user_namespace,
                 )
                 orchestrator_result = orchestrator.run(
                     prompt=prompt_text,
@@ -925,10 +1154,17 @@ def generate():
                     auxiliary_system_prompt=auxiliary_system_prompt,
                 )
                 response_text = orchestrator_result.response_text
-                tool_messages = [dict(msg) for msg in orchestrator_result.extra_messages]
+                tool_messages = [
+                    dict(msg) for msg in orchestrator_result.extra_messages
+                ]
                 tool_invocations = list(orchestrator_result.tool_invocations)
+                auxiliary_llm_calls = list(
+                    getattr(orchestrator_result, "aux_llm_calls", [])
+                )
             except ToolCallParsingError as exc:
-                current_app.logger.warning("[mcp_orchestrator] Invalid tool request payload: %s", exc)
+                current_app.logger.warning(
+                    "[mcp_orchestrator] Invalid tool request payload: %s", exc
+                )
                 response_text = (
                     "Tool call was not executed due to an MCP serialisation error. "
                     f"({exc})\n\n"
@@ -937,26 +1173,43 @@ def generate():
                 tool_invocations = []
 
         if tool_invocations:
-            current_app.logger.info("[mcp_orchestrator] Tool invocations: %s", tool_invocations)
+            current_app.logger.info(
+                "[mcp_orchestrator] Tool invocations: %s", tool_invocations
+            )
 
         # Store both user message and response in context AFTER calling the LLM
         # Truncate large tool results to prevent context explosion
-        truncated_tool_messages = _truncate_large_tool_results(tool_messages, max_tool_content_chars=5000)
+        truncated_tool_messages = _truncate_large_tool_results(
+            tool_messages, max_tool_content_chars=5000
+        )
 
         if user_concept_id:
-            chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "user", "content": prompt_text})
+            chat_history_service.add_message_to_history(
+                user_concept_id, session_id, {"role": "user", "content": prompt_text}
+            )
             for tool_msg in truncated_tool_messages:
-                chat_history_service.add_message_to_history(user_concept_id, session_id, tool_msg)
-            chat_history_service.add_message_to_history(user_concept_id, session_id, {"role": "assistant", "content": response_text})
+                chat_history_service.add_message_to_history(
+                    user_concept_id, session_id, tool_msg
+                )
+            chat_history_service.add_message_to_history(
+                user_concept_id,
+                session_id,
+                {"role": "assistant", "content": response_text},
+            )
         else:
-            current_app.config["CONTEXT"].append({"role": "user", "content": prompt_text})
+            current_app.config["CONTEXT"].append(
+                {"role": "user", "content": prompt_text}
+            )
             for tool_msg in truncated_tool_messages:
                 current_app.config["CONTEXT"].append(tool_msg)
-            current_app.config["CONTEXT"].append({"role": "assistant", "content": response_text})
-
+            current_app.config["CONTEXT"].append(
+                {"role": "assistant", "content": response_text}
+            )
 
         # Limit overall context size to prevent unbounded growth
-        current_app.config["CONTEXT"] = _limit_context_size(current_app.config["CONTEXT"], max_messages=20)
+        current_app.config["CONTEXT"] = _limit_context_size(
+            current_app.config["CONTEXT"], max_messages=20
+        )
 
         # Build LLM debug information
         # NOTE: Only include the NEW messages for this turn to avoid exponential token growth
@@ -965,9 +1218,52 @@ def generate():
         if tool_messages:
             current_turn_messages.extend(tool_messages)
 
-        # Calculate context statistics for visibility
-        context_stats = _calculate_context_stats(enhanced_context)
-        current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
+        # Calculate context statistics for visibility.
+        # If the internal orchestrator is enabled, it augments and trims the context
+        # before sending it to the LLM, so report stats for the *actual* sent context.
+        sent_context_for_stats = enhanced_context
+        if orchestrator is not None:
+            build_augmented = getattr(orchestrator, "_build_augmented_context", None)
+            if callable(build_augmented):
+                try:
+                    sent_context_for_stats = build_augmented(
+                        enhanced_context,
+                        user_namespace=user_namespace,
+                        auxiliary_system_prompt=auxiliary_system_prompt,
+                    )
+                except Exception:
+                    sent_context_for_stats = enhanced_context
+
+        sent_context_stats_messages: list[dict] = enhanced_context
+        if isinstance(sent_context_for_stats, list):
+            normalised_messages: list[dict] = []
+            for msg in sent_context_for_stats:
+                if isinstance(msg, dict):
+                    normalised_messages.append(msg)
+                    continue
+                try:
+                    normalised_messages.append(dict(msg))
+                except Exception:
+                    continue
+            if normalised_messages:
+                sent_context_stats_messages = normalised_messages
+
+        context_stats = _calculate_context_stats(sent_context_stats_messages)
+
+        # stored_context should reflect the persisted user/session history when authenticated,
+        # not the unauthenticated in-memory CONTEXT list.
+        if user_concept_id:
+            try:
+                persisted_history = chat_history_service.get_chat_history(
+                    user_concept_id, session_id
+                )
+            except Exception:
+                persisted_history = []
+            current_context_stats = _calculate_context_stats(persisted_history)
+        else:
+            current_context_stats = _calculate_context_stats(
+                current_app.config["CONTEXT"]
+            )
 
         # Calculate tool statistics if tools were used
         tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
@@ -978,33 +1274,44 @@ def generate():
             "messages": current_turn_messages,
             "response": response_text,
             "user_prompt": user_prompt_debug,
+            "internal_mcp": {
+                "gateway_present": gateway is not None,
+                "gateway_enabled": (
+                    bool(getattr(gateway, "enabled", False))
+                    if gateway is not None
+                    else False
+                ),
+                "orchestrator_present": orchestrator is not None,
+            },
             "context_stats": {
                 "sent_to_llm": context_stats,  # What was actually sent this turn
-                "stored_context": current_context_stats  # Current state after this turn
+                "stored_context": current_context_stats,  # Current state after this turn
             },
             "tool_stats": tool_stats,  # MCP tool result statistics
-            "tool_invocations": [
-                {
-                    "method": inv.get("tool") or inv.get("method", "unknown"),
-                    "arguments": inv.get("payload") or inv.get("arguments", {}),
-                    "error": inv.get("error")
-                }
-                for inv in tool_invocations
-            ] if tool_invocations else []
+            "tool_invocations": (
+                [
+                    {
+                        "method": inv.get("tool") or inv.get("method", "unknown"),
+                        "arguments": inv.get("payload") or inv.get("arguments", {}),
+                        "error": inv.get("error"),
+                    }
+                    for inv in tool_invocations
+                ]
+                if tool_invocations
+                else []
+            ),
+            "aux_llm_calls": auxiliary_llm_calls,
         }
 
-        return jsonify({
-            "response": response_text,
-            "llm_debug": llm_debug_info
-        })
+        return jsonify({"response": response_text, "llm_debug": llm_debug_info})
     except Exception as e:
-        print(f"Error during generation: {e}") # Log error server-side
+        print(f"Error during generation: {e}")  # Log error server-side
         # Return error with debug info showing the current turn only (not full context)
         # to avoid exponential token growth in debug data
 
         # Calculate context stats if available
         context_stats = None
-        if 'enhanced_context' in locals():
+        if "enhanced_context" in locals():
             try:
                 context_stats = {
                     "sent_to_llm": _calculate_context_stats(enhanced_context)
@@ -1014,15 +1321,18 @@ def generate():
 
         error_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
-            "model": model_name if 'model_name' in locals() else 'unknown',
+            "model": model_name if "model_name" in locals() else "unknown",
             "messages": [{"role": "user", "content": prompt_text}],
             "response": None,
             "error": str(e),
             "context_stats": context_stats,
-            "user_prompt": user_prompt_debug if 'user_prompt_debug' in locals() else None,
-            "tool_invocations": []
+            "user_prompt": (
+                user_prompt_debug if "user_prompt_debug" in locals() else None
+            ),
+            "tool_invocations": [],
         }
         return jsonify({"error": str(e), "llm_debug": error_debug_info}), 500
+
 
 @von_bp.route("/history", methods=["GET"])
 def history():
@@ -1036,27 +1346,33 @@ def history():
     session_id = session["session_id"]
 
     if not user_concept_id:
-        return jsonify({
-            "history": [],
-            "segments_returned": 0,
-            "total_segments": 0,
-            "has_more_history": False
-        })
+        return jsonify(
+            {
+                "history": [],
+                "segments_returned": 0,
+                "total_segments": 0,
+                "has_more_history": False,
+            }
+        )
 
     requested_segments = request.args.get("segments", default=1, type=int)
     segment_count = max(1, requested_segments)
 
     try:
-        segments = chat_history_service.get_chat_history_segments(user_concept_id, session_id)
+        segments = chat_history_service.get_chat_history_segments(
+            user_concept_id, session_id
+        )
         total_segments = len(segments)
 
         if total_segments == 0:
-            return jsonify({
-                "history": [],
-                "segments_returned": 0,
-                "total_segments": 0,
-                "has_more_history": False
-            })
+            return jsonify(
+                {
+                    "history": [],
+                    "segments_returned": 0,
+                    "total_segments": 0,
+                    "has_more_history": False,
+                }
+            )
 
         segment_count = min(segment_count, total_segments)
         selected_segments = segments[-segment_count:]
@@ -1064,15 +1380,18 @@ def history():
 
         has_more = segment_count < total_segments
 
-        return jsonify({
-            "history": flattened_history,
-            "segments_returned": segment_count,
-            "total_segments": total_segments,
-            "has_more_history": has_more
-        })
+        return jsonify(
+            {
+                "history": flattened_history,
+                "segments_returned": segment_count,
+                "total_segments": total_segments,
+                "has_more_history": has_more,
+            }
+        )
     except Exception as e:
         print(f"Error retrieving history: {e}")
         return jsonify({"error": str(e)}), 500
+
 
 @von_bp.route("/history/length", methods=["GET"])
 def history_length():
@@ -1101,8 +1420,9 @@ def get_models():
         models = list_models_func()
         return jsonify(models), 200
     except Exception as e:
-        print(f"Error fetching models: {e}") # Log error server-side
+        print(f"Error fetching models: {e}")  # Log error server-side
         return jsonify({"error": str(e)}), 500
+
 
 @von_bp.route("/reset", methods=["POST"])
 def reset_context():
@@ -1112,14 +1432,19 @@ def reset_context():
         session_id = session.get("session_id")
 
         if user_concept_id and session_id:
-            chat_history_service.add_reset_marker_to_history(user_concept_id, session_id)
+            chat_history_service.add_reset_marker_to_history(
+                user_concept_id, session_id
+            )
 
         # Clear the conversation context
         current_app.config["CONTEXT"] = []
-        print("Context reset successfully") # Log server-side
-        return jsonify({"status": "reset", "message": "Context reset successfully"}), 200
+        print("Context reset successfully")  # Log server-side
+        return (
+            jsonify({"status": "reset", "message": "Context reset successfully"}),
+            200,
+        )
     except Exception as e:
-        print(f"Error resetting context: {e}") # Log error server-side
+        print(f"Error resetting context: {e}")  # Log error server-side
         return jsonify({"error": f"Failed to reset context: {str(e)}"}), 500
 
 
@@ -1165,13 +1490,18 @@ def set_organisation():
         session["namespace"] = namespace
         session.modified = True
 
-        return jsonify({
-            "status": "updated",
-            "user_id": user_id,
-            "organisation_id": org_id,
-            "role": role_in_org,
-            "namespace": namespace
-        }), 200
+        return (
+            jsonify(
+                {
+                    "status": "updated",
+                    "user_id": user_id,
+                    "organisation_id": org_id,
+                    "role": role_in_org,
+                    "namespace": namespace,
+                }
+            ),
+            200,
+        )
 
     except Exception as e:
         print(f"Error setting organisation: {e}")
@@ -1191,13 +1521,18 @@ def get_session_context():
 
         user_id = session.get("user_id")
         if not user_id:
-            return jsonify({
-                "authenticated": False,
-                "user_id": None,
-                "organisation_id": None,
-                "role": None,
-                "namespace": None
-            }), 200
+            return (
+                jsonify(
+                    {
+                        "authenticated": False,
+                        "user_id": None,
+                        "organisation_id": None,
+                        "role": None,
+                        "namespace": None,
+                    }
+                ),
+                200,
+            )
 
         org_id = session.get("organisation_concept_id")
         role_in_org = session.get("role_in_org")
@@ -1217,13 +1552,18 @@ def get_session_context():
             else:
                 namespace = derive_namespace(user_slug)
 
-        return jsonify({
-            "authenticated": True,
-            "user_id": user_id,
-            "organisation_id": org_id,
-            "role": role_in_org,
-            "namespace": namespace
-        }), 200
+        return (
+            jsonify(
+                {
+                    "authenticated": True,
+                    "user_id": user_id,
+                    "organisation_id": org_id,
+                    "role": role_in_org,
+                    "namespace": namespace,
+                }
+            ),
+            200,
+        )
 
     except Exception as e:
         print(f"Error getting session context: {e}")
@@ -1256,15 +1596,17 @@ def get_my_organisations():
             {
                 "concept_id": org_id,
                 "name": org_id.replace("_", " ").title(),  # Simple formatting
-                "role": role
+                "role": role,
             }
             for org_id, role in org_roles.items()
         ]
 
-        return jsonify({
-            "organisations": organisations,
-            "total_count": len(organisations)
-        }), 200
+        return (
+            jsonify(
+                {"organisations": organisations, "total_count": len(organisations)}
+            ),
+            200,
+        )
 
     except Exception as e:
         print(f"Error getting organisations: {e}")

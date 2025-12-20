@@ -24,9 +24,10 @@ def get_session_context() -> Dict[str, Any]:
     """
     try:
         from flask import session as flask_session
+
         return {
             "org_id": flask_session.get("org_id"),
-            "role_in_org": flask_session.get("role_in_org")
+            "role_in_org": flask_session.get("role_in_org"),
         }
     except (ImportError, RuntimeError):
         # Not in Flask context or session not available
@@ -35,6 +36,7 @@ def get_session_context() -> Dict[str, Any]:
 
 class ChatHistoryServiceError(Exception):
     """Exception raised for chat history service errors."""
+
     pass
 
 
@@ -65,10 +67,7 @@ def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
     try:
-        doc = chat_history_coll.find_one({
-            "user_id": user_id,
-            "session_id": session_id
-        })
+        doc = chat_history_coll.find_one({"user_id": user_id, "session_id": session_id})
 
         if doc:
             return doc.get("history", [])
@@ -78,7 +77,9 @@ def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
         raise ChatHistoryServiceError(f"Could not retrieve chat history: {e}") from e
 
 
-def get_chat_history_segments(user_id: str, session_id: str) -> List[List[Dict[str, Any]]]:
+def get_chat_history_segments(
+    user_id: str, session_id: str
+) -> List[List[Dict[str, Any]]]:
     """
     Return chat history split into segments separated by reset markers.
     Retrieves history from ALL sessions for the user, sorted chronologically.
@@ -108,7 +109,10 @@ def get_chat_history_segments(user_id: str, session_id: str) -> List[List[Dict[s
             current_segment: List[Dict[str, Any]] = []
 
             for entry in history:
-                if entry.get("role") == "system" and entry.get("content") == "__RESET__":
+                if (
+                    entry.get("role") == "system"
+                    and entry.get("content") == "__RESET__"
+                ):
                     current_session_segments.append(current_segment)
                     current_segment = []
                     continue
@@ -125,10 +129,14 @@ def get_chat_history_segments(user_id: str, session_id: str) -> List[List[Dict[s
         return all_segments
     except PyMongoError as e:
         logger.error(f"Error retrieving segmented chat history: {e}", exc_info=True)
-        raise ChatHistoryServiceError(f"Could not retrieve segmented chat history: {e}") from e
+        raise ChatHistoryServiceError(
+            f"Could not retrieve segmented chat history: {e}"
+        ) from e
 
 
-def add_message_to_history(user_id: str, session_id: str, message: Dict[str, Any]) -> None:
+def add_message_to_history(
+    user_id: str, session_id: str, message: Dict[str, Any]
+) -> None:
     """
     Adds a message to the chat history for a specific user and session.
 
@@ -149,26 +157,22 @@ def add_message_to_history(user_id: str, session_id: str, message: Dict[str, Any
 
     try:
         # Add timestamp to message
-        message_with_timestamp = {
-            **message,
-            "timestamp": datetime.now(timezone.utc)
-        }
+        message_with_timestamp = {**message, "timestamp": datetime.now(timezone.utc)}
 
         # Update or insert the session document
         result = chat_history_coll.update_one(
-            {
-                "user_id": user_id,
-                "session_id": session_id
-            },
+            {"user_id": user_id, "session_id": session_id},
             {
                 "$push": {"history": message_with_timestamp},
                 "$set": {"updated_at": datetime.now(timezone.utc)},
-                "$setOnInsert": {"created_at": datetime.now(timezone.utc)}
+                "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
             },
-            upsert=True
+            upsert=True,
         )
 
-        logger.debug(f"Added message to history for user {user_id}, session {session_id}")
+        logger.debug(
+            f"Added message to history for user {user_id}, session {session_id}"
+        )
 
         # Index to RAG (Best effort)
         if get_rag_service:
@@ -190,7 +194,7 @@ def add_message_to_history(user_id: str, session_id: str, message: Dict[str, Any
                         "session_id": session_id,
                         "role": message.get("role", "unknown"),
                         "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "type": "chat_message"
+                        "type": "chat_message",
                     }
 
                     # Include organisation and role metadata if available
@@ -199,11 +203,7 @@ def add_message_to_history(user_id: str, session_id: str, message: Dict[str, Any
                     if session_context.get("role_in_org"):
                         metadata["role_in_org"] = session_context["role_in_org"]
 
-                    doc = {
-                        "id": doc_id,
-                        "text": content,
-                        "metadata": metadata
-                    }
+                    doc = {"id": doc_id, "text": content, "metadata": metadata}
                     # Use a specific namespace for chat history to allow filtered queries later
                     rag.upsert_documents([doc], namespace="chat_history")
             except Exception as e:
@@ -235,24 +235,23 @@ def add_reset_marker_to_history(user_id: str, session_id: str) -> None:
         reset_marker = {
             "role": "system",
             "content": "__RESET__",
-            "timestamp": datetime.now(timezone.utc)
+            "timestamp": datetime.now(timezone.utc),
         }
 
         result = chat_history_coll.update_one(
-            {
-                "user_id": user_id,
-                "session_id": session_id
-            },
+            {"user_id": user_id, "session_id": session_id},
             {
                 "$push": {"history": reset_marker},
-                "$set": {"updated_at": datetime.now(timezone.utc)}
-            }
+                "$set": {"updated_at": datetime.now(timezone.utc)},
+            },
         )
 
         if result.matched_count > 0:
             logger.info(f"Added reset marker for user {user_id}, session {session_id}")
         else:
-            logger.warning(f"No session found to add reset marker for user {user_id}, session {session_id}")
+            logger.warning(
+                f"No session found to add reset marker for user {user_id}, session {session_id}"
+            )
     except PyMongoError as e:
         logger.error(f"Error adding reset marker: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Could not add reset marker: {e}") from e
@@ -275,15 +274,18 @@ def delete_chat_history(user_id: str, session_id: str) -> None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
     try:
-        result = chat_history_coll.delete_one({
-            "user_id": user_id,
-            "session_id": session_id
-        })
+        result = chat_history_coll.delete_one(
+            {"user_id": user_id, "session_id": session_id}
+        )
 
         if result.deleted_count > 0:
-            logger.info(f"Deleted chat history for user {user_id}, session {session_id}")
+            logger.info(
+                f"Deleted chat history for user {user_id}, session {session_id}"
+            )
         else:
-            logger.warning(f"No history found to delete for user {user_id}, session {session_id}")
+            logger.warning(
+                f"No history found to delete for user {user_id}, session {session_id}"
+            )
     except PyMongoError as e:
         logger.error(f"Error deleting chat history: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Could not delete chat history: {e}") from e
@@ -314,4 +316,6 @@ def get_chat_history_length(user_id: str) -> int:
         return total_turns
     except PyMongoError as e:
         logger.error(f"Error retrieving chat history length: {e}", exc_info=True)
-        raise ChatHistoryServiceError(f"Could not retrieve chat history length: {e}") from e
+        raise ChatHistoryServiceError(
+            f"Could not retrieve chat history length: {e}"
+        ) from e

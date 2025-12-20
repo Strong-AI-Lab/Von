@@ -22,6 +22,7 @@ _LOG_TAG = "[arxiv_proxy]"
 @dataclass
 class ArxivProxyConfig:
     """Configuration for arXiv MCP subprocess."""
+
     storage_path: Path
     command: str = "uv"
     timeout_sec: float = 30.0
@@ -103,6 +104,7 @@ class ArxivMCPProxy:
                                 if text_data.strip().startswith("{"):
                                     try:
                                         import json
+
                                         return json.loads(text_data)
                                     except json.JSONDecodeError:
                                         return {"text": text_data}
@@ -227,6 +229,7 @@ async def get_arxiv_proxy() -> ArxivMCPProxy:
         if _proxy_instance is None:
             # Determine storage path
             import os
+
             workspace_root = Path(__file__).parent.parent.parent.parent.parent
             storage_path = workspace_root / "data" / "arxiv_papers"
 

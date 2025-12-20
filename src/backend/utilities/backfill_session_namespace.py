@@ -16,6 +16,7 @@ Run via PowerShell (do not auto-start server):
     pdm run python -c $code
 
 """
+
 from typing import Optional, Dict, Any
 import os
 from datetime import datetime, timezone
@@ -44,7 +45,13 @@ def run_backfill(limit: Optional[int] = None) -> Dict[str, Any]:
 
     coll = db["interaction_sessions"]
 
-    query = {"$or": [{"namespace": {"$exists": False}}, {"namespace": {"$eq": None}}, {"namespace": {"$in": ["", " "]}}]}
+    query = {
+        "$or": [
+            {"namespace": {"$exists": False}},
+            {"namespace": {"$eq": None}},
+            {"namespace": {"$in": ["", " "]}},
+        ]
+    }
     cursor = coll.find(query).sort("last_updated_time", -1)
     if isinstance(limit, int) and limit > 0:
         cursor = cursor.limit(limit)
@@ -58,7 +65,10 @@ def run_backfill(limit: Optional[int] = None) -> Dict[str, Any]:
         user_id = doc.get("user_id")
         ns = _derive_namespace(user_id)
         try:
-            coll.update_one({"_id": doc["_id"]}, {"$set": {"namespace": ns, "last_updated_time": now}})
+            coll.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"namespace": ns, "last_updated_time": now}},
+            )
             updated += 1
         except Exception as e:
             # Continue; report at end

@@ -1,5 +1,3 @@
-import json
-
 import pytest
 from flask import Flask
 
@@ -33,12 +31,22 @@ def app(monkeypatch):
         lambda: "#V#test_user",
     )
 
+    # Avoid touching the database in this test.
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.add_message_to_history",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.chat_history_service.get_chat_history",
+        lambda *_args, **_kwargs: [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "ok"},
+        ],
+    )
+
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _user_id: [
-            {"concept_id": "#V#prompt1", "content": "First prompt."},
-            {"concept_id": "#V#prompt2", "content": "Second prompt."},
-        ],
+        lambda _user_id: [],
     )
 
     flask_app = Flask(__name__)
@@ -49,43 +57,28 @@ def app(monkeypatch):
     flask_app.config["INTERNAL_MCP_ORCHESTRATOR"] = None
     flask_app.config["INTERNAL_MCP_GATEWAY"] = None
 
-    flask_app.config["TEST_LLM"] = llm
     return flask_app
 
 
-def test_generate_includes_user_prompt_debug_metadata(app):
+def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_user(
+    app,
+):
     client = app.test_client()
 
     resp = client.post("/von/generate", json={"prompt": "Hello"})
     assert resp.status_code == 200
 
     body = resp.get_json()
-    assert body["response"] == "ok"
-
     llm_debug = body["llm_debug"]
-    assert llm_debug["user_prompt"]["effective_user_concept_id"] == "#V#test_user"
-    assert llm_debug["user_prompt"]["loaded"] is True
-    assert llm_debug["user_prompt"]["chars"] > 0
-    assert llm_debug["user_prompt"]["prompt_concept_ids"] == [
-        "#V#prompt1",
-        "#V#prompt2",
-    ]
 
-    llm_calls = app.config["TEST_LLM"].calls
-    assert len(llm_calls) == 1
+    # Previously this was empty because it always reported app.config["CONTEXT"],
+    # which is only used for unauthenticated sessions.
+    stored = llm_debug["context_stats"]["stored_context"]
+    assert stored["total_messages"] >= 2
+    assert stored["by_role"]["user"] >= 1
+    assert stored["by_role"]["assistant"] >= 1
 
-    sent_context = llm_calls[0]["context"]
-    assert any(
-        msg.get("role") == "system"
-        and "USER-SPECIFIC SYSTEM PROMPT" in msg.get("content", "")
-        for msg in sent_context
-    )
-
-    injected_msg = next(
-        msg
-        for msg in sent_context
-        if msg.get("role") == "system"
-        and "USER-SPECIFIC SYSTEM PROMPT" in msg.get("content", "")
-    )
-    assert "First prompt." in injected_msg.get("content", "")
-    assert "Second prompt." in injected_msg.get("content", "")
+    internal_mcp = llm_debug["internal_mcp"]
+    assert internal_mcp["gateway_present"] is False
+    assert internal_mcp["gateway_enabled"] is False
+    assert internal_mcp["orchestrator_present"] is False

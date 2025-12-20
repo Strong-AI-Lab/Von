@@ -46,7 +46,9 @@ def app_client(monkeypatch):
     sys.modules["google_auth_oauthlib.flow"] = fake_flow_module
 
     fake_id_token_module = types.ModuleType("google.oauth2.id_token")
-    fake_id_token_module.verify_oauth2_token = lambda *args, **kwargs: {"sub": "dummy-user"}
+    fake_id_token_module.verify_oauth2_token = lambda *args, **kwargs: {
+        "sub": "dummy-user"
+    }
     sys.modules["google.oauth2"] = types.ModuleType("google.oauth2")
     sys.modules["google.oauth2.id_token"] = fake_id_token_module
 
@@ -124,7 +126,10 @@ def test_set_organisation_updates_session_and_namespace(app_client):
     with client.session_transaction() as sess:
         assert sess["organisation_concept_id"] == "university_of_auckland_strong_ai_lab"
         assert sess["role_in_org"] == "admin"
-        assert sess["namespace"] == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+        assert (
+            sess["namespace"]
+            == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+        )
 
 
 def test_set_organisation_validates_body(app_client):

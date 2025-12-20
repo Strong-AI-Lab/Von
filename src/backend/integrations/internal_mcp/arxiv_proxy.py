@@ -21,6 +21,7 @@ _LOG_TAG = "[arxiv_proxy]"
 @dataclass
 class ArxivProxyConfig:
     """Configuration for arXiv MCP subprocess."""
+
     storage_path: Path
     command: str = "uv"
     timeout_sec: float = 30.0
@@ -77,7 +78,9 @@ class ArxivMCPProxy:
         except Exception as e:
             raise ArxivProxyError(f"Failed to start arxiv-mcp-server: {e}") from e
 
-    def _send_request(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    def _send_request(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Send MCP request to subprocess and get response."""
         with self._lock:
             self._call_count += 1
@@ -102,7 +105,6 @@ class ArxivMCPProxy:
                 # Send request
                 request_json = json.dumps(request) + "\n"
                 logger.debug("%s Sending request: %s", _LOG_TAG, request_json.strip())
-                print(f"[ARXIV DEBUG] Sending: {request_json.strip()}", flush=True)  # DEBUG
 
                 if self._process.stdin is None:
                     raise ArxivProxyError("Process stdin is None")
@@ -118,8 +120,9 @@ class ArxivMCPProxy:
                 if not response_line:
                     raise ArxivProxyError("No response from arxiv-mcp-server")
 
-                logger.debug("%s Received response: %s", _LOG_TAG, response_line.strip())
-                print(f"[ARXIV DEBUG] Received: {response_line.strip()}", flush=True)  # DEBUG
+                logger.debug(
+                    "%s Received response: %s", _LOG_TAG, response_line.strip()
+                )
                 response = json.loads(response_line)
 
                 # Check for error
@@ -141,7 +144,9 @@ class ArxivMCPProxy:
             except BrokenPipeError as e:
                 self._error_count += 1
                 self._process = None  # Mark for restart
-                raise ArxivProxyError("Subprocess pipe broken, will restart on next call") from e
+                raise ArxivProxyError(
+                    "Subprocess pipe broken, will restart on next call"
+                ) from e
             except Exception as e:
                 self._error_count += 1
                 raise ArxivProxyError(f"Request failed: {e}") from e
@@ -189,7 +194,9 @@ class ArxivMCPProxy:
         """
         return self._send_request("get_paper_metadata", {"arxiv_id": arxiv_id})
 
-    def download_paper(self, arxiv_id: str, filename: Optional[str] = None) -> Dict[str, Any]:
+    def download_paper(
+        self, arxiv_id: str, filename: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Download arXiv paper PDF to storage.
 
         Args:
@@ -203,7 +210,10 @@ class ArxivMCPProxy:
         arguments = {"paper_id": arxiv_id}
         # Note: filename parameter not supported by external server
         if filename:
-            logger.warning("%s filename parameter not supported by arxiv-mcp-server, ignoring", _LOG_TAG)
+            logger.warning(
+                "%s filename parameter not supported by arxiv-mcp-server, ignoring",
+                _LOG_TAG,
+            )
 
         return self._send_request("download_paper", arguments)
 
@@ -248,6 +258,7 @@ def get_arxiv_proxy() -> ArxivMCPProxy:
         if _proxy_instance is None:
             # Determine storage path
             import os
+
             workspace_root = Path(__file__).parent.parent.parent.parent.parent
             storage_path = workspace_root / "data" / "arxiv_papers"
 
@@ -258,7 +269,9 @@ def get_arxiv_proxy() -> ArxivMCPProxy:
 
             config = ArxivProxyConfig(storage_path=storage_path)
             _proxy_instance = ArxivMCPProxy(config)
-            logger.info("%s Initialized arXiv proxy with storage: %s", _LOG_TAG, storage_path)
+            logger.info(
+                "%s Initialized arXiv proxy with storage: %s", _LOG_TAG, storage_path
+            )
 
         return _proxy_instance
 
