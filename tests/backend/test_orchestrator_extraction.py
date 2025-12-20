@@ -230,14 +230,19 @@ def test_llm_detector_returns_true_on_yes():
     )
 
     llm = _RecorderLLM(["YES"])
+    aux_log: list[dict] = []
     decision = orchestrator._llm_detects_missing_tool_call(
-        "I'm going to search the web", llm, fallback_model="fallback-model"
+        "I'm going to search the web",
+        llm,
+        fallback_model="fallback-model",
+        aux_log=aux_log,
     )
 
     assert decision is True
     assert llm.calls[0]["model"] == "detector-model"
     assert llm.calls[0]["context"] is None
     assert "search the web" in llm.calls[0]["prompt"]
+    assert aux_log and aux_log[0]["type"] == "missing_tool_call_classifier"
 
 
 def test_llm_detector_uses_fallback_model_when_missing():
@@ -251,12 +256,17 @@ def test_llm_detector_uses_fallback_model_when_missing():
     )
 
     llm = _RecorderLLM(["NO"])
+    aux_log: list[dict] = []
     decision = orchestrator._llm_detects_missing_tool_call(
-        "Normal explanatory text", llm, fallback_model="fallback-model"
+        "Normal explanatory text",
+        llm,
+        fallback_model="fallback-model",
+        aux_log=aux_log,
     )
 
     assert decision is False
     assert llm.calls[0]["model"] == "fallback-model"
+    assert aux_log and aux_log[0]["model"] == "fallback-model"
 
 
 def test_run_retries_when_llm_detector_flags_missing_tool_call():
@@ -297,3 +307,4 @@ def test_run_retries_when_llm_detector_flags_missing_tool_call():
     assert payload.get("namespace") == "#V#user"
     assert result.tool_invocations
     assert result.response_text == "Final response"
+    assert result.aux_llm_calls

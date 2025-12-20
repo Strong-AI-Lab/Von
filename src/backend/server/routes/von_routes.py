@@ -1122,6 +1122,7 @@ def generate():
                         },
                         "tool_stats": tool_stats,
                         "tool_invocations": tool_invocations,
+                        "aux_llm_calls": [],
                     }
 
                     return jsonify(
@@ -1131,6 +1132,7 @@ def generate():
                         }
                     )
 
+        auxiliary_llm_calls: list[dict] = []
         if orchestrator is None:
             response_text = llm_client.generate(
                 prompt_text, context=enhanced_context, model=model_name
@@ -1156,6 +1158,9 @@ def generate():
                     dict(msg) for msg in orchestrator_result.extra_messages
                 ]
                 tool_invocations = list(orchestrator_result.tool_invocations)
+                auxiliary_llm_calls = list(
+                    getattr(orchestrator_result, "aux_llm_calls", [])
+                )
             except ToolCallParsingError as exc:
                 current_app.logger.warning(
                     "[mcp_orchestrator] Invalid tool request payload: %s", exc
@@ -1295,6 +1300,7 @@ def generate():
                 if tool_invocations
                 else []
             ),
+            "aux_llm_calls": auxiliary_llm_calls,
         }
 
         return jsonify({"response": response_text, "llm_debug": llm_debug_info})
