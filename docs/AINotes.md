@@ -307,4 +307,35 @@ Implemented complete Phase 1 infrastructure for multi-tenant organisation-scoped
 - [ ] Phase 2 implementation: Organisation membership Vontology model
 - [ ] Phase 3 implementation: Database-backed RBAC system
 
+## Technical Debt & Refactoring Notes
+
+### Type Safety Enforcement (CRITICAL - Identified December 2025)
+
+**Problem:** Multiple instances of `# type: ignore` comments appeared during JVNAUTOSCI-800 cleanup, particularly in scenarios like wrapper pattern usage (`_RestrictedGateway`). These ignores are a symptom of insufficient type enforcement in the codebase.
+
+**Root Cause:** Some architectural patterns (wrapper classes, duck typing) and legacy code don't leverage proper typing:
+- Wrapper classes that delegate to underlying implementations without using Protocol or abstract base classes
+- Functions accepting loosely-typed arguments (Any, dict) when more specific types would be appropriate
+- Missing TypedDict or dataclass definitions for structured data
+- Inconsistent use of Optional/Union vs None coercion
+
+**Recommendation:** Establish a **type enforcement strategy** for the refactoring backlog:
+1. **Enable strict type checking** in Pyright configuration (`pyrightConfig: {"typeCheckingMode": "strict"}` in pyrightconfig.json)
+2. **Use Protocol/ABC** for wrapper patterns instead of relying on duck typing and type ignores
+3. **Define explicit types** for complex dictionaries (TypedDict or dataclasses)
+4. **Replace Any types** with specific union types or protocols where feasible
+5. **Document intentional type mismatches** with inline comments (not just `# type: ignore`)
+
+**Example Fix Pattern:**
+- **Before:** `gateway: Any` → cast to InternalMCPGateway → needs `# type: ignore[arg-type]`
+- **After:** Define `ManagedGateway` Protocol, implement wrapper against Protocol → type safe, no ignores needed
+
+**Affected Files Requiring Review:**
+- `src/backend/mcp_server/mcp_stdio_server.py` (line 1238: _RestrictedGateway wrapper)
+- `src/backend/services/rag_service.py` (dict-based operations)
+- `src/backend/integrations/internal_mcp/catalogue.py` (Tool definitions with flexible schemas)
+- `src/backend/services/chat_auxiliary_prompt_service.py` (context dict handling)
+
+**Priority:** Medium - not blocking, but should be addressed in next major refactoring cycle to improve IDE support and prevent subtle type-related bugs.
+
 
