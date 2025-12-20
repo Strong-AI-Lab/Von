@@ -1235,7 +1235,7 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
         gateway=base_gateway, allow_writes=effective_allow_writes
     )
     orchestrator = InternalMCPChatOrchestrator(
-        gateway=gateway,
+        gateway=gateway,  # type: ignore[arg-type]
         logger=_LOG.getChild("von_chat_run"),
         max_tool_invocations=max_tool_invocations,
         default_gmail_profile=None,
