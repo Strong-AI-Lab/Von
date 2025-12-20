@@ -200,6 +200,164 @@ def _search_concepts(**kwargs):
     return search_concepts(**kwargs)
 
 
+def _upsert_text_relation(**kwargs):
+    from ...services.text_value_service import upsert_text_for_concept
+
+    concept_id = kwargs.get("concept_id")
+    predicate = kwargs.get("predicate")
+    text = kwargs.get("text")
+    language = kwargs.get("language", "en-NZ")
+    context = kwargs.get("context")
+
+    if not concept_id:
+        return {"error": "Missing 'concept_id' parameter"}
+    if not predicate:
+        return {"error": "Missing 'predicate' parameter"}
+    if not text:
+        return {"error": "Missing 'text' parameter"}
+
+    try:
+        result = upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate=predicate,
+            text=text,
+            lang=language,
+            context=context,
+        )
+
+        text_preview = text[:100] + "..." if len(text) > 100 else text
+        return {
+            "success": True,
+            "text_value_id": str(result.get("text_value_id")),
+            "relation_id": str(result.get("relation_id")),
+            "relation_created": result.get("relation_created"),
+            "predicate": predicate,
+            "text_preview": text_preview,
+            "language": language,
+        }
+    except Exception as exc:
+        return {"error": f"Failed to upsert text relation: {exc}"}
+
+
+def _get_text_relations(**kwargs):
+    from ...services.text_value_service import get_texts_for_concept
+
+    concept_id = kwargs.get("concept_id")
+    predicate = kwargs.get("predicate")
+    language = kwargs.get("language")
+    limit = kwargs.get("limit", 50)
+
+    if not concept_id:
+        return {"error": "Missing 'concept_id' parameter"}
+
+    try:
+        relations = get_texts_for_concept(
+            subject_concept_id=concept_id,
+            predicate=predicate,
+            lang=language,
+            limit=limit,
+        )
+
+        # Add text previews for long content
+        for relation in relations:
+            text = relation.get("text", "")
+            if len(text) > 200:
+                relation["text_preview"] = text[:200] + "..."
+
+        return {
+            "concept_id": concept_id,
+            "relations_found": len(relations),
+            "relations": relations,
+        }
+    except Exception as exc:
+        return {"error": f"Failed to get text relations: {exc}"}
+
+
+def _update_text_relation(**kwargs):
+    from ...services.text_value_service import update_text_relation_text
+
+    concept_id = kwargs.get("concept_id")
+    relation_id = kwargs.get("relation_id")
+    new_text = kwargs.get("new_text")
+    language = kwargs.get("language", "en-NZ")
+
+    if not concept_id:
+        return {"error": "Missing 'concept_id' parameter"}
+    if not relation_id:
+        return {"error": "Missing 'relation_id' parameter"}
+    if not new_text:
+        return {"error": "Missing 'new_text' parameter"}
+
+    try:
+        result = update_text_relation_text(
+            subject_concept_id=concept_id,
+            relation_id=relation_id,
+            new_text=new_text,
+            lang=language,
+        )
+
+        old_preview = str(result.get("old_text", ""))[:100]
+        new_preview = new_text[:100] + "..." if len(new_text) > 100 else new_text
+
+        return {
+            "success": True,
+            "relation_id": relation_id,
+            "old_text_preview": old_preview,
+            "new_text_preview": new_preview,
+            "text_value_id": str(result.get("text_value_id")),
+        }
+    except Exception as exc:
+        return {"error": f"Failed to update text relation: {exc}"}
+
+
+def _delete_text_relation(**kwargs):
+    from ...services.text_value_service import (
+        delete_text_relation,
+        delete_text_relation_by_predicate_and_text,
+    )
+
+    concept_id = kwargs.get("concept_id")
+    relation_id = kwargs.get("relation_id")
+    predicate = kwargs.get("predicate")
+    text = kwargs.get("text")
+    language = kwargs.get("language")
+
+    if not concept_id:
+        return {"error": "Missing 'concept_id' parameter"}
+
+    try:
+        if relation_id:
+            # Delete by relation ID (preferred)
+            result = delete_text_relation(
+                subject_concept_id=concept_id,
+                relation_id=relation_id,
+            )
+            return {
+                "success": True,
+                "deleted_relation_id": relation_id,
+                "deleted_text_preview": str(result.get("text", ""))[:100],
+                "text_value_cleaned_up": result.get("orphaned", False),
+            }
+        elif predicate and text:
+            # Delete by predicate + text match
+            result = delete_text_relation_by_predicate_and_text(
+                subject_concept_id=concept_id,
+                predicate=predicate,
+                text=text,
+                lang=language,
+            )
+            return {
+                "success": True,
+                "deleted_relation_id": result.get("relation_id"),
+                "deleted_text_preview": text[:100],
+                "text_value_cleaned_up": result.get("orphaned_text_value_deleted", False),
+            }
+        else:
+            return {"error": "Must provide either relation_id or both predicate and text"}
+    except Exception as exc:
+        return {"error": f"Failed to delete text relation: {exc}"}
+
+
 def _add_names_to_concept(**kwargs):
     from ...services.text_value_service import upsert_text_for_concept
     from ...db.repositories.concepts_repository import ConceptsRepository
@@ -1035,6 +1193,135 @@ def _concept_search_output_schema() -> Schema:
         optional={},
         allow_unknown=True,
         description="search_concepts output: results (list of {concept_id, name, kind, relevance_score, similarity_score?, hierarchy?}), total_count (int), match_types_used (list[str]), query_info (dict). hierarchy (when include_hierarchy_path=true): {primary_path, paths[], all_parents, max_depth, is_root}",
+    )
+
+
+def _upsert_text_relation_input_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+            "predicate": str,
+            "text": str,
+        },
+        optional={
+            "language": str,
+            "context": (dict, type(None)),
+        },
+        allow_unknown=True,
+        description="upsert_text_relation input: concept_id (str), predicate (str, e.g., 'hasContent', 'hasDescription'), text (str), language (str, optional, default 'en-NZ'), context (dict, optional metadata)",
+    )
+
+
+def _upsert_text_relation_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+        },
+        optional={
+            "text_value_id": (str, type(None)),
+            "relation_id": (str, type(None)),
+            "relation_created": (bool, type(None)),
+            "predicate": (str, type(None)),
+            "text_preview": (str, type(None)),
+            "language": (str, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="upsert_text_relation output: success (bool), text_value_id (str), relation_id (str), relation_created (bool), predicate (str), text_preview (str), language (str), error (str if failed)",
+    )
+
+
+def _get_text_relations_input_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+        },
+        optional={
+            "predicate": (str, type(None)),
+            "language": (str, type(None)),
+            "limit": (int, type(None)),
+        },
+        allow_unknown=True,
+        description="get_text_relations input: concept_id (str), predicate (str, optional filter), language (str, optional filter), limit (int, optional, default 50)",
+    )
+
+
+def _get_text_relations_output_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+            "relations_found": int,
+        },
+        optional={
+            "relations": (list, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="get_text_relations output: concept_id (str), relations_found (int), relations (list of {text, lang, text_value_id, predicate, relation_id, context, text_preview?}), error (str if failed)",
+    )
+
+
+def _update_text_relation_input_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+            "relation_id": str,
+            "new_text": str,
+        },
+        optional={
+            "language": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="update_text_relation input: concept_id (str), relation_id (str), new_text (str), language (str, optional)",
+    )
+
+
+def _update_text_relation_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+        },
+        optional={
+            "relation_id": (str, type(None)),
+            "old_text_preview": (str, type(None)),
+            "new_text_preview": (str, type(None)),
+            "text_value_id": (str, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="update_text_relation output: success (bool), relation_id (str), old_text_preview (str), new_text_preview (str), text_value_id (str), error (str if failed)",
+    )
+
+
+def _delete_text_relation_input_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+        },
+        optional={
+            "relation_id": (str, type(None)),
+            "predicate": (str, type(None)),
+            "text": (str, type(None)),
+            "language": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="delete_text_relation input: concept_id (str), relation_id (str, optional - preferred method), predicate (str, optional for predicate+text deletion), text (str, optional with predicate), language (str, optional)",
+    )
+
+
+def _delete_text_relation_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+        },
+        optional={
+            "deleted_relation_id": (str, type(None)),
+            "deleted_text_preview": (str, type(None)),
+            "text_value_cleaned_up": (bool, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="delete_text_relation output: success (bool), deleted_relation_id (str), deleted_text_preview (str), text_value_cleaned_up (bool), error (str if failed)",
     )
 
 
@@ -2559,6 +2846,38 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=concept_search_output_schema,
             category="read",
             description="Namespaced alias for concept search used by the MCP orchestrator. Same parameters as search_concepts (query required; pass empty string when using instance_of filters).",
+        ),
+        MethodDefinition(
+            name="upsert_text_relation",
+            handler=_upsert_text_relation,
+            input_schema=_upsert_text_relation_input_schema(),
+            output_schema=_upsert_text_relation_output_schema(),
+            category="write",
+            description="Add or update ANY text relation (hasContent, hasDescription, hasNote, custom predicates, etc.). Use for attaching text content to concepts with flexible predicate types. More general than add_names which is specialized for hasName relations only.",
+        ),
+        MethodDefinition(
+            name="get_text_relations",
+            handler=_get_text_relations,
+            input_schema=_get_text_relations_input_schema(),
+            output_schema=_get_text_relations_output_schema(),
+            category="read",
+            description="Retrieve text relations for a concept, optionally filtered by predicate/language. Returns all text attachments (hasContent, hasDescription, hasName, etc.). Use to query what text is attached to a concept.",
+        ),
+        MethodDefinition(
+            name="update_text_relation",
+            handler=_update_text_relation,
+            input_schema=_update_text_relation_input_schema(),
+            output_schema=_update_text_relation_output_schema(),
+            category="write",
+            description="Modify the text content of an existing text relation by relation ID. Updates the text value while preserving the relation structure. Use when you need to change existing attached text.",
+        ),
+        MethodDefinition(
+            name="delete_text_relation",
+            handler=_delete_text_relation,
+            input_schema=_delete_text_relation_input_schema(),
+            output_schema=_delete_text_relation_output_schema(),
+            category="write",
+            description="Delete a specific text relation by relation ID or by predicate+text match. Optionally garbage-collects orphaned text values. Use to remove unwanted text attachments from concepts.",
         ),
         MethodDefinition(
             name="add_names",

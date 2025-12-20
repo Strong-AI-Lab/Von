@@ -88,6 +88,132 @@
             }
         },
         {
+            "name": "upsert_text_relation",
+            "description": "Add or update ANY text relation (hasContent, hasDescription, hasNote, custom predicates, etc.). Use for attaching text content to concepts with flexible predicate types.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept to attach text to (e.g., '#V#my_concept')"
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "The text relation predicate (e.g., 'hasContent', 'hasDescription', 'hasNote')"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The text content to attach"
+                    },
+                    "language": {
+                        "type": "string",
+                        "default": "en-NZ",
+                        "description": "Language code (ISO 639-1/BCP 47): en-NZ (default), en-US, fr, de, mi, zh, etc."
+                    },
+                    "context": {
+                        "type": "object",
+                        "description": "Optional metadata (e.g., {'text_type': 'NL', 'author': 'system'})"
+                    }
+                },
+                "required": [
+                    "concept_id",
+                    "predicate",
+                    "text"
+                ]
+            }
+        },
+        {
+            "name": "get_text_relations",
+            "description": "Retrieve text relations for a concept, optionally filtered by predicate/language. Returns all text attachments (hasContent, hasDescription, hasName, etc.).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept to query text relations for"
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Optional: filter by predicate (e.g., 'hasContent', 'hasName')"
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Optional: filter by language code (e.g., 'en-NZ', 'fr')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 50,
+                        "description": "Maximum number of results to return"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ]
+            }
+        },
+        {
+            "name": "update_text_relation",
+            "description": "Modify the text content of an existing text relation by relation ID. Updates the text value while preserving the relation structure.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept owning the text relation"
+                    },
+                    "relation_id": {
+                        "type": "string",
+                        "description": "The ID of the text relation to update"
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "The new text content"
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Optional: update the language code"
+                    }
+                },
+                "required": [
+                    "concept_id",
+                    "relation_id",
+                    "new_text"
+                ]
+            }
+        },
+        {
+            "name": "delete_text_relation",
+            "description": "Delete a specific text relation by relation ID or by predicate+text match. Optionally garbage-collects orphaned text values.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept owning the text relation"
+                    },
+                    "relation_id": {
+                        "type": "string",
+                        "description": "Optional: delete by relation ID (preferred method)"
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Optional: delete by predicate + text match"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Optional: exact text to match (used with predicate)"
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Optional: language code for predicate+text deletion"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ]
+            }
+        },
+        {
             "name": "add_names",
             "description": "Add one or more names/aliases/synonyms to a concept using text relations (hasName predicate). Supports bulk operations and multilingual names. Pass array of strings for simple names (defaults: en-NZ, NL) or objects for control. Name types: NL (Natural Language - standard names/translations, default), ABBR (Abbreviation - 'EU', 'NATO', 'PhD'), CODE (URIs/system IDs). Language codes: en-NZ (default), en-US, fr, de, es, it, mi (Māori), zh (Chinese), ja (Japanese), etc. Examples: names=['EU member', 'EU state'] or names=[{name:'État membre', language:'fr'}, {name:'EU MS', name_type:'ABBR'}].",
             "inputSchema": {
