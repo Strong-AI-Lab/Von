@@ -1191,11 +1191,18 @@ def get_available_people():
         # Filter and format for dropdown - include all fields needed for filtering
         people_options = []
         for concept in concepts:
+            from ...services.concept_service import enrich_concept_with_text_relations
             from ...vontology.utils_vontology import (
                 get_concept_display_name_with_names_fallback,
             )
 
-            display_name = get_concept_display_name_with_names_fallback(concept)
+            # Enrich concept with names from text relations before getting display name
+            enriched_concept = enrich_concept_with_text_relations(
+                concept, logger=current_app.logger
+            )
+            display_name = get_concept_display_name_with_names_fallback(
+                enriched_concept
+            )
             people_options.append(
                 {
                     "id": concept.get("_id"),
@@ -1244,11 +1251,18 @@ def get_available_organisations():
         # Filter and format for dropdown - include all fields needed for filtering
         organisation_options = []
         for concept in unique_concepts:
+            from ...services.concept_service import enrich_concept_with_text_relations
             from backend.vontology.utils_vontology import (
                 get_concept_display_name_with_names_fallback,
             )
 
-            display_name = get_concept_display_name_with_names_fallback(concept)
+            # Enrich concept with names from text relations before getting display name
+            enriched_concept = enrich_concept_with_text_relations(
+                concept, logger=current_app.logger
+            )
+            display_name = get_concept_display_name_with_names_fallback(
+                enriched_concept
+            )
             organisation_options.append(
                 {
                     "id": concept.get("_id"),
