@@ -349,7 +349,7 @@ class InternalMCPChatOrchestrator:
         toolish_keywords = ("search", "web", "fetch", "execute", "tool", "ontology", "mcp", "operation", "concept", "relationship")
         promise_patterns = (
             "i'm going to",
-            "i am going to", 
+            "i am going to",
             "i'll",
             "i will",
             "let me",
@@ -357,10 +357,10 @@ class InternalMCPChatOrchestrator:
             "i'll do that now",
             "i'll start",
         )
-        
+
         has_promise = any(p in lowered for p in promise_patterns)
         has_toolish = any(k in lowered for k in toolish_keywords)
-        
+
         if has_promise and has_toolish:
             # Additional check: the response should be relatively short (< 500 chars)
             # to avoid triggering on long explanatory responses
