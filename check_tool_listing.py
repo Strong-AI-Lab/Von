@@ -5,16 +5,20 @@ import sys
 
 sys.path.insert(0, os.path.abspath("."))
 
-from src.backend.integrations.internal_mcp.orchestrator import (
+from src.backend.integrations.internal_mcp import (
     InternalMCPChatOrchestrator,
+    InternalMCPGateway,
+    InternalMCPTransport,
+    build_default_catalogue,
 )
-from src.backend.integrations.internal_mcp.gateway import Gateway
 
 
 def main():
     # Create orchestrator
-    gateway = Gateway()
-    orchestrator = InternalMCPChatOrchestrator(gateway)
+    catalogue = build_default_catalogue()
+    transport = InternalMCPTransport()
+    gateway = InternalMCPGateway(catalogue=catalogue, transport=transport, enabled=True)
+    orchestrator = InternalMCPChatOrchestrator(gateway=gateway)
 
     # Get tool listing with namespace (authenticated state)
     print("\n" + "=" * 80)

@@ -18,6 +18,17 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
+try:  # Optional dependency: agent Gmail OAuth token store.
+    from backend.services.agent_gmail_token_store import (
+        get_agent_gmail_token_payload as _get_agent_gmail_token_payload,
+        get_agent_gmail_token_status as _get_agent_gmail_token_status,
+        upsert_agent_gmail_tokens as _upsert_agent_gmail_tokens,
+    )
+except Exception:  # pragma: no cover
+    _get_agent_gmail_token_payload = None  # type: ignore
+    _get_agent_gmail_token_status = None  # type: ignore
+    _upsert_agent_gmail_tokens = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_SCOPES: List[str] = [
@@ -48,6 +59,35 @@ class GmailProfile:
         missing or cannot be refreshed, the caller must provision a token
         out-of-band to avoid unexpected prompts in headless environments.
         """
+
+        if callable(_get_agent_gmail_token_payload):
+            token_payload = _get_agent_gmail_token_payload(self.profile_id)
+            if token_payload:
+                creds = Credentials.from_authorized_user_info(
+                    token_payload, scopes=self.scopes
+                )
+
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                    if callable(_upsert_agent_gmail_tokens):
+                        authorised_email = None
+                        if callable(_get_agent_gmail_token_status):
+                            status = _get_agent_gmail_token_status(self.profile_id)
+                            authorised_email = status.authorised_email
+                        _upsert_agent_gmail_tokens(
+                            profile_id=self.profile_id,
+                            token_payload=json.loads(creds.to_json()),
+                            authorised_email=authorised_email,
+                            scopes=list(self.scopes),
+                            expires_at=getattr(creds, "expiry", None),
+                        )
+                elif not creds or not creds.valid:
+                    raise RuntimeError(
+                        "Invalid or non-refreshable Gmail credentials stored for "
+                        f"profile '{self.profile_id}'."
+                    )
+
+                return creds
 
         if not self.token_path:
             raise ValueError("token_path is required for Gmail profile")
