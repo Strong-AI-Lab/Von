@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -170,3 +171,75 @@ def test_modify_labels_guard(monkeypatch):
 
         assert result == {"id": "mid"}
         svc.users.return_value.messages.return_value.modify.assert_called_once()
+
+
+@patch("src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file")
+@patch("src.backend.integrations.google.gmail_service.os.path.exists")
+@patch("src.backend.integrations.google.gmail_service._get_agent_gmail_token_payload")
+def test_ensure_credentials_prefers_db_tokens(
+    mock_get_payload, mock_exists, mock_file_loader
+):
+    mock_exists.side_effect = AssertionError("Should not check token file when DB tokens exist")
+    mock_file_loader.side_effect = AssertionError(
+        "Should not load token file when DB tokens exist"
+    )
+
+    mock_get_payload.return_value = {
+        "token": "access-token",
+        "refresh_token": "refresh-token",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "scopes": list(gs.DEFAULT_SCOPES),
+        "expiry": "2099-01-01T00:00:00Z",
+    }
+
+    profile = gs.GmailProfile(profile_id="p", token_path="", scopes=list(gs.DEFAULT_SCOPES))
+    creds = profile.ensure_credentials()
+
+    assert creds.token == "access-token"
+
+
+@patch("src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file")
+@patch("src.backend.integrations.google.gmail_service._upsert_agent_gmail_tokens")
+@patch("src.backend.integrations.google.gmail_service._get_agent_gmail_token_status")
+@patch("src.backend.integrations.google.gmail_service._get_agent_gmail_token_payload")
+@patch("src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_info")
+def test_ensure_credentials_refreshes_db_tokens_and_persists(
+    mock_info_loader,
+    mock_get_payload,
+    mock_status,
+    mock_upsert,
+    mock_file_loader,
+):
+    mock_file_loader.side_effect = AssertionError(
+        "Should not load token file when DB tokens exist"
+    )
+
+    mock_get_payload.return_value = {
+        "token": "access-token",
+        "refresh_token": "refresh-token",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "client-id",
+        "client_secret": "client-secret",
+        "scopes": list(gs.DEFAULT_SCOPES),
+        "expiry": "2000-01-01T00:00:00Z",
+    }
+
+    creds = MagicMock()
+    creds.expired = True
+    creds.refresh_token = "refresh-token"
+    creds.valid = False
+    creds.expiry = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    creds.to_json.return_value = json.dumps({"token": "new-token"})
+    mock_info_loader.return_value = creds
+
+    mock_status.return_value = SimpleNamespace(authorised_email="test@example.com")
+
+    profile = gs.GmailProfile(
+        profile_id="p", token_path="/tmp/unused.json", scopes=list(gs.DEFAULT_SCOPES)
+    )
+    profile.ensure_credentials()
+
+    creds.refresh.assert_called_once()
+    mock_upsert.assert_called_once()

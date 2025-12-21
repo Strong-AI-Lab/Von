@@ -2128,11 +2128,14 @@ def _gmail_list_messages(**kwargs):
         return {"error": "Missing required parameter: profile", "success": False}
 
     try:
+        max_results = kwargs.get("max_results")
+        if max_results is None:
+            max_results = kwargs.get("maxResults")
         return gs.list_messages(
             profile_id=profile,
             query=kwargs.get("query"),
             label_ids=kwargs.get("label_ids"),
-            max_results=kwargs.get("max_results") or 25,
+            max_results=max_results or 25,
             audit_context={
                 "namespace": kwargs.get("namespace"),
                 "source": "internal_mcp_gateway",
@@ -2632,6 +2635,7 @@ def build_default_catalogue() -> MethodCatalogue:
             "query": str,
             "label_ids": list,
             "max_results": (int, type(None)),
+            "maxResults": (int, type(None)),
         },
         allow_unknown=False,
         description="List Gmail messages for a profile with optional query/labels (read-only).",

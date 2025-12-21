@@ -94,14 +94,17 @@
             <small class="settings-note">Profile IDs must match the backend Gmail profiles configured via environment
                 (VON_GMAIL_PROFILES). Leave blank to disable Gmail calls.</small>
 
-            <h4 class="mt-2">Google OAuth</h4>
-            <p class="settings-note">Use this to refresh Gmail tokens for the agent mailbox. This does not change your
-                app user selection.</p>
+            <h4 class="mt-2">Agent Gmail OAuth</h4>
+            <p class="settings-note">Authorise a Gmail profile for agent tools. This does <strong>not</strong> log you
+                in as an app user.</p>
             <div class="inline-form inline-form-tight">
-                <button type="button" class="btn-primary" onclick="loginWithGoogle()">Start Google OAuth</button>
+                <button type="button" class="btn-primary" onclick="authoriseAgentGmail()">Authorise Agent Gmail</button>
+                <button type="button" class="btn-danger ml-2" onclick="revokeAgentGmail()">Revoke</button>
+                <button type="button" class="btn-secondary ml-2"
+                    onclick="refreshAgentGmailOauthStatus()">Refresh</button>
                 <span class="settings-note ml-2">Ensure popups are allowed for this site.</span>
             </div>
-            <div id="googleOauthStatus" class="settings-note mt-1">Gmail OAuth session: unknown</div>
+            <div id="agentGmailOauthStatus" class="settings-note mt-1">Agent Gmail OAuth: unknown</div>
             <div id="gmailProfileStatus" class="settings-note">Gmail profile target: unknown</div>
         </section>
 
@@ -261,13 +264,43 @@
             }
         }
 
-        function setGoogleOauthStatus(authStatus) {
-            const el = document.getElementById('googleOauthStatus');
+        function getSelectedGmailProfileId() {
+            const input = document.getElementById('gmailProfileInput');
+            const raw = input?.value ?? '';
+            const fromInput = String(raw).trim();
+            if (fromInput) return fromInput;
+            try { return (localStorage.getItem('von_gmail_profile') || '').trim(); } catch { return ''; }
+        }
+
+        async function refreshAgentGmailOauthStatus() {
+            const el = document.getElementById('agentGmailOauthStatus');
             if (!el) return;
-            if (authStatus?.authenticated) {
-                el.textContent = `Gmail OAuth session: ${authStatus.email || '(unknown email)'}`;
-            } else {
-                el.textContent = 'Gmail OAuth session: not authenticated';
+
+            const profileId = getSelectedGmailProfileId();
+            if (!profileId) {
+                el.textContent = 'Agent Gmail OAuth: disabled (no profile selected)';
+                return;
+            }
+
+            el.textContent = 'Agent Gmail OAuth: checking…';
+            try {
+                const response = await fetch(`/von/api/agent/gmail/oauth/status?profile_id=${encodeURIComponent(profileId)}`);
+                const data = await response.json();
+                if (!response.ok) {
+                    el.textContent = `Agent Gmail OAuth: error (${data?.error || response.status})`;
+                    return;
+                }
+
+                if (data?.has_tokens) {
+                    const email = data.authorised_email || '(unknown email)';
+                    const expiry = data.expires_at ? ` (expires ${data.expires_at})` : '';
+                    el.textContent = `Agent Gmail OAuth: authorised as ${email}${expiry}`;
+                } else {
+                    el.textContent = 'Agent Gmail OAuth: not authorised';
+                }
+            } catch (error) {
+                console.warn('Failed to fetch agent Gmail OAuth status', error);
+                el.textContent = 'Agent Gmail OAuth: error (failed to fetch)';
             }
         }
 
@@ -277,6 +310,7 @@
                 if (!el) return;
                 const profileId = localStorage.getItem('von_gmail_profile') || '';
                 el.textContent = profileId ? `Gmail profile target: ${profileId}` : 'Gmail profile target: none (disabled)';
+                refreshAgentGmailOauthStatus();
             } catch (e) {
                 console.warn('Failed to update Gmail profile status', e);
             }
@@ -286,9 +320,6 @@
         async function updateAuthenticationDisplay(authStatus) {
             const authContainer = document.getElementById('authenticationStatus');
             console.log('Updating authentication display. Container found:', !!authContainer, 'Status:', authStatus);
-
-            // Reflect status in Google OAuth section too
-            setGoogleOauthStatus(authStatus);
 
             if (authStatus.authenticated) {
                 // User is logged in - show status and logout button
@@ -336,8 +367,100 @@
                 authContainer.innerHTML = `
                     <button onclick="loginWithGoogle()" class="btn-primary">Login with Google</button>
                 `;
-                setGoogleOauthStatus({ authenticated: false });
             }
+        }
+
+        function authoriseAgentGmail() {
+            const profileId = getSelectedGmailProfileId();
+            if (!profileId) {
+                alert('Please enter a Gmail profile ID first.');
+                return;
+            }
+
+            const width = 520;
+            const height = 700;
+            const left = (screen.width / 2) - (width / 2);
+            const top = (screen.height / 2) - (height / 2);
+
+            const popup = window.open(
+                `/von/api/agent/gmail/oauth/start?profile_id=${encodeURIComponent(profileId)}`,
+                'agentGmailOAuth',
+                `width=${width},height=${height},left=${left},top=${top},scrollbars=yes,resizable=yes`
+            );
+
+            if (!popup) {
+                alert('Popup blocked! Please allow popups for this site and try again.');
+                return;
+            }
+
+            let messageReceived = false;
+            const messageHandler = async (event) => {
+                if (event.origin !== window.location.origin) return;
+                if (event.data && event.data.type === 'agentGmailOAuthSuccess') {
+                    messageReceived = true;
+                    window.removeEventListener('message', messageHandler);
+                    try { if (!popup.closed) popup.close(); } catch { }
+                    await refreshAgentGmailOauthStatus();
+                } else if (event.data && event.data.type === 'agentGmailOAuthError') {
+                    messageReceived = true;
+                    window.removeEventListener('message', messageHandler);
+                    try { if (!popup.closed) popup.close(); } catch { }
+
+                    const el = document.getElementById('agentGmailOauthStatus');
+                    if (el) {
+                        const title = event.data.title || 'Agent Gmail OAuth error';
+                        const detail = event.data.detail ? ` (${event.data.detail})` : '';
+                        el.textContent = `Agent Gmail OAuth: ${title}${detail}`;
+                    }
+
+                    await refreshAgentGmailOauthStatus();
+                }
+            };
+            window.addEventListener('message', messageHandler);
+
+            let pollCount = 0;
+            const poll = setInterval(async () => {
+                pollCount++;
+                if (popup.closed) {
+                    clearInterval(poll);
+                    window.removeEventListener('message', messageHandler);
+                    if (!messageReceived) {
+                        setTimeout(() => { refreshAgentGmailOauthStatus(); }, 500);
+                    }
+                    return;
+                }
+                if (pollCount > 120) {
+                    clearInterval(poll);
+                    window.removeEventListener('message', messageHandler);
+                }
+            }, 1000);
+
+            popup.focus();
+        }
+
+        async function revokeAgentGmail() {
+            const profileId = getSelectedGmailProfileId();
+            if (!profileId) {
+                alert('Please enter a Gmail profile ID first.');
+                return;
+            }
+
+            try {
+                const response = await fetch(`/von/api/agent/gmail/oauth/revoke?profile_id=${encodeURIComponent(profileId)}`,
+                    { method: 'POST', headers: { 'Content-Type': 'application/json' } }
+                );
+                if (!response.ok) {
+                    const data = await response.json().catch(() => ({}));
+                    alert(`Failed to revoke tokens: ${data?.error || response.status}`);
+                    return;
+                }
+            } catch (error) {
+                console.warn('Failed to revoke agent Gmail tokens', error);
+                alert('Failed to revoke tokens.');
+                return;
+            }
+
+            await refreshAgentGmailOauthStatus();
         }
 
         // Handle logout
@@ -587,6 +710,7 @@
             console.log('Settings tab DOMContentLoaded - checking authentication status');
             checkAuthenticationStatus();
             updateGmailProfileStatus();
+            refreshAgentGmailOauthStatus();
         });
 
         // Also check when settings tab becomes visible (for dynamic tab loading)
@@ -594,6 +718,7 @@
             console.log('Settings tab initialized - checking authentication status');
             checkAuthenticationStatus();
             updateGmailProfileStatus();
+            refreshAgentGmailOauthStatus();
         }
 
         // Export function for external tab management to call when settings tab is activated

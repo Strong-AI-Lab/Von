@@ -7,8 +7,19 @@
 ## Design choices
 - **Profile-based config**: Multiple Gmail profiles, each with its own token, scopes, and optional label/query filters. Config via `VON_GMAIL_PROFILES` JSON or legacy env fallbacks for a single `von-service` profile.
 - **Read-first posture**: Default scopes are read-only. Mutation scope (`gmail.modify`) only when explicitly requested via env flag (`VON_GMAIL_MUTATION=true`) or profile scopes.
-- **No interactive flows**: The service does not auto-run OAuth flows; tokens must be provisioned out of band to avoid unexpected prompts.
+- **No automatic interactive flows**: The Gmail service layer does not auto-run OAuth flows; tokens must be provisioned deliberately to avoid unexpected prompts in headless environments.
 - **Separation of credentials**: Never reuse Von's token for user mail. Profiles are resolved explicitly by ID on each call.
+
+## Agent Gmail OAuth (JVNAUTOSCI-801)
+Von now supports an explicit, UI-driven OAuth flow to authorise *agent* Gmail profiles without altering the existing **user login** OAuth.
+
+- The UI initiates `/von/api/agent/gmail/oauth/start?profile_id=...` and stores the resulting tokens in MongoDB (encrypted-at-rest).
+- The Gmail service prefers DB-stored tokens when present, and falls back to the existing `token_path` file behaviour for backwards compatibility.
+
+### Agent OAuth configuration
+- `GMAIL_TOKEN_ENCRYPTION_KEY` (required for DB token storage; Fernet key)
+- `VON_AGENT_GMAIL_OAUTH_REDIRECT_URI` (e.g. `http://localhost:5000/von/api/agent/gmail/oauth/callback`)
+- `VON_AGENT_GMAIL_OAUTH_CLIENT_SECRET_PATH` (optional override; defaults to the profile's `credentials_path`)
 
 ## Initial surface (MVP)
 - **Service helpers** (in code now): `list_messages`, `get_message`, `get_attachment`, per-profile.
@@ -24,7 +35,7 @@
 - Preferred: `VON_GMAIL_PROFILES` JSON (list or object) with fields:
   - `profile_id` (required)
   - `token_path` (required)
-  - `credentials_path` (optional, for refresh if needed)
+  - `credentials_path` (optional, used for agent OAuth if set; also used for refresh in file-token mode)
   - `user_id` (default `me`)
   - `scopes` (default read-only)
   - `label_filter` (optional array)
