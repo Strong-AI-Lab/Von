@@ -19,6 +19,13 @@ from typing import (
 
 from .gateway import InternalMCPGateway
 
+# Structured tool calling support (JVNAUTOSCI-799 Phase 3)
+from ...languagemodels.structured_tool_calling import (
+    LLMResponse,
+    ToolDefinition,
+    ToolCall,
+)
+
 
 @dataclass(frozen=True)
 class OrchestratorResult:
@@ -116,6 +123,102 @@ class InternalMCPChatOrchestrator:
         if value is None:
             value = default
         return max(min_value, min(max_value, int(value)))
+
+    def _convert_mcp_tools_to_structured_definitions(
+        self,
+    ) -> List[ToolDefinition]:
+        """Convert MCP tool catalog to structured ToolDefinition list (JVNAUTOSCI-799).
+
+        Returns:
+            List of ToolDefinition objects describing available MCP tools
+        """
+        catalogue = self._gateway.describe_methods()
+        tool_definitions: List[ToolDefinition] = []
+
+        for tool_name, metadata in catalogue.items():
+            try:
+                # Convert MCP Schema to JSON Schema format
+                input_schema = self._mcp_schema_to_json_schema(
+                    metadata.get("input_schema", {})
+                )
+
+                # Create ToolDefinition
+                tool_def = ToolDefinition(
+                    name=tool_name,
+                    description=metadata.get("description", f"Execute {tool_name}"),
+                    input_schema=input_schema,
+                )
+                tool_definitions.append(tool_def)
+            except Exception as exc:
+                self._logger.warning(
+                    "[orchestrator] Failed to convert tool %s to ToolDefinition: %s",
+                    tool_name,
+                    exc,
+                )
+                continue
+
+        self._logger.debug(
+            "[orchestrator] Converted %d MCP tools to ToolDefinitions",
+            len(tool_definitions),
+        )
+        return tool_definitions
+
+    def _mcp_schema_to_json_schema(self, mcp_schema: Mapping[str, Any]) -> Dict[str, Any]:
+        """Convert MCP Schema format to JSON Schema format.
+
+        MCP schemas use required/optional dicts, JSON Schema uses properties + required list.
+        """
+        required_fields = mcp_schema.get("required", {})
+        optional_fields = mcp_schema.get("optional", {})
+
+        properties: Dict[str, Any] = {}
+        required_list: List[str] = []
+
+        # Process required fields
+        for field_name, field_type in required_fields.items():
+            properties[field_name] = {"type": self._python_type_to_json_schema_type(field_type)}
+            required_list.append(field_name)
+
+        # Process optional fields
+        for field_name, field_type in optional_fields.items():
+            properties[field_name] = {"type": self._python_type_to_json_schema_type(field_type)}
+
+        json_schema = {
+            "type": "object",
+            "properties": properties,
+        }
+
+        if required_list:
+            json_schema["required"] = required_list
+
+        return json_schema
+
+    @staticmethod
+    def _python_type_to_json_schema_type(python_type: Any) -> str:
+        """Convert Python type annotations to JSON Schema type strings."""
+        # Handle tuples of types (union types)
+        if isinstance(python_type, tuple):
+            # For unions, just take the first non-None type
+            for t in python_type:
+                if t is not type(None):
+                    return InternalMCPChatOrchestrator._python_type_to_json_schema_type(t)
+            return "string"  # Fallback
+
+        # Handle None type
+        if python_type is type(None):
+            return "null"
+
+        # Map Python types to JSON Schema types
+        type_map = {
+            str: "string",
+            int: "integer",
+            float: "number",
+            bool: "boolean",
+            list: "array",
+            dict: "object",
+        }
+
+        return type_map.get(python_type, "string")  # Default to string
 
     def _limit_context_for_llm(
         self, messages: List[Mapping[str, Any]]
@@ -1165,15 +1268,73 @@ class InternalMCPChatOrchestrator:
             user_namespace=user_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
         )
-        response = llm_client.generate(prompt, context=augmented_context, model=model)
+
+        # Phase 3 (JVNAUTOSCI-799): Attempt structured tool calling if available
+        use_structured = (
+            hasattr(llm_client, "generate_with_tools")
+            and hasattr(llm_client, "_should_use_structured_calling")
+            and llm_client._should_use_structured_calling()
+        )
+
+        if use_structured:
+            self._logger.debug("[mcp_orchestrator] Using structured tool calling path")
+            try:
+                tool_definitions = self._convert_mcp_tools_to_structured_definitions()
+                llm_response = llm_client.generate_with_tools(
+                    prompt=prompt,
+                    available_tools=tool_definitions,
+                    context=augmented_context,
+                    model=model,
+                    system_message=None,  # Already in augmented_context
+                )
+
+                # Convert to legacy format for compatibility
+                if llm_response.tool_calls:
+                    # Have tool calls - will process via structured path
+                    response = llm_response.text_response or ""
+                    tool_calls = [
+                        {
+                            self._TOOL_FIELD: tc.tool_name,
+                            self._PAYLOAD_FIELD: tc.payload,
+                            "_call_id": tc.call_id,  # Preserve for tracing (JVNAUTOSCI-803)
+                        }
+                        for tc in llm_response.tool_calls
+                    ]
+                    has_valid_tool_call = True
+                    self._logger.debug(
+                        "[mcp_orchestrator] Structured calling extracted %d tool(s)",
+                        len(tool_calls),
+                    )
+                else:
+                    # No tool calls - return text response
+                    response = llm_response.text_response
+                    tool_calls = None
+                    has_valid_tool_call = False
+            except Exception as exc:
+                self._logger.warning(
+                    "[mcp_orchestrator] Structured calling failed, falling back to legacy: %s",
+                    exc,
+                )
+                use_structured = False
+
+        if not use_structured:
+            # Legacy path: generate() returns text, parse tool calls from JSON
+            response = llm_client.generate(prompt, context=augmented_context, model=model)
+            tool_calls = None  # Will be extracted below
+            has_valid_tool_call = False  # Will be set below
 
         # Detect JSON tool-call output for diagnostics (JVNAUTOSCI-698).
         # Only warn if we fail to parse/execute it.
-        is_json_action = self._is_json_action_response(response)
+        # Skip detection for structured path - it handles tool calls natively
+        if not use_structured:
+            is_json_action = self._is_json_action_response(response)
 
-        # Extract potential tool request(s)
-        tool_calls = self._extract_tool_calls(response)
-        has_valid_tool_call = bool(tool_calls)
+            # Extract potential tool request(s)
+            tool_calls = self._extract_tool_calls(response)
+            has_valid_tool_call = bool(tool_calls)
+        else:
+            # Structured path already extracted tool calls above
+            is_json_action = False  # Not relevant for structured calling
 
         # Only attempt extraction if detection passed (has action="call_tool" structure)
         # This prevents treating tool result JSON as tool call requests (JVNAUTOSCI-699)
@@ -1249,9 +1410,16 @@ class InternalMCPChatOrchestrator:
         # Support chained tool calls up to max_tool_invocations limit (JVNAUTOSCI-699)
         iteration_count = 0
         current_response = response
+        # Track if we're in the first iteration with structured tool calls already extracted
+        first_iteration_structured = use_structured and has_valid_tool_call
 
         while iteration_count < self._max_tool_invocations:
-            tool_calls = self._extract_tool_calls(current_response)
+            # Skip extraction on first iteration if structured calling already did it
+            if first_iteration_structured:
+                first_iteration_structured = False  # Only skip once
+            else:
+                tool_calls = self._extract_tool_calls(current_response)
+
             if not tool_calls:
                 break
 
@@ -1335,25 +1503,47 @@ class InternalMCPChatOrchestrator:
                     tool_payload = self._format_tool_result(
                         tool_name, result.payload, result.duration_ms, "ok"
                     )
-                    invocations.append({"tool": tool_name, "payload": dict(payload)})
-                    self._logger.info(
-                        "[mcp_orchestrator] Tool invocation #%d: tool=%s, model=%s",
-                        iteration_count,
-                        tool_name,
-                        model or "default",
+
+                    # Extract call_id for tracing (JVNAUTOSCI-803)
+                    call_id = tool_request.get("_call_id")
+                    invocation_record = {"tool": tool_name, "payload": dict(payload)}
+                    if call_id:
+                        invocation_record["call_id"] = call_id
+                    invocations.append(invocation_record)
+
+                    log_msg = (
+                        "[mcp_orchestrator] Tool invocation #%d: tool=%s, model=%s"
+                        + (", call_id=%s" if call_id else "")
                     )
+                    log_args = [iteration_count, tool_name, model or "default"]
+                    if call_id:
+                        log_args.append(call_id)
+                    self._logger.info(log_msg, *log_args)
                 except (
                     Exception
                 ) as exc:  # pragma: no cover - error handling path validated separately
                     tool_payload = self._format_tool_result(
                         tool_name, None, None, "error", str(exc)
                     )
-                    invocations.append(
-                        {"tool": tool_name, "payload": dict(payload), "error": str(exc)}
+
+                    # Extract call_id for error tracing (JVNAUTOSCI-803)
+                    call_id = tool_request.get("_call_id")
+                    error_record = {
+                        "tool": tool_name,
+                        "payload": dict(payload),
+                        "error": str(exc),
+                    }
+                    if call_id:
+                        error_record["call_id"] = call_id
+                    invocations.append(error_record)
+
+                    log_msg = "[mcp_orchestrator] Tool %s failed: %s" + (
+                        " (call_id=%s)" if call_id else ""
                     )
-                    self._logger.warning(
-                        "[mcp_orchestrator] Tool %s failed: %s", tool_name, exc
-                    )
+                    log_args = [tool_name, exc]
+                    if call_id:
+                        log_args.append(call_id)
+                    self._logger.warning(log_msg, *log_args)
 
                 augmented_context.append({"role": "tool", "content": tool_payload})
                 tool_messages.append({"role": "tool", "content": tool_payload})
