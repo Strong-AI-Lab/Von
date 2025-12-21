@@ -14,6 +14,7 @@ This document provides an overview of key files within the `docs` directory that
 > 6. If the user pastes Bash that fails, convert it to valid PowerShell rather than trying to “fix” heredocs.
 > 7. Keep changes minimal, well‑scoped, and update related tests/documentation.
 > 8. When uncertain, ask succinctly—do not guess or fabricate behaviour.
+> 9. Always check VS Code’s Problems panel (or run `get_errors`) after edits and whenever the user reports an error.
 
 ## 🇳🇿 CRITICAL: New Zealand English Only
 

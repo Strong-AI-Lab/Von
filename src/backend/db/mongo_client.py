@@ -125,6 +125,9 @@ TEXT_RELATIONS_COLLECTION_NAME = (
 )
 META_RELATIONS_COLLECTION_NAME = "meta_relations"  # New collection for relation elicitation meta-data (JVNAUTOSCI-371)
 
+# Agent Gmail OAuth token storage (JVNAUTOSCI-801)
+AGENT_GMAIL_TOKENS_COLLECTION_NAME = "agent_gmail_tokens"
+
 # --- Client Initialization ---
 # REFACTORING_NOTE: The global client is being removed in favor of a more robust
 # connection management pattern within get_db(). This avoids issues with
@@ -703,6 +706,45 @@ def get_meta_relations_collection() -> Collection | None:
             )
         return coll
     return None
+
+
+def get_agent_gmail_tokens_collection() -> Collection | None:
+    """Returns the agent Gmail token collection and ensures indexes.
+
+    Stores encrypted OAuth token payloads for agent Gmail profiles.
+    IMPORTANT: Token content should never be logged.
+    """
+
+    db = get_db()
+    if db is None:
+        return None
+
+    coll = db[AGENT_GMAIL_TOKENS_COLLECTION_NAME]
+    try:
+        existing_indexes = [idx["name"] for idx in coll.list_indexes()]
+
+        if "profile_id_1_unique" not in existing_indexes:
+            coll.create_index(
+                [("profile_id", ASCENDING)], unique=True, name="profile_id_1_unique"
+            )
+        if "authorised_email_1" not in existing_indexes:
+            coll.create_index(
+                [("authorised_email", ASCENDING)], name="authorised_email_1"
+            )
+        if "updated_at_-1" not in existing_indexes:
+            coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
+    except OperationFailure as e:
+        logger.warning(
+            "Could not create some indexes for %s: %s",
+            AGENT_GMAIL_TOKENS_COLLECTION_NAME,
+            e,
+        )
+    except Exception as e:
+        logger.warning(
+            "Index creation skipped for %s: %s", AGENT_GMAIL_TOKENS_COLLECTION_NAME, e
+        )
+
+    return coll
 
 
 # --- Example Usage (Optional, for testing) ---

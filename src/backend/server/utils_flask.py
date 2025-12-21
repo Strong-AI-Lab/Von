@@ -45,6 +45,7 @@ from .routes.elicitation_routes import elicitation_bp
 from .routes.annotations_routes import annotations_bp
 from .routes.admin_routes import admin_bp
 from .routes.auth_routes import auth_bp
+from .routes.agent_gmail_oauth_routes import agent_gmail_oauth_bp
 from .routes.predicate_routes import predicate_bp
 from ..db.connection_manager import (
     ensure_monitor_started,
@@ -121,6 +122,9 @@ def create_flask_app(
     app.register_blueprint(
         auth_bp, url_prefix="/von"
     )  # Register the new auth blueprint with /von prefix to match Google OAuth config
+    app.register_blueprint(
+        agent_gmail_oauth_bp, url_prefix="/von"
+    )  # Agent Gmail OAuth endpoints (separate from user login)
     # ---------------------------
 
     # --- Log App Version ---

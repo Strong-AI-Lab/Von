@@ -473,7 +473,8 @@ class InternalMCPChatOrchestrator:
                 text_value = text.get("text")
                 if not isinstance(text_value, str) or not text_value.strip():
                     continue
-                lang = text.get("lang") if isinstance(text.get("lang"), str) else ""
+                raw_lang = text.get("lang")
+                lang = raw_lang if isinstance(raw_lang, str) else ""
                 _add_candidate(text_value, predicate=predicate, lang=lang)
 
         if not candidate_texts:
