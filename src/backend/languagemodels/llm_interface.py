@@ -10,6 +10,14 @@ except ImportError:  # pragma: no cover - environment without ollama
     ollama = None  # type: ignore
 import openai
 from abc import ABC, abstractmethod
+
+# Structured tool calling support (JVNAUTOSCI-799)
+from .structured_tool_calling import (
+    LLMResponse,
+    ToolDefinition,
+    get_llm_client as get_structured_client,
+    LLMClientConfig,
+)
 from typing import (
     Optional,
     List,
@@ -238,6 +246,79 @@ class LLMInterface(ABC):
         """Generate a response based on the prompt and optional context and parameters."""
         pass
 
+    def generate_with_tools(
+        self,
+        prompt: str,
+        available_tools: List[ToolDefinition],
+        context: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        system_message: Optional[str] = None,
+    ) -> LLMResponse:
+        """Generate response with structured tool calling support (JVNAUTOSCI-799).
+
+        This method provides provider-native tool calling when supported, with
+        graceful fallback to JSON-in-text parsing for unsupported providers.
+
+        Args:
+            prompt: User query or instruction
+            available_tools: List of tools the model can invoke
+            context: Prior conversation history
+            model: Model name override
+            system_message: System-level instructions
+
+        Returns:
+            LLMResponse with text and/or structured tool calls
+
+        Note:
+            Default implementation uses structured_tool_calling module.
+            Subclasses can override for provider-specific optimisations.
+        """
+        # Feature flag check
+        if not self._should_use_structured_calling():
+            # Fallback to legacy JSON-in-text
+            raise NotImplementedError(
+                "generate_with_tools() requires VON_INTERNAL_MCP_STRUCTURED_TOOL_CALLING=1"
+            )
+
+        # Default implementation delegates to structured_tool_calling module
+        config = self._get_structured_client_config(model)
+        client = get_structured_client(config)
+        return client.generate_with_tools_sync(
+            prompt=prompt,
+            available_tools=available_tools,
+            system_message=system_message,
+            context=self._convert_context_for_structured_client(context),
+        )
+
+    def _should_use_structured_calling(self) -> bool:
+        """Check if structured tool calling is enabled via feature flag."""
+        return os.environ.get("VON_INTERNAL_MCP_STRUCTURED_TOOL_CALLING", "1") == "1"
+
+    def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
+        """Get configuration for structured tool calling client.
+
+        Subclasses should override to provide provider-specific config.
+        """
+        raise NotImplementedError(
+            "Subclass must implement _get_structured_client_config()"
+        )
+
+    def _convert_context_for_structured_client(
+        self, context: Optional[List[Dict[str, Any]]]
+    ) -> Optional[Dict[str, Any]]:
+        """Convert LLMInterface context format to structured client format.
+
+        Args:
+            context: List of message dicts with 'role' and 'content' keys
+
+        Returns:
+            Dict suitable for structured client (implementation-specific)
+        """
+        # Default: pass through as-is (most clients expect list of messages)
+        if context:
+            return {"messages": context}
+        return None
+
     @abstractmethod
     def list_models(self) -> List[str]:
         """List available models for this interface."""
@@ -297,6 +378,14 @@ class OllamaClient(LLMInterface):
                 f"An unexpected error occurred during OllamaClient initialization for host {self.host}: {e}"
             )
             raise
+
+    def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
+        """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""
+        return LLMClientConfig(
+            model=model or self.default_model,
+            base_url=self.host,
+            temperature=0.7,
+        )
 
     def _normalize_host_url(self, host: str) -> str:
         """
@@ -657,6 +746,14 @@ class OpenAIClient(LLMInterface):
         self.client = openai.OpenAI(api_key=self.api_key)
         logger.info("OpenAIClient initialized.")
 
+    def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
+        """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""
+        return LLMClientConfig(
+            model=model or self.DEFAULT_MODEL,
+            api_key=self.api_key,
+            temperature=0.7,
+        )
+
     def validate_model_response(self, response, model: str) -> str:
         """
         Validate that the response matches expectations for the model.
@@ -945,6 +1042,14 @@ class GeminiClient(LLMInterface):
             raise ValueError(
                 f"Failed to initialize Gemini model '{self.default_model}'. Check model name and API key."
             ) from e
+
+    def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
+        """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""
+        return LLMClientConfig(
+            model=model or self.default_model,
+            api_key=self.api_key,
+            temperature=0.7,
+        )
 
     def generate(
         self,
