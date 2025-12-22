@@ -108,7 +108,8 @@ async function updateHistoryLength() {
                 if (!authenticated) {
                     historyLengthElement.textContent = 'History: unauthenticated';
                 } else {
-                    historyLengthElement.textContent = `History: ${historyLength}`;
+                    const contextCount = transcriptTurns.length;
+                    historyLengthElement.textContent = `History: ${contextCount} | ${historyLength}`;
                 }
             }
         } else {
@@ -213,6 +214,8 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
         } else if (scrollToBottom) {
             scrollableField.scrollTop = scrollableField.scrollHeight;
         }
+        // Update history display to reflect new context count
+        updateHistoryLength();
     });
 }
 

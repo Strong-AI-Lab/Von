@@ -649,8 +649,8 @@ class InternalMCPChatOrchestrator:
             self._missing_tool_call_detector = None
             return None
 
-        prompt_id = self._first_relationship_value(action, "uses_prompt")
-        model_id = self._first_relationship_value(action, "uses_llm_model")
+        prompt_id = self._first_relationship_value(action, "#V#uses_prompt")
+        model_id = self._first_relationship_value(action, "#V#uses_llm_model")
 
         prompt_text: Optional[str] = None
         if isinstance(prompt_id, str):
