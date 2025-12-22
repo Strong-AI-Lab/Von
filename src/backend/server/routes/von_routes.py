@@ -1530,6 +1530,7 @@ def search_concepts_endpoint():
         # Format results for autocomplete
         formatted_results = [
             {
+                "id": item.get("concept_id"),  # Frontend expects 'id' field
                 "concept_id": item.get("concept_id"),
                 "name": item.get("name") or item.get("concept_id"),
                 "kind": item.get("kind", "unknown"),
