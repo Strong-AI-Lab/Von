@@ -1427,6 +1427,49 @@ def get_models():
         return jsonify({"error": str(e)}), 500
 
 
+@von_bp.route("/api/search", methods=["GET"])
+def search_concepts_endpoint():
+    """API endpoint to search for concepts by name.
+    
+    Query parameters:
+    - q: Search query string (required)
+    - limit: Maximum results to return (default: 8)
+    """
+    try:
+        from ...services.concept_search_service import search_concepts
+        
+        query = request.args.get("q", "").strip()
+        limit = request.args.get("limit", default=8, type=int)
+        
+        if not query:
+            return jsonify({"results": [], "total_count": 0}), 200
+        
+        result = search_concepts(
+            query=query,
+            match_type="substring",
+            limit=limit,
+            include_description=False
+        )
+        
+        # Format results for autocomplete
+        formatted_results = [
+            {
+                "concept_id": item.get("concept_id"),
+                "name": item.get("name") or item.get("concept_id"),
+                "kind": item.get("kind", "unknown")
+            }
+            for item in result.get("results", [])
+        ]
+        
+        return jsonify({
+            "results": formatted_results,
+            "total_count": result.get("total_count", 0)
+        }), 200
+    except Exception as e:
+        current_app.logger.error(f"Concept search error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/reset", methods=["POST"])
 def reset_context():
     """Reset the conversation context."""
