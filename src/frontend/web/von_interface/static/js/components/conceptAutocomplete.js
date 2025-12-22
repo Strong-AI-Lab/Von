@@ -16,7 +16,7 @@
 const TRIGGER_PATTERN = /#[Vv]#/;
 const DEBOUNCE_MS = 200;
 const MAX_RESULTS = 8;
-const SEARCH_API = '/von/api/search';
+const SEARCH_API = '/von/api/search'; // Full path including /von prefix for Flask blueprint
 
 let autocompleteState = {
     isOpen: false,
@@ -120,31 +120,45 @@ function renderDropdown(results) {
         item.style.cursor = 'pointer';
         item.style.borderBottom = '1px solid #f0f0f0';
         item.style.fontSize = '14px';
+        item.style.display = 'flex';
+        item.style.alignItems = 'center';
+        item.style.justifyContent = 'space-between';
+        item.style.gap = '8px';
 
-        // Create display: "name (id)" with badge for kind
-        const kindBadge = document.createElement('span');
-        kindBadge.textContent = result.kind;
-        kindBadge.style.display = 'inline-block';
-        kindBadge.style.fontSize = '10px';
-        kindBadge.style.padding = '2px 6px';
-        kindBadge.style.marginLeft = '8px';
-        kindBadge.style.backgroundColor = '#e8e8e8';
-        kindBadge.style.borderRadius = '3px';
-        kindBadge.style.fontWeight = 'bold';
-        kindBadge.style.color = '#333';
-
+        // Left side: name with tooltip
         const nameSpan = document.createElement('span');
-        nameSpan.textContent = result.name;
+        nameSpan.className = 'concept-autocomplete-item-name';
+        nameSpan.textContent = result.name || result.id;
         nameSpan.style.fontWeight = '500';
+        nameSpan.style.flex = '1';
+        nameSpan.title = `${result.name || result.id} — ${result.id}`;
 
-        const idSpan = document.createElement('span');
-        idSpan.textContent = ` (${result.id})`;
-        idSpan.style.color = '#666';
-        idSpan.style.fontSize = '12px';
-        idSpan.style.marginLeft = '4px';
+        // Right side: kind badge (matching vontology.js style)
+        const badgeText = result.kind === 'predicate' ? 'Predicate' : 
+                         (result.kind === 'individual' ? 'Individual' : 'Type');
+        const kindBadge = document.createElement('span');
+        kindBadge.className = `concept-autocomplete-item-kind ${result.kind}`;
+        kindBadge.textContent = badgeText;
+        kindBadge.style.display = 'inline-block';
+        kindBadge.style.fontSize = '11px';
+        kindBadge.style.padding = '3px 8px';
+        kindBadge.style.borderRadius = '3px';
+        kindBadge.style.fontWeight = '500';
+        kindBadge.style.whiteSpace = 'nowrap';
+        
+        // Set badge colors to match vontology.js
+        if (result.kind === 'individual') {
+            kindBadge.style.backgroundColor = '#d4edda';
+            kindBadge.style.color = '#155724';
+        } else if (result.kind === 'type') {
+            kindBadge.style.backgroundColor = '#cfe2ff';
+            kindBadge.style.color = '#084298';
+        } else if (result.kind === 'predicate') {
+            kindBadge.style.backgroundColor = '#fff3cd';
+            kindBadge.style.color = '#997404';
+        }
 
         item.appendChild(nameSpan);
-        item.appendChild(idSpan);
         item.appendChild(kindBadge);
 
         // Hover effect
