@@ -16,7 +16,7 @@
 const TRIGGER_PATTERN = /#[Vv]#/;
 const DEBOUNCE_MS = 200;
 const MAX_RESULTS = 8;
-const SEARCH_API = '/vontology/api/search';
+const SEARCH_API = '/von/api/search';
 
 let autocompleteState = {
     isOpen: false,
