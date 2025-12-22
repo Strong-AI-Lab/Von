@@ -879,14 +879,15 @@ body {
     left: 50%;
     transform: translateX(-50%);
     margin-bottom: 8px;
-    padding: 8px 12px;
+    padding: 10px 14px;
     background: #fff3cd;
     border: 1px solid #ffeeba;
     border-radius: 6px;
     color: #6b4b00;
     font-size: 13px;
-    white-space: pre-wrap;
-    max-width: 400px;
+    white-space: normal;
+    min-width: 300px;
+    max-width: 600px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
     z-index: 1000;
     pointer-events: none;
