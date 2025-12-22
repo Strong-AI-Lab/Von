@@ -135,7 +135,10 @@ def get_chat_history_segments(
 
 
 def add_message_to_history(
-    user_id: str, session_id: str, message: Dict[str, Any], llm_debug_data: Optional[Dict[str, Any]] = None
+    user_id: str,
+    session_id: str,
+    message: Dict[str, Any],
+    llm_debug_data: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Adds a message to the chat history for a specific user and session.
