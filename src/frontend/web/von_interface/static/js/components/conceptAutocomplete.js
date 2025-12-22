@@ -359,6 +359,12 @@ function handleInput(event) {
     const searchText = text.substring(lastTriggerIdx + 3, cursorPos);
     console.log(`[conceptAutocomplete] Search text: "${searchText}"`);
 
+    // Enforce proximity: only keep trigger active if cursor is within 10 chars of the trigger
+    if (searchText.length > 10) {
+        closeAutocomplete();
+        return;
+    }
+
     // Debounce search
     clearTimeout(autocompleteState.searchTimeout);
     autocompleteState.searchTimeout = setTimeout(() => {
