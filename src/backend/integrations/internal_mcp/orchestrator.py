@@ -459,13 +459,34 @@ class InternalMCPChatOrchestrator:
             "here is the actual ontology operation:",
             "here is the actual operation",
             "here's the actual operation",
+            # Common narration patterns that precede no-op responses
+            "proceeding now",
+            "what i am about to apply",
+            "what i'm about to apply",
+            "i will now",
+            "i'll now",
         )
         if any(t in lowered for t in triggers):
             return True
 
         # Detect "promise to do" pattern when combined with tool-related keywords
         # This catches "I'm going to search..." or "I'll execute the tools now"
-        toolish_keywords = ("search", "web", "fetch", "execute", "tool", "ontology", "mcp", "operation", "concept", "relationship")
+        toolish_keywords = (
+            "search",
+            "web",
+            "fetch",
+            "execute",
+            "tool",
+            "ontology",
+            "mcp",
+            "operation",
+            "concept",
+            "relationship",
+            "create",
+            "link",
+            "add",
+            "update",
+        )
         promise_patterns = (
             "i'm going to",
             "i am going to",
@@ -1346,8 +1367,13 @@ class InternalMCPChatOrchestrator:
                     model or "default",
                 )
 
+            # Gather richer diagnostics for debug panels and logs
+            fenced_detected = self._contains_fenced_tool_call_json(response)
+            classifier_verdict: Optional[bool] = None
+            classifier_used = False
             retry_reason: Optional[str] = None
-            if self._contains_fenced_tool_call_json(response):
+
+            if fenced_detected:
                 retry_reason = "fenced tool-call JSON detected"
             else:
                 llm_flag = self._llm_detects_missing_tool_call(
@@ -1357,12 +1383,33 @@ class InternalMCPChatOrchestrator:
                     aux_log=aux_llm_calls,
                 )
 
+                if llm_flag is not None:
+                    classifier_used = True
+                    classifier_verdict = llm_flag
                 if llm_flag is True:
                     retry_reason = "LLM classifier flagged missing tool call"
                 elif llm_flag is None:
                     # Fallback to legacy heuristic only when classifier unavailable
                     if self._looks_like_missing_tool_call(response):
                         retry_reason = "heuristic missing tool call"
+
+            # Always append a compact detection summary for UI debugging
+            try:
+                aux_llm_calls.append(
+                    {
+                        "type": "missing_tool_call_detection",
+                        "path": "structured" if use_structured else "legacy",
+                        "is_json_action": is_json_action,
+                        "fenced_json": fenced_detected,
+                        "classifier_used": classifier_used,
+                        "classifier_verdict": (
+                            "yes" if classifier_verdict is True else "no" if classifier_verdict is False else "unavailable"
+                        ),
+                        "retry_reason": retry_reason or "",
+                    }
+                )
+            except Exception:  # pragma: no cover - best effort only
+                pass
 
             if retry_reason:
                 self._logger.info(
