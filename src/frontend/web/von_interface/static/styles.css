@@ -853,12 +853,54 @@ body {
     border-color: #004085;
 }
 
+.llm-debug-warning-container {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    margin-left: 2px;
+}
+
 .llm-debug-warning-indicator {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    margin-left: 2px;
-    cursor: help;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+}
+
+.llm-debug-warning-indicator:hover {
+    transform: scale(1.15);
+}
+
+.llm-debug-warning-tooltip {
+    display: none;
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 8px;
+    padding: 8px 12px;
+    background: #fff3cd;
+    border: 1px solid #ffeeba;
+    border-radius: 6px;
+    color: #6b4b00;
+    font-size: 13px;
+    white-space: pre-wrap;
+    max-width: 400px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    z-index: 1000;
+    pointer-events: none;
+    line-height: 1.4;
+}
+
+.llm-debug-warning-tooltip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: #ffeeba;
 }
 
 .llm-debug-warning-icon {

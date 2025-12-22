@@ -62,11 +62,13 @@ function createChatDebugWarningIndicator(warnings) {
         return null;
     }
 
+    const container = document.createElement('span');
+    container.className = 'llm-debug-warning-container';
+    container.setAttribute('role', 'img');
+    container.setAttribute('aria-label', 'Warnings available for this LLM debug turn');
+
     const indicator = document.createElement('span');
     indicator.className = 'llm-debug-warning-indicator';
-    indicator.title = warnings.join('\n');
-    indicator.setAttribute('role', 'img');
-    indicator.setAttribute('aria-label', 'Warnings available for this LLM debug turn');
     indicator.innerHTML = `
         <svg class="llm-debug-warning-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M1 21h22L12 2 1 21z" />
@@ -74,7 +76,23 @@ function createChatDebugWarningIndicator(warnings) {
             <circle cx="12" cy="17" r="1" class="llm-debug-warning-icon-mark" />
         </svg>
     `;
-    return indicator;
+
+    // Create custom tooltip
+    const tooltip = document.createElement('div');
+    tooltip.className = 'llm-debug-warning-tooltip';
+    tooltip.textContent = warnings.join('\n');
+
+    // Show/hide tooltip on hover
+    container.addEventListener('mouseenter', () => {
+        tooltip.style.display = 'block';
+    });
+    container.addEventListener('mouseleave', () => {
+        tooltip.style.display = 'none';
+    });
+
+    container.appendChild(indicator);
+    container.appendChild(tooltip);
+    return container;
 }
 
 let activeChatRequest = null;
