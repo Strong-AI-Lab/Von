@@ -86,8 +86,8 @@ class GeminiClient(LLMClient):
             response = self._client.models.generate_content(
                 model=self._model_name,
                 contents=messages,  # type: ignore[arg-type]
-                tools=tools,
-                config=genai.types.GenerateContentConfig(
+                tools=tools,  # type: ignore[call-arg]
+                config=self._genai.types.GenerateContentConfig(
                     temperature=self._temperature,
                     max_output_tokens=self._max_tokens,
                 ),

@@ -91,6 +91,25 @@ Tags: #AUTO_ACTION_PROTOCOL #ACTUALLY_TRY #NO_REDUNDANT_PERMISSION #RAW_TEXT_PRE
 **Detection:** System logs `[mcp_orchestrator] Detected JSON action output (LLM failure mode)` when this pattern occurs.
 
 - ✅ Let the user control when and how the server runs
+### Missing Tool Call Detector (Manual Use Only)
+
+**Note:** Von's chat orchestrator does NOT currently invoke this detector automatically. It exists in the Vontology for potential future integration or manual testing.
+
+**How to invoke manually:**
+```python
+# Load detector action from Vontology
+detector = fetch_concept("#V#detect_missing_tool_call_action")
+prompt_concept = detector.relationships["#V#uses_prompt"][0]  # #V#missing_tool_call_detection_prompt
+prompt_text = get_text_relations(prompt_concept, predicate="hasContent")[0]["text"]
+model = detector.relationships["#V#uses_llm_model"][0]  # #V#gpt-4o-mini
+
+# Invoke with assistant message
+result = llm_service.invoke(model, prompt_text, input_message=assistant_draft)
+# Returns: "yes" (tool promised but not invoked) or "no" (OK)
+```
+
+**What it detects:** Promises like "I'll fetch JVNAUTOSCI-803" without actual tool call JSON. See `#V#missing_tool_call_detection_prompt` for exact classification logic.
+
 
 ### Automatic External Tool Activation (JIRA / GitHub / Mongo / Others)
 
@@ -733,6 +752,97 @@ from src.backend.services.text_value_service import upsert_text_for_concept
 **Why This Matters:** The internal gateway is used by the chat interface, while external servers are used by IDE integrations and external agents. Users may test one path successfully while the other remains broken, leading to "it works for me" confusion.
 
 **Prevention:** When implementing new MCP tools, create a shared function in a service module and call it from all three implementations. This reduces duplication and ensures consistency.
+
+### 📋 CRITICAL: Using MCP Tools vs Custom Python Scripts
+
+**This section operationalizes the decision tree for AI agents: When to use MCP tools vs writing custom Python.**
+
+#### Quick Rule
+> **Use MCP tools by default.** Only write Python scripts when you need bulk operations, complex conditional logic, or data validation across multiple resources. See [docs/engineering/mcp_tools_best_practices.md](../docs/engineering/mcp_tools_best_practices.md) for comprehensive guidance.
+
+#### ✅ Always Use MCP Tools For:
+
+**1. Adding Text Content** (prompts, descriptions, instructions, notes)
+```json
+{
+  "tool": "upsert_text_relation",
+  "arguments": {
+    "concept_id": "#V#my_concept",
+    "predicate": "hasContent",
+    "text": "Your text here...",
+    "language": "en-NZ"
+  }
+}
+```
+
+**2. Querying Text Relations**
+```json
+{
+  "tool": "get_text_relations",
+  "arguments": {
+    "concept_id": "#V#my_concept",
+    "predicate": "hasContent"
+  }
+}
+```
+
+**3. Creating/Updating Concepts**
+```json
+{
+  "tool": "create_concepts",
+  "arguments": {
+    "parent_id": "#V#thing",
+    "concepts": [
+      {"name": "my_concept", "kind": "type", "description": "..."}
+    ]
+  }
+}
+```
+
+**4. Managing Relationships**
+```json
+{
+  "tool": "add_relationship",
+  "arguments": {
+    "source_id": "#V#concept1",
+    "predicate": "instance_of",
+    "target": "#V#concept2"
+  }
+}
+```
+
+#### ❌ Never Do This:
+
+- ❌ Write throwaway Python scripts for single Vontology operations
+- ❌ Use `upsert_text_for_concept()` directly (use `upsert_text_relation` tool instead)
+- ❌ Query MongoDB directly (use MCP query tools)
+- ❌ Import internal services just to interact with Vontology
+
+#### ✅ OK to Write Python For:
+
+- ✅ Bulk migrations (1000+ items with conditional logic)
+- ✅ Complex data validation across multiple resources
+- ✅ One-time backfill operations with rollback
+- ✅ Extracting/analysing large datasets
+- **But**: Call MCP tools from within the script instead of internal services
+
+#### Why MCP is Better
+
+| Aspect | Python Script | MCP Tool |
+|--------|---------------|----------|
+| Stability | Breaks on code changes | Stable API contract |
+| Discoverability | Need to know implementation | Tool schemas self-document |
+| Logging | Manual implementation | Automatic tracing |
+| Reusability | Python-only | Works from CLI, IDE, chat |
+| Error Handling | Manual implementation | Consistent responses |
+
+#### Reference
+
+See [docs/engineering/mcp_tools_best_practices.md](../docs/engineering/mcp_tools_best_practices.md) for:
+- Complete decision tree
+- All available MCP tools with examples
+- Common patterns and troubleshooting
+- When to write scripts (with examples)
 
 ## External MCP Servers
 

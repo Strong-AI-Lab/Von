@@ -65,6 +65,17 @@ body {
     }
 }
 
+/* Rotation animation for loading/refresh icons */
+@keyframes icon-spin {
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
 .annotation-input {
     margin-top: 4px;
 }
@@ -842,6 +853,47 @@ body {
     border-color: #004085;
 }
 
+.llm-debug-warning-indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-left: 2px;
+    cursor: help;
+}
+
+.llm-debug-warning-icon {
+    width: 14px;
+    height: 14px;
+    fill: #f57c00;
+}
+
+.llm-debug-warning-icon-mark {
+    stroke: #ffffff;
+    stroke-width: 2;
+    stroke-linecap: round;
+    fill: #ffffff;
+}
+
+.llm-debug-warning-box {
+    background: #fff3cd;
+    border: 1px solid #ffeeba;
+    border-left: 4px solid #f57c00;
+    color: #6b4b00;
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 10px;
+}
+
+.llm-debug-warning-box-title {
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.llm-debug-warning-list {
+    margin: 0;
+    padding-left: 18px;
+}
+
 /* Hide tool section when no tools used */
 #chatLlmDebugToolsSection.hidden {
     display: none;
@@ -1400,6 +1452,21 @@ button:hover {
 }
 
 /* Secondary variant (for non-primary actions like Reset) */
+/* Delete exchange button styling */
+.btn-delete-exchange {
+    transition: color 0.15s ease-in-out;
+    opacity: 0.7;
+}
+
+.btn-delete-exchange:hover {
+    opacity: 1;
+}
+
+.btn-delete-exchange:focus {
+    outline: 2px solid rgba(217, 83, 79, 0.5);
+    outline-offset: -2px;
+}
+
 .btn-secondary {
     background: transparent;
     color: #0f172a;
@@ -4075,6 +4142,16 @@ html body .names-list-container .name-cartouche .name-delete-button:disabled:hov
     transform: translateY(1px);
 }
 
+/* Loading state for refresh/action buttons */
+.round-icon-button.loading {
+    pointer-events: none;
+    opacity: 0.8;
+}
+
+.round-icon-button.loading svg {
+    animation: icon-spin 1s linear infinite;
+}
+
 /* Circular plus button for add actions */
 .circular-add-button {
     width: 30px;
@@ -4349,6 +4426,88 @@ body.settings-body {
     display: flex;
     flex-direction: column;
     gap: 2rem;
+}
+
+.runtime-overview {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.runtime-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.runtime-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+}
+
+.runtime-card {
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 12px;
+    background: linear-gradient(180deg, #f9fafb 0%, #fff 100%);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.runtime-label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #374151;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+}
+
+.runtime-value {
+    margin-top: 6px;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #111827;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.runtime-copy-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid #cbd5e1;
+    background: #ffffff;
+    color: #111827;
+    font-weight: 700;
+    min-width: 140px;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.runtime-copy-button:hover {
+    background: #f0f4f8;
+    border-color: #b8c2cf;
+}
+
+.runtime-copy-button:active {
+    transform: translateY(1px);
+}
+
+.runtime-copy-button.copied {
+    background: #d4edda;
+    border-color: #9ad0a1;
+    color: #0f5132;
+}
+
+.runtime-hint {
+    margin-top: 4px;
+    font-size: 0.85rem;
+    color: #6b7280;
 }
 
 .settings-container section {

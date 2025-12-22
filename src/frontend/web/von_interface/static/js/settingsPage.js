@@ -19,6 +19,155 @@ const LS_ORG_KEY = 'von_current_org';
 const LS_LANG_KEY = 'von_preferred_language';
 const LS_AUTO_RELOAD = 'von:autoReloadOnRestart';
 const LS_GMAIL_PROFILE = 'von_gmail_profile';
+const RUNTIME_REFRESH_MS = 12000;
+
+let runtimeIntervalId = null;
+
+function formatUptime(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const d = Math.floor(totalSec / 86400);
+  const h = Math.floor((totalSec % 86400) / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function wireCopyButton(btn) {
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const value = btn.textContent.trim();
+    if (!value || value === '—') return;
+    try {
+      await navigator.clipboard.writeText(value);
+      const oldText = btn.textContent;
+      btn.textContent = 'Copied';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.textContent = oldText;
+        btn.classList.remove('copied');
+      }, 1000);
+    } catch (err) {
+      console.warn('Copy failed', err);
+    }
+  });
+}
+
+function renderRagSummary(ragData, pendingFallback) {
+  const ragSummaryEl = document.getElementById('settingsRagSummary');
+  const ragHintEl = document.getElementById('settingsRagHint');
+  if (!ragSummaryEl) return;
+
+  const pending = typeof pendingFallback === 'number' ? pendingFallback : null;
+  if (!ragData) {
+    if (pending === null || pending < 0) {
+      ragSummaryEl.textContent = 'Unknown';
+      if (ragHintEl) ragHintEl.textContent = 'RAG status unavailable';
+    } else if (pending === 0) {
+      ragSummaryEl.textContent = 'Idle';
+      if (ragHintEl) ragHintEl.textContent = 'No pending items to index';
+    } else {
+      ragSummaryEl.textContent = `${pending} pending`;
+      if (ragHintEl) ragHintEl.textContent = 'Pending items waiting for indexing';
+    }
+    return;
+  }
+
+  const { indexed = 0, pending: pendingCount = 0, failed = 0, skipped = 0 } = ragData;
+  if (pendingCount === 0) {
+    ragSummaryEl.textContent = `Indexed ${indexed}`;
+    if (ragHintEl) ragHintEl.textContent = `Indexed=${indexed} • Failed=${failed} • Skipped=${skipped}`;
+  } else {
+    ragSummaryEl.textContent = `Indexed ${indexed} • ${pendingCount} pending`;
+    if (ragHintEl) ragHintEl.textContent = `Indexed=${indexed} • Pending=${pendingCount} • Failed=${failed} • Skipped=${skipped}`;
+  }
+}
+
+async function loadRagStatus(pendingFallback) {
+  const ns = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
+  const url = ns ? `/admin/rag_status?namespace=${encodeURIComponent(ns)}` : '/admin/rag_status';
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(url, { cache: 'no-store', signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    renderRagSummary(data, pendingFallback);
+  } catch (err) {
+    console.warn('Failed to load RAG status (settings)', err);
+    renderRagSummary(null, pendingFallback);
+  }
+}
+
+async function loadRuntimeStatus(manualRefresh = false) {
+  const localEl = document.getElementById('settingsLocalIpValue');
+  const publicEl = document.getElementById('settingsPublicIpValue');
+  const pidEl = document.getElementById('settingsPidValue');
+  const uptimeEl = document.getElementById('settingsUptimeValue');
+  const refreshBtn = document.getElementById('refreshRuntimeButton');
+
+  if (refreshBtn && manualRefresh) {
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = 'Refreshing…';
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch('/health', { cache: 'no-store', signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+
+    const data = await res.json();
+    const { local_ip: localIp = '—', public_ip: publicIp = '—', pid = '—', start_time: startTimeIso = null, rag_pending_count: ragPending = null } = data;
+
+    if (localEl) localEl.textContent = localIp || '—';
+    if (publicEl) publicEl.textContent = publicIp || '—';
+    if (pidEl) pidEl.textContent = pid ?? '—';
+    if (uptimeEl && startTimeIso) {
+      const started = Date.parse(startTimeIso);
+      if (!Number.isNaN(started)) {
+        const diff = Date.now() - started;
+        uptimeEl.textContent = formatUptime(diff);
+      } else {
+        uptimeEl.textContent = '—';
+      }
+    }
+
+    await loadRagStatus(ragPending);
+  } catch (err) {
+    console.warn('Failed to load runtime status', err);
+    if (localEl) localEl.textContent = '—';
+    if (publicEl) publicEl.textContent = '—';
+    if (pidEl) pidEl.textContent = '—';
+    if (uptimeEl) uptimeEl.textContent = '—';
+    renderRagSummary(null, null);
+  } finally {
+    if (refreshBtn && manualRefresh) {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = 'Refresh';
+    }
+  }
+}
+
+function setupRuntimeSection() {
+  wireCopyButton(document.getElementById('settingsLocalIpValue'));
+  wireCopyButton(document.getElementById('settingsPublicIpValue'));
+  wireCopyButton(document.getElementById('settingsPidValue'));
+
+  const refreshBtn = document.getElementById('refreshRuntimeButton');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', () => loadRuntimeStatus(true));
+  }
+
+  loadRuntimeStatus();
+  if (!runtimeIntervalId) {
+    runtimeIntervalId = setInterval(loadRuntimeStatus, RUNTIME_REFRESH_MS);
+  }
+}
 
 function getStoredJson(key) {
   try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; }
@@ -57,6 +206,7 @@ function applyStoredSelection(selectId, stored, fallbackSelected = true) {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  setupRuntimeSection();
   // Initialize all settings sections
   await loadAndDisplaySettings();
   // Load DB info
@@ -134,6 +284,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 });
+
+// Expose a lightweight hook so inline auth script can refresh org selector post-login
+// without reloading the whole settings page.
+window.refreshOrgSelector = async function () {
+  try {
+    await renderOrgSelector('orgSelectorContainer');
+  } catch (e) {
+    console.warn('refreshOrgSelector failed', e);
+  }
+};
 
 // Auto Reload on Restart toggle
 const autoReloadToggle = document.getElementById('autoReloadOnRestartToggle');

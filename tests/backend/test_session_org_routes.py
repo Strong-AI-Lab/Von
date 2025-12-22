@@ -40,13 +40,13 @@ def app_client(monkeypatch):
         def fetch_token(self, *args, **kwargs):
             return None
 
-    fake_flow_module.Flow = _DummyFlow
+    fake_flow_module.Flow = _DummyFlow  # type: ignore[attr-defined]
     sys.modules["google_auth_oauthlib"] = types.ModuleType("google_auth_oauthlib")
-    sys.modules["google_auth_oauthlib"].flow = fake_flow_module
+    sys.modules["google_auth_oauthlib"].flow = fake_flow_module  # type: ignore[attr-defined]
     sys.modules["google_auth_oauthlib.flow"] = fake_flow_module
 
     fake_id_token_module = types.ModuleType("google.oauth2.id_token")
-    fake_id_token_module.verify_oauth2_token = lambda *args, **kwargs: {
+    fake_id_token_module.verify_oauth2_token = lambda *args, **kwargs: {  # type: ignore[attr-defined]
         "sub": "dummy-user"
     }
 
@@ -56,7 +56,7 @@ def app_client(monkeypatch):
         def __init__(self, id_token: str = "dummy-token"):
             self.id_token = id_token
 
-    fake_credentials_module.Credentials = _DummyCredentials
+    fake_credentials_module.Credentials = _DummyCredentials  # type: ignore[attr-defined]
 
     fake_service_account_module = types.ModuleType("google.oauth2.service_account")
 
@@ -64,12 +64,12 @@ def app_client(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.project_id = kwargs.get("project_id")
 
-    fake_service_account_module.Credentials = _DummyServiceAccountCredentials
+    fake_service_account_module.Credentials = _DummyServiceAccountCredentials  # type: ignore[attr-defined]
 
     fake_oauth2_package = types.ModuleType("google.oauth2")
-    fake_oauth2_package.id_token = fake_id_token_module
-    fake_oauth2_package.credentials = fake_credentials_module
-    fake_oauth2_package.service_account = fake_service_account_module
+    fake_oauth2_package.id_token = fake_id_token_module  # type: ignore[attr-defined]
+    fake_oauth2_package.credentials = fake_credentials_module  # type: ignore[attr-defined]
+    fake_oauth2_package.service_account = fake_service_account_module  # type: ignore[attr-defined]
 
     sys.modules["google.oauth2"] = fake_oauth2_package
     sys.modules["google.oauth2.id_token"] = fake_id_token_module
@@ -203,6 +203,6 @@ def test_get_my_organisations_returns_stubbed_memberships(app_client):
     data = resp.get_json()
     assert data["total_count"] == 1
     org = data["organisations"][0]
-    assert org["concept_id"] == "university_of_auckland_strong_ai_lab"
+    assert org["concept_id"] == "#V#university_of_auckland_strong_ai_lab"
     assert org["role"] == "admin"
     assert org["name"] == "University Of Auckland Strong Ai Lab"

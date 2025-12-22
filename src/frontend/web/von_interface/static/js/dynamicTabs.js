@@ -1258,11 +1258,18 @@ async function reloadConceptTab(conceptId) {
         // Calculate the suffix used for this tab's DOM elements
         const suffix = conceptId.replace(/[^a-zA-Z0-9]/g, '_');
 
-        // Show loading state
+        // Show loading state on both tab button and refresh icon
         const tabButton = document.querySelector(`[data-tab-id="${conceptId}"] .tab-name`);
         const originalText = tabButton?.textContent;
         if (tabButton) {
             tabButton.textContent = '🔄 Reloading...';
+        }
+
+        // Add loading animation to refresh button icon
+        const refreshButton = document.getElementById(`refreshConceptButton_${suffix}`);
+        if (refreshButton) {
+            refreshButton.classList.add('loading');
+            refreshButton.disabled = true;
         }
 
         // Fetch fresh concept data from backend
@@ -1303,6 +1310,12 @@ async function reloadConceptTab(conceptId) {
             tabButton.textContent = originalText;
         }
 
+        // Remove loading animation from refresh button
+        if (refreshButton) {
+            refreshButton.classList.remove('loading');
+            refreshButton.disabled = false;
+        }
+
     } catch (error) {
         console.error(`[dynamicTabs] Failed to reload concept tab:`, error);
 
@@ -1314,6 +1327,14 @@ async function reloadConceptTab(conceptId) {
             setTimeout(() => {
                 if (tabButton) tabButton.textContent = originalText;
             }, 2000);
+        }
+
+        // Remove loading animation from refresh button on error
+        const suffix = conceptId.replace(/[^a-zA-Z0-9]/g, '_');
+        const refreshButton = document.getElementById(`refreshConceptButton_${suffix}`);
+        if (refreshButton) {
+            refreshButton.classList.remove('loading');
+            refreshButton.disabled = false;
         }
 
         // Show user-friendly error message

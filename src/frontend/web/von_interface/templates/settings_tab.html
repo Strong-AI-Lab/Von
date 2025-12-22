@@ -12,6 +12,53 @@
 
 <body class="settings-body">
     <div class="settings-container">
+        <section id="server-runtime-overview" class="runtime-overview">
+            <div class="runtime-header">
+                <div>
+                    <h2>Server Runtime</h2>
+                    <p class="settings-note">Live connection details for this Von instance. Values refresh
+                        automatically and can be copied for debugging or remote access.</p>
+                </div>
+                <button id="refreshRuntimeButton" type="button" class="btn-secondary">Refresh</button>
+            </div>
+            <div class="runtime-grid">
+                <div class="runtime-card">
+                    <div class="runtime-label">Local IP</div>
+                    <div class="runtime-value">
+                        <button id="settingsLocalIpValue" class="runtime-copy-button" type="button"
+                            title="Copy local IP address">—</button>
+                    </div>
+                    <div class="runtime-hint">LAN address; use for same-network clients.</div>
+                </div>
+                <div class="runtime-card">
+                    <div class="runtime-label">Public IP</div>
+                    <div class="runtime-value">
+                        <button id="settingsPublicIpValue" class="runtime-copy-button" type="button"
+                            title="Copy public IP address">—</button>
+                    </div>
+                    <div class="runtime-hint">What external services (e.g., Atlas) see.</div>
+                </div>
+                <div class="runtime-card">
+                    <div class="runtime-label">PID</div>
+                    <div class="runtime-value">
+                        <button id="settingsPidValue" class="runtime-copy-button" type="button"
+                            title="Copy server process ID">—</button>
+                    </div>
+                    <div class="runtime-hint">Process identifier for the running backend.</div>
+                </div>
+                <div class="runtime-card">
+                    <div class="runtime-label">Uptime</div>
+                    <div class="runtime-value" id="settingsUptimeValue" title="Process uptime">—</div>
+                    <div class="runtime-hint">Updated every few seconds.</div>
+                </div>
+                <div class="runtime-card">
+                    <div class="runtime-label">RAG Status</div>
+                    <div class="runtime-value" id="settingsRagSummary" title="RAG indexing summary">—</div>
+                    <div class="runtime-hint" id="settingsRagHint">Includes pending and indexed counts.</div>
+                </div>
+            </div>
+        </section>
+
         <section id="premium-model-settings">
             <h2>Premium Models (OpenAI)</h2>
             <label for="openaiApiKeyEnvVar">OpenAI API Key Environment Variable:</label>
@@ -360,6 +407,11 @@
                     } catch (error) {
                         console.warn('Failed to update history length after login:', error);
                     }
+                }
+
+                // Re-render organisation selector now that we have an authenticated session
+                if (window.refreshOrgSelector) {
+                    try { await window.refreshOrgSelector(); } catch (e) { console.warn('Org selector refresh failed', e); }
                 }
             } else {
                 // User is not logged in - show login button

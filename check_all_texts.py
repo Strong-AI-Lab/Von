@@ -17,5 +17,5 @@ else:
         text = t.get('text', '')
         print(f'  predicate={predicate}, lang={lang}, text_len={len(text)}')
         seen_predicates.add(predicate)
-    
+
     print(f'\nUnique predicates: {sorted(seen_predicates)}')

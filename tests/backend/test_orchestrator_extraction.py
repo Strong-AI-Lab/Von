@@ -245,6 +245,56 @@ def test_llm_detector_returns_true_on_yes():
     assert aux_log and aux_log[0]["type"] == "missing_tool_call_classifier"
 
 
+def test_llm_detector_strips_vontology_model_prefix_before_calling_llm():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    orchestrator._missing_tool_call_detector_loaded = True
+    orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
+        action_id="#V#detect_missing_tool_call_action",
+        prompt_id="#V#missing_tool_call_detection_prompt",
+        prompt_text="Answer YES or NO for: {response}",
+        model="#V#gpt-4o-mini",
+    )
+
+    llm = _RecorderLLM(["NO"])
+    aux_log: list[dict] = []
+    decision = orchestrator._llm_detects_missing_tool_call(
+        "I will fetch that now",
+        llm,
+        fallback_model="fallback-model",
+        aux_log=aux_log,
+    )
+
+    assert decision is False
+    assert llm.calls[0]["model"] == "gpt-4o-mini"
+    assert aux_log and aux_log[0]["model_raw"] == "#V#gpt-4o-mini"
+    assert aux_log[0]["model_resolved"] == "gpt-4o-mini"
+
+
+def test_llm_detector_appends_response_when_placeholder_missing():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    orchestrator._missing_tool_call_detector_loaded = True
+    orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
+        action_id="#V#detect_missing_tool_call_action",
+        prompt_id="#V#missing_tool_call_detection_prompt",
+        prompt_text="You are a binary classifier. Output yes or no.",
+        model="detector-model",
+    )
+
+    llm = _RecorderLLM(["YES"])
+    aux_log: list[dict] = []
+    decision = orchestrator._llm_detects_missing_tool_call(
+        "I'll fetch JVNAUTOSCI-803 now",
+        llm,
+        fallback_model="fallback-model",
+        aux_log=aux_log,
+    )
+
+    assert decision is True
+    assert "fetch JVNAUTOSCI-803" in llm.calls[0]["prompt"]
+    assert aux_log and aux_log[0]["prompt_placeholder_response"] is False
+    assert aux_log[0]["prompt_injection_mode"] == "append"
+
+
 def test_llm_detector_uses_fallback_model_when_missing():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     orchestrator._missing_tool_call_detector_loaded = True

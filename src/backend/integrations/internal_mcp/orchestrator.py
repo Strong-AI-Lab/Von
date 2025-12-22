@@ -617,6 +617,59 @@ class InternalMCPChatOrchestrator:
         best = candidate_texts[0].get("text")
         return best if isinstance(best, str) else None
 
+    @staticmethod
+    def _normalise_llm_model_name(model: Optional[str]) -> Optional[str]:
+        """Convert internal model identifiers into provider model names.
+
+        The Vontology often stores model references as concept IDs (e.g. "#V#gpt-4o-mini").
+        LLM clients expect provider model strings (e.g. "gpt-4o-mini").
+
+        This is intentionally lightweight so other LLM workflows/actions can reuse it.
+        """
+
+        if not isinstance(model, str):
+            return None
+
+        candidate = model.strip()
+        if not candidate:
+            return None
+
+        if candidate.startswith("#V#"):
+            candidate = candidate[3:]
+
+        return candidate or None
+
+    def _inject_prompt_variable(self, prompt_text: str, *, key: str, value: str) -> str:
+        """Ensure a prompt receives a variable payload.
+
+        Preferred: replace "{key}" if present.
+        Fallback: append a small labelled section.
+
+        This keeps future LLM actions easy to add without requiring every stored
+        prompt to strictly follow a single templating convention.
+        """
+
+        if not isinstance(prompt_text, str):
+            prompt_text = ""
+
+        placeholder = "{" + key + "}"
+        if placeholder in prompt_text:
+            return prompt_text.replace(placeholder, value)
+
+        # One-time warning per instance to avoid noisy logs.
+        warn_attr = f"_warned_missing_placeholder_{key}"
+        if not getattr(self, warn_attr, False):
+            try:
+                self._logger.info(
+                    "[mcp_orchestrator] Prompt missing placeholder %s; appending variable payload.",
+                    placeholder,
+                )
+            except Exception:  # pragma: no cover
+                pass
+            setattr(self, warn_attr, True)
+
+        return f"{prompt_text.rstrip()}\n\n{key.replace('_', ' ').title()}:\n{value}\n"
+
     def _get_missing_tool_call_detector(self) -> Optional[_MissingToolCallDetectorSpec]:
         """Load the missing-tool-call detector spec from the Vontology (best effort)."""
 
@@ -704,13 +757,21 @@ class InternalMCPChatOrchestrator:
                 + f"\n... [truncated {len(truncated_response) - max_chars} chars]"
             )
 
-        model_name = detector.model or fallback_model
-        prompt_text = detector.prompt_text.replace("{response}", truncated_response)
+        raw_model_name = detector.model or fallback_model
+        model_name = self._normalise_llm_model_name(raw_model_name)
+
+        placeholder_present = (
+            isinstance(detector.prompt_text, str) and "{response}" in detector.prompt_text
+        )
+        injection_mode = "replace" if placeholder_present else "append"
+        prompt_text = self._inject_prompt_variable(
+            detector.prompt_text,
+            key="response",
+            value=truncated_response,
+        )
 
         try:
-            classifier_output = llm_client.generate(
-                prompt_text, context=None, model=model_name
-            )
+            classifier_output = llm_client.generate(prompt_text, context=None, model=model_name)
         except Exception as exc:  # pragma: no cover - defensive
             self._logger.warning(
                 "[mcp_orchestrator] Missing tool-call classifier failed (model=%s): %s",
@@ -728,6 +789,10 @@ class InternalMCPChatOrchestrator:
                     {
                         "type": "missing_tool_call_classifier",
                         "model": model_name or fallback_model or "default",
+                        "model_raw": raw_model_name or "",
+                        "model_resolved": model_name or "",
+                        "prompt_placeholder_response": placeholder_present,
+                        "prompt_injection_mode": injection_mode,
                         "prompt_preview": prompt_text[:800],
                         "response_preview": classifier_output[:800],
                         "truncated": len(prompt_text) > 800
