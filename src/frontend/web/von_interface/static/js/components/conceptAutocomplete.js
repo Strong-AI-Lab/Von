@@ -64,7 +64,7 @@ export function closeAutocomplete() {
  */
 async function searchConcepts(query) {
     try {
-        if (!query || query.length < 1) {
+        if (!query || (typeof query === 'string' && query.length < 1)) {
             closeAutocomplete();
             return;
         }
@@ -80,7 +80,7 @@ async function searchConcepts(query) {
         }
 
         const data = await response.json();
-        const results = data.results || [];
+        const results = Array.isArray(data.results) ? data.results : [];
 
         // Update state
         autocompleteState.results = results;
@@ -203,7 +203,10 @@ function updateItemSelection() {
  */
 function insertConcept(conceptId) {
     const ta = autocompleteState.textarea;
-    if (!ta) return;
+    if (!ta || !ta.value) {
+        console.warn('[conceptAutocomplete] insertConcept called with invalid textarea');
+        return;
+    }
 
     const text = ta.value;
     const cursorPos = ta.selectionStart;
