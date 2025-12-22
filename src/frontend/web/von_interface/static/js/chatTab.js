@@ -1089,9 +1089,16 @@ function showLlmDebugPopup(turnId) {
     // Store full data for copy function
     popup.dataset.currentDebugData = JSON.stringify(debugData, null, 2);
 
-    // Show popup
-    popup.classList.remove('hidden');
+    // Show popup - update aria-hidden BEFORE showing to avoid accessibility warning
     popup.setAttribute('aria-hidden', 'false');
+    popup.classList.remove('hidden');
+    
+    // Focus close button for accessibility
+    const closeBtn = document.getElementById('closeChatLlmDebug');
+    if (closeBtn) {
+        // Small delay to ensure popup is visible before focusing
+        setTimeout(() => closeBtn.focus(), 10);
+    }
 }
 
 // Handle export full conversation JSON
