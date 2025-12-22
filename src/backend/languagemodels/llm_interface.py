@@ -305,19 +305,17 @@ class LLMInterface(ABC):
 
     def _convert_context_for_structured_client(
         self, context: Optional[List[Dict[str, Any]]]
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[List[Dict[str, Any]]]:
         """Convert LLMInterface context format to structured client format.
 
         Args:
             context: List of message dicts with 'role' and 'content' keys
 
         Returns:
-            Dict suitable for structured client (implementation-specific)
+            List suitable for structured client (sequence of message dicts)
         """
-        # Default: pass through as-is (most clients expect list of messages)
-        if context:
-            return {"messages": context}
-        return None
+        # Default: pass through as-is (structured clients expect list of messages)
+        return context
 
     @abstractmethod
     def list_models(self) -> List[str]:

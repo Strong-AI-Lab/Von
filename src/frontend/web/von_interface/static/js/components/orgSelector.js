@@ -15,7 +15,7 @@ const LS_ORG_ROLE = 'von_org_role';
  */
 export async function loadMyOrganisations() {
     try {
-        const response = await getJson('/api/organisations/my_organisations');
+        const response = await getJson('/von/api/organisations/my_organisations');
         return response.organisations || [];
     } catch (err) {
         console.error('Error loading organisations:', err);
@@ -28,7 +28,7 @@ export async function loadMyOrganisations() {
  */
 export async function getSessionContext() {
     try {
-        return await getJson('/api/session/context');
+        return await getJson('/von/api/session/context');
     } catch (err) {
         console.error('Error getting session context:', err);
         return {
@@ -46,12 +46,12 @@ export async function getSessionContext() {
  */
 export async function switchOrganisation(orgConceptId) {
     try {
-        const response = await postJson('/api/session/set_organisation', {
+        const response = await postJson('/von/api/session/set_organisation', {
             organisation_concept_id: orgConceptId
         });
 
         if (response.status === 'updated') {
-            // Store in localStorage for persistence
+            // Store in localStorage for persistence (keep concept_id form for UI)
             localStorage.setItem(LS_ORG_CONTEXT, JSON.stringify({
                 concept_id: response.organisation_id,
                 namespace: response.namespace
@@ -136,7 +136,7 @@ export async function renderOrgSelector(containerId) {
                         await switchOrganisation(orgId);
                     } else {
                         // Switch back to personal (no org)
-                        const response = await postJson('/api/session/set_organisation', {
+                        const response = await postJson('/von/api/session/set_organisation', {
                             organisation_concept_id: null
                         });
                         // Clear localStorage

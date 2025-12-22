@@ -310,6 +310,18 @@ def exchange_auth_token():
     session["google_user_info"] = {"name": user.get("name"), "email": user.get("email")}
     session["user_concept_id"] = user.get("concept_id")
 
+    # Provide a consistent slug-style user_id for downstream session-aware routes
+    # (org selection, namespace derivation) that currently expect a plain slug.
+    user_slug = None
+    concept_id = user.get("concept_id") or ""
+    if concept_id:
+        user_slug = concept_id[3:] if concept_id.startswith("#V#") else concept_id
+    elif user.get("email"):
+        user_slug = user.get("email").split("@")[0]
+
+    if user_slug:
+        session["user_id"] = user_slug.strip().lower().replace(" ", "_")
+
     print(f"[auth_exchange] Successfully set session for {user.get('email')}")
     print(f"[auth_exchange] Session contents: {dict(session)}")
 

@@ -1454,48 +1454,90 @@ def set_organisation():
     """
     Set the current organisation context in the session.
 
-    Request body: {organisation_concept_id: str}
+    Request body: {organisation_concept_id: str} or empty dict to clear
+    - organisation_concept_id can be a concept ID with or without #V# prefix
+    - If organisation_concept_id is present but empty/null, treat as clear request
     Returns: {user_id, organisation_id, role, namespace, status: 'updated'}
     """
     try:
         from ...services.namespace_service import derive_namespace
         from ...security.role_resolver import get_user_role
 
-        user_id = session.get("user_id")
+        user_id = session.get("user_id") or session.get("user_concept_id") or session.get("user_email")
         if not user_id:
             return jsonify({"error": "Not authenticated"}), 401
 
         data = request.get_json() or {}
         org_id = data.get("organisation_concept_id")
 
+        # Normalise user id to a safe slug for namespace/role lookup
+        user_slug = str(user_id)
+        if user_slug.startswith("#V#"):
+            user_slug = user_slug[3:]
+        if "@" in user_slug:
+            user_slug = user_slug.split("@")[0]
+        user_slug = user_slug.strip().lower().replace(" ", "_")
+
+        # Check if this is a clear request (empty dict or explicit null/empty string)
+        is_clear_request = "organisation_concept_id" in data and not org_id
+
+        # Handle clearing (personal context / no org)
+        if is_clear_request:
+            namespace = derive_namespace(user_slug)
+            session.pop("organisation_concept_id", None)
+            session.pop("role_in_org", None)
+            session["namespace"] = namespace
+            session.modified = True
+            return (
+                jsonify(
+                    {
+                        "status": "updated",
+                        "user_id": user_id,
+                        "organisation_id": None,
+                        "role": None,
+                        "namespace": namespace,
+                    }
+                ),
+                200,
+            )
+
+        # If org_id not provided and not an explicit clear, that's an error
         if not org_id:
             return jsonify({"error": "organisation_concept_id required"}), 400
 
         # TODO: Validate user is member of org (once membership model exists)
         # For now, allow any org switch
 
-        # Get role for this user in this org
-        user_slug = user_id.strip().lower().replace(" ", "_")
+        # org_id may arrive as a concept id (e.g., "#V#university_of_auckland_strong_ai_lab")
+        org_slug = str(org_id)
+        if org_slug.startswith("#V#"):
+            org_slug = org_slug[3:]
+        org_slug = org_slug.strip().lower().replace(" ", "_")
+
+        # Get role for this user in this org (stub resolver expects slugs)
         try:
-            role_in_org = get_user_role(user_slug, org_id)
+            role_in_org = get_user_role(user_slug, org_slug)
         except Exception:
             role_in_org = "member"  # Default fallback
 
-        # Derive composite namespace
-        namespace = derive_namespace(user_slug, org_id)
+        # Derive composite namespace using slug values
+        namespace = derive_namespace(user_slug, org_slug)
 
-        # Update session
-        session["organisation_concept_id"] = org_id
+        # Update session (store slug form for backward compatibility)
+        session["organisation_concept_id"] = org_slug
         session["role_in_org"] = role_in_org
         session["namespace"] = namespace
         session.modified = True
+
+        # Return concept ID form in API response (with #V# prefix)
+        concept_id_response = f"#V#{org_slug}" if not str(org_id).startswith("#V#") else org_id
 
         return (
             jsonify(
                 {
                     "status": "updated",
                     "user_id": user_id,
-                    "organisation_id": org_id,
+                    "organisation_id": concept_id_response,
                     "role": role_in_org,
                     "namespace": namespace,
                 }
@@ -1519,7 +1561,7 @@ def get_session_context():
         from ...services.namespace_service import derive_namespace
         from ...security.role_resolver import get_user_role
 
-        user_id = session.get("user_id")
+        user_id = session.get("user_id") or session.get("user_concept_id") or session.get("user_email")
         if not user_id:
             return (
                 jsonify(
@@ -1540,7 +1582,12 @@ def get_session_context():
 
         # If no namespace in session, derive it
         if not namespace:
-            user_slug = user_id.strip().lower().replace(" ", "_")
+            user_slug = str(user_id)
+            if user_slug.startswith("#V#"):
+                user_slug = user_slug[3:]
+            if "@" in user_slug:
+                user_slug = user_slug.split("@")[0]
+            user_slug = user_slug.strip().lower().replace(" ", "_")
             if org_id:
                 # Get role if not in session
                 if not role_in_org:
@@ -1580,11 +1627,17 @@ def get_my_organisations():
     try:
         from ...security.role_resolver import get_all_user_organisations
 
-        user_id = session.get("user_id")
+        user_id = session.get("user_id") or session.get("user_concept_id") or session.get("user_email")
         if not user_id:
             return jsonify({"error": "Not authenticated"}), 401
 
-        user_slug = user_id.strip().lower().replace(" ", "_")
+        # Derive a slug for stub role resolution
+        user_slug = str(user_id)
+        if user_slug.startswith("#V#"):
+            user_slug = user_slug[3:]
+        if "@" in user_slug:
+            user_slug = user_slug.split("@")[0]
+        user_slug = user_slug.strip().lower().replace(" ", "_")
 
         # Get orgs from role resolver (Phase 1 hardcoded mappings)
         # Returns dict: {org_id: role_name}
@@ -1592,14 +1645,16 @@ def get_my_organisations():
 
         # TODO: Once organisation concepts exist in Vontology, fetch their names
         # For now, use concept_id as name
-        organisations = [
-            {
-                "concept_id": org_id,
-                "name": org_id.replace("_", " ").title(),  # Simple formatting
-                "role": role,
-            }
-            for org_id, role in org_roles.items()
-        ]
+        organisations = []
+        for org_id, role in org_roles.items():
+            concept_id = org_id if org_id.startswith("#V#") else f"#V#{org_id}"
+            organisations.append(
+                {
+                    "concept_id": concept_id,
+                    "name": concept_id.replace("#V#", "").replace("_", " ").title(),
+                    "role": role,
+                }
+            )
 
         return (
             jsonify(

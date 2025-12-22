@@ -954,13 +954,22 @@ def search_concepts(
                                 if isinstance(context, dict)
                                 else "NL"
                             )
-                            # First name becomes primary
-                            if cid not in text_relations_names:
-                                text_relations_names[cid] = name
                             # Store all names with types
                             if cid not in text_relations_all_names:
                                 text_relations_all_names[cid] = []
                             text_relations_all_names[cid].append((name, name_type))
+
+                    # After collecting all names, select primary name with preference for NL > ABBR > CODE
+                    for cid, names_list in text_relations_all_names.items():
+                        # Sort by name_type priority: NL first, then ABBR, then CODE
+                        def name_type_priority(item: tuple) -> tuple:
+                            name, name_type = item
+                            priority_map = {"NL": 0, "ABBR": 1, "CODE": 2}
+                            return (priority_map.get(name_type, 3), name)
+
+                        sorted_names = sorted(names_list, key=name_type_priority)
+                        if sorted_names:
+                            text_relations_names[cid] = sorted_names[0][0]  # Take the best name
 
                 logger.info(
                     f"[concept_search] Fetched names from text_relations for {len(text_relations_names)} concepts"
@@ -1049,14 +1058,16 @@ def search_concepts(
                         )
                         candidate_score = 70.0 + (match_ratio * 15.0)
 
-                    # Apply name_type bonus: NL (natural language) gets slight boost over ABBR/CODE
+                    # Apply name_type bonus: NL (natural language) gets highest score over ABBR/CODE
                     if candidate_score > 0:
                         if name_type == "NL":
-                            candidate_score += 2.0  # Natural language bonus
+                            candidate_score += 3.0  # Natural language bonus
                         elif name_type == "ABBR":
-                            candidate_score += 0.0  # No bonus for abbreviations
-                        elif name_type == "CODE":
-                            candidate_score -= 1.0  # Slight penalty for technical codes
+                            candidate_score += 1.0  # Small bonus for abbreviations
+                        elif name_type in ("CODE", "vonGUID"):
+                            # Significant penalty for technical codes and GUIDs
+                            # This deprioritizes them unless they're the only match
+                            candidate_score -= 10.0  # Major penalty for codes/GUIDs
 
                     # Update best match if this is better
                     if candidate_score > best_match_score:

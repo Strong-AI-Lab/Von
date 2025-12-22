@@ -1,5 +1,6 @@
 // Chat Tab Module
 import { annotateTurn, getUserContext } from './apiService.js';
+import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { elements, renderSpanSuggestions } from './domUtils.js';
 import { annotateElementText } from './utils/textDecorator.js';
 
@@ -9,6 +10,72 @@ const llmDebugData = new Map();
 const transcriptTurns = [];
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
+
+function deriveLlmDebugWarnings(debugData) {
+    const warnings = [];
+    if (!debugData || typeof debugData !== 'object') {
+        return warnings;
+    }
+
+    if (typeof debugData.error === 'string' && debugData.error.trim()) {
+        warnings.push(`Backend error: ${debugData.error.trim()}`);
+    }
+
+    const auxCalls = Array.isArray(debugData.aux_llm_calls) ? debugData.aux_llm_calls : [];
+    for (const call of auxCalls) {
+        if (!call || typeof call !== 'object') {
+            continue;
+        }
+
+        const callType = typeof call.type === 'string' ? call.type : '';
+
+        if (callType === 'missing_tool_call_classifier') {
+            const injectionMode = typeof call.prompt_injection_mode === 'string' ? call.prompt_injection_mode : '';
+            if (injectionMode === 'append') {
+                warnings.push(
+                    'Missing tool-call detector prompt did not include `{response}` placeholder; response was appended.'
+                );
+            }
+
+            const verdict = typeof call.response_preview === 'string' ? call.response_preview.trim().toLowerCase() : '';
+            if (verdict && !(verdict.startsWith('yes') || verdict.startsWith('no'))) {
+                warnings.push('Missing tool-call classifier returned an unexpected verdict (not yes/no).');
+            }
+
+            const modelRaw = typeof call.model_raw === 'string' ? call.model_raw : '';
+            const modelResolved = typeof call.model_resolved === 'string' ? call.model_resolved : '';
+            if (modelRaw.startsWith('#V#') && !modelResolved) {
+                warnings.push('Missing tool-call classifier model could not be resolved from ontology ID.');
+            }
+        }
+
+        if (typeof call.error === 'string' && call.error.trim()) {
+            warnings.push(call.error.trim());
+        }
+    }
+
+    return Array.from(new Set(warnings));
+}
+
+function createChatDebugWarningIndicator(warnings) {
+    if (!Array.isArray(warnings) || warnings.length === 0) {
+        return null;
+    }
+
+    const indicator = document.createElement('span');
+    indicator.className = 'llm-debug-warning-indicator';
+    indicator.title = warnings.join('\n');
+    indicator.setAttribute('role', 'img');
+    indicator.setAttribute('aria-label', 'Warnings available for this LLM debug turn');
+    indicator.innerHTML = `
+        <svg class="llm-debug-warning-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M1 21h22L12 2 1 21z" />
+            <path d="M12 9v5" class="llm-debug-warning-icon-mark" />
+            <circle cx="12" cy="17" r="1" class="llm-debug-warning-icon-mark" />
+        </svg>
+    `;
+    return indicator;
+}
 
 let activeChatRequest = null;
 
@@ -94,6 +161,56 @@ function copyTextFallback(text) {
     return successful;
 }
 
+// Delete exchange (top-level so event handlers can access it)
+function deleteExchange(turnId, isUserMessage) {
+    const scrollableField = document.getElementById('scrollableField');
+    if (!scrollableField) return;
+
+    // Find message containers (may be paired user + assistant)
+    const messageContainers = scrollableField.querySelectorAll(`[data-turn-id="${turnId}"]`);
+    if (messageContainers.length === 0) return;
+
+    // Get message text for warning check
+    let totalLength = 0;
+    messageContainers.forEach(container => {
+        const text = container.textContent || '';
+        totalLength += text.length;
+    });
+
+    const isSignificant = totalLength > 200;
+    const exchangeType = isUserMessage ? 'user message' : 'Von response';
+    let confirmMessage = `Delete this ${exchangeType}?`;
+
+    if (isSignificant) {
+        confirmMessage += `\n\nWARNING: This exchange contains significant content (${totalLength} characters).`;
+    }
+
+    if (!confirm(confirmMessage)) {
+        return;
+    }
+
+    messageContainers.forEach(container => {
+        container.remove();
+    });
+
+    // Remove from transcript
+    const index = transcriptTurns.findIndex(t => t.turnId === turnId);
+    if (index !== -1) {
+        transcriptTurns.splice(index, 1);
+    }
+
+    // If it was the only exchange, reload previous context
+    const remainingMessages = scrollableField.querySelectorAll('.message-container').length;
+    if (remainingMessages === 0) {
+        console.log('[chatTab] Last exchange deleted, reloading previous context...');
+        loadChatHistory({ segments: historySegmentsShown });
+    }
+
+    // Update history counts
+    updateHistoryBanner();
+    updateHistoryLength();
+}
+
 async function updateHistoryLength() {
     try {
         const response = await fetch('/von/history/length');
@@ -101,10 +218,9 @@ async function updateHistoryLength() {
 
         if (response.ok) {
             const historyLength = data.history_length || 0;
-            const authenticated = data.authenticated !== undefined ? data.authenticated : true; // Default to true for backward compatibility
+            const authenticated = data.authenticated !== undefined ? data.authenticated : true;
             const historyLengthElement = document.getElementById('chat-history-length');
             if (historyLengthElement) {
-                // Display "unauthenticated" if not authenticated, otherwise show the count
                 if (!authenticated) {
                     historyLengthElement.textContent = 'History: unauthenticated';
                 } else {
@@ -303,6 +419,9 @@ export function initializeChatTab() {
             handleSendPrompt();
         }
     });
+
+    // Initialize concept autocomplete for #V# trigger
+    initializeConceptAutocomplete(promptInput);
 
     loadChatHistory();
     updateHistoryLength();
@@ -618,7 +737,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             // Create a container for Von's response with image
             const messageContainer = document.createElement('div');
             messageContainer.style.cssText = 'display: flex; align-items: flex-start; margin-bottom: 15px; padding: 10px; background-color: #f8f9fa; border-radius: 8px; border-left: 4px solid #007bff;';
-
+            messageContainer.className = 'message-container';
             // Add Von's image
             const vonImage = document.createElement('img');
             vonImage.src = '/static/VonImageBig.png';
@@ -656,6 +775,33 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 llmDebugButton.dataset.turnId = turnId;
                 llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
                 messageHeader.appendChild(llmDebugButton);
+
+                const debugData = llmDebugData.get(turnId);
+                const warnings = deriveLlmDebugWarnings(debugData);
+                const warningIndicator = createChatDebugWarningIndicator(warnings);
+                if (warningIndicator) {
+                    messageHeader.appendChild(warningIndicator);
+                }
+            }
+
+            // Add delete button
+            if (turnId) {
+                const deleteButton = document.createElement('button');
+                deleteButton.className = 'btn-mini btn-delete-exchange';
+                deleteButton.textContent = '✕';
+                deleteButton.title = 'Delete this exchange';
+                deleteButton.style.cssText = 'margin-left: auto; color: #666; background: transparent; border: none; cursor: pointer; font-size: 1.2em; padding: 0 4px; line-height: 1;';
+                deleteButton.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteExchange(turnId, false);
+                });
+                deleteButton.addEventListener('mouseover', () => {
+                    deleteButton.style.color = '#d9534f';
+                });
+                deleteButton.addEventListener('mouseout', () => {
+                    deleteButton.style.color = '#666';
+                });
+                messageHeader.appendChild(deleteButton);
             }
 
             const messageText = document.createElement('div');
@@ -678,6 +824,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             // For user messages and errors, use simpler styling
             const messageContainer = document.createElement('div');
             messageContainer.style.cssText = 'margin-bottom: 15px; padding: 10px; background-color: #fff; border-radius: 8px; border-left: 4px solid #28a745;';
+            messageContainer.className = 'message-container';
 
             if (sender === 'Error') {
                 messageContainer.style.borderLeftColor = '#dc3545';
@@ -701,6 +848,33 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 llmDebugButton.dataset.turnId = turnId;
                 llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
                 messageHeader.appendChild(llmDebugButton);
+
+                const debugData = llmDebugData.get(turnId);
+                const warnings = deriveLlmDebugWarnings(debugData);
+                const warningIndicator = createChatDebugWarningIndicator(warnings);
+                if (warningIndicator) {
+                    messageHeader.appendChild(warningIndicator);
+                }
+            }
+
+            // Add delete button for user messages
+            if (turnId) {
+                const deleteButton = document.createElement('button');
+                deleteButton.className = 'btn-mini btn-delete-exchange';
+                deleteButton.textContent = '✕';
+                deleteButton.title = 'Delete this exchange';
+                deleteButton.style.cssText = 'margin-left: auto; color: #666; background: transparent; border: none; cursor: pointer; font-size: 1.2em; padding: 0 4px; line-height: 1;';
+                deleteButton.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteExchange(turnId, true);
+                });
+                deleteButton.addEventListener('mouseover', () => {
+                    deleteButton.style.color = '#d9534f';
+                });
+                deleteButton.addEventListener('mouseout', () => {
+                    deleteButton.style.color = '#666';
+                });
+                messageHeader.appendChild(deleteButton);
             }
 
             const messageText = document.createElement('div');
@@ -839,6 +1013,17 @@ function showLlmDebugPopup(turnId) {
 
     if (hasError) {
         metadataHtml += `<br><strong style="color: #dc3545;">Error:</strong> ${debugData.error}`;
+    }
+
+    const warnings = deriveLlmDebugWarnings(debugData).filter(w => !String(w).startsWith('Backend error:'));
+    if (warnings.length > 0) {
+        const warningItems = warnings.map(warning => `<li>${warning}</li>`).join('');
+        metadataHtml = `
+            <div class="llm-debug-warning-box">
+                <div class="llm-debug-warning-box-title">Warnings</div>
+                <ul class="llm-debug-warning-list">${warningItems}</ul>
+            </div>
+        ` + metadataHtml;
     }
 
     metaDiv.innerHTML = metadataHtml;
