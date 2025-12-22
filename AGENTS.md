@@ -487,6 +487,9 @@ When modifying code or creating new features, AI agents MUST follow these testin
    * Follow the Arrange-Act-Assert pattern in test cases
    * Include setup and teardown code when needed
 
+6. **Running Tests via Copilot tools:**
+  * When using the `runTests` tool, always provide `tests` or specific test file paths in the `files` argument; invoking it with no targets can return `0/0` and hides real coverage.
+
 Example of proper test-compatible exports:
 ```javascript
 // Export for testing - allows direct testing of utility functions

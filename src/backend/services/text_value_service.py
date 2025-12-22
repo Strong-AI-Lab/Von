@@ -30,8 +30,13 @@ def _now() -> datetime:
 
 
 def _normalize_text(raw: str) -> str:
-    """Collapse whitespace and trim, mirroring TextValue persistence behaviour."""
+    """Collapse whitespace for fingerprint/dedup purposes (preserves none of the original formatting)."""
     return re.sub(r"\s+", " ", raw.strip())
+
+
+def _prepare_persisted_text(raw: str) -> str:
+    """Light cleanup for storage: trim ends but preserve internal newlines/spacing."""
+    return raw.strip()
 
 
 def _compute_fingerprint(text: str, lang: str) -> str:
@@ -48,11 +53,11 @@ def create_text_value(
     Returns the inserted/existing ObjectId as a hex string.
     """
     provenance = provenance or {}
-    # Normalize whitespace consistently so fingerprint/text comparisons stay stable
-    text = _normalize_text(text)
-    # Validate input via Pydantic
-    tv = TextValueModel(text=text, lang=lang, provenance=provenance)
-    fp = _compute_fingerprint(tv.text, tv.lang)
+    stored_text = _prepare_persisted_text(text)
+    fp = _compute_fingerprint(stored_text, lang)
+
+    # Validate input via Pydantic (stores the preserved formatting)
+    tv = TextValueModel(text=stored_text, lang=lang, provenance=provenance)
 
     # Try to find by fingerprint+lang
     existing = TextValuesRepository.find_one({"fingerprint": fp, "lang": tv.lang})
@@ -145,9 +150,9 @@ def upsert_text_for_concept(
 
     Returns a payload with text_value_id and relation_id.
     """
-    normalized_text = _normalize_text(text)
+    stored_text = _prepare_persisted_text(text)
     text_value_id = create_text_value(
-        text=normalized_text, lang=lang, provenance=provenance
+        text=stored_text, lang=lang, provenance=provenance
     )
     relation_id, relation_created, context_updated = link_text_to_concept(
         subject_concept_id=subject_concept_id,
@@ -169,7 +174,7 @@ def upsert_text_for_concept(
         "relation_id": relation_id,
         "relation_created": relation_created,
         "context_updated": context_updated,
-        "text": normalized_text,
+        "text": stored_text,
         "lang": lang,
     }
     if relation_doc:
@@ -299,16 +304,16 @@ def update_text_relation_text(
         except (InvalidId, TypeError):
             current_tv = None
 
-    normalized_new = _normalize_text(new_text)
+    new_raw = _prepare_persisted_text(new_text)
     if (
         current_tv
-        and current_tv.get("text") == normalized_new
+        and current_tv.get("text") == new_raw
         and (current_tv.get("lang") or lang) == lang
     ):
         return {
             "relation_id": relation_id,
             "text_value_id": current_tv_id_str,
-            "text": normalized_new,
+            "text": new_raw,
             "lang": lang,
             "predicate": rel.get("predicate"),
             "updated": False,
@@ -316,7 +321,7 @@ def update_text_relation_text(
 
     # Reuse create_text_value for fingerprint logic to avoid duplicate documents for whitespace-only changes
     new_text_value_id = create_text_value(
-        text=normalized_new, lang=lang, provenance=provenance
+        text=new_raw, lang=lang, provenance=provenance
     )
     relation_updated = False
     if new_text_value_id != current_tv_id_str:
@@ -329,7 +334,7 @@ def update_text_relation_text(
     return {
         "relation_id": relation_id,
         "text_value_id": new_text_value_id,
-        "text": normalized_new,
+        "text": new_raw,
         "lang": lang,
         "predicate": rel.get("predicate"),
         "updated": relation_updated,
@@ -352,8 +357,8 @@ def delete_text_relation_by_predicate_and_text(
         raise PermissionError("User cannot delete text for an inaccessible concept")
 
     lang = (lang or "en").strip() or "en"
-    normalized_text = _normalize_text(text)
-    fingerprint = _compute_fingerprint(normalized_text, lang)
+    raw_text = _prepare_persisted_text(text)
+    fingerprint = _compute_fingerprint(raw_text, lang)
 
     if predicate == RelationPredicate.HAS_NAME and context:
         name_type = context.get("name_type")
@@ -368,10 +373,10 @@ def delete_text_relation_by_predicate_and_text(
     if not text_value:
         # Legacy fallback: direct text/lang lookup
         text_value = TextValuesRepository.find_one(
-            {"text": normalized_text, "lang": lang}
+            {"text": raw_text, "lang": lang}
         )
     if not text_value:
-        text_value = TextValuesRepository.find_one({"text": normalized_text})
+        text_value = TextValuesRepository.find_one({"text": raw_text})
     if not text_value:
         raise ValueError(f"Text value '{text}' not found")
 
