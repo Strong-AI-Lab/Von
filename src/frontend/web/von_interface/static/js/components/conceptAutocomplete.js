@@ -25,6 +25,7 @@ let autocompleteState = {
     triggerPos: null,
     textarea: null,
     searchTimeout: null,
+    dropdownPointerDown: false,
 };
 
 /**
@@ -43,6 +44,17 @@ function createDropdown() {
     dropdown.style.maxHeight = '250px';
     dropdown.style.overflowY = 'auto';
     dropdown.style.minWidth = '200px';
+
+    // Track pointer state so blur on the textarea does not close before click handlers run
+    dropdown.addEventListener('pointerdown', () => {
+        autocompleteState.dropdownPointerDown = true;
+    });
+    dropdown.addEventListener('pointerup', () => {
+        // Release after click dispatches
+        setTimeout(() => {
+            autocompleteState.dropdownPointerDown = false;
+        }, 0);
+    });
     return dropdown;
 }
 
@@ -134,8 +146,8 @@ function renderDropdown(results) {
         nameSpan.title = `${result.name || result.id} — ${result.id}`;
 
         // Right side: kind badge (matching vontology.js style)
-        const badgeText = result.kind === 'predicate' ? 'Predicate' : 
-                         (result.kind === 'individual' ? 'Individual' : 'Type');
+        const badgeText = result.kind === 'predicate' ? 'Predicate' :
+            (result.kind === 'individual' ? 'Individual' : 'Type');
         const kindBadge = document.createElement('span');
         kindBadge.className = `concept-autocomplete-item-kind ${result.kind}`;
         kindBadge.textContent = badgeText;
@@ -145,7 +157,7 @@ function renderDropdown(results) {
         kindBadge.style.borderRadius = '3px';
         kindBadge.style.fontWeight = '500';
         kindBadge.style.whiteSpace = 'nowrap';
-        
+
         // Set badge colors to match vontology.js
         if (result.kind === 'individual') {
             kindBadge.style.backgroundColor = '#d4edda';
@@ -370,7 +382,11 @@ export function initializeConceptAutocomplete(textareaElement) {
     // Close on blur
     textareaElement.addEventListener('blur', () => {
         // Delay to allow click on dropdown items
-        setTimeout(closeAutocomplete, 150);
+        setTimeout(() => {
+            if (!autocompleteState.dropdownPointerDown) {
+                closeAutocomplete();
+            }
+        }, 150);
     });
 
     console.log(`[conceptAutocomplete] Initialized on ${textareaElement.id}`);
