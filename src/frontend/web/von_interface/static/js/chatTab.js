@@ -328,10 +328,14 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
         if (msg.role === 'user' || msg.role === 'assistant') {
             const turnId = `history-${msg.role}-${index}`;
             const label = msg.role === 'user' ? 'User' : 'Von';
-            appendMessage(label, msg.content, turnId, false, true, msg.timestamp);
+            
+            // Check if this assistant message has debug data
+            const hasDebugData = msg.role === 'assistant' && !!msg.llm_debug_data;
+            
+            appendMessage(label, msg.content, turnId, hasDebugData, true, msg.timestamp);
 
             // Restore LLM debug data if present (for assistant messages)
-            if (msg.role === 'assistant' && msg.llm_debug_data) {
+            if (hasDebugData) {
                 llmDebugData.set(turnId, msg.llm_debug_data);
             }
         }
