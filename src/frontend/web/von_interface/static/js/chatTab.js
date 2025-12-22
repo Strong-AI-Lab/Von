@@ -329,7 +329,7 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             const turnId = `history-${msg.role}-${index}`;
             const label = msg.role === 'user' ? 'User' : 'Von';
             appendMessage(label, msg.content, turnId, false, true, msg.timestamp);
-            
+
             // Restore LLM debug data if present (for assistant messages)
             if (msg.role === 'assistant' && msg.llm_debug_data) {
                 llmDebugData.set(turnId, msg.llm_debug_data);
@@ -1001,9 +1001,11 @@ function showLlmDebugPopup(turnId) {
     // Display metadata
     const hasError = debugData.error !== undefined;
 
-    // Build metadata HTML with context stats
-    let metadataHtml = `<strong>Model:</strong> ${debugData.model || 'Unknown'}<br>`;
-    metadataHtml += `<strong>Message Count:</strong> ${debugData.messages?.length || 0}`;
+    // Build metadata object (not HTML) so it's included in JSON structure
+    const metadata = {
+        model: debugData.model || 'Unknown',
+        message_count: debugData.messages?.length || 0
+    };
 
     // Add context statistics if available
     if (debugData.context_stats) {
@@ -1011,32 +1013,38 @@ function showLlmDebugPopup(turnId) {
         const storedStats = debugData.context_stats.stored_context;
 
         if (sentStats) {
-            metadataHtml += `<br><strong>Context Sent to LLM:</strong> ${sentStats.total_messages} msgs, ${sentStats.total_chars.toLocaleString()} chars`;
-            if (sentStats.largest_message?.chars > 0) {
-                metadataHtml += ` (largest: ${sentStats.largest_message.role}, ${sentStats.largest_message.chars.toLocaleString()} chars)`;
-            }
+            metadata.context_sent_to_llm = {
+                total_messages: sentStats.total_messages,
+                total_chars: sentStats.total_chars,
+                largest_message: sentStats.largest_message
+            };
         }
 
         if (storedStats) {
-            metadataHtml += `<br><strong>Stored Context:</strong> ${storedStats.total_messages} msgs, ${storedStats.total_chars.toLocaleString()} chars`;
+            metadata.stored_context = {
+                total_messages: storedStats.total_messages,
+                total_chars: storedStats.total_chars
+            };
         }
     }
 
     // Add tool statistics if available
     if (debugData.tool_stats) {
-        const toolStats = debugData.tool_stats;
-        metadataHtml += `<br><strong>MCP Tools Used:</strong> ${toolStats.tool_count}`;
-        if (toolStats.tool_count > 0) {
-            metadataHtml += ` (${toolStats.total_chars.toLocaleString()} chars)`;
-            if (toolStats.truncated_count > 0) {
-                metadataHtml += ` <span style="color: #fd7e14;">⚠️ ${toolStats.truncated_count} truncated</span>`;
-            }
-        }
+        metadata.mcp_tools_used = {
+            tool_count: debugData.tool_stats.tool_count,
+            total_chars: debugData.tool_stats.total_chars,
+            truncated_count: debugData.tool_stats.truncated_count
+        };
     }
 
     if (hasError) {
-        metadataHtml += `<br><strong style="color: #dc3545;">Error:</strong> ${debugData.error}`;
+        metadata.error = debugData.error;
     }
+
+    // Build metadata HTML display
+    let metadataHtml = '<div class="llm-debug-metadata-section"><strong>Metadata</strong><pre>';
+    metadataHtml += JSON.stringify(metadata, null, 2);
+    metadataHtml += '</pre></div>';
 
     const warnings = deriveLlmDebugWarnings(debugData).filter(w => !String(w).startsWith('Backend error:'));
     if (warnings.length > 0) {
@@ -1091,8 +1099,12 @@ function showLlmDebugPopup(turnId) {
         auxSection.classList.add('hidden');
     }
 
-    // Store full data for copy function
-    popup.dataset.currentDebugData = JSON.stringify(debugData, null, 2);
+    // Store full data for copy function, including computed metadata
+    const enhancedDebugData = {
+        ...debugData,
+        metadata: metadata  // Add computed metadata to the structure
+    };
+    popup.dataset.currentDebugData = JSON.stringify(enhancedDebugData, null, 2);
 
     // Show popup - update aria-hidden BEFORE showing to avoid accessibility warning
     popup.setAttribute('aria-hidden', 'false');

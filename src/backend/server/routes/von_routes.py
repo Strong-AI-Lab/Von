@@ -1466,7 +1466,11 @@ def set_organisation():
         from ...services.namespace_service import derive_namespace
         from ...security.role_resolver import get_user_role
 
-        user_id = session.get("user_id") or session.get("user_concept_id") or session.get("user_email")
+        user_id = (
+            session.get("user_id")
+            or session.get("user_concept_id")
+            or session.get("user_email")
+        )
         if not user_id:
             return jsonify({"error": "Not authenticated"}), 401
 
@@ -1533,7 +1537,9 @@ def set_organisation():
         session.modified = True
 
         # Return concept ID form in API response (with #V# prefix)
-        concept_id_response = f"#V#{org_slug}" if not str(org_id).startswith("#V#") else org_id
+        concept_id_response = (
+            f"#V#{org_slug}" if not str(org_id).startswith("#V#") else org_id
+        )
 
         return (
             jsonify(
@@ -1564,7 +1570,11 @@ def get_session_context():
         from ...services.namespace_service import derive_namespace
         from ...security.role_resolver import get_user_role
 
-        user_id = session.get("user_id") or session.get("user_concept_id") or session.get("user_email")
+        user_id = (
+            session.get("user_id")
+            or session.get("user_concept_id")
+            or session.get("user_email")
+        )
         if not user_id:
             return (
                 jsonify(
@@ -1630,7 +1640,11 @@ def get_my_organisations():
     try:
         from ...security.role_resolver import get_all_user_organisations
 
-        user_id = session.get("user_id") or session.get("user_concept_id") or session.get("user_email")
+        user_id = (
+            session.get("user_id")
+            or session.get("user_concept_id")
+            or session.get("user_email")
+        )
         if not user_id:
             return jsonify({"error": "Not authenticated"}), 401
 
