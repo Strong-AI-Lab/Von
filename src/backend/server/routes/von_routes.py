@@ -171,34 +171,34 @@ def _calculate_tool_stats(tool_messages: list[dict]) -> dict:
 def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
     """
     Derive warnings from LLM debug information.
-    
+
     Mirrors the frontend deriveLlmDebugWarnings logic to ensure backend
     warnings are persisted in the JSON structure.
-    
+
     Args:
         debug_info: The llm_debug_info dictionary
-        
+
     Returns:
         List of warning strings
     """
     warnings = []
-    
+
     if not debug_info or not isinstance(debug_info, dict):
         return warnings
-    
+
     # Check for backend errors
     if isinstance(debug_info.get("error"), str) and debug_info.get("error", "").strip():
         warnings.append(f"Backend error: {debug_info['error'].strip()}")
-    
+
     # Check auxiliary LLM calls for warnings
     aux_calls = debug_info.get("aux_llm_calls", [])
     if isinstance(aux_calls, list):
         for call in aux_calls:
             if not isinstance(call, dict):
                 continue
-            
+
             call_type = call.get("type", "")
-            
+
             # Check missing tool-call classifier warnings
             if call_type == "missing_tool_call_classifier":
                 injection_mode = call.get("prompt_injection_mode", "")
@@ -206,24 +206,28 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
                     warnings.append(
                         "Missing tool-call detector prompt did not include `{response}` placeholder; response was appended."
                     )
-                
+
                 verdict = str(call.get("response_preview", "")).strip().lower()
                 if verdict and not verdict.startswith(("yes", "no")):
                     warnings.append(
                         "Missing tool-call classifier returned an unexpected verdict (not yes/no)."
                     )
-                
+
                 model_raw = call.get("model_raw", "")
                 model_resolved = call.get("model_resolved", "")
-                if isinstance(model_raw, str) and model_raw.startswith("#V#") and not model_resolved:
+                if (
+                    isinstance(model_raw, str)
+                    and model_raw.startswith("#V#")
+                    and not model_resolved
+                ):
                     warnings.append(
                         "Missing tool-call classifier model could not be resolved from ontology ID."
                     )
-            
+
             # Check for call-level errors
             if isinstance(call.get("error"), str) and call.get("error", "").strip():
                 warnings.append(call["error"].strip())
-    
+
     # Remove duplicates while preserving order
     seen = set()
     unique_warnings = []
@@ -231,7 +235,7 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
         if w not in seen:
             seen.add(w)
             unique_warnings.append(w)
-    
+
     return unique_warnings
 
 
