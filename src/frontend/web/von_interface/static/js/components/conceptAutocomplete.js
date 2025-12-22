@@ -208,17 +208,27 @@ function insertConcept(conceptId) {
     const text = ta.value;
     const cursorPos = ta.selectionStart;
 
-    // Find the #V# or #v# trigger position
+    // Find the #V# or #v# trigger position (search backwards for the pattern)
     let triggerIdx = -1;
-    let searchStart = Math.max(0, cursorPos - 50);
+    let searchStart = Math.max(0, cursorPos - 100);
     let substring = text.substring(searchStart, cursorPos);
-    let match = substring.match(/#[Vv]#$/);
 
-    if (match) {
-        triggerIdx = searchStart + substring.length - match[0].length;
+    // Search backwards for #V# or #v#
+    for (let i = substring.length - 3; i >= 0; i--) {
+        if (
+            substring[i] === '#' &&
+            (substring[i + 1] === 'V' || substring[i + 1] === 'v') &&
+            substring[i + 2] === '#'
+        ) {
+            triggerIdx = searchStart + i;
+            break;
+        }
     }
 
-    if (triggerIdx === -1) return;
+    if (triggerIdx === -1) {
+        console.warn('[conceptAutocomplete] No #V# trigger found when inserting concept');
+        return;
+    }
 
     // Replace from trigger to cursor position
     const before = text.substring(0, triggerIdx);
@@ -230,6 +240,8 @@ function insertConcept(conceptId) {
     ta.selectionStart = newPos;
     ta.selectionEnd = newPos;
     ta.focus();
+
+    console.log(`[conceptAutocomplete] Inserted ${conceptId} at position ${triggerIdx}`);
 
     // Trigger input event for any listeners
     ta.dispatchEvent(new Event('input', { bubbles: true }));
@@ -292,19 +304,18 @@ function handleInput(event) {
     let searchStart = Math.max(0, cursorPos - 100);
     let substring = text.substring(searchStart, cursorPos);
 
-    // Find last #V# or #v#
+    // Find last #V# or #v# (correct pattern: #V# not V##)
     let lastTriggerIdx = -1;
-    let triggerMatch = null;
 
-    // Search backwards from cursor
-    for (let i = substring.length - 1; i >= 0; i--) {
+    // Search backwards from cursor for the pattern #V# or #v#
+    for (let i = substring.length - 3; i >= 0; i--) {
         if (
             substring[i] === '#' &&
-            i > 0 &&
-            (substring[i - 1] === 'V' || substring[i - 1] === 'v')
+            (substring[i + 1] === 'V' || substring[i + 1] === 'v') &&
+            substring[i + 2] === '#'
         ) {
-            lastTriggerIdx = searchStart + i - 1;
-            triggerMatch = substring[i - 1];
+            lastTriggerIdx = searchStart + i;
+            console.log(`[conceptAutocomplete] Found trigger at position ${lastTriggerIdx}`);
             break;
         }
     }
@@ -315,8 +326,9 @@ function handleInput(event) {
         return;
     }
 
-    // Get search text after trigger
-    const searchText = text.substring(lastTriggerIdx + 3, cursorPos).trim();
+    // Get search text after trigger (after the 3 chars #V#)
+    const searchText = text.substring(lastTriggerIdx + 3, cursorPos);
+    console.log(`[conceptAutocomplete] Search text: "${searchText}"`);
 
     // Debounce search
     clearTimeout(autocompleteState.searchTimeout);
