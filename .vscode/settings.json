@@ -50,16 +50,18 @@
   "editor.formatOnSave": true,
   "jupyter.interactiveWindow.textEditor.executeSelection": true,
   "javascript.suggestionActions.enabled": true,
-  "python.testing.pytestLogLevel": "INFO",
   "python.analysis.inlayHints.functionReturnTypes": true,
   "python.defaultInterpreterPath": ".venv\\Scripts\\python.exe",
   "python.testing.pytestEnabled": true,
   "python.envFile": "${workspaceFolder}\\.vscode\\.env.tests",
   "python.languageServer": "Pylance",
   "python.testing.pytestArgs": [
+    "-q",
     "tests"
   ],
-  "python.formatting.provider": "black",
+  "python.testing.pytestLogLevel": "WARNING",
+  "python.editor.defaultFormatter": "ms-python.black-formatter",
+  "python.editor.formatOnSave": true,
   "python.terminal.useEnvFile": true,
   "python.analysis.importFormat": "absolute",
   "python.terminal.activateEnvironment": true,
@@ -67,13 +69,6 @@
     "**/Von-Private/.venv/**"
   ],
   "python.analysis.inlayHints.variableTypes": true,
-  "python-envs.pythonProjects": [
-    {
-      "path": "",
-      "envManager": "ms-python.python:system",
-      "packageManager": "ms-python.python:pip"
-    }
-  ],
   "python.testing.pytestEnv": {
     "VON_DB_NAME": "test_von_db",
     "VON_USE_MOCK_DB": "1"

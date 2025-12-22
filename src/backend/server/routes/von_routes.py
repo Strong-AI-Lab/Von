@@ -1177,41 +1177,8 @@ def generate():
                 "[mcp_orchestrator] Tool invocations: %s", tool_invocations
             )
 
-        # Store both user message and response in context AFTER calling the LLM
-        # Truncate large tool results to prevent context explosion
-        truncated_tool_messages = _truncate_large_tool_results(
-            tool_messages, max_tool_content_chars=5000
-        )
-
-        if user_concept_id:
-            chat_history_service.add_message_to_history(
-                user_concept_id, session_id, {"role": "user", "content": prompt_text}
-            )
-            for tool_msg in truncated_tool_messages:
-                chat_history_service.add_message_to_history(
-                    user_concept_id, session_id, tool_msg
-                )
-            chat_history_service.add_message_to_history(
-                user_concept_id,
-                session_id,
-                {"role": "assistant", "content": response_text},
-            )
-        else:
-            current_app.config["CONTEXT"].append(
-                {"role": "user", "content": prompt_text}
-            )
-            for tool_msg in truncated_tool_messages:
-                current_app.config["CONTEXT"].append(tool_msg)
-            current_app.config["CONTEXT"].append(
-                {"role": "assistant", "content": response_text}
-            )
-
-        # Limit overall context size to prevent unbounded growth
-        current_app.config["CONTEXT"] = _limit_context_size(
-            current_app.config["CONTEXT"], max_messages=20
-        )
-
-        # Build LLM debug information
+        # Build LLM debug information FIRST (before saving to history)
+        # so we can persist it alongside the assistant message
         # NOTE: Only include the NEW messages for this turn to avoid exponential token growth
         # as the full context would include all previous turns' debug data
         current_turn_messages = [{"role": "user", "content": prompt_text}]
@@ -1302,6 +1269,42 @@ def generate():
             ),
             "aux_llm_calls": auxiliary_llm_calls,
         }
+
+        # Now save messages to history/context with debug info
+        # Truncate large tool results to prevent context explosion
+        truncated_tool_messages = _truncate_large_tool_results(
+            tool_messages, max_tool_content_chars=5000
+        )
+
+        if user_concept_id:
+            chat_history_service.add_message_to_history(
+                user_concept_id, session_id, {"role": "user", "content": prompt_text}
+            )
+            for tool_msg in truncated_tool_messages:
+                chat_history_service.add_message_to_history(
+                    user_concept_id, session_id, tool_msg
+                )
+            # Save assistant message WITH debug data
+            chat_history_service.add_message_to_history(
+                user_concept_id,
+                session_id,
+                {"role": "assistant", "content": response_text},
+                llm_debug_data=llm_debug_info,
+            )
+        else:
+            current_app.config["CONTEXT"].append(
+                {"role": "user", "content": prompt_text}
+            )
+            for tool_msg in truncated_tool_messages:
+                current_app.config["CONTEXT"].append(tool_msg)
+            current_app.config["CONTEXT"].append(
+                {"role": "assistant", "content": response_text}
+            )
+
+        # Limit overall context size to prevent unbounded growth
+        current_app.config["CONTEXT"] = _limit_context_size(
+            current_app.config["CONTEXT"], max_messages=20
+        )
 
         return jsonify({"response": response_text, "llm_debug": llm_debug_info})
     except Exception as e:
