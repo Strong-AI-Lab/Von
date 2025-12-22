@@ -31,12 +31,12 @@ from typing import (
 )
 
 try:
-    import google.generativeai as genai  # type: ignore
+    from google import genai  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
     genai = None  # type: ignore
 
 if genai is not None:
-    # Cast to Any so Pyright doesn't complain about dynamic attrs (configure, GenerativeModel, types, list_models)
+    # Cast to Any so Pyright doesn't complain about dynamic attrs
     genai = cast(Any, genai)
 from ..services.settings_service import get_active_llm_setting, get_openai_env_var
 import time
@@ -1013,7 +1013,7 @@ class GeminiClient(LLMInterface):
     ):
         if genai is None:
             raise ImportError(
-                "google.generativeai package is required for GeminiClient. Install with: pip install google-generativeai"
+                "google-genai package is required for GeminiClient. Install with: pdm add google-genai"
             )
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
@@ -1143,7 +1143,7 @@ class GeminiClient(LLMInterface):
         # Ensure genai is available
         if genai is None:
             raise ImportError(
-                "google.generativeai package is required for Gemini embeddings"
+                "google-genai package is required for Gemini embeddings. Install with: pdm add google-genai"
             )
 
         # Cast to Any to avoid static analysis errors about exported members
