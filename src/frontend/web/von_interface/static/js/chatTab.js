@@ -329,6 +329,11 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             const turnId = `history-${msg.role}-${index}`;
             const label = msg.role === 'user' ? 'User' : 'Von';
             appendMessage(label, msg.content, turnId, false, true, msg.timestamp);
+            
+            // Restore LLM debug data if present (for assistant messages)
+            if (msg.role === 'assistant' && msg.llm_debug_data) {
+                llmDebugData.set(turnId, msg.llm_debug_data);
+            }
         }
     });
 
@@ -1092,7 +1097,7 @@ function showLlmDebugPopup(turnId) {
     // Show popup - update aria-hidden BEFORE showing to avoid accessibility warning
     popup.setAttribute('aria-hidden', 'false');
     popup.classList.remove('hidden');
-    
+
     // Focus close button for accessibility
     const closeBtn = document.getElementById('closeChatLlmDebug');
     if (closeBtn) {

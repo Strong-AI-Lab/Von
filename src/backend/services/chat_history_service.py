@@ -135,7 +135,7 @@ def get_chat_history_segments(
 
 
 def add_message_to_history(
-    user_id: str, session_id: str, message: Dict[str, Any]
+    user_id: str, session_id: str, message: Dict[str, Any], llm_debug_data: Optional[Dict[str, Any]] = None
 ) -> None:
     """
     Adds a message to the chat history for a specific user and session.
@@ -144,6 +144,7 @@ def add_message_to_history(
         user_id: The user's concept ID
         session_id: The session UUID
         message: Message dictionary with 'role' and 'content' keys
+        llm_debug_data: Optional LLM debug information (model, context stats, tool usage, etc.)
     """
     if not user_id or not session_id:
         raise ChatHistoryServiceError("user_id and session_id are required.")
@@ -156,8 +157,10 @@ def add_message_to_history(
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
     try:
-        # Add timestamp to message
+        # Add timestamp to message (and llm_debug_data if present)
         message_with_timestamp = {**message, "timestamp": datetime.now(timezone.utc)}
+        if llm_debug_data:
+            message_with_timestamp["llm_debug_data"] = llm_debug_data
 
         # Update or insert the session document
         result = chat_history_coll.update_one(
