@@ -49,8 +49,6 @@ def app_client(monkeypatch):
     fake_id_token_module.verify_oauth2_token = lambda *args, **kwargs: {
         "sub": "dummy-user"
     }
-    sys.modules["google.oauth2"] = types.ModuleType("google.oauth2")
-    sys.modules["google.oauth2.id_token"] = fake_id_token_module
 
     fake_credentials_module = types.ModuleType("google.oauth2.credentials")
 
@@ -59,18 +57,24 @@ def app_client(monkeypatch):
             self.id_token = id_token
 
     fake_credentials_module.Credentials = _DummyCredentials
+
+    fake_service_account_module = types.ModuleType("google.oauth2.service_account")
+
+    class _DummyServiceAccountCredentials:
+        def __init__(self, *args, **kwargs):
+            self.project_id = kwargs.get("project_id")
+
+    fake_service_account_module.Credentials = _DummyServiceAccountCredentials
+
+    fake_oauth2_package = types.ModuleType("google.oauth2")
+    fake_oauth2_package.id_token = fake_id_token_module
+    fake_oauth2_package.credentials = fake_credentials_module
+    fake_oauth2_package.service_account = fake_service_account_module
+
+    sys.modules["google.oauth2"] = fake_oauth2_package
+    sys.modules["google.oauth2.id_token"] = fake_id_token_module
     sys.modules["google.oauth2.credentials"] = fake_credentials_module
-
-    fake_request_module = types.ModuleType("google.auth.transport.requests")
-
-    class _DummyRequest:
-        def __call__(self, *args, **kwargs):
-            return None
-
-    fake_request_module.Request = _DummyRequest
-    sys.modules["google.auth"] = types.ModuleType("google.auth")
-    sys.modules["google.auth.transport"] = types.ModuleType("google.auth.transport")
-    sys.modules["google.auth.transport.requests"] = fake_request_module
+    sys.modules["google.oauth2.service_account"] = fake_service_account_module
 
     import src.backend.server.utils_flask as utils_flask
 

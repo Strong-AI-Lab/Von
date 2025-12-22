@@ -53,11 +53,30 @@ class TestGetLLMClient:
 
         assert isinstance(client, OpenAIClient)
 
-    def test_gemini_client_creation(self):
+    def test_gemini_client_creation(self, monkeypatch):
         """Test factory creates GeminiClient for Gemini models."""
         from src.backend.languagemodels.structured_tool_calling.providers import GeminiClient
 
-        config = LLMClientConfig(model="gemini-pro")
+        # Mock the google.genai.Client to avoid requiring an actual API key
+        import sys
+        import types
+
+        fake_genai = types.ModuleType("google.genai")
+        fake_genai.Client = lambda **kwargs: types.SimpleNamespace(
+            models=types.SimpleNamespace(generate_content=lambda **kw: None)
+        )
+        fake_genai.types = types.SimpleNamespace(
+            GenerateContentConfig=lambda **kw: kw,
+            Tool=lambda **kw: kw,
+            FunctionDeclaration=lambda **kw: kw,
+            Schema=lambda **kw: kw,
+            Type=types.SimpleNamespace(OBJECT="OBJECT"),
+        )
+
+        sys.modules["google.genai"] = fake_genai
+        monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+
+        config = LLMClientConfig(model="gemini-pro", api_key="test-key")
         client = get_llm_client(config)
 
         assert isinstance(client, GeminiClient)

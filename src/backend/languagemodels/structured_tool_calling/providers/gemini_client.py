@@ -22,22 +22,21 @@ class GeminiClient(LLMClient):
         super().__init__(config)
 
         try:
-            import google.generativeai as genai
+            from google import genai
         except ImportError:
-            raise ImportError("google-generativeai package required for GeminiClient")
+            raise ImportError("google-genai package required for GeminiClient")
 
         self._genai = genai
 
+        # Create client with API key if provided
+        client_kwargs = {}
         if config.api_key:
-            genai.configure(api_key=config.api_key)  # type: ignore[attr-defined]
+            client_kwargs['api_key'] = config.api_key
 
-        self._model = genai.GenerativeModel(  # type: ignore[attr-defined]
-            model_name=config.model,
-            generation_config={
-                "temperature": config.temperature,
-                "max_output_tokens": config.max_tokens or 2048,
-            }
-        )
+        self._client = genai.Client(**client_kwargs)  # type: ignore[attr-defined]
+        self._model_name = config.model
+        self._temperature = config.temperature
+        self._max_tokens = config.max_tokens or 2048
 
     async def generate_with_tools(
         self,
@@ -84,9 +83,14 @@ class GeminiClient(LLMClient):
             messages = self._build_messages(prompt, context, system_message)
 
             # Call Gemini API with function calling
-            response = self._model.generate_content(
-                messages,  # type: ignore[arg-type]
+            response = self._client.models.generate_content(
+                model=self._model_name,
+                contents=messages,  # type: ignore[arg-type]
                 tools=tools,
+                config=genai.types.GenerateContentConfig(
+                    temperature=self._temperature,
+                    max_output_tokens=self._max_tokens,
+                ),
                 **kwargs,
             )
 
