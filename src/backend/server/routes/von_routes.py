@@ -168,6 +168,73 @@ def _calculate_tool_stats(tool_messages: list[dict]) -> dict:
     return stats
 
 
+def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
+    """
+    Derive warnings from LLM debug information.
+    
+    Mirrors the frontend deriveLlmDebugWarnings logic to ensure backend
+    warnings are persisted in the JSON structure.
+    
+    Args:
+        debug_info: The llm_debug_info dictionary
+        
+    Returns:
+        List of warning strings
+    """
+    warnings = []
+    
+    if not debug_info or not isinstance(debug_info, dict):
+        return warnings
+    
+    # Check for backend errors
+    if isinstance(debug_info.get("error"), str) and debug_info.get("error", "").strip():
+        warnings.append(f"Backend error: {debug_info['error'].strip()}")
+    
+    # Check auxiliary LLM calls for warnings
+    aux_calls = debug_info.get("aux_llm_calls", [])
+    if isinstance(aux_calls, list):
+        for call in aux_calls:
+            if not isinstance(call, dict):
+                continue
+            
+            call_type = call.get("type", "")
+            
+            # Check missing tool-call classifier warnings
+            if call_type == "missing_tool_call_classifier":
+                injection_mode = call.get("prompt_injection_mode", "")
+                if injection_mode == "append":
+                    warnings.append(
+                        "Missing tool-call detector prompt did not include `{response}` placeholder; response was appended."
+                    )
+                
+                verdict = str(call.get("response_preview", "")).strip().lower()
+                if verdict and not verdict.startswith(("yes", "no")):
+                    warnings.append(
+                        "Missing tool-call classifier returned an unexpected verdict (not yes/no)."
+                    )
+                
+                model_raw = call.get("model_raw", "")
+                model_resolved = call.get("model_resolved", "")
+                if isinstance(model_raw, str) and model_raw.startswith("#V#") and not model_resolved:
+                    warnings.append(
+                        "Missing tool-call classifier model could not be resolved from ontology ID."
+                    )
+            
+            # Check for call-level errors
+            if isinstance(call.get("error"), str) and call.get("error", "").strip():
+                warnings.append(call["error"].strip())
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_warnings = []
+    for w in warnings:
+        if w not in seen:
+            seen.add(w)
+            unique_warnings.append(w)
+    
+    return unique_warnings
+
+
 @von_bp.route("/onboard_new_member", methods=["POST"])
 def onboard_new_member():
     """Onboards a new lab member."""
@@ -626,6 +693,8 @@ def generate():
                 },
             }
 
+            llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+
             return jsonify(
                 {
                     "response": response_text,
@@ -858,6 +927,8 @@ def generate():
                     "enabled": True,
                 },
             }
+
+            llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
 
             return jsonify(
                 {
@@ -1270,6 +1341,9 @@ def generate():
             "aux_llm_calls": auxiliary_llm_calls,
         }
 
+        # Derive warnings from debug info and add to structure
+        llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+
         # Now save messages to history/context with debug info
         # Truncate large tool results to prevent context explosion
         truncated_tool_messages = _truncate_large_tool_results(
@@ -1334,6 +1408,7 @@ def generate():
             ),
             "tool_invocations": [],
         }
+        error_debug_info["warnings"] = _derive_llm_debug_warnings(error_debug_info)
         return jsonify({"error": str(e), "llm_debug": error_debug_info}), 500
 
 
@@ -1430,41 +1505,43 @@ def get_models():
 @von_bp.route("/api/search", methods=["GET"])
 def search_concepts_endpoint():
     """API endpoint to search for concepts by name.
-    
+
     Query parameters:
     - q: Search query string (required)
     - limit: Maximum results to return (default: 8)
     """
     try:
         from ...services.concept_search_service import search_concepts
-        
+
         query = request.args.get("q", "").strip()
         limit = request.args.get("limit", default=8, type=int)
-        
+
         if not query:
             return jsonify({"results": [], "total_count": 0}), 200
-        
+
         result = search_concepts(
-            query=query,
-            match_type="substring",
-            limit=limit,
-            include_description=False
+            query=query, match_type="substring", limit=limit, include_description=False
         )
-        
+
         # Format results for autocomplete
         formatted_results = [
             {
                 "concept_id": item.get("concept_id"),
                 "name": item.get("name") or item.get("concept_id"),
-                "kind": item.get("kind", "unknown")
+                "kind": item.get("kind", "unknown"),
             }
             for item in result.get("results", [])
         ]
-        
-        return jsonify({
-            "results": formatted_results,
-            "total_count": result.get("total_count", 0)
-        }), 200
+
+        return (
+            jsonify(
+                {
+                    "results": formatted_results,
+                    "total_count": result.get("total_count", 0),
+                }
+            ),
+            200,
+        )
     except Exception as e:
         current_app.logger.error(f"Concept search error: {e}")
         return jsonify({"error": str(e)}), 500
