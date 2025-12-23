@@ -13,6 +13,16 @@ const transcriptTurns = [];
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 
+function escapeHtml(value) {
+    const text = String(value ?? '');
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // Cache concept metadata used for cartouches in chat transcript.
 // Map<fullId, { name: string, kind: string } | null>
 const chatConceptMetaCache = new Map();
@@ -1352,8 +1362,43 @@ function showLlmDebugPopup(turnId) {
         metadata.error = debugData.error;
     }
 
+    let workflowExecutionTrace = null;
+    if (Array.isArray(debugData.aux_llm_calls)) {
+        workflowExecutionTrace = debugData.aux_llm_calls.find((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return false;
+            }
+            if (entry.type !== 'workflow_execution_trace') {
+                return false;
+            }
+            return typeof entry.execution_id === 'string' && entry.execution_id.trim().length > 0;
+        }) || null;
+    }
+
     // Build metadata HTML display
-    let metadataHtml = '<div class="llm-debug-metadata-section"><strong>Metadata</strong><pre>';
+    let metadataHtml = '';
+    if (workflowExecutionTrace) {
+        const executionId = String(workflowExecutionTrace.execution_id).trim();
+        const href = `/api/workflows/executions/${encodeURIComponent(executionId)}`;
+        const workflowSummary = {
+            workflow_id: workflowExecutionTrace.workflow_id ?? null,
+            execution_id: executionId,
+            stored: workflowExecutionTrace.stored ?? null,
+            status: workflowExecutionTrace.status ?? null
+        };
+
+        metadataHtml += '<div class="llm-debug-metadata-section">';
+        metadataHtml += '<strong>Workflow execution</strong>';
+        metadataHtml += '<div>';
+        metadataHtml += `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(executionId)}</a>`;
+        metadataHtml += '</div>';
+        metadataHtml += '<pre>';
+        metadataHtml += escapeHtml(JSON.stringify(workflowSummary, null, 2));
+        metadataHtml += '</pre>';
+        metadataHtml += '</div>';
+    }
+
+    metadataHtml += '<div class="llm-debug-metadata-section"><strong>Metadata</strong><pre>';
     metadataHtml += JSON.stringify(metadata, null, 2);
     metadataHtml += '</pre></div>';
 
@@ -1413,7 +1458,8 @@ function showLlmDebugPopup(turnId) {
     // Store full data for copy function, including computed metadata
     const enhancedDebugData = {
         ...debugData,
-        metadata: metadata  // Add computed metadata to the structure
+        metadata: metadata,  // Add computed metadata to the structure
+        workflow_execution_trace: workflowExecutionTrace || undefined
     };
     popup.dataset.currentDebugData = JSON.stringify(enhancedDebugData, null, 2);
 
@@ -1575,5 +1621,9 @@ export const resetChat = handleResetContext;
 export const handleChatResponse = appendMessage;
 export const exportConversationJson = handleExportConversationJson;
 export const exportConversationMarkdown = handleExportConversationMarkdown;
-export { formatChatTimestamp, updateHistoryLength };
+// Export for testing
+export const setLlmDebugDataForTurn = (turnId, debugData) => {
+    llmDebugData.set(turnId, debugData);
+};
+export { formatChatTimestamp, showLlmDebugPopup, updateHistoryLength };
 
