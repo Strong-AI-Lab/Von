@@ -15,10 +15,15 @@ It only prints allowlisted keys and redacts secret-like values (tokens, password
   3. Or address any issues/feedback from Phase 1 review
 
 ## Current Status
-- **Date**: 2025-12-04 (Updated: JVNAUTOSCI-789 Phase 2 Substantial Progress)
-- **Current Work**: JVNAUTOSCI-789 Phase 2 (IN PROGRESS - 80% complete)
-- **Branch**: JVNAUTOSCI-789-phase-2-ui-integration-for-organisation-and-role
-- **Immediate Focus**: Phase 2 implementation progressing well:
+- **Date**: 2025-12-04 (Updated: JVNAUTOSCI-799 Detector & Autocomplete Fixes Complete)
+- **Current Work**: JVNAUTOSCI-799 Structured Tool Calling (Bug Fixes Complete)
+- **Branch**: JVNAUTOSCI-799-structured-tool-calling-for-internal-mcp-replace
+- **Latest Fixes**:
+  - ✅ **CRITICAL FIX**: Detector prompt missing `{response}` placeholder (was breaking tool-call detection)
+  - ✅ **BUG FIX**: conceptAutocomplete.js line 239 TypeError (undefined property access)
+  - ✅ **UI IMPROVEMENT**: Renamed "Attributes" → "Text Fields" for clarity
+  - ✅ **TASK CREATED**: JVNAUTOSCI-807 (ubiquitous predicate reflection in Vontology)
+- **Previous Work**: JVNAUTOSCI-789 Phase 2 (80% complete)
   1. ✅ Backend API endpoints (3/3)
   2. ✅ Frontend UI component (1/1)
   3. ✅ Vontology membership model (1/1)
