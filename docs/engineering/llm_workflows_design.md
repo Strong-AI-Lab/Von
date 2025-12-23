@@ -259,22 +259,15 @@ WorkflowEngine.execute_workflow(workflow_id, inputs, context) -> WorkflowResult
 **Description**: A compositional pattern comprising one or more LLM actions with defined sequencing and control flow.
 
 **Attributes** (via text relations):
-- **hasDefinition** (JSON):
-  ```json
-  {
-    "control_flow": "sequential",
-    "failure_strategy": "halt",
-    "max_iterations": null,
-    "timeout_seconds": 300,
-    "steps": [...]
-  }
-  ```
 - **hasDescription**: Human-readable explanation of workflow purpose
 - **hasName**: Workflow display name
+- **hasDefinition**: Optional *narrative* process description (not machine-parsed JSON)
 
 **Relationships**:
 - `is_a_type_of` → `#V#workflow`
 - `has_instance` → Specific workflow instances (e.g., `#V#chat_assistant_workflow`)
+- `hasInitialStep` → The first step in the workflow (a `#V#workflow_step` individual)
+- `hasStep` → All steps in the workflow (unordered set; ordering comes from control-flow links)
 
 #### `#V#llm_action` (Type) — ENHANCED
 
@@ -306,22 +299,23 @@ WorkflowEngine.execute_workflow(workflow_id, inputs, context) -> WorkflowResult
 
 **Description**: A single step within an LLM workflow
 
-**Attributes** (JSON in hasDefinition):
-```json
-{
-  "step_id": "invoke_llm_for_spans",
-  "step_index": 2,
-  "action_id": "#V#extract_spans_action",
-  "condition": "$.input.text.length > 0",
-  "retry_policy": "exponential_backoff",
-  "max_retries": 3,
-  "timeout_seconds": 30
-}
-```
+**Attributes** (via text relations):
+- **hasName**: Short label (e.g., "Invoke LLM for spans")
+- **hasDescription**: Purpose of the step
+- **hasTimeoutSeconds**: Optional numeric setting
+- **hasMaxRetries**: Optional numeric setting
+- **hasRetryPolicy**: Optional symbolic setting (e.g., `#V#exponential_backoff_retry_policy`)
 
 **Relationships**:
 - `is_an_instance_of` → `#V#workflow_step`
-- `part_of_workflow` → Parent workflow concept
+- `partOfWorkflow` → Parent workflow concept
+- `invokesAction` → The action to execute (usually a `#V#llm_action`, but can be any `#V#action`)
+- `nextStep` → Default control-flow successor step
+- `onTrueNextStep` / `onFalseNextStep` → Conditional branching successors
+- `onFailureNextStep` → Fallback/recovery successor
+- `hasPrecondition` → Preconditions (logical statements, see `#V#workflow_condition`)
+- `hasEffect` → Effects (state updates, see `#V#workflow_effect`)
+- `readsVariable` / `writesVariable` → Dataflow dependencies
 
 #### `#V#workflow_execution_trace` (Individual)
 
@@ -347,98 +341,78 @@ WorkflowEngine.execute_workflow(workflow_id, inputs, context) -> WorkflowResult
 
 **New Predicates**:
 - `partOfWorkflow`: Links step to parent workflow
-- `hasPromptTemplate`: Links action to stored prompt concept
-- `hasInputSchema` / `hasOutputSchema`: Schema definitions (JSON text relations)
+- `hasInitialStep`: Links workflow to its entry step
+- `hasStep`: Links workflow to step set (for discovery)
+- `nextStep`: Default control-flow edge
+- `onTrueNextStep` / `onFalseNextStep`: Conditional branch edges
+- `onFailureNextStep`: Error-recovery edge
+- `invokesAction`: Step → action to run
+- `hasPromptTemplate`: Action → stored prompt concept
+- `hasPrecondition` / `hasEffect`: Step → condition/effect objects
+- `readsVariable` / `writesVariable`: Step → variable nodes
 
 ---
 
 ## 6. Workflow Definition Language
 
-### 6.1 JSON Schema
+### 6.1 Vontology-Native Process Representation (No JSON Definitions)
 
-Workflows are stored as JSON in `hasDefinition` text relations:
+Workflow *structure* should be represented as explicit Vontology entities and relationships, not as a JSON blob in text.
 
-```json
-{
-  "workflow_id": "#V#chat_assistant_workflow",
-  "version": "1.0",
-  "control_flow": "sequential",
-  "failure_strategy": "halt",
-  "timeout_seconds": 120,
-  "steps": [
-    {
-      "step_id": "build_system_message",
-      "action_type": "compose_prompt",
-      "inputs": {
-        "user_id": "$context.user_id",
-        "org_id": "$context.org_id",
-        "tool_list": "$system.available_tools"
-      },
-      "outputs": {
-        "system_message": "$.result"
-      }
-    },
-    {
-      "step_id": "invoke_llm",
-      "action_type": "llm_generate",
-      "model": "$settings.default_model",
-      "prompt": "$state.system_message + $inputs.user_prompt",
-      "context": "$inputs.conversation_history",
-      "max_retries": 2,
-      "outputs": {
-        "llm_response": "$.content"
-      }
-    },
-    {
-      "step_id": "extract_tool_calls",
-      "action_type": "parse_json",
-      "input": "$state.llm_response",
-      "condition": "'action' in $state.llm_response",
-      "fallback_action": "return_text_response",
-      "outputs": {
-        "tool_calls": "$.parsed.tools"
-      }
-    },
-    {
-      "step_id": "execute_tools",
-      "action_type": "mcp_tool_loop",
-      "tool_calls": "$state.tool_calls",
-      "max_iterations": 8,
-      "condition": "$state.tool_calls is not empty",
-      "outputs": {
-        "tool_results": "$.results"
-      }
-    },
-    {
-      "step_id": "synthesise_response",
-      "action_type": "llm_generate",
-      "prompt": "Synthesise final response from: $state.tool_results",
-      "outputs": {
-        "final_response": "$.content"
-      }
-    }
-  ]
-}
-```
+This aligns with classical KR approaches:
+- **Scripts** (Schank & Abelson): stereotyped event sequences with roles, props, and expectations.
+- **Plans** (STRIPS-style): actions with **preconditions** and **effects**, enabling reasoning about state.
+- **HTN**: workflows as tasks decomposed into ordered/partially ordered subtasks.
+- **Situation calculus / Golog**: explicitly modelled programmes; the graph is the programme.
 
-### 6.2 Variable Binding Syntax
+In Von terms, a workflow becomes a small, queryable graph:
 
-- `$context.user_id`: Runtime context variable
-- `$inputs.user_prompt`: Workflow input parameter
-- `$state.llm_response`: Previous step output
-- `$settings.default_model`: System settings
-- `$system.available_tools`: System introspection
+- `#V#chat_assistant_workflow` (individual; instance of `#V#llm_workflow`)
+  - `hasInitialStep` → `#V#chat_step_build_system_message`
+  - `hasStep` → (all step nodes)
 
-**Evaluation**: Simple JSONPath-like expressions (use `jsonpath-ng` library)
+- `#V#chat_step_build_system_message` (individual; instance of `#V#workflow_step`)
+  - `invokesAction` → `#V#compose_chat_system_message_action`
+  - `nextStep` → `#V#chat_step_invoke_llm`
 
-### 6.3 Condition Syntax
+- `#V#chat_step_invoke_llm`
+  - `invokesAction` → `#V#chat_llm_generate_action`
+  - `nextStep` → `#V#chat_step_extract_tool_calls`
 
-- String containment: `'word' in $state.response`
-- Field presence: `$state.result.field exists`
-- Comparison: `$state.count > 0`
-- Boolean: `$state.flag == true`
+- `#V#chat_step_extract_tool_calls`
+  - `invokesAction` → `#V#parse_tool_calls_action`
+  - `hasPrecondition` → `#V#tool_calls_present_condition`
+  - `onTrueNextStep` → `#V#chat_step_execute_tools`
+  - `onFalseNextStep` → `#V#chat_step_return_text_response`
 
-**Parser**: Custom minimal expression evaluator (not full Python `eval` for security)
+- `#V#chat_step_execute_tools`
+  - `invokesAction` → `#V#mcp_tool_loop_action`
+  - `nextStep` → `#V#chat_step_synthesise_response`
+
+- `#V#chat_step_synthesise_response`
+  - `invokesAction` → `#V#synthesise_final_response_action`
+
+The “definition” is therefore the graph itself.
+
+### 6.2 Conditions, State, and Bindings
+
+To keep the workflow graph explicit while remaining implementable, represent *conditions* and *bindings* as first-class nodes:
+
+- `#V#workflow_variable` (type) with individuals like `#V#var_tool_calls`, `#V#var_tool_results`
+  - Steps use `readsVariable` / `writesVariable` to document dataflow.
+
+- `#V#workflow_condition` (type)
+  - Store a short declarative expression in `hasContent` (e.g., "tool_calls_nonempty") or a restricted predicate form.
+  - Link step → condition via `hasPrecondition`.
+
+- `#V#workflow_effect` (type)
+  - Represents a state update such as “append tool result to context” or “set final_response”.
+
+This is deliberately closer to planning/operator representations than to a JSON DSL.
+
+### 6.3 Optional: Narrative Definition Text
+
+If `hasDefinition` is used at all, it should be a narrative process description that complements the graph (useful for humans and LLM prompting), not a machine-parsed JSON definition.
 
 ---
 
@@ -628,30 +602,37 @@ from typing import List, Dict, Any
 @dataclass
 class WorkflowStep:
     step_id: str
-    action_type: str
-    inputs: Dict[str, str]  # Variable bindings
+    action_id: str  # Vontology concept ID
+    inputs: Dict[str, str]  # Variable bindings (strings or references)
     outputs: Dict[str, str]  # Output mappings
-    condition: Optional[str] = None
+    condition_id: Optional[str] = None  # Optional #V#workflow_condition
     retry_policy: str = "none"
     max_retries: int = 0
     timeout_seconds: int = 30
 
 @dataclass
-class WorkflowDefinition:
+class WorkflowGraph:
+    """A workflow definition represented explicitly as a graph."""
+
     workflow_id: str
-    version: str
-    control_flow: str  # "sequential" | "conditional" | "iterative"
-    steps: List[WorkflowStep]
-    failure_strategy: str = "halt"
-    max_iterations: Optional[int] = None
-    timeout_seconds: int = 300
+    initial_step_id: str
+    steps: Dict[str, WorkflowStep]
+    edges: Dict[str, Dict[str, str]]  # step_id -> {"next"|"on_true"|"on_false"|"on_failure": step_id}
 
     @classmethod
-    def from_vontology(cls, workflow_id: str) -> 'WorkflowDefinition':
-        """Load workflow definition from Vontology."""
-        # Fetch hasDefinition text relation
-        # Parse JSON
-        # Validate schema
+    def from_vontology(cls, workflow_id: str) -> 'WorkflowGraph':
+        """Load workflow definition from Vontology relationships.
+
+        Expected pattern:
+        - workflow --hasInitialStep--> step
+        - workflow --hasStep--> step
+        - step --nextStep/onTrueNextStep/...--> step
+        - step --invokesAction--> action
+        """
+        # 1) Fetch workflow node
+        # 2) Resolve hasInitialStep + hasStep
+        # 3) For each step, resolve invokesAction and control-flow successors
+        # 4) Return graph
         pass
 ```
 

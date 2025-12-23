@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import importlib
+import sys
+import types
+
+import pytest
+
+
+@pytest.fixture()
+def app_client(monkeypatch):
+    # Must be set before importing mongo_client so USE_MOCK_DB is computed correctly.
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+
+    import src.backend.db.mongo_client as mongo_client
+
+    importlib.reload(mongo_client)
+
+    # Stub Google auth dependencies pulled in by utils_flask -> auth_routes imports.
+    fake_flow_module = types.ModuleType("google_auth_oauthlib.flow")
+
+    class _DummyFlow:
+        def __init__(self, *args, **kwargs):
+            self.credentials = types.SimpleNamespace(id_token="dummy-token")
+            self.redirect_uri = kwargs.get("redirect_uri")
+            self.client_config = {"web": {"redirect_uris": [self.redirect_uri]}}
+
+        @classmethod
+        def from_client_config(cls, *args, **kwargs):
+            return cls(**kwargs)
+
+        def authorization_url(self, *args, **kwargs):
+            return "https://auth.example", "state-token"
+
+        def fetch_token(self, *args, **kwargs):
+            return None
+
+    fake_flow_module.Flow = _DummyFlow  # type: ignore[attr-defined]
+    sys.modules["google_auth_oauthlib"] = types.ModuleType("google_auth_oauthlib")
+    sys.modules["google_auth_oauthlib"].flow = fake_flow_module  # type: ignore[attr-defined]
+    sys.modules["google_auth_oauthlib.flow"] = fake_flow_module
+
+    fake_id_token_module = types.ModuleType("google.oauth2.id_token")
+    fake_id_token_module.verify_oauth2_token = lambda *args, **kwargs: {  # type: ignore[attr-defined]
+        "sub": "dummy-user"
+    }
+
+    fake_credentials_module = types.ModuleType("google.oauth2.credentials")
+
+    class _DummyCredentials:
+        def __init__(self, id_token: str = "dummy-token"):
+            self.id_token = id_token
+
+    fake_credentials_module.Credentials = _DummyCredentials  # type: ignore[attr-defined]
+
+    fake_service_account_module = types.ModuleType("google.oauth2.service_account")
+
+    class _DummyServiceAccountCredentials:
+        def __init__(self, *args, **kwargs):
+            self.project_id = kwargs.get("project_id")
+
+    fake_service_account_module.Credentials = _DummyServiceAccountCredentials  # type: ignore[attr-defined]
+
+    fake_oauth2_package = types.ModuleType("google.oauth2")
+    fake_oauth2_package.id_token = fake_id_token_module  # type: ignore[attr-defined]
+    fake_oauth2_package.credentials = fake_credentials_module  # type: ignore[attr-defined]
+    fake_oauth2_package.service_account = fake_service_account_module  # type: ignore[attr-defined]
+
+    sys.modules["google.oauth2"] = fake_oauth2_package
+    sys.modules["google.oauth2.id_token"] = fake_id_token_module
+    sys.modules["google.oauth2.credentials"] = fake_credentials_module
+    sys.modules["google.oauth2.service_account"] = fake_service_account_module
+
+    import src.backend.server.utils_flask as utils_flask
+
+    monkeypatch.setattr(utils_flask, "ensure_monitor_started", lambda: None)
+    monkeypatch.setattr(
+        utils_flask,
+        "prompt_concept_health_status",
+        lambda: {"available": True, "source_field": "stub"},
+    )
+
+    app = utils_flask.create_flask_app(
+        list_models_func=lambda: ["dummy-model"],
+        generate_func=lambda prompt, context, model: "ok",
+    )
+    app.config["TESTING"] = True
+
+    with app.test_client() as client:
+        yield client
+
+
+def test_workflow_execution_routes_roundtrip(app_client):
+    from src.backend.workflows.trace_model import WorkflowExecutionTrace
+    from src.backend.workflows.trace_store import insert_workflow_execution_trace
+
+    trace = WorkflowExecutionTrace(workflow_id="#V#chat_assistant_workflow")
+    trace.user_namespace = "#V#unit_test_user"
+    trace.start_step("llm.generate", inputs={"prompt": "hi"}).finish_success(
+        {"response_preview": "hello"}
+    )
+    trace.finish_completed()
+
+    insert_workflow_execution_trace(trace.to_storage_document())
+
+    resp = app_client.get(f"/api/workflows/executions/{trace.execution_id}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["execution_id"] == trace.execution_id
+
+    recent = app_client.get("/api/workflows/executions/recent?limit=5")
+    assert recent.status_code == 200
+    payload = recent.get_json()
+    assert payload["count"] >= 1
+    assert any(
+        item.get("execution_id") == trace.execution_id for item in payload["items"]
+    )
+
+
+def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    def _fake_find_one(filter, projection=None):
+        if filter.get("concept_id") == "#V#demo_workflow":
+            return {
+                "concept_id": "#V#demo_workflow",
+                "name": "Demo workflow",
+                "relationships": {
+                    "hasInitialStep": ["#V#demo_step_1"],
+                    "hasStep": ["#V#demo_step_1", "#V#demo_step_2", "#V#demo_step_3"],
+                },
+            }
+        return None
+
+    def _fake_find(filter, projection=None, sort=None, skip=0, limit=0):
+        ids = filter.get("concept_id", {}).get("$in", [])
+        docs = []
+        for cid in ids:
+            if cid == "#V#demo_step_1":
+                docs.append(
+                    {
+                        "concept_id": "#V#demo_step_1",
+                        "name": "Step 1",
+                        "relationships": {
+                            "invokesAction": ["#V#demo_action"],
+                            "hasPrecondition": ["#V#demo_condition_1"],
+                            "onTrueNextStep": ["#V#demo_step_2"],
+                            "onFalseNextStep": ["#V#demo_step_3"],
+                        },
+                    }
+                )
+            if cid == "#V#demo_step_2":
+                docs.append(
+                    {
+                        "concept_id": "#V#demo_step_2",
+                        "name": "Step 2",
+                        "relationships": {
+                            "invokesAction": ["#V#demo_action_2"],
+                        },
+                    }
+                )
+            if cid == "#V#demo_step_3":
+                docs.append(
+                    {
+                        "concept_id": "#V#demo_step_3",
+                        "name": "Step 3",
+                        "relationships": {
+                            "invokesAction": ["#V#demo_action_3"],
+                        },
+                    }
+                )
+        return docs
+
+    monkeypatch.setattr(workflows_routes.ConceptsRepository, "find_one", _fake_find_one)
+    monkeypatch.setattr(workflows_routes.ConceptsRepository, "find", _fake_find)
+    monkeypatch.setattr(workflows_routes, "get_texts_for_concept", lambda cid: [])
+
+    resp = app_client.get("/api/workflows/definitions/%23V%23demo_workflow")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["workflow_id"] == "#V#demo_workflow"
+    assert data["definition"]["representation"] == "vontology_process_graph_v1"
+    assert data["definition"]["initial_step"] == "#V#demo_step_1"
+    assert any(
+        step["step_id"] == "#V#demo_step_1" for step in data["definition"]["steps"]
+    )
+    step_1 = next(
+        step
+        for step in data["definition"]["steps"]
+        if step["step_id"] == "#V#demo_step_1"
+    )
+    assert step_1["preconditions"] == ["#V#demo_condition_1"]
+    assert step_1["control_flow"]["on_true"] == "#V#demo_step_2"
+    assert step_1["control_flow"]["on_false"] == "#V#demo_step_3"
+    assert any(
+        edge["predicate"] == "onTrueNextStep" for edge in data["definition"]["edges"]
+    )
+    assert any(
+        edge["predicate"] == "onFalseNextStep" for edge in data["definition"]["edges"]
+    )
