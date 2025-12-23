@@ -377,7 +377,7 @@ export function initializePromptCartoucheOverlay(textarea) {
             if (!Number.isFinite(start) || !Number.isFinite(end)) return;
             removeTokenRangeFromTextarea(textarea, start, end);
         }
-    });
+    }, true);
 
     parts.overlay.addEventListener('keydown', (event) => {
         const key = event.key;
