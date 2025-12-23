@@ -163,7 +163,9 @@ class InternalMCPChatOrchestrator:
         )
         return tool_definitions
 
-    def _mcp_schema_to_json_schema(self, mcp_schema: Mapping[str, Any]) -> Dict[str, Any]:
+    def _mcp_schema_to_json_schema(
+        self, mcp_schema: Mapping[str, Any]
+    ) -> Dict[str, Any]:
         """Convert MCP Schema format to JSON Schema format.
 
         MCP schemas use required/optional dicts, JSON Schema uses properties + required list.
@@ -176,12 +178,16 @@ class InternalMCPChatOrchestrator:
 
         # Process required fields
         for field_name, field_type in required_fields.items():
-            properties[field_name] = {"type": self._python_type_to_json_schema_type(field_type)}
+            properties[field_name] = {
+                "type": self._python_type_to_json_schema_type(field_type)
+            }
             required_list.append(field_name)
 
         # Process optional fields
         for field_name, field_type in optional_fields.items():
-            properties[field_name] = {"type": self._python_type_to_json_schema_type(field_type)}
+            properties[field_name] = {
+                "type": self._python_type_to_json_schema_type(field_type)
+            }
 
         json_schema = {
             "type": "object",
@@ -201,7 +207,9 @@ class InternalMCPChatOrchestrator:
             # For unions, just take the first non-None type
             for t in python_type:
                 if t is not type(None):
-                    return InternalMCPChatOrchestrator._python_type_to_json_schema_type(t)
+                    return InternalMCPChatOrchestrator._python_type_to_json_schema_type(
+                        t
+                    )
             return "string"  # Fallback
 
         # Handle None type
@@ -524,7 +532,9 @@ class InternalMCPChatOrchestrator:
         if not concept:
             return None
 
-        relationships = concept.get("relationships") if isinstance(concept, Mapping) else None
+        relationships = (
+            concept.get("relationships") if isinstance(concept, Mapping) else None
+        )
         if not isinstance(relationships, Mapping):
             return None
 
@@ -557,9 +567,13 @@ class InternalMCPChatOrchestrator:
 
         candidate_texts: List[Dict[str, Any]] = []
 
-        def _add_candidate(text_value: str, *, predicate: str = "hasContent", lang: str = "") -> None:
+        def _add_candidate(
+            text_value: str, *, predicate: str = "hasContent", lang: str = ""
+        ) -> None:
             if isinstance(text_value, str) and text_value.strip():
-                candidate_texts.append({"text": text_value.strip(), "predicate": predicate, "lang": lang})
+                candidate_texts.append(
+                    {"text": text_value.strip(), "predicate": predicate, "lang": lang}
+                )
 
         if isinstance(concept, Mapping):
             direct_content = concept.get("content")
@@ -578,7 +592,9 @@ class InternalMCPChatOrchestrator:
             )
             preserved_content = preserved_fields.get("content")
             if isinstance(preserved_content, str):
-                _add_candidate(preserved_content, predicate="preserved_content", lang="")
+                _add_candidate(
+                    preserved_content, predicate="preserved_content", lang=""
+                )
 
         try:
             from src.backend.services.text_value_service import get_texts_for_concept
@@ -761,7 +777,8 @@ class InternalMCPChatOrchestrator:
         model_name = self._normalise_llm_model_name(raw_model_name)
 
         placeholder_present = (
-            isinstance(detector.prompt_text, str) and "{response}" in detector.prompt_text
+            isinstance(detector.prompt_text, str)
+            and "{response}" in detector.prompt_text
         )
         injection_mode = "replace" if placeholder_present else "append"
         prompt_text = self._inject_prompt_variable(
@@ -771,7 +788,9 @@ class InternalMCPChatOrchestrator:
         )
 
         try:
-            classifier_output = llm_client.generate(prompt_text, context=None, model=model_name)
+            classifier_output = llm_client.generate(
+                prompt_text, context=None, model=model_name
+            )
         except Exception as exc:  # pragma: no cover - defensive
             self._logger.warning(
                 "[mcp_orchestrator] Missing tool-call classifier failed (model=%s): %s",
@@ -1322,8 +1341,69 @@ class InternalMCPChatOrchestrator:
         auxiliary_system_prompt: str | None = None,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
+
+        trace_enabled = os.getenv("VON_WORKFLOWS_TRACE_ENABLED", "0").lower() in {
+            "1",
+            "true",
+        }
+        trace = None
+        trace_store_fn = None
+        if trace_enabled:
+            try:
+                from ...workflows.trace_model import WorkflowExecutionTrace
+                from ...workflows.trace_store import insert_workflow_execution_trace
+
+                trace = WorkflowExecutionTrace(workflow_id="#V#chat_assistant_workflow")
+                trace.user_namespace = user_namespace
+                trace_store_fn = insert_workflow_execution_trace
+            except Exception:
+                trace_enabled = False
+                trace = None
+                trace_store_fn = None
+
+        def _persist_trace(*, status: str, error: str | None = None) -> None:
+            if not trace_enabled or trace is None or trace_store_fn is None:
+                return
+            try:
+                if status == "failed" and error:
+                    trace.finish_failed(error)
+                else:
+                    trace.finish_completed()
+                stored_execution_id = trace_store_fn(trace.to_storage_document())
+                aux_llm_calls.append(
+                    {
+                        "type": "workflow_execution_trace",
+                        "workflow_id": trace.workflow_id,
+                        "execution_id": trace.execution_id,
+                        "stored": bool(stored_execution_id),
+                        "status": trace.status,
+                    }
+                )
+            except Exception:
+                pass
+
         if not self._gateway.enabled or self._max_tool_invocations <= 0:
+            if trace_enabled and trace is not None:
+                llm_step = trace.start_step(
+                    "llm.generate",
+                    inputs={
+                        "prompt": prompt,
+                        "model": model or "default",
+                        "gateway_enabled": bool(self._gateway.enabled),
+                        "max_tool_invocations": int(self._max_tool_invocations),
+                    },
+                )
             response = llm_client.generate(prompt, context=context, model=model)
+            if trace_enabled and trace is not None:
+                llm_step.finish_success(
+                    {
+                        "response_preview": (
+                            response[:800]
+                            if isinstance(response, str)
+                            else str(response)[:800]
+                        )
+                    }
+                )
             # If the model emitted a tool-call JSON blob but the gateway is disabled,
             # surface an actionable message instead of returning raw JSON.
             try:
@@ -1333,7 +1413,7 @@ class InternalMCPChatOrchestrator:
             if tool_calls:
                 tool_name = tool_calls[0].get(self._TOOL_FIELD)
                 if isinstance(tool_name, str):
-                    return OrchestratorResult(
+                    result = OrchestratorResult(
                         response_text=(
                             "Internal MCP is disabled, so I couldn't execute the tool call "
                             f"for tool={tool_name!r}. Set VON_INTERNAL_MCP_ENABLE=1 and try again."
@@ -1342,12 +1422,16 @@ class InternalMCPChatOrchestrator:
                         tool_invocations=(),
                         aux_llm_calls=(),
                     )
-            return OrchestratorResult(
+                    _persist_trace(status="completed")
+                    return result
+            result = OrchestratorResult(
                 response_text=response,
                 extra_messages=(),
                 tool_invocations=(),
                 aux_llm_calls=tuple(aux_llm_calls),
             )
+            _persist_trace(status="completed")
+            return result
 
         augmented_context = self._build_augmented_context(
             context,
@@ -1365,6 +1449,15 @@ class InternalMCPChatOrchestrator:
         if use_structured:
             self._logger.debug("[mcp_orchestrator] Using structured tool calling path")
             try:
+                if trace_enabled and trace is not None:
+                    llm_step = trace.start_step(
+                        "llm.generate_with_tools",
+                        inputs={
+                            "prompt": prompt,
+                            "model": model or "default",
+                            "context_messages": len(augmented_context),
+                        },
+                    )
                 tool_definitions = self._convert_mcp_tools_to_structured_definitions()
                 llm_response = llm_client.generate_with_tools(
                     prompt=prompt,
@@ -1396,7 +1489,23 @@ class InternalMCPChatOrchestrator:
                     response = llm_response.text_response
                     tool_calls = None
                     has_valid_tool_call = False
+                if trace_enabled and trace is not None:
+                    llm_step.finish_success(
+                        {
+                            "response_preview": (
+                                response[:800]
+                                if isinstance(response, str)
+                                else str(response)[:800]
+                            ),
+                            "tool_call_count": len(tool_calls or []),
+                        }
+                    )
             except Exception as exc:
+                if trace_enabled and trace is not None:
+                    try:
+                        llm_step.finish_failed(str(exc))
+                    except Exception:
+                        pass
                 self._logger.warning(
                     "[mcp_orchestrator] Structured calling failed, falling back to legacy: %s",
                     exc,
@@ -1405,9 +1514,30 @@ class InternalMCPChatOrchestrator:
 
         if not use_structured:
             # Legacy path: generate() returns text, parse tool calls from JSON
-            response = llm_client.generate(prompt, context=augmented_context, model=model)
+            if trace_enabled and trace is not None:
+                llm_step = trace.start_step(
+                    "llm.generate",
+                    inputs={
+                        "prompt": prompt,
+                        "model": model or "default",
+                        "context_messages": len(augmented_context),
+                    },
+                )
+            response = llm_client.generate(
+                prompt, context=augmented_context, model=model
+            )
             tool_calls = None  # Will be extracted below
             has_valid_tool_call = False  # Will be set below
+            if trace_enabled and trace is not None:
+                llm_step.finish_success(
+                    {
+                        "response_preview": (
+                            response[:800]
+                            if isinstance(response, str)
+                            else str(response)[:800]
+                        )
+                    }
+                )
 
         # Detect JSON tool-call output for diagnostics (JVNAUTOSCI-698).
         # Only warn if we fail to parse/execute it.
@@ -1468,7 +1598,9 @@ class InternalMCPChatOrchestrator:
                         "fenced_json": fenced_detected,
                         "classifier_used": classifier_used,
                         "classifier_verdict": (
-                            "yes" if classifier_verdict is True else "no" if classifier_verdict is False else "unavailable"
+                            "yes"
+                            if classifier_verdict is True
+                            else "no" if classifier_verdict is False else "unavailable"
                         ),
                         "retry_reason": retry_reason or "",
                     }
@@ -1498,19 +1630,23 @@ class InternalMCPChatOrchestrator:
                     tool_calls = retry_calls
                     has_valid_tool_call = True
                 else:
-                    return OrchestratorResult(
+                    result = OrchestratorResult(
                         response_text=response,
                         extra_messages=(),
                         tool_invocations=(),
                         aux_llm_calls=tuple(aux_llm_calls),
                     )
+                    _persist_trace(status="completed")
+                    return result
             else:
-                return OrchestratorResult(
+                result = OrchestratorResult(
                     response_text=response,
                     extra_messages=(),
                     tool_invocations=(),
                     aux_llm_calls=tuple(aux_llm_calls),
                 )
+                _persist_trace(status="completed")
+                return result
 
         assert tool_calls is not None
         self._logger.debug("[mcp_orchestrator] Extracted tool requests: %s", tool_calls)
@@ -1561,6 +1697,22 @@ class InternalMCPChatOrchestrator:
                 iteration_count += 1
                 tool_name = tool_request.get(self._TOOL_FIELD)
                 payload = tool_request.get(self._PAYLOAD_FIELD) or {}
+                call_id = tool_request.get("_call_id")
+
+                tool_step = None
+                if trace_enabled and trace is not None and isinstance(tool_name, str):
+                    tool_step = trace.start_step(
+                        f"tool.{tool_name}",
+                        inputs={
+                            "tool": tool_name,
+                            "call_id": call_id,
+                            "payload": (
+                                dict(payload)
+                                if isinstance(payload, Mapping)
+                                else payload
+                            ),
+                        },
+                    )
 
                 if not isinstance(tool_name, str):
                     raise ToolCallParsingError("Tool name must be a string.")
@@ -1617,11 +1769,21 @@ class InternalMCPChatOrchestrator:
                     )
 
                     # Extract call_id for tracing (JVNAUTOSCI-803)
-                    call_id = tool_request.get("_call_id")
                     invocation_record = {"tool": tool_name, "payload": dict(payload)}
                     if call_id:
                         invocation_record["call_id"] = call_id
                     invocations.append(invocation_record)
+
+                    if tool_step is not None:
+                        try:
+                            tool_step.finish_success(
+                                {
+                                    "status": "ok",
+                                    "duration_ms": result.duration_ms,
+                                }
+                            )
+                        except Exception:
+                            pass
 
                     log_msg = (
                         "[mcp_orchestrator] Tool invocation #%d: tool=%s, model=%s"
@@ -1639,7 +1801,6 @@ class InternalMCPChatOrchestrator:
                     )
 
                     # Extract call_id for error tracing (JVNAUTOSCI-803)
-                    call_id = tool_request.get("_call_id")
                     error_record = {
                         "tool": tool_name,
                         "payload": dict(payload),
@@ -1648,6 +1809,12 @@ class InternalMCPChatOrchestrator:
                     if call_id:
                         error_record["call_id"] = call_id
                     invocations.append(error_record)
+
+                    if tool_step is not None:
+                        try:
+                            tool_step.finish_failed(str(exc))
+                        except Exception:
+                            pass
 
                     log_msg = "[mcp_orchestrator] Tool %s failed: %s" + (
                         " (call_id=%s)" if call_id else ""
@@ -1680,12 +1847,14 @@ class InternalMCPChatOrchestrator:
                 self._max_tool_invocations,
             )
 
-        return OrchestratorResult(
+        result = OrchestratorResult(
             response_text=current_response,
             extra_messages=tuple(tool_messages),
             tool_invocations=tuple(invocations),
             aux_llm_calls=tuple(aux_llm_calls),
         )
+        _persist_trace(status="completed")
+        return result
 
 
 __all__ = [
