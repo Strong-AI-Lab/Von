@@ -11,7 +11,8 @@ const SEARCH_API = '/von/api/search';
 
 // Match #V\u200B#<id> and #v\u200B#<id>
 // Mirrors the allowed id character set used elsewhere.
-const NON_TRIGGER_TOKEN_RE = /#([Vv])\u200B#([A-Za-z0-9_\(\)\./:–\-]+?)(?=[\s"'`]|$)/g;
+// NOTE: Parentheses NOT allowed in concept IDs (they use underscores)
+const NON_TRIGGER_TOKEN_RE = /#([Vv])\u200B#([A-Za-z0-9_\./:–\-]+?)(?=[\s"'`]|$)/g;
 
 // For normalising before send.
 const NON_TRIGGER_PREFIX_RE = /#([Vv])\u200B#/g;
