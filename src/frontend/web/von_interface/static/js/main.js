@@ -56,8 +56,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       const normalizedId = conceptId.startsWith('#V#') ? conceptId : `#V#${conceptId}`;
       if (createConceptTab) {
-        // When createConceptTab is true, just create/activate the concept tab without switching to Vontology
-        selectVontologyNodeByIdentifier(normalizedId, createConceptTab);
+        // When createConceptTab is true, create the concept tab but keep the user on the current tab.
+        // (Open in the background; do not switch focus.)
+        createOrActivateConceptTab(normalizedId, normalizedId, false);
       } else {
         // Original behaviour: switch to Vontology tab and select node
         activateTab('vontologyTab');

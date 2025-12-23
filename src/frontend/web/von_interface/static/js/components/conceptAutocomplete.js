@@ -13,6 +13,8 @@
  * - Graceful fallback if search unavailable
  */
 
+import { makeNonTriggerVontologyId } from './promptCartoucheOverlay.js';
+
 const TRIGGER_PATTERN = /#[Vv]#/;
 const DEBOUNCE_MS = 200;
 const MAX_RESULTS = 8;
@@ -234,6 +236,8 @@ function insertConcept(conceptId) {
         return;
     }
 
+    const insertedId = makeNonTriggerVontologyId(conceptId);
+
     const text = ta.value;
     const cursorPos = ta.selectionStart;
 
@@ -262,15 +266,15 @@ function insertConcept(conceptId) {
     // Replace from trigger to cursor position
     const before = text.substring(0, triggerIdx);
     const after = text.substring(cursorPos);
-    ta.value = before + conceptId + after;
+    ta.value = before + insertedId + after;
 
     // Move cursor after inserted concept ID
-    const newPos = triggerIdx + conceptId.length;
+    const newPos = triggerIdx + insertedId.length;
     ta.selectionStart = newPos;
     ta.selectionEnd = newPos;
     ta.focus();
 
-    console.log(`[conceptAutocomplete] Inserted ${conceptId} at position ${triggerIdx}`);
+    console.log(`[conceptAutocomplete] Inserted ${insertedId} at position ${triggerIdx}`);
 
     // Trigger input event for any listeners
     ta.dispatchEvent(new Event('input', { bubbles: true }));

@@ -1,7 +1,7 @@
 import { deleteJson, getJson, patchJson, postJson, putJson } from './apiService.js';
 import { elements, getCurrentUserConceptId, getUserClientId } from './domUtils.js';
 import { populateLanguageSelect } from './languageConfig.js';
-import { simpleMarkdownToHtml } from './markdownUtils.js';
+import { renderMarkdownViaServer } from './markdownUtils.js';
 import { checkDuplicateName, normalizeConceptName, recordNameNormalizationMetric } from './nameUtils.js';
 import {
   defaultSelectedConceptType,
@@ -12,8 +12,16 @@ import {
   setCurrentlySelectedConceptId,
   setSelectedConceptOriginalName
 } from './state.js';
-import { annotateElementText } from './utils/textDecorator.js';
+import { annotateElementText, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
 import { chooseBestTypeForIndividual, insertNodeIntoVontologyTree, selectVontologyNodeByIdentifier } from './vontology.js';
+
+async function renderConceptMarkdownInto(container, markdownText) {
+  const text = String(markdownText ?? '');
+  container.textContent = text;
+  const html = await renderMarkdownViaServer(text);
+  container.innerHTML = html;
+  linkifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'] });
+}
 
 // Initialize concept tab state (moved to function to avoid module load issues)
 export function initializeConceptTabState() {
@@ -2039,11 +2047,10 @@ export function setupConceptTabEventListenersWithSuffix(suffix = '') {
       if (!notesRendered || !notesTextarea) return;
       const hidden = notesRendered.classList.contains('hidden');
       if (hidden) {
-        try {
-          notesRendered.innerHTML = simpleMarkdownToHtml(notesTextarea.value || '');
-        } catch (e) {
-          notesRendered.textContent = notesTextarea.value || '';
-        }
+        const raw = notesTextarea.value || '';
+        void renderConceptMarkdownInto(notesRendered, raw).catch(() => {
+          notesRendered.textContent = raw;
+        });
         notesRendered.classList.remove('hidden');
         toggleNotesRenderButton.textContent = 'Show Raw Markdown';
       } else {
@@ -2068,12 +2075,10 @@ export function setupConceptTabEventListenersWithSuffix(suffix = '') {
     }
     const isHidden = renderedContainer.classList.contains('hidden');
     if (isHidden) {
-      try {
-        const raw = descriptionEl.textContent || '';
-        renderedContainer.innerHTML = simpleMarkdownToHtml(raw);
-      } catch (e) {
-        renderedContainer.textContent = descriptionEl.textContent || '';
-      }
+      const raw = descriptionEl.textContent || '';
+      void renderConceptMarkdownInto(renderedContainer, raw).catch(() => {
+        renderedContainer.textContent = raw;
+      });
       renderedContainer.classList.remove('hidden');
       if (buttonEl) buttonEl.textContent = 'Show Raw Markdown';
       descriptionEl.style.display = 'none';
@@ -2107,7 +2112,10 @@ function ensureDescriptionRendered(suffix) {
         descriptionEl.insertAdjacentElement('afterend', rc);
       }
       if (rc.classList.contains('hidden')) {
-        try { rc.innerHTML = simpleMarkdownToHtml(descriptionEl.textContent || ''); } catch { rc.textContent = descriptionEl.textContent || ''; }
+        const raw = descriptionEl.textContent || '';
+        void renderConceptMarkdownInto(rc, raw).catch(() => {
+          rc.textContent = raw;
+        });
         rc.classList.remove('hidden');
         if (btn) btn.textContent = 'Show Raw Markdown';
         descriptionEl.style.display = 'none';
@@ -3230,6 +3238,8 @@ async function handleCreateInstance(suffix = '') {
 function refreshRenderedConceptNotes() {
   if (!elements || !elements.conceptNotesRendered) return;
   const raw = (elements.updatedNotesContent && elements.updatedNotesContent.value) || (elements.conceptNotesInput && elements.conceptNotesInput.value) || '';
-  elements.conceptNotesRendered.innerHTML = simpleMarkdownToHtml(raw.trim());
+  void renderConceptMarkdownInto(elements.conceptNotesRendered, raw.trim()).catch(() => {
+    elements.conceptNotesRendered.textContent = raw.trim();
+  });
 }
 

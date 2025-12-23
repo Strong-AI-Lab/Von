@@ -13,7 +13,8 @@ jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
 }));
 
 jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js', () => ({
-    annotateElementText: jest.fn()
+    cartouchifyElementText: jest.fn(),
+    cartouchifyVontologyTokensInElement: jest.fn()
 }));
 
 const { formatChatTimestamp, sendMessage } = require(chatTabModulePath);
