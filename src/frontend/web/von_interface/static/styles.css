@@ -3087,8 +3087,8 @@ button.prompt-vontology-cartouche.vontology-cartouche {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 8px;
-    border-radius: 12px;
+    padding: 4px 12px;
+    border-radius: 20px;
     border: 1px solid;
     font-size: 13px;
     font-weight: 500;
@@ -3122,17 +3122,17 @@ button.prompt-vontology-cartouche.type:hover {
     color: #204a72;
 }
 
-/* Individual cartouche in prompt */
+/* Individual cartouche in prompt (green) */
 button.prompt-vontology-cartouche.individual {
-    background: #f7f9f2;
-    border-color: #cfe3b4;
-    color: #2f4a1f;
+    background: #dcfce7;
+    border-color: #86efac;
+    color: #166534;
 }
 
 button.prompt-vontology-cartouche.individual:hover {
-    background: #ecf3e0;
-    border-color: #bbd89f;
-    color: #2f4a1f;
+    background: #bbf7d0;
+    border-color: #4ade80;
+    color: #166534;
 }
 
 /* Predicate cartouche in prompt */
