@@ -5,13 +5,16 @@
 // (#V\u200B#...) into the textarea so autocomplete does not re-trigger.
 // The overlay renders those tokens as cartouches and supports removal.
 
+import { createVontologyCartouche } from '../utils/textDecorator.js';
+
 const ZWSP = '\u200B';
 
 const SEARCH_API = '/von/api/search';
 
 // Match #V\u200B#<id> and #v\u200B#<id>
 // Mirrors the allowed id character set used elsewhere.
-const NON_TRIGGER_TOKEN_RE = /#([Vv])\u200B#([A-Za-z0-9_\(\)\./:–\-]+?)(?=[\s"'`]|$)/g;
+// NOTE: Parentheses NOT allowed in concept IDs (they use underscores)
+const NON_TRIGGER_TOKEN_RE = /#([Vv])\u200B#([A-Za-z0-9_\./:–\-]+?)(?=[\s"'`]|$)/g;
 
 // For normalising before send.
 const NON_TRIGGER_PREFIX_RE = /#([Vv])\u200B#/g;
@@ -130,26 +133,10 @@ function normaliseKindClass(kind) {
 }
 
 function createPromptCartouche(fullId, start, end) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'vontology-cartouche prompt-vontology-cartouche';
-    btn.dataset.fullConceptId = fullId;
+    const btn = createVontologyCartouche(fullId);
+    btn.classList.add('prompt-vontology-cartouche');
     btn.dataset.start = String(start);
     btn.dataset.end = String(end);
-    btn.title = 'Concept reference';
-    btn.setAttribute('aria-label', `Concept reference ${fullId}`);
-
-    const name = document.createElement('span');
-    name.className = 'vontology-cartouche-name';
-    name.textContent = '…';
-
-    const id = document.createElement('span');
-    id.className = 'vontology-cartouche-id';
-    id.textContent = fullId;
-
-    const kind = document.createElement('span');
-    kind.className = 'vontology-cartouche-kind type';
-    kind.textContent = '…';
 
     const remove = document.createElement('span');
     remove.className = 'prompt-vontology-cartouche-remove';
@@ -157,10 +144,6 @@ function createPromptCartouche(fullId, start, end) {
     remove.setAttribute('role', 'button');
     remove.setAttribute('aria-label', `Remove concept ${fullId}`);
     remove.tabIndex = -1;
-
-    btn.appendChild(name);
-    btn.appendChild(id);
-    btn.appendChild(kind);
     btn.appendChild(remove);
 
     return btn;
@@ -305,6 +288,11 @@ function updatePromptCartouche(cartoucheEl, meta) {
         const kindClass = normaliseKindClass(meta.kind);
         kindEl.className = `vontology-cartouche-kind ${kindClass}`;
         kindEl.textContent = meta.kind ? formatKindLabel(meta.kind) : 'Type';
+        // Also apply kind class to the button itself for consistent styling
+        cartoucheEl.className = cartoucheEl.className.replace(/\b(type|individual|predicate)\b/g, '');
+        if (kindClass && kindClass !== 'type') {
+            cartoucheEl.classList.add(kindClass);
+        }
     }
 }
 
@@ -389,7 +377,7 @@ export function initializePromptCartoucheOverlay(textarea) {
             if (!Number.isFinite(start) || !Number.isFinite(end)) return;
             removeTokenRangeFromTextarea(textarea, start, end);
         }
-    });
+    }, true);
 
     parts.overlay.addEventListener('keydown', (event) => {
         const key = event.key;
