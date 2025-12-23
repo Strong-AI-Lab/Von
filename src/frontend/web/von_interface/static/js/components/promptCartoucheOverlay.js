@@ -305,6 +305,11 @@ function updatePromptCartouche(cartoucheEl, meta) {
         const kindClass = normaliseKindClass(meta.kind);
         kindEl.className = `vontology-cartouche-kind ${kindClass}`;
         kindEl.textContent = meta.kind ? formatKindLabel(meta.kind) : 'Type';
+        // Also apply kind class to the button itself for consistent styling
+        cartoucheEl.className = cartoucheEl.className.replace(/\b(type|individual|predicate)\b/g, '');
+        if (kindClass && kindClass !== 'type') {
+            cartoucheEl.classList.add(kindClass);
+        }
     }
 }
 
