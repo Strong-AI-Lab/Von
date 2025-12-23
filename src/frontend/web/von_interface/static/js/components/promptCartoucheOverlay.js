@@ -76,7 +76,15 @@ function syncOverlayStyles(textarea, overlay, inner) {
         inner.style.fontWeight = cs.fontWeight;
         inner.style.lineHeight = cs.lineHeight;
         inner.style.letterSpacing = cs.letterSpacing;
-        inner.style.color = cs.color;
+        // The textarea text is intentionally made transparent (we draw text in the overlay).
+        // Do not copy its colour, otherwise the overlay becomes transparent too.
+        // Prefer caretColour if set; otherwise fall back to CSS.
+        const caretColour = cs.caretColor;
+        if (caretColour && caretColour !== 'auto') {
+            inner.style.color = caretColour;
+        } else {
+            inner.style.removeProperty('color');
+        }
         inner.style.textAlign = cs.textAlign;
     } catch (_) {
         // Best-effort only.
