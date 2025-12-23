@@ -1552,6 +1552,35 @@ def search_concepts_endpoint():
         return jsonify({"error": str(e)}), 500
 
 
+@von_bp.route("/api/render_markdown", methods=["POST"])
+def render_markdown_endpoint():
+    """Render markdown to sanitised HTML.
+
+    Request JSON:
+    - text: markdown string
+
+    Response JSON:
+    - html: sanitised HTML string
+    """
+
+    try:
+        from ...services.markdown_render_service import render_markdown_to_safe_html
+
+        data = request.get_json(silent=True) or {}
+        text = data.get("text", "")
+        if not isinstance(text, str):
+            return jsonify({"error": "Field 'text' must be a string"}), 400
+
+        if len(text) > 200_000:
+            return jsonify({"error": "Markdown payload too large"}), 413
+
+        html = render_markdown_to_safe_html(text)
+        return jsonify({"html": html}), 200
+    except Exception as e:
+        current_app.logger.error(f"render_markdown error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/reset", methods=["POST"])
 def reset_context():
     """Reset the conversation context."""

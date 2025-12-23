@@ -1,0 +1,44 @@
+/** @jest-environment jsdom */
+
+const { simpleMarkdownToHtml } = require('../../src/frontend/web/von_interface/static/js/markdownUtils.js');
+
+describe('markdownUtils', () => {
+    test('removes orphan bullet-only line before fenced code block', () => {
+        const input = [
+            'Once you confirm, I will immediately perform:',
+            '',
+            '•',
+            '',
+            '```',
+            'add_relationship',
+            'source: #V#gpt-4o',
+            '```',
+            '',
+        ].join('\n');
+
+        const html = simpleMarkdownToHtml(input);
+
+        // No stray bullet rendered.
+        expect(html).not.toContain('•');
+        // Code block still present.
+        expect(html).toContain('<pre><code>');
+        expect(html).toContain('add_relationship');
+    });
+
+    test('removes orphan dash bullet-only line before fenced code block', () => {
+        const input = [
+            'Do this:',
+            '',
+            '-',
+            '',
+            '```json',
+            '{"a": 1}',
+            '```',
+        ].join('\n');
+
+        const html = simpleMarkdownToHtml(input);
+        expect(html).not.toContain('<br>-<br>');
+        expect(html).toContain('<pre><code>');
+        expect(html).toContain('{&quot;a&quot;: 1}');
+    });
+});

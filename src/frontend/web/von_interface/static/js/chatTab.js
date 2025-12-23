@@ -1,8 +1,10 @@
 // Chat Tab Module
 import { annotateTurn, getUserContext } from './apiService.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
+import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { elements, renderSpanSuggestions } from './domUtils.js';
-import { annotateElementText } from './utils/textDecorator.js';
+import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
+import { cartouchifyElementText, cartouchifyVontologyTokensInElement } from './utils/textDecorator.js';
 
 // Store LLM debug data for each turn
 const llmDebugData = new Map();
@@ -10,6 +12,261 @@ const llmDebugData = new Map();
 const transcriptTurns = [];
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
+
+// Cache concept metadata used for cartouches in chat transcript.
+// Map<fullId, { name: string, kind: string } | null>
+const chatConceptMetaCache = new Map();
+// Map<fullId, Promise<meta|null>> for in-flight lookups.
+const chatConceptMetaPending = new Map();
+
+function isMarkdownProducingModel(model) {
+    if (!model) {
+        return false;
+    }
+    const modelName = String(model).trim().toLowerCase();
+    return modelName.startsWith('gpt-5.2');
+}
+
+function shouldRenderMarkdownForAssistant(message, debugData) {
+    const text = String(message ?? '');
+
+    if (isMarkdownProducingModel(debugData?.model)) {
+        // Treat as markdown-friendly even when detection is ambiguous.
+        return true;
+    }
+
+    return detectMarkdown(text);
+}
+
+async function renderChatMarkdownIntoContainer(container, text) {
+    const markdownText = String(text ?? '');
+    const html = await renderMarkdownViaServer(markdownText);
+
+    // Cache rendered HTML so we can toggle without re-fetching.
+    try {
+        container.dataset.renderedHtml = html;
+    } catch (_) {
+        // Ignore dataset failures.
+    }
+
+    // If the user has toggled to raw text while this request was in-flight, do not overwrite.
+    if (container?.dataset?.renderMode === 'text') {
+        return;
+    }
+
+    container.innerHTML = html;
+    try {
+        container.dataset.renderMode = 'rendered';
+    } catch (_) {
+        // Ignore.
+    }
+
+    // Preserve clickable #V# tokens, but never inside code blocks.
+    cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'] });
+    hydrateChatConceptCartouches(container);
+}
+
+function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
+    if (!messageTextEl) {
+        return;
+    }
+
+    const raw = String(originalText ?? '');
+    const nextMode = mode === 'text' ? 'text' : 'rendered';
+
+    try {
+        messageTextEl.dataset.originalText = raw;
+        messageTextEl.dataset.renderMode = nextMode;
+    } catch (_) {
+        // Ignore.
+    }
+
+    if (nextMode === 'text') {
+        // Raw view: show the original model output exactly, no markdown and no cartouches.
+        messageTextEl.classList.remove('markdown-rendered', 'chat-markdown');
+        messageTextEl.style.whiteSpace = 'pre-wrap';
+        messageTextEl.textContent = raw;
+        return;
+    }
+
+    // Rendered view: use cached HTML if available, else re-render via server.
+    messageTextEl.classList.add('markdown-rendered', 'chat-markdown');
+    messageTextEl.style.whiteSpace = 'normal';
+
+    const cachedHtml = messageTextEl?.dataset?.renderedHtml;
+    if (cachedHtml) {
+        messageTextEl.innerHTML = cachedHtml;
+        cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'] });
+        hydrateChatConceptCartouches(messageTextEl);
+        return;
+    }
+
+    // Keep a safe plaintext fallback while the request is in-flight.
+    messageTextEl.textContent = raw;
+    void renderChatMarkdownIntoContainer(messageTextEl, raw).catch((err) => {
+        console.error('[chatTab] Server markdown render failed; falling back to plain text:', err);
+        if (messageTextEl?.dataset?.renderMode === 'rendered') {
+            messageTextEl.textContent = raw;
+        }
+    });
+}
+
+function renderAssistantMessageContent(container, message, debugData) {
+    const text = String(message ?? '');
+    const shouldRenderMarkdown = shouldRenderMarkdownForAssistant(text, debugData);
+
+    if (!shouldRenderMarkdown) {
+        try {
+            container.dataset.originalText = text;
+            container.dataset.renderMode = 'text';
+        } catch (_) {
+            // Ignore.
+        }
+        container.classList.remove('markdown-rendered', 'chat-markdown');
+        container.style.whiteSpace = 'pre-wrap';
+        cartouchifyElementText(container, text);
+        hydrateChatConceptCartouches(container);
+        return;
+    }
+
+    container.classList.add('markdown-rendered', 'chat-markdown');
+    container.style.whiteSpace = 'normal';
+
+    try {
+        container.dataset.originalText = text;
+        container.dataset.renderMode = 'rendered';
+    } catch (_) {
+        // Ignore.
+    }
+
+    // Render asynchronously so we can rely on the server-side markdown/sanitisation.
+    // Keep a safe plaintext fallback in-place while the request is in-flight.
+    container.textContent = text;
+    void renderChatMarkdownIntoContainer(container, text).catch((err) => {
+        console.error('[chatTab] Server markdown render failed; falling back to plain text:', err);
+        container.textContent = text;
+    });
+}
+
+function formatKindLabel(kind) {
+    const k = (kind || '').toString().toLowerCase();
+    if (k === 'predicate') return 'Predicate';
+    if (k === 'individual') return 'Individual';
+    return 'Type';
+}
+
+function normaliseKindClass(kind) {
+    const k = (kind || '').toString().toLowerCase();
+    if (k === 'predicate' || k === 'individual' || k === 'type') {
+        return k;
+    }
+    return 'type';
+}
+
+async function fetchConceptMetaForChat(fullId) {
+    try {
+        // Prefer an exact lookup rather than fuzzy search: avoids incorrect labels.
+        const nodeUrl = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(fullId)}`;
+        const nodeRes = await fetch(nodeUrl, { cache: 'no-store' });
+        if (nodeRes.ok) {
+            const node = await nodeRes.json();
+            const name =
+                node?.display_name ||
+                node?.name ||
+                node?.node?.display_name ||
+                node?.node?.name ||
+                fullId;
+            const kind = node?.kind || node?.node?.kind || 'type';
+            return { name: String(name), kind: String(kind) };
+        }
+
+        // Fallback to search endpoint if node_content is unavailable.
+        const url = `/von/api/search?q=${encodeURIComponent(fullId)}&limit=8`;
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) return null;
+
+        const data = await res.json();
+        const results = Array.isArray(data?.results) ? data.results : [];
+        const match = results.find(r => r && r.id === fullId);
+        if (!match || !match.id) return null;
+
+        return {
+            name: match.name || match.id,
+            kind: match.kind || 'type'
+        };
+    } catch (err) {
+        console.debug('[chatTab] fetchConceptMetaForChat failed', err);
+        return null;
+    }
+}
+
+function updateCartoucheElement(cartoucheEl, meta) {
+    if (!cartoucheEl) return;
+    if (!meta) {
+        cartoucheEl.classList.add('unresolved');
+        return;
+    }
+
+    const nameEl = cartoucheEl.querySelector('.vontology-cartouche-name');
+    const kindEl = cartoucheEl.querySelector('.vontology-cartouche-kind');
+
+    if (nameEl) {
+        nameEl.textContent = meta.name || (cartoucheEl.dataset.fullConceptId || '');
+    }
+    if (kindEl) {
+        const kindClass = normaliseKindClass(meta.kind);
+        kindEl.className = `vontology-cartouche-kind ${kindClass}`;
+        kindEl.textContent = formatKindLabel(meta.kind);
+    }
+}
+
+function hydrateChatConceptCartouches(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') {
+        return;
+    }
+
+    const cartouches = Array.from(root.querySelectorAll('.vontology-cartouche[data-full-concept-id]'));
+    if (cartouches.length === 0) {
+        return;
+    }
+
+    const uniqueIds = new Set();
+    for (const el of cartouches) {
+        const fullId = el.dataset.fullConceptId;
+        if (fullId) {
+            uniqueIds.add(fullId);
+        }
+    }
+
+    for (const fullId of uniqueIds) {
+        if (chatConceptMetaCache.has(fullId)) {
+            const cached = chatConceptMetaCache.get(fullId);
+            cartouches
+                .filter(el => el.dataset.fullConceptId === fullId)
+                .forEach(el => updateCartoucheElement(el, cached));
+            continue;
+        }
+
+        if (!chatConceptMetaPending.has(fullId)) {
+            const p = fetchConceptMetaForChat(fullId).then((meta) => {
+                chatConceptMetaCache.set(fullId, meta);
+                chatConceptMetaPending.delete(fullId);
+                return meta;
+            });
+            chatConceptMetaPending.set(fullId, p);
+        }
+
+        chatConceptMetaPending.get(fullId)
+            .then((meta) => {
+                cartouches
+                    .filter(el => el.dataset.fullConceptId === fullId)
+                    .forEach(el => updateCartoucheElement(el, meta));
+            })
+            .catch(() => {
+                // Ignore lookup failures; leave placeholders.
+            });
+    }
+}
 
 function deriveLlmDebugWarnings(debugData) {
     const warnings = [];
@@ -328,16 +585,14 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
         if (msg.role === 'user' || msg.role === 'assistant') {
             const turnId = `history-${msg.role}-${index}`;
             const label = msg.role === 'user' ? 'User' : 'Von';
-            
-            // Check if this assistant message has debug data
-            const hasDebugData = msg.role === 'assistant' && !!msg.llm_debug_data;
-            
-            appendMessage(label, msg.content, turnId, hasDebugData, true, msg.timestamp);
 
-            // Restore LLM debug data if present (for assistant messages)
+            // Restore debug data before rendering so markdown gating can see model info.
+            const hasDebugData = msg.role === 'assistant' && !!msg.llm_debug_data;
             if (hasDebugData) {
                 llmDebugData.set(turnId, msg.llm_debug_data);
             }
+
+            appendMessage(label, msg.content, turnId, hasDebugData, true, msg.timestamp);
         }
     });
 
@@ -450,6 +705,9 @@ export function initializeChatTab() {
     // Initialize concept autocomplete for #V# trigger
     initializeConceptAutocomplete(promptInput);
 
+    // Render non-trigger (#V\u200B#...) concept tokens as cartouches in the prompt.
+    initializePromptCartoucheOverlay(promptInput);
+
     loadChatHistory();
     updateHistoryLength();
     console.log("Chat tab initialized successfully");
@@ -481,6 +739,7 @@ function restorePromptEditingState(request) {
     }
 
     promptInput.value = request.promptRaw || '';
+    promptInput.dispatchEvent(new Event('input', { bubbles: true }));
 
     try {
         const valueLength = promptInput.value.length;
@@ -547,7 +806,8 @@ async function handleSendPrompt() {
     const promptRaw = promptInput.value;
     const selectionStart = typeof promptInput.selectionStart === 'number' ? promptInput.selectionStart : null;
     const selectionEnd = typeof promptInput.selectionEnd === 'number' ? promptInput.selectionEnd : null;
-    const promptText = promptRaw.trim();
+    const promptForSend = normaliseVontologyIdsForBackend(promptRaw);
+    const promptText = promptForSend.trim();
 
     if (!promptText) {
         alert('Please enter a prompt.');
@@ -578,6 +838,7 @@ async function handleSendPrompt() {
 
     // Clear input
     promptInput.value = '';
+    promptInput.dispatchEvent(new Event('input', { bubbles: true }));
     let request = null;
     try {
         request = {
@@ -795,6 +1056,17 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             // Add LLM debug button if debug data available
             if (hasLlmDebug && turnId) {
+                const debugData = llmDebugData.get(turnId);
+
+                // Compact model badge (visible at-a-glance)
+                if (debugData && debugData.model) {
+                    const modelBadge = document.createElement('span');
+                    modelBadge.className = 'chat-llm-model-badge';
+                    modelBadge.textContent = String(debugData.model);
+                    modelBadge.title = 'LLM model used for this turn';
+                    messageHeader.appendChild(modelBadge);
+                }
+
                 const llmDebugButton = document.createElement('button');
                 llmDebugButton.className = 'btn-mini llm-debug-button';
                 llmDebugButton.textContent = 'LLM ⓘ';
@@ -803,7 +1075,6 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
                 messageHeader.appendChild(llmDebugButton);
 
-                const debugData = llmDebugData.get(turnId);
                 const warnings = deriveLlmDebugWarnings(debugData);
                 const warningIndicator = createChatDebugWarningIndicator(warnings);
                 if (warningIndicator) {
@@ -834,9 +1105,32 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             const messageText = document.createElement('div');
             messageText.style.cssText = 'color: #333; white-space: pre-wrap;';
             try {
-                annotateElementText(messageText, message);
+                const debugData = turnId ? llmDebugData.get(turnId) : null;
+                const rawText = String(message ?? '');
+                const canRenderMarkdown = shouldRenderMarkdownForAssistant(rawText, debugData);
+
+                if (canRenderMarkdown) {
+                    const toggleButton = document.createElement('button');
+                    toggleButton.className = 'btn-mini chat-render-toggle';
+                    toggleButton.textContent = 'Text';
+                    toggleButton.title = 'Show the original (raw) text';
+                    toggleButton.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const currentMode = messageText?.dataset?.renderMode || 'rendered';
+                        const nextMode = currentMode === 'text' ? 'rendered' : 'text';
+                        setVonMessageRenderMode(messageText, nextMode, rawText, debugData);
+                        toggleButton.textContent = nextMode === 'text' ? 'Rendered' : 'Text';
+                        toggleButton.title = nextMode === 'text'
+                            ? 'Show the rendered markdown view'
+                            : 'Show the original (raw) text';
+                    });
+                    messageHeader.appendChild(toggleButton);
+                }
+
+                renderAssistantMessageContent(messageText, rawText, debugData);
             } catch (e) {
-                console.error('[chatTab] annotateElementText failed for Von message:', e);
+                console.error('[chatTab] Failed to render Von message:', e);
                 messageText.textContent = String(message);
             }
 
@@ -906,11 +1200,24 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             const messageText = document.createElement('div');
             messageText.style.cssText = 'color: #333; white-space: pre-wrap;';
-            try {
-                annotateElementText(messageText, message);
-            } catch (e) {
-                console.error('[chatTab] annotateElementText failed for User/Error message:', e);
-                messageText.textContent = String(message);
+            const userText = String(message ?? '');
+            const shouldRenderUserMarkdown = sender === 'User' && detectMarkdown(userText);
+            if (shouldRenderUserMarkdown) {
+                messageText.classList.add('markdown-rendered', 'chat-markdown');
+                messageText.style.whiteSpace = 'normal';
+                messageText.textContent = userText;
+                void renderChatMarkdownIntoContainer(messageText, userText).catch((err) => {
+                    console.error('[chatTab] Server markdown render failed for user message; falling back to plain text:', err);
+                    messageText.textContent = userText;
+                });
+            } else {
+                try {
+                    cartouchifyElementText(messageText, userText);
+                    hydrateChatConceptCartouches(messageText);
+                } catch (e) {
+                    console.error('[chatTab] cartouchifyElementText failed for User/Error message:', e);
+                    messageText.textContent = userText;
+                }
             }
 
             messageContainer.appendChild(messageHeader);

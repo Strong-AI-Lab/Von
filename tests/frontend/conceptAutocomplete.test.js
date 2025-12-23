@@ -134,4 +134,37 @@ describe('conceptAutocomplete', () => {
             done();
         }, 300);
     });
+
+    test('selecting a concept inserts a non-trigger token (#V\u200B#...)', (done) => {
+        initializeConceptAutocomplete(textarea);
+
+        global.fetch = jest.fn(() =>
+            Promise.resolve({
+                ok: true,
+                json: () =>
+                    Promise.resolve({
+                        results: [{ id: '#V#person', name: 'Person', kind: 'type' }],
+                    }),
+            })
+        );
+
+        textarea.value = '#V#pe';
+        textarea.selectionStart = textarea.value.length;
+        textarea.selectionEnd = textarea.value.length;
+
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+        setTimeout(() => {
+            const dropdown = document.querySelector('.concept-autocomplete-dropdown');
+            const first = dropdown
+                ? dropdown.querySelector('.concept-autocomplete-item[data-concept-id="#V#person"]')
+                : null;
+            expect(first).toBeTruthy();
+            first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+            const ZWSP = '\u200B';
+            expect(textarea.value).toBe(`#V${ZWSP}#person`);
+            done();
+        }, 300);
+    });
 });
