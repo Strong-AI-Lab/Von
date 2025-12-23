@@ -7,7 +7,7 @@ import { initializeAnnotationTab } from './annotationTab.js';
 import { fetchConceptListWithSuffix, fetchSubtypesWithSuffix, initializeNamesForm, loadConceptAttributes, loadConceptNames, selectConceptWithSuffix } from './conceptTab.js';
 import { getCurrentUserConceptId } from './domUtils.js';
 import { DEFAULT_LANGUAGE } from './languageConfig.js';
-import { detectMarkdown, renderSmartText } from './markdownUtils.js';
+import { detectMarkdown, renderSmartTextAsync } from './markdownUtils.js';
 import { destroyPredicateView, initializePredicateView } from './predicateView.js';
 import { getConceptTypeDisplayNames, setCurrentConceptType, setCurrentlySelectedConceptId, setSelectedConceptOriginalName } from './state.js';
 import { activateTab } from './tabNavigation.js';
@@ -3107,14 +3107,14 @@ async function populateTypeDescription(conceptId, suffix) {
             // Reset markdown-rendered class then render
             display.className = (display.className || '').replace(/\bmarkdown-rendered\b/g, '').trim();
             if (text) {
-                try {
-                    // Always render with HTML escaping (escapeHtml=true) to properly handle markdown
-                    display.innerHTML = renderSmartText(text, true);
-                    if (detectMarkdown(text)) display.classList.add('markdown-rendered');
-                } catch (e) {
-                    // Fallback: plain text escape
+                const isMarkdown = detectMarkdown(text);
+                if (isMarkdown) display.classList.add('markdown-rendered');
+                display.textContent = text;
+                void renderSmartTextAsync(text, true).then((html) => {
+                    display.innerHTML = html;
+                }).catch(() => {
                     display.textContent = text;
-                }
+                });
             } else {
                 display.innerHTML = '<i>No description available.</i>';
             }
@@ -3404,16 +3404,9 @@ async function populateNotesSection(conceptId, suffix) {
                 const noteText = n.text || '';
                 const isMarkdown = detectMarkdown(noteText);
                 let displayHtml; let safeText; let truncated = false;
-                if (isMarkdown) {
-                    const renderedHtml = renderSmartText(noteText, true);
-                    truncated = renderedHtml.length > 800;
-                    displayHtml = truncated ? renderedHtml.slice(0, 800) + '…' : renderedHtml || '<i>(empty)</i>';
-                    safeText = escapeHtml(noteText);
-                } else {
-                    safeText = escapeHtml(noteText);
-                    truncated = safeText.length > 800;
-                    displayHtml = truncated ? safeText.slice(0, 800) + '…' : safeText || '<i>(empty)</i>';
-                }
+                safeText = escapeHtml(noteText);
+                truncated = safeText.length > 800;
+                displayHtml = truncated ? safeText.slice(0, 800) + '…' : safeText || '<i>(empty)</i>';
                 const viewClasses = isMarkdown ? 'note-view markdown-rendered' : 'note-view';
                 item.innerHTML = `
                          <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:hidden;">${displayHtml}</div>
@@ -3433,6 +3426,18 @@ async function populateNotesSection(conceptId, suffix) {
                              <button type="button" class="round-icon-button note-delete-btn" title="Delete note" aria-label="Delete note" data-icon="delete" data-keep-title="true"></button>
                    </div>`;
                 listEl.appendChild(item);
+
+                if (isMarkdown) {
+                    const viewEl = item.querySelector('.note-view');
+                    if (viewEl) {
+                        void renderSmartTextAsync(noteText, true).then((html) => {
+                            viewEl.innerHTML = html || '<i>(empty)</i>';
+                        }).catch(() => {
+                            // Leave plaintext fallback.
+                        });
+                    }
+                }
+
                 wireNoteItem(item, n);
                 try {
                     // Adaptive layout: align edge + orientation switch for note actions (mirror description actions)
@@ -3718,16 +3723,9 @@ async function populateContentSection(conceptId, suffix) {
                 const contentText = c.text || '';
                 const isMarkdown = detectMarkdown(contentText);
                 let displayHtml; let safeText; let truncated = false;
-                if (isMarkdown) {
-                    const renderedHtml = renderSmartText(contentText, true);
-                    truncated = renderedHtml.length > 1000;
-                    displayHtml = truncated ? renderedHtml.slice(0, 1000) + '…' : renderedHtml || '<i>(empty)</i>';
-                    safeText = escapeHtml(contentText);
-                } else {
-                    safeText = escapeHtml(contentText);
-                    truncated = safeText.length > 1000;
-                    displayHtml = truncated ? safeText.slice(0, 1000) + '…' : safeText || '<i>(empty)</i>';
-                }
+                safeText = escapeHtml(contentText);
+                truncated = safeText.length > 1000;
+                displayHtml = truncated ? safeText.slice(0, 1000) + '…' : safeText || '<i>(empty)</i>';
                 const viewClasses = isMarkdown ? 'content-view markdown-rendered' : 'content-view';
                 item.innerHTML = `
                          <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:hidden;">${displayHtml}</div>
@@ -3747,6 +3745,18 @@ async function populateContentSection(conceptId, suffix) {
                              <button type="button" class="round-icon-button content-delete-btn" title="Delete content" aria-label="Delete content" data-icon="delete"></button>
                    </div>`;
                 listEl.appendChild(item);
+
+                if (isMarkdown) {
+                    const viewEl = item.querySelector('.content-view');
+                    if (viewEl) {
+                        void renderSmartTextAsync(contentText, true).then((html) => {
+                            viewEl.innerHTML = html || '<i>(empty)</i>';
+                        }).catch(() => {
+                            // Leave plaintext fallback.
+                        });
+                    }
+                }
+
                 wireContentItem(item, c);
                 try {
                     // Adaptive layout: align edge + orientation switch for content actions

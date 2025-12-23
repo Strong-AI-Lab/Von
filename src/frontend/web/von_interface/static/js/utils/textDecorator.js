@@ -45,8 +45,9 @@ export function createAnnotatedFragment(text) {
 	for (const seg of segments) {
 		if (seg.type === 'token' && seg.conceptId) {
 			const a = document.createElement('a');
-			// Avoid real navigation in browsers and jsdom tests
-			a.href = 'javascript:void(0)';
+			// Avoid javascript: URLs (treat all content as untrusted).
+			// We still use an anchor for consistent styling + accessibility.
+			a.href = '#';
 			a.textContent = seg.text;
 			a.className = 'vontology-token';
 			a.dataset.conceptId = seg.conceptId;
@@ -66,6 +67,182 @@ export function createAnnotatedFragment(text) {
 	return frag;
 }
 
+function formatKindLabel(kind) {
+	const k = (kind || '').toString().toLowerCase();
+	if (k === 'predicate') return 'Predicate';
+	if (k === 'individual') return 'Individual';
+	return 'Type';
+}
+
+function normaliseKindClass(kind) {
+	const k = (kind || '').toString().toLowerCase();
+	if (k === 'predicate' || k === 'individual' || k === 'type') {
+		return k;
+	}
+	return 'type';
+}
+
+export function createVontologyCartouche(conceptId, opts = {}) {
+	const idRaw = (conceptId || '').toString();
+	const fullId = idRaw.startsWith('#V#') ? idRaw : `#V#${idRaw}`;
+
+	const btn = document.createElement('button');
+	btn.type = 'button';
+	btn.className = 'vontology-cartouche';
+	btn.dataset.conceptId = idRaw.startsWith('#V#') ? idRaw.slice(3) : idRaw;
+	btn.dataset.fullConceptId = fullId;
+	btn.title = opts.title || 'Open concept tab';
+	btn.setAttribute('aria-label', opts.ariaLabel || `Open concept ${fullId}`);
+
+	const name = document.createElement('span');
+	name.className = 'vontology-cartouche-name';
+	name.textContent = opts.name || '…';
+
+	const id = document.createElement('span');
+	id.className = 'vontology-cartouche-id';
+	id.textContent = fullId;
+
+	const kind = document.createElement('span');
+	const kindClass = normaliseKindClass(opts.kind);
+	kind.className = `vontology-cartouche-kind ${kindClass}`;
+	kind.textContent = opts.kind ? formatKindLabel(opts.kind) : '…';
+
+	btn.appendChild(name);
+	btn.appendChild(id);
+	btn.appendChild(kind);
+
+	btn.addEventListener('click', (e) => {
+		e.preventDefault();
+		e.stopPropagation();
+		const raw = btn.dataset.conceptId;
+		if (!raw) return;
+		btn.dispatchEvent(new CustomEvent('von:selectConceptById', {
+			bubbles: true,
+			detail: { conceptId: raw, createConceptTab: true }
+		}));
+	});
+
+	return btn;
+}
+
+export function createCartoucheFragment(text) {
+	const frag = document.createDocumentFragment();
+	const segments = parseVontologyTokens(text);
+	for (const seg of segments) {
+		if (seg.type === 'token' && seg.conceptId) {
+			frag.appendChild(createVontologyCartouche(seg.conceptId));
+		} else {
+			frag.appendChild(document.createTextNode(seg.text));
+		}
+	}
+	return frag;
+}
+
+function shouldSkipTextNode(textNode, skipSelectors) {
+	const parent = textNode && textNode.parentElement;
+	if (!parent || !Array.isArray(skipSelectors) || skipSelectors.length === 0) {
+		return false;
+	}
+
+	for (const selector of skipSelectors) {
+		try {
+			if (parent.closest(selector)) {
+				return true;
+			}
+		} catch (_) {
+			// Ignore invalid selectors.
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Traverse existing DOM content and replace raw #V# tokens in text nodes with
+ * clickable anchors. This is useful after Markdown rendering.
+ *
+ * By default, skips linkification inside <pre>/<code> blocks and existing <a> tags.
+ */
+export function linkifyVontologyTokensInElement(root, options = {}) {
+	if (!root) {
+		return;
+	}
+
+	const skipSelectors = Array.isArray(options.skipSelectors)
+		? options.skipSelectors
+		: ['pre', 'code', 'a'];
+
+	const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+	const textNodes = [];
+	let node = walker.nextNode();
+	while (node) {
+		textNodes.push(node);
+		node = walker.nextNode();
+	}
+
+	for (const textNode of textNodes) {
+		const value = textNode.nodeValue;
+		if (!value || !value.includes('#V#')) {
+			continue;
+		}
+
+		if (shouldSkipTextNode(textNode, skipSelectors)) {
+			continue;
+		}
+
+		const frag = createAnnotatedFragment(value);
+		try {
+			textNode.parentNode.insertBefore(frag, textNode);
+			textNode.parentNode.removeChild(textNode);
+		} catch (_) {
+			// If the node was detached mid-iteration, ignore.
+		}
+	}
+}
+
+/**
+ * Traverse existing DOM content and replace raw #V# tokens in text nodes with
+ * cartouche buttons (name/id/kind placeholders).
+ *
+ * By default, skips cartouchification inside <pre>/<code> blocks and existing <a> tags.
+ */
+export function cartouchifyVontologyTokensInElement(root, options = {}) {
+	if (!root) {
+		return;
+	}
+
+	const skipSelectors = Array.isArray(options.skipSelectors)
+		? options.skipSelectors
+		: ['pre', 'code', 'a'];
+
+	const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+	const textNodes = [];
+	let node = walker.nextNode();
+	while (node) {
+		textNodes.push(node);
+		node = walker.nextNode();
+	}
+
+	for (const textNode of textNodes) {
+		const value = textNode.nodeValue;
+		if (!value || !value.includes('#V#')) {
+			continue;
+		}
+
+		if (shouldSkipTextNode(textNode, skipSelectors)) {
+			continue;
+		}
+
+		const frag = createCartoucheFragment(value);
+		try {
+			textNode.parentNode.insertBefore(frag, textNode);
+			textNode.parentNode.removeChild(textNode);
+		} catch (_) {
+			// If the node was detached mid-iteration, ignore.
+		}
+	}
+}
+
 /**
  * Replace all children of container with the annotated fragment for given text
  */
@@ -73,5 +250,11 @@ export function annotateElementText(container, text) {
 	if (!container) return;
 	while (container.firstChild) container.removeChild(container.firstChild);
 	container.appendChild(createAnnotatedFragment(text ?? ''));
+}
+
+export function cartouchifyElementText(container, text) {
+	if (!container) return;
+	while (container.firstChild) container.removeChild(container.firstChild);
+	container.appendChild(createCartoucheFragment(text ?? ''));
 }
 

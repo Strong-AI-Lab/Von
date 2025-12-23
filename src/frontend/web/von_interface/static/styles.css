@@ -853,6 +853,23 @@ body {
     border-color: #004085;
 }
 
+/* Chat message view toggle (Rendered/Text) */
+.chat-render-toggle {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    background: #f1f5f9;
+    color: #0f172a;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.chat-render-toggle:hover {
+    background: #e2e8f0;
+    border-color: #94a3b8;
+}
+
 .llm-debug-warning-container {
     position: relative;
     display: inline-flex;
@@ -3017,6 +3034,70 @@ footer {
     width: 100%;
 }
 
+/* Prompt cartouche overlay (rich textarea overlay) */
+.prompt-input-wrapper {
+    position: relative;
+    width: 100%;
+}
+
+.prompt-input-wrapper .prompt-input {
+    position: relative;
+    z-index: 2;
+    background: transparent;
+    color: transparent;
+    caret-color: #0f172a;
+}
+
+.prompt-input-wrapper .prompt-input::placeholder {
+    color: #64748b;
+    opacity: 1;
+}
+
+.prompt-input-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    pointer-events: none;
+    overflow: hidden;
+    background: transparent;
+    color: #0f172a;
+}
+
+/* Chat header model badge (small, non-intrusive) */
+.chat-llm-model-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 0.78em;
+    background: #eef2ff;
+    border: 1px solid #c7d2fe;
+    color: #3730a3;
+    white-space: nowrap;
+}
+
+.prompt-input-overlay-inner {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+button.prompt-vontology-cartouche {
+    pointer-events: auto;
+    margin: 0 2px;
+    vertical-align: baseline;
+}
+
+.prompt-vontology-cartouche-remove {
+    margin-left: 6px;
+    font-weight: 700;
+    opacity: 0.7;
+    cursor: pointer;
+}
+
+.prompt-vontology-cartouche-remove:hover {
+    opacity: 1;
+}
+
 .settings-iframe {
     width: 100%;
     min-height: 600px;
@@ -5022,6 +5103,106 @@ body.settings-body {
 .markdown-rendered {
     line-height: 1.6;
     color: #374151;
+}
+
+/* Chat transcript markdown: keep hierarchy readable without huge headings */
+.chat-markdown.markdown-rendered {
+    font-size: 0.95rem;
+}
+
+.chat-markdown.markdown-rendered h1 {
+    font-size: 1.15em;
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+/* Chat transcript: concept cartouches for inline #V# tokens (inside markdown-rendered content) */
+.chat-markdown.markdown-rendered .vontology-cartouche {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid #cbd5e1;
+    background: #f1f5f9;
+    color: #0f172a;
+    font-size: 0.85em;
+    line-height: 1.2;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.chat-markdown.markdown-rendered .vontology-cartouche:hover {
+    background: #e2e8f0;
+}
+
+.chat-markdown.markdown-rendered .vontology-cartouche:focus {
+    outline: 2px solid #3b82f6;
+    outline-offset: 1px;
+}
+
+.chat-markdown.markdown-rendered .vontology-cartouche .vontology-cartouche-name {
+    font-weight: 600;
+}
+
+.chat-markdown.markdown-rendered .vontology-cartouche .vontology-cartouche-id {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.92em;
+    color: #475569;
+}
+
+.chat-markdown.markdown-rendered .vontology-cartouche .vontology-cartouche-kind {
+    display: inline-block;
+    font-size: 0.8em;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+}
+
+.chat-markdown.markdown-rendered .vontology-cartouche .vontology-cartouche-kind.type {
+    background-color: #cfe2ff;
+    color: #084298;
+    border-color: #b6d4fe;
+}
+
+.chat-markdown.markdown-rendered .vontology-cartouche .vontology-cartouche-kind.individual {
+    background-color: #d4edda;
+    color: #155724;
+    border-color: #c3e6cb;
+}
+
+.chat-markdown.markdown-rendered .vontology-cartouche .vontology-cartouche-kind.predicate {
+    background-color: #fff3cd;
+    color: #997404;
+    border-color: #ffeeba;
+}
+
+.chat-markdown.markdown-rendered .vontology-cartouche.unresolved {
+    opacity: 0.85;
+}
+
+.chat-markdown.markdown-rendered h2 {
+    font-size: 1.05em;
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.chat-markdown.markdown-rendered h3 {
+    font-size: 1.0em;
+}
+
+.chat-markdown.markdown-rendered h4,
+.chat-markdown.markdown-rendered h5,
+.chat-markdown.markdown-rendered h6 {
+    font-size: 0.95em;
+}
+
+.chat-markdown.markdown-rendered p {
+    margin: 0.6em 0;
+}
+
+.chat-markdown.markdown-rendered pre {
+    margin: 0.8em 0;
 }
 
 /* Heading styles for markdown */
