@@ -3081,17 +3081,117 @@ footer {
     word-break: break-word;
 }
 
-button.prompt-vontology-cartouche {
+/* Prompt cartouche styling - align with output cartouches */
+button.prompt-vontology-cartouche,
+button.prompt-vontology-cartouche.vontology-cartouche {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border-radius: 12px;
+    border: 1px solid;
+    font-size: 13px;
+    font-weight: 500;
+    text-decoration: none !important;
+    cursor: pointer;
     pointer-events: auto;
     margin: 0 2px;
     vertical-align: baseline;
+    transition: all 0.15s ease;
+    background: #f3f4f6;
+    border-color: #d1d5db;
+    color: #374151;
+}
+
+button.prompt-vontology-cartouche:hover,
+button.prompt-vontology-cartouche.vontology-cartouche:hover {
+    background: #e5e7eb;
+    border-color: #9ca3af;
+}
+
+/* Type cartouche in prompt */
+button.prompt-vontology-cartouche.type {
+    background: #eef6ff;
+    border-color: #b6dbff;
+    color: #204a72;
+}
+
+button.prompt-vontology-cartouche.type:hover {
+    background: #d9ebff;
+    border-color: #9ac9ff;
+    color: #204a72;
+}
+
+/* Individual cartouche in prompt */
+button.prompt-vontology-cartouche.individual {
+    background: #f7f9f2;
+    border-color: #cfe3b4;
+    color: #2f4a1f;
+}
+
+button.prompt-vontology-cartouche.individual:hover {
+    background: #ecf3e0;
+    border-color: #bbd89f;
+    color: #2f4a1f;
+}
+
+/* Predicate cartouche in prompt */
+button.prompt-vontology-cartouche.predicate {
+    background: #f5f0ff;
+    border-color: #d4c5f9;
+    color: #4a3871;
+}
+
+button.prompt-vontology-cartouche.predicate:hover {
+    background: #ede5ff;
+    border-color: #c5b3f3;
+    color: #4a3871;
+}
+
+/* Cartouche internal elements */
+.vontology-cartouche-name {
+    font-weight: 600;
+}
+
+.vontology-cartouche-id {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.92em;
+    color: #475569;
+}
+
+.vontology-cartouche-kind {
+    display: inline-block;
+    font-size: 0.8em;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+}
+
+.vontology-cartouche-kind.type {
+    background-color: #cfe2ff;
+    color: #084298;
+    border-color: #b6d4fe;
+}
+
+.vontology-cartouche-kind.individual {
+    background-color: #d4edda;
+    color: #155724;
+    border-color: #c3e6cb;
+}
+
+.vontology-cartouche-kind.predicate {
+    background-color: #fff3cd;
+    color: #997404;
+    border-color: #ffeeba;
 }
 
 .prompt-vontology-cartouche-remove {
-    margin-left: 6px;
+    margin-left: 4px;
     font-weight: 700;
     opacity: 0.7;
     cursor: pointer;
+    line-height: 1;
+    padding: 0 2px;
 }
 
 .prompt-vontology-cartouche-remove:hover {
