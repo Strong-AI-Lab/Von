@@ -14,8 +14,9 @@ export function parseVontologyTokens(text) {
 	// Spaces in concept names are normalized to underscores during ID generation, so no spaces in IDs
 	// Quotes and backticks are forbidden in concept names and serve as text boundaries
 	// Using space/quote/backtick as terminators eliminates ambiguity and runaway link concerns
-	// This supports concept IDs like: #V#person, #V#michael_witbrock_business_trip_akl–mel_26-29_nov_2025_(air_nz)
-	const tokenRe = /#V#([A-Za-z0-9_\(\)\./:–\-]+?)(?=[\s"'`]|$)/g;
+	// This supports concept IDs like: #V#person, #V#michael_witbrock_business_trip_akl_mel_26_29_nov_2025_air_nz
+	// NOTE: Parentheses are not allowed in concept IDs
+	const tokenRe = /#V#([A-Za-z0-9_\./:–\-]+?)(?=[\s"'`]|$)/g;
 
 	let lastIndex = 0;
 	let match;
