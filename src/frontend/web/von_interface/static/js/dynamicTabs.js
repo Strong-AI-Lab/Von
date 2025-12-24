@@ -1286,6 +1286,18 @@ async function reloadConceptTab(conceptId) {
         // This refreshes notes, names, and all UI elements
         selectConceptWithSuffix(conceptData, suffix);
 
+        // Refresh text-relation driven sections (notes/content/description). These sections can stay mounted
+        // across reloads, so we explicitly ask them to refresh for the current concept.
+        try {
+            await ensureUnifiedDescriptionSection(conceptId, suffix);
+        } catch (_) { /* ignore */ }
+        try {
+            await populateNotesSection(conceptId, suffix);
+        } catch (_) { /* ignore */ }
+        try {
+            await populateContentSection(conceptId, suffix);
+        } catch (_) { /* ignore */ }
+
         // Reload names explicitly to ensure they're fresh
         await loadConceptNames(conceptId, suffix);
 
@@ -3349,7 +3361,18 @@ async function populateNotesSection(conceptId, suffix) {
         const containerParent = document.getElementById(`conceptStep1_${suffix}`) || document.getElementById('conceptStep1');
         if (!containerParent) return;
         const existing = document.getElementById(`notesMultiSection_${suffix}`);
-        if (existing) return; // already mounted
+        if (existing) {
+            try {
+                if (typeof existing.__refreshForConcept === 'function') {
+                    await existing.__refreshForConcept(conceptId);
+                    return;
+                }
+            } catch (_) { /* ignore */ }
+            // Older DOM from previous versions: remove and rebuild to avoid stale concept binding.
+            try { existing.remove(); } catch (_) { /* ignore */ }
+        }
+
+        let currentConceptId = conceptId;
 
         const section = document.createElement('div');
         section.id = `notesMultiSection_${suffix}`;
@@ -3377,7 +3400,10 @@ async function populateNotesSection(conceptId, suffix) {
         const fetchNotes = async () => {
             statusEl.textContent = 'Loading notes...';
             try {
-                const res = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts?predicate=hasNote&limit=200`);
+                const res = await fetch(`/api/concepts/${encodeURIComponent(currentConceptId)}/texts?predicate=hasNote&limit=200`, {
+                    cache: 'no-store',
+                    headers: { 'Cache-Control': 'no-cache' }
+                });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
                 renderNotes(Array.isArray(data.texts) ? data.texts : []);
@@ -3385,6 +3411,14 @@ async function populateNotesSection(conceptId, suffix) {
             } catch (e) {
                 statusEl.textContent = `Failed to load notes: ${e.message}`;
             }
+        };
+
+        // Allow callers to reuse this section for another concept without remounting.
+        section.__refreshForConcept = async (newConceptId) => {
+            if (typeof newConceptId === 'string' && newConceptId.trim()) {
+                currentConceptId = newConceptId;
+            }
+            await fetchNotes();
         };
 
         const renderNotes = (notes) => {
@@ -3409,8 +3443,8 @@ async function populateNotesSection(conceptId, suffix) {
                 displayHtml = truncated ? safeText.slice(0, 800) + '…' : safeText || '<i>(empty)</i>';
                 const viewClasses = isMarkdown ? 'note-view markdown-rendered' : 'note-view';
                 const viewStyle = isMarkdown
-                    ? 'white-space:normal;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:hidden;'
-                    : 'white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:hidden;';
+                    ? 'white-space:normal;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:auto;'
+                    : 'white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:auto;';
                 item.innerHTML = `
                                                  <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="${viewStyle}">${displayHtml}</div>
                    <div class="note-edit hidden" style="margin-top:4px;">
@@ -3485,6 +3519,7 @@ async function populateNotesSection(conceptId, suffix) {
                         const truncated = full.length > 800;
                         viewEl.innerHTML = truncated ? escapeHtml(full.slice(0, 800)) + '…' : escapeHtml(full);
                         viewEl.style.maxHeight = '220px';
+                        viewEl.style.overflow = 'auto';
                         expandBtn.dataset.icon = 'expand';
                         expandBtn.title = 'Show more';
                         expandBtn.setAttribute('aria-label', 'Show full note');
@@ -3492,6 +3527,7 @@ async function populateNotesSection(conceptId, suffix) {
                     } else {
                         viewEl.innerHTML = escapeHtml(viewEl.getAttribute('data-full') || '');
                         viewEl.style.maxHeight = 'none';
+                        viewEl.style.overflow = 'visible';
                         expandBtn.dataset.icon = 'collapse';
                         expandBtn.title = 'Show less';
                         expandBtn.setAttribute('aria-label', 'Show less of note');
@@ -3539,7 +3575,7 @@ async function populateNotesSection(conceptId, suffix) {
                 } catch (_) { /* ignore */ }
                 status.textContent = 'Saving...'; saveBtn.disabled = true;
                 try {
-                    const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts/${encodeURIComponent(note.relation_id)}`, {
+                    const resp = await fetch(`/api/concepts/${encodeURIComponent(currentConceptId)}/texts/${encodeURIComponent(note.relation_id)}`, {
                         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: newText })
                     });
                     const data = await resp.json().catch(() => ({}));
@@ -3578,7 +3614,7 @@ async function populateNotesSection(conceptId, suffix) {
                 }
                 status.textContent = 'Deleting...'; delBtn.disabled = true;
                 try {
-                    const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts/${encodeURIComponent(note.relation_id)}`, { method: 'DELETE' });
+                    const resp = await fetch(`/api/concepts/${encodeURIComponent(currentConceptId)}/texts/${encodeURIComponent(note.relation_id)}`, { method: 'DELETE' });
                     const data = await resp.json().catch(() => ({}));
                     if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
                     item.remove();
@@ -3595,8 +3631,8 @@ async function populateNotesSection(conceptId, suffix) {
             if (annotateBtn) {
                 annotateBtn.dataset.hasDirectAnnotate = '1';
                 annotateBtn.addEventListener('click', () => {
-                    const info = dynamicConceptTabs.get(conceptId);
-                    const conceptName = info?.conceptName || conceptId;
+                    const info = dynamicConceptTabs.get(currentConceptId);
+                    const conceptName = info?.conceptName || currentConceptId;
                     document.dispatchEvent(new CustomEvent('open-annotation-tab', {
                         detail: { text: note.text || '', conceptName, source: 'note' }
                     }));
@@ -3638,7 +3674,7 @@ async function populateNotesSection(conceptId, suffix) {
                 } catch (_) { /* ignore */ }
                 cStatus.textContent = 'Creating...'; createBtn.disabled = true;
                 try {
-                    const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts`, {
+                    const resp = await fetch(`/api/concepts/${encodeURIComponent(currentConceptId)}/texts`, {
                         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ predicate: 'hasNote', text: txt })
                     });
                     const data = await resp.json().catch(() => ({}));
@@ -3670,7 +3706,18 @@ async function populateContentSection(conceptId, suffix) {
         const containerParent = document.getElementById(`conceptStep1_${suffix}`) || document.getElementById('conceptStep1');
         if (!containerParent) return;
         const existing = document.getElementById(`contentMultiSection_${suffix}`);
-        if (existing) return; // already mounted
+        if (existing) {
+            try {
+                if (typeof existing.__refreshForConcept === 'function') {
+                    await existing.__refreshForConcept(conceptId);
+                    return;
+                }
+            } catch (_) { /* ignore */ }
+            // Older DOM from previous versions: remove and rebuild to avoid stale concept binding.
+            try { existing.remove(); } catch (_) { /* ignore */ }
+        }
+
+        let currentConceptId = conceptId;
 
         const section = document.createElement('div');
         section.id = `contentMultiSection_${suffix}`;
@@ -3701,7 +3748,10 @@ async function populateContentSection(conceptId, suffix) {
         const fetchContent = async () => {
             statusEl.textContent = 'Loading content...';
             try {
-                const res = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts?predicate=hasContent&limit=200`);
+                const res = await fetch(`/api/concepts/${encodeURIComponent(currentConceptId)}/texts?predicate=hasContent&limit=200`, {
+                    cache: 'no-store',
+                    headers: { 'Cache-Control': 'no-cache' }
+                });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
                 renderContent(Array.isArray(data.texts) ? data.texts : []);
@@ -3709,6 +3759,14 @@ async function populateContentSection(conceptId, suffix) {
             } catch (e) {
                 statusEl.textContent = `Failed to load content: ${e.message}`;
             }
+        };
+
+        // Allow callers to reuse this section for another concept without remounting.
+        section.__refreshForConcept = async (newConceptId) => {
+            if (typeof newConceptId === 'string' && newConceptId.trim()) {
+                currentConceptId = newConceptId;
+            }
+            await fetchContent();
         };
 
         const renderContent = (contentItems) => {
@@ -3733,8 +3791,8 @@ async function populateContentSection(conceptId, suffix) {
                 displayHtml = truncated ? safeText.slice(0, 1000) + '…' : safeText || '<i>(empty)</i>';
                 const viewClasses = isMarkdown ? 'content-view markdown-rendered' : 'content-view';
                 const viewStyle = isMarkdown
-                    ? 'white-space:normal;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:hidden;'
-                    : 'white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:hidden;';
+                    ? 'white-space:normal;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:auto;'
+                    : 'white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:auto;';
                 item.innerHTML = `
                                                  <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="${viewStyle}">${displayHtml}</div>
                    <div class="content-edit hidden" style="margin-top:4px;">
@@ -3809,6 +3867,7 @@ async function populateContentSection(conceptId, suffix) {
                         const truncated = full.length > 1000;
                         viewEl.innerHTML = truncated ? escapeHtml(full.slice(0, 1000)) + '…' : escapeHtml(full);
                         viewEl.style.maxHeight = '250px';
+                        viewEl.style.overflow = 'auto';
                         expandBtn.dataset.icon = 'expand';
                         expandBtn.title = 'Show more';
                         expandBtn.setAttribute('aria-label', 'Show full content');
@@ -3816,6 +3875,7 @@ async function populateContentSection(conceptId, suffix) {
                     } else {
                         viewEl.innerHTML = escapeHtml(viewEl.getAttribute('data-full') || '');
                         viewEl.style.maxHeight = 'none';
+                        viewEl.style.overflow = 'visible';
                         expandBtn.dataset.icon = 'collapse';
                         expandBtn.title = 'Show less';
                         expandBtn.setAttribute('aria-label', 'Show less of content');
@@ -3863,7 +3923,7 @@ async function populateContentSection(conceptId, suffix) {
                 } catch (_) { /* ignore */ }
                 status.textContent = 'Saving...'; saveBtn.disabled = true;
                 try {
-                    const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts/${encodeURIComponent(content.relation_id)}`, {
+                    const resp = await fetch(`/api/concepts/${encodeURIComponent(currentConceptId)}/texts/${encodeURIComponent(content.relation_id)}`, {
                         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: newText })
                     });
                     const data = await resp.json().catch(() => ({}));
@@ -3902,7 +3962,7 @@ async function populateContentSection(conceptId, suffix) {
                 }
                 status.textContent = 'Deleting...'; delBtn.disabled = true;
                 try {
-                    const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts/${encodeURIComponent(content.relation_id)}`, { method: 'DELETE' });
+                    const resp = await fetch(`/api/concepts/${encodeURIComponent(currentConceptId)}/texts/${encodeURIComponent(content.relation_id)}`, { method: 'DELETE' });
                     const data = await resp.json().catch(() => ({}));
                     if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
                     item.remove();
@@ -3919,8 +3979,8 @@ async function populateContentSection(conceptId, suffix) {
             if (annotateBtn) {
                 annotateBtn.dataset.hasDirectAnnotate = '1';
                 annotateBtn.addEventListener('click', () => {
-                    const info = dynamicConceptTabs.get(conceptId);
-                    const conceptName = info?.conceptName || conceptId;
+                    const info = dynamicConceptTabs.get(currentConceptId);
+                    const conceptName = info?.conceptName || currentConceptId;
                     document.dispatchEvent(new CustomEvent('open-annotation-tab', {
                         detail: { text: content.text || '', conceptName, source: 'content' }
                     }));
@@ -3962,7 +4022,7 @@ async function populateContentSection(conceptId, suffix) {
                 } catch (_) { /* ignore */ }
                 cStatus.textContent = 'Creating...'; createBtn.disabled = true;
                 try {
-                    const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts`, {
+                    const resp = await fetch(`/api/concepts/${encodeURIComponent(currentConceptId)}/texts`, {
                         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ predicate: 'hasContent', text: txt })
                     });
                     const data = await resp.json().catch(() => ({}));

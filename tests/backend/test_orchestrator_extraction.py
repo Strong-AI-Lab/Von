@@ -1,5 +1,6 @@
 import pytest
 import sys
+from typing import Any, Mapping
 from pathlib import Path
 
 # Add project root to path
@@ -43,6 +44,14 @@ class _RecorderLLM:
         if not self.responses:
             raise RuntimeError("No responses left in _RecorderLLM")
         return self.responses.pop(0)
+
+
+def test_instruction_message_requires_verification_tool_calls_for_concept_existence():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    message = orchestrator._instruction_message(user_namespace="#V#user")
+    assert "VERIFICATION & CONSISTENCY RULES" in message
+    assert "fetch_concept" in message
+    assert "search_concepts" in message
 
 
 def test_extract_tool_calls_accepts_single_tool_call():
@@ -212,9 +221,7 @@ def test_looks_like_missing_tool_call_ignores_short_explanatory_text():
 
 def test_looks_like_missing_tool_call_ignores_long_prose():
     """Test that long prose responses (>500 chars) don't trigger false positives."""
-    text = (
-        "I'm going to explain this carefully. " * 20  # Makes it > 500 chars
-    )
+    text = "I'm going to explain this carefully. " * 20  # Makes it > 500 chars
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     assert not orchestrator._looks_like_missing_tool_call(text)
 
@@ -230,7 +237,7 @@ def test_llm_detector_returns_true_on_yes():
     )
 
     llm = _RecorderLLM(["YES"])
-    aux_log: list[dict] = []
+    aux_log: list[Mapping[str, Any]] = []
     decision = orchestrator._llm_detects_missing_tool_call(
         "I'm going to search the web",
         llm,
@@ -256,7 +263,7 @@ def test_llm_detector_strips_vontology_model_prefix_before_calling_llm():
     )
 
     llm = _RecorderLLM(["NO"])
-    aux_log: list[dict] = []
+    aux_log: list[Mapping[str, Any]] = []
     decision = orchestrator._llm_detects_missing_tool_call(
         "I will fetch that now",
         llm,
@@ -281,7 +288,7 @@ def test_llm_detector_appends_response_when_placeholder_missing():
     )
 
     llm = _RecorderLLM(["YES"])
-    aux_log: list[dict] = []
+    aux_log: list[Mapping[str, Any]] = []
     decision = orchestrator._llm_detects_missing_tool_call(
         "I'll fetch JVNAUTOSCI-803 now",
         llm,
@@ -306,7 +313,7 @@ def test_llm_detector_uses_fallback_model_when_missing():
     )
 
     llm = _RecorderLLM(["NO"])
-    aux_log: list[dict] = []
+    aux_log: list[Mapping[str, Any]] = []
     decision = orchestrator._llm_detects_missing_tool_call(
         "Normal explanatory text",
         llm,
@@ -351,6 +358,51 @@ def test_run_retries_when_llm_detector_flags_missing_tool_call():
     )
 
     # Should have attempted a tool after classifier said YES
+    assert gateway.calls
+    method_name, payload = gateway.calls[0]
+    assert method_name == "test"
+    assert payload.get("namespace") == "#V#user"
+    assert result.tool_invocations
+    assert result.response_text == "Final response"
+    assert result.aux_llm_calls
+
+
+def test_run_retries_when_classifier_misses_but_heuristic_triggers():
+    gateway = _DummyGateway()
+    llm = _RecorderLLM(
+        [
+            # Initial response: promises tool-backed actions, includes a strong heuristic trigger.
+            (
+                "I’ll do one thing only in this turn: create the concept and then verify it.\n\n"
+                "Proceeding now.\n\n"
+                "Next message will contain the tool output."  # No tool JSON payload
+            ),
+            "NO",  # classifier verdict (incorrect)
+            '{"action": "call_tool", "tool": "test", "payload": {}}',  # retry emits tool call
+            "Final response",  # follow-up after tool invocation
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=1,
+    )
+    orchestrator._missing_tool_call_detector_loaded = True
+    orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
+        action_id="#V#detect_missing_tool_call_action",
+        prompt_id="#V#missing_tool_call_detection_prompt",
+        prompt_text="Answer YES or NO for: {response}",
+        model="detector-model",
+    )
+
+    result = orchestrator.run(
+        prompt="hello",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
     assert gateway.calls
     method_name, payload = gateway.calls[0]
     assert method_name == "test"

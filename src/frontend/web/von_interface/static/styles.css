@@ -853,6 +853,23 @@ body {
     border-color: #004085;
 }
 
+/* Copy agent message (markdown) button in chat messages */
+.chat-copy-markdown {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    background: #f1f5f9;
+    color: #0f172a;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.chat-copy-markdown:hover {
+    background: #e2e8f0;
+    border-color: #94a3b8;
+}
+
 /* Chat message view toggle (Rendered/Text) */
 .chat-render-toggle {
     font-size: 0.75rem;
@@ -868,6 +885,26 @@ body {
 .chat-render-toggle:hover {
     background: #e2e8f0;
     border-color: #94a3b8;
+}
+
+/* Clipboard feedback states for small buttons */
+.btn-mini.success-feedback {
+    background-color: #28a745;
+    color: white;
+    border: 1px solid #28a745;
+    border-radius: 4px;
+}
+
+.btn-mini.error-feedback {
+    background-color: #dc3545;
+    color: white;
+    border: 1px solid #dc3545;
+    border-radius: 4px;
+    animation: shake 0.3s ease;
+}
+
+.btn-mini .btn-icon {
+    font-weight: 700;
 }
 
 .llm-debug-warning-container {
@@ -1514,12 +1551,27 @@ button:hover {
 /* Secondary variant (for non-primary actions like Reset) */
 /* Delete exchange button styling */
 .btn-delete-exchange {
-    transition: color 0.15s ease-in-out;
-    opacity: 0.7;
+    margin-left: 6px;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    font-size: 1rem;
+    border: none;
+    background: transparent;
+    color: #64748b;
+    border-radius: 6px;
+    transition: color 0.15s ease-in-out, background 0.15s ease-in-out, opacity 0.15s ease-in-out;
+    opacity: 0.85;
 }
 
 .btn-delete-exchange:hover {
     opacity: 1;
+    color: #d9534f;
+    background: rgba(217, 83, 79, 0.08);
 }
 
 .btn-delete-exchange:focus {
@@ -2653,6 +2705,11 @@ footer {
     min-height: 0;
 }
 
+/* Chat needs a bit more horizontal room than other tabs. */
+#chatTab>.content-wrapper {
+    max-width: 980px;
+}
+
 .main-title {
     text-align: center;
     margin-bottom: 20px;
@@ -3178,8 +3235,8 @@ button.prompt-vontology-cartouche {
 /* Inline-code cartouches: only used when a <code> span contains exactly one #V#... token. */
 .vontology-cartouche.vontology-cartouche-inline-code {
     padding: 1px 8px;
-    border-color: #d8b4fe;
-    background: #faf5ff;
+    border-color: #cbd5e1;
+    background: #f8fafc;
 }
 
 .vontology-cartouche.vontology-cartouche-inline-code .vontology-cartouche-name {
@@ -3188,7 +3245,7 @@ button.prompt-vontology-cartouche {
 
 .vontology-cartouche.vontology-cartouche-inline-code .vontology-cartouche-id {
     font-weight: 700;
-    color: #6d28d9;
+    color: #334155;
 }
 
 .prompt-vontology-cartouche-remove {
@@ -4561,6 +4618,15 @@ html body .names-list-container .name-cartouche .name-delete-button:disabled:hov
     justify-content: flex-end;
     padding: 10px 12px;
     border-top: 1px solid #e5e7eb;
+}
+
+/* Text relations (attributes): keep long values contained and scrollable */
+.attribute-cartouche .attribute-text {
+    display: block;
+    max-height: 7rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    line-height: 1.25;
 }
 
 /* Annotation JSON lightweight panel (anchored, no full-screen overlay) */

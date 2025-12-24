@@ -1405,41 +1405,17 @@ def get_vontology_node_content(identifier: str) -> dict:
         # Use accessor functions for description and notes
         description = get_concept_description(doc)
         notes = get_concept_notes(doc)
-        subconcept_of = doc.get("relationships", {}).get("is_a_type_of", "None (Root)")
-        instance_of = doc.get("relationships", {}).get("is_an_instance_of", "None")
-        source_concept = doc.get("source_concept", "N/A")
 
-        subconcept_of_str = "None (Root)"
-        if isinstance(subconcept_of, list):
-            subconcept_of_str = (
-                ", ".join(subconcept_of) if subconcept_of else "None (Root)"
-            )
-        elif isinstance(subconcept_of, str) and subconcept_of:
-            subconcept_of_str = subconcept_of
-
-        instance_of_str = "None"
-        if isinstance(instance_of, list):
-            instance_of_str = (
-                ", ".join(str(item) for item in instance_of) if instance_of else "None"
-            )
-        elif isinstance(instance_of, str) and instance_of:
-            instance_of_str = instance_of
-        elif instance_of:  # Handle other types like ObjectId
-            instance_of_str = str(instance_of)
-
+        # NOTE: Older versions reconstructed md_content with boilerplate metadata
+        # (Source Concept/SubConcept Of/Instance Of). Those placeholders are noisy
+        # and redundant with UI fields, so keep the fallback minimal.
         md_content = f"# {name}\n\n"
-        md_content += f"**Source Concept**: {source_concept}\n"
-        md_content += f"**SubConcept Of**: {subconcept_of_str}\n"
-        md_content += f"**Instance Of**: {instance_of_str}\n\n"
 
-        # Handle description and notes
         if description:
-            md_content += f"**Description**:\n{description}\n\n"
-        else:
-            md_content += f"**Description**: None\n\n"
+            md_content += f"## Description\n\n{description}\n\n"
 
         if notes:
-            md_content += f"**Notes**:\n{notes}\n"
+            md_content += f"## Notes\n\n{notes}\n"
 
     html = markdown.markdown(md_content)
 
