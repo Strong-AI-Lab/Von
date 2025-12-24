@@ -336,6 +336,8 @@ console.log('Parent position:', parentStyles.position); // Should be 'relative' 
 4. **Element truly missing from DOM** → Then investigate JavaScript/template issues
 
 **Priority**: CSS visibility issues are 10x more common than missing DOM elements. Start with comprehensive CSS analysis.
+
+**When the element exists but looks wrong (e.g., centred, oddly indented, unexpectedly bold):** ask the user to use Chrome DevTools (Elements tab) to copy the element's `outerHTML` and capture key computed styles (especially `display`, `white-space`, `text-align`, `font-weight`, `margin`, `padding`, and `line-height`) for the element and its nearest container. This is often the fastest way to spot a single inherited CSS rule or an unexpected wrapper like `<h1>`.
 ## Core AI-Focused Documents
 
 1.  **`docs/AINotes.md`**

@@ -125,6 +125,15 @@ describe('chat markdown rendering (assistant)', () => {
         const assistantMarkdown = scrollableField.querySelector('.chat-markdown.markdown-rendered');
         expect(assistantMarkdown).not.toBeNull();
 
+        const assistantHeader = assistantMarkdown.closest('.message-container')?.querySelector('div');
+        const renderBadge = assistantHeader?.querySelector('.chat-render-mode-badge');
+        expect(renderBadge).toBeTruthy();
+        expect(renderBadge.textContent).toContain('View: Rendered');
+
+        // Chat transcript should not inherit centring/boldness from surrounding containers.
+        expect(assistantMarkdown.style.textAlign).toBe('left');
+        expect(assistantMarkdown.style.fontWeight).toBe('400');
+
         expect(assistantMarkdown.querySelector('h1')).not.toBeNull();
         expect(assistantMarkdown.querySelector('ul')).not.toBeNull();
         expect(assistantMarkdown.textContent).toContain('Title');
@@ -236,10 +245,92 @@ describe('chat markdown rendering (assistant)', () => {
 
         const userMarkdown = userContainer.querySelector('.chat-markdown.markdown-rendered');
         expect(userMarkdown).not.toBeNull();
+
+        // Chat transcript should not inherit centring/boldness from surrounding containers.
+        expect(userMarkdown.style.textAlign).toBe('left');
+        expect(userMarkdown.style.fontWeight).toBe('400');
         expect(userMarkdown.querySelector('h1')).not.toBeNull();
         expect(userMarkdown.textContent).toContain('Title');
 
         const cartouche = userMarkdown.querySelector('.vontology-cartouche[data-full-concept-id="#V#person"]');
         expect(cartouche).not.toBeNull();
+    });
+
+    test('recovers when rendered HTML drops leading # (V#person) and still avoids code blocks', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'test prompt';
+
+        const assistantHtml = [
+            '<ul><li>State A<ul><li>V#person</li></ul></li></ul>',
+            '<pre><code>V#person</code></pre>'
+        ].join('\n');
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ display_name: 'Person', kind: 'type' })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: assistantHtml })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/search')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ results: [{ id: '#V#person', name: 'Person', kind: 'type' }] })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ response: 'ok', llm_debug: { model: 'gpt-5.2' } })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const scrollableField = document.getElementById('scrollableField');
+        const assistantMarkdown = scrollableField.querySelector('.chat-markdown.markdown-rendered');
+        expect(assistantMarkdown).not.toBeNull();
+
+        // The list item should become a cartouche even though input was V#person.
+        const cartouche = assistantMarkdown.querySelector('.vontology-cartouche[data-full-concept-id="#V#person"]');
+        expect(cartouche).not.toBeNull();
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(cartouche.textContent).toContain('Person');
+        expect(cartouche.textContent).toContain('#V#person');
+
+        // But V#person inside code must not be cartouchified.
+        const codeBlock = assistantMarkdown.querySelector('pre');
+        expect(codeBlock).not.toBeNull();
+        expect(codeBlock.querySelector('.vontology-cartouche')).toBeNull();
+        expect(codeBlock.textContent).toContain('V#person');
     });
 });
