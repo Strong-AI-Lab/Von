@@ -4,6 +4,7 @@ import { initializeConceptAutocomplete } from './components/conceptAutocomplete.
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { elements, renderSpanSuggestions } from './domUtils.js';
 import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
+import { selectBestNameForContext } from './utils/nameSelection.js';
 import { cartouchifyElementText, cartouchifyVontologyTokensInElement } from './utils/textDecorator.js';
 
 // Store LLM debug data for each turn
@@ -223,7 +224,16 @@ async function fetchConceptMetaForChat(fullId) {
         const nodeRes = await fetch(nodeUrl, { cache: 'no-store' });
         if (nodeRes.ok) {
             const node = await nodeRes.json();
+            const preferredLanguage = getUserContext()?.language || 'en-NZ';
+            const rawNames =
+                node?.raw_doc?.names ||
+                node?.node?.raw_doc?.names ||
+                node?.names ||
+                node?.node?.names ||
+                null;
+            const bestName = selectBestNameForContext(rawNames, preferredLanguage);
             const name =
+                bestName ||
                 node?.display_name ||
                 node?.name ||
                 node?.node?.display_name ||
@@ -1089,6 +1099,8 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             const messageContent = document.createElement('div');
             messageContent.style.cssText = 'flex: 1; line-height: 1.5;';
 
+            const rawText = String(message ?? '');
+
             const messageHeader = document.createElement('div');
             messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; align-items: center; gap: 8px;';
 
@@ -1106,6 +1118,46 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 badge.style.cssText = 'display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 10px; font-size: 0.8em; background: #fff3cd; border: 1px solid #ffeeba; color: #856404;';
                 messageHeader.appendChild(badge);
             }
+
+            const copyMarkdownButton = document.createElement('button');
+            copyMarkdownButton.className = 'btn-mini chat-copy-markdown';
+            copyMarkdownButton.textContent = 'MD';
+            copyMarkdownButton.title = 'Copy this agent message as Markdown to clipboard';
+            copyMarkdownButton.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+
+                const originalContent = copyMarkdownButton.innerHTML;
+                const markdownString = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+                if (!markdownString.trim()) {
+                    indicateClipboardResult(copyMarkdownButton, originalContent, false);
+                    return;
+                }
+
+                const markSuccess = () => indicateClipboardResult(copyMarkdownButton, originalContent, true);
+                const markFailure = (err) => {
+                    console.error('[chatTab] Failed to copy agent Markdown:', err);
+                    indicateClipboardResult(copyMarkdownButton, originalContent, false);
+                };
+
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(markdownString)
+                        .then(markSuccess)
+                        .catch((err) => {
+                            if (copyTextFallback(markdownString)) {
+                                markSuccess();
+                            } else {
+                                markFailure(err);
+                            }
+                        });
+                } else if (copyTextFallback(markdownString)) {
+                    markSuccess();
+                } else {
+                    markFailure(new Error('Clipboard unsupported'));
+                }
+            });
+
+            let copyButtonAppended = false;
 
             // Add LLM debug button if debug data available
             if (hasLlmDebug && turnId) {
@@ -1128,6 +1180,9 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
                 messageHeader.appendChild(llmDebugButton);
 
+                messageHeader.appendChild(copyMarkdownButton);
+                copyButtonAppended = true;
+
                 const warnings = deriveLlmDebugWarnings(debugData);
                 const warningIndicator = createChatDebugWarningIndicator(warnings);
                 if (warningIndicator) {
@@ -1135,36 +1190,23 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 }
             }
 
+            if (!copyButtonAppended) {
+                messageHeader.appendChild(copyMarkdownButton);
+            }
+
+            const rightControls = document.createElement('span');
+            rightControls.className = 'chat-message-controls';
+            rightControls.style.cssText = 'margin-left: auto; display: inline-flex; align-items: center; gap: 6px;';
+
             // Render-mode badge: shows whether this message is in Rendered/Text mode.
             const renderModeBadge = document.createElement('span');
             renderModeBadge.className = 'chat-render-mode-badge';
-            messageHeader.appendChild(renderModeBadge);
-
-            // Add delete button
-            if (turnId) {
-                const deleteButton = document.createElement('button');
-                deleteButton.className = 'btn-mini btn-delete-exchange';
-                deleteButton.textContent = '✕';
-                deleteButton.title = 'Delete this exchange';
-                deleteButton.style.cssText = 'margin-left: auto; color: #666; background: transparent; border: none; cursor: pointer; font-size: 1.2em; padding: 0 4px; line-height: 1;';
-                deleteButton.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    deleteExchange(turnId, false);
-                });
-                deleteButton.addEventListener('mouseover', () => {
-                    deleteButton.style.color = '#d9534f';
-                });
-                deleteButton.addEventListener('mouseout', () => {
-                    deleteButton.style.color = '#666';
-                });
-                messageHeader.appendChild(deleteButton);
-            }
+            rightControls.appendChild(renderModeBadge);
 
             const messageText = document.createElement('div');
             messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400;';
             try {
                 const debugData = turnId ? llmDebugData.get(turnId) : null;
-                const rawText = String(message ?? '');
                 const canRenderMarkdown = shouldRenderMarkdownForAssistant(rawText, debugData);
 
                 if (canRenderMarkdown) {
@@ -1189,7 +1231,21 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                             model: debugData?.model
                         });
                     });
-                    messageHeader.appendChild(toggleButton);
+                    rightControls.appendChild(toggleButton);
+                }
+
+                // Add delete button after the toggle so the close (✕) is right-most.
+                if (turnId) {
+                    const deleteButton = document.createElement('button');
+                    deleteButton.className = 'btn-mini btn-delete-exchange';
+                    deleteButton.type = 'button';
+                    deleteButton.textContent = '✕';
+                    deleteButton.title = 'Delete this exchange';
+                    deleteButton.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        deleteExchange(turnId, false);
+                    });
+                    rightControls.appendChild(deleteButton);
                 }
 
                 renderAssistantMessageContent(messageText, rawText, debugData);
@@ -1203,6 +1259,8 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 console.error('[chatTab] Failed to render Von message:', e);
                 messageText.textContent = String(message);
             }
+
+            messageHeader.appendChild(rightControls);
 
             messageContent.appendChild(messageHeader);
             messageContent.appendChild(messageText);
@@ -1252,18 +1310,12 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             if (turnId) {
                 const deleteButton = document.createElement('button');
                 deleteButton.className = 'btn-mini btn-delete-exchange';
+                deleteButton.type = 'button';
                 deleteButton.textContent = '✕';
                 deleteButton.title = 'Delete this exchange';
-                deleteButton.style.cssText = 'margin-left: auto; color: #666; background: transparent; border: none; cursor: pointer; font-size: 1.2em; padding: 0 4px; line-height: 1;';
                 deleteButton.addEventListener('click', (e) => {
                     e.stopPropagation();
                     deleteExchange(turnId, true);
-                });
-                deleteButton.addEventListener('mouseover', () => {
-                    deleteButton.style.color = '#d9534f';
-                });
-                deleteButton.addEventListener('mouseout', () => {
-                    deleteButton.style.color = '#666';
                 });
                 messageHeader.appendChild(deleteButton);
             }

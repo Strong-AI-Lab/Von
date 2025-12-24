@@ -55,6 +55,18 @@ def _truncate_large_tool_results(
     return result
 
 
+def _truncate_debug_payload(raw: str | None, max_chars: int = 4000) -> str | None:
+    """Limit rejected tool payloads before surfacing them in LLM debug info."""
+    if raw is None:
+        return None
+
+    payload = raw if isinstance(raw, str) else str(raw)
+    if len(payload) <= max_chars:
+        return payload
+
+    return payload[:max_chars] + f"\n... [truncated {len(payload) - max_chars} chars]"
+
+
 def _limit_context_size(context: list[dict], max_messages: int = 20) -> list[dict]:
     """
     Keep only the most recent messages in context to prevent unbounded growth.
@@ -1245,7 +1257,21 @@ def generate():
                     f"({exc})\n\n"
                     "Please try again. If this keeps happening, copy the LLM debug output so we can reproduce it."
                 )
-                tool_invocations = []
+                rejected_tool_call = _truncate_debug_payload(
+                    getattr(exc, "raw_response", None)
+                )
+                tool_messages = []
+                tool_invocations = [
+                    {
+                        "tool": "__tool_call_parse_error__",
+                        "payload": (
+                            {"raw_tool_call": rejected_tool_call}
+                            if rejected_tool_call is not None
+                            else {}
+                        ),
+                        "error": str(exc),
+                    }
+                ]
 
         if tool_invocations:
             current_app.logger.info(
@@ -1310,6 +1336,44 @@ def generate():
         # Calculate tool statistics if tools were used
         tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
 
+        # Capture a compact summary of the tool catalogue that the agent was shown.
+        # This improves trace transparency without storing the full system prompt.
+        tool_catalogue_summary = None
+        if gateway is not None:
+            try:
+                methods_snapshot = gateway.describe_methods()
+                if isinstance(methods_snapshot, dict):
+                    method_names = sorted(
+                        [
+                            name
+                            for name in methods_snapshot.keys()
+                            if isinstance(name, str)
+                        ]
+                    )
+                    try:
+                        import hashlib
+                        import json
+
+                        digest = hashlib.sha256(
+                            json.dumps(
+                                method_names,
+                                separators=(",", ":"),
+                                ensure_ascii=True,
+                            ).encode("utf-8")
+                        ).hexdigest()
+                    except Exception:
+                        digest = None
+
+                    sample_cap = 25
+                    tool_catalogue_summary = {
+                        "method_count": len(method_names),
+                        "sha256": digest,
+                        "sample": method_names[:sample_cap],
+                        "sample_truncated": len(method_names) > sample_cap,
+                    }
+            except Exception:
+                tool_catalogue_summary = None
+
         llm_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
             "model": model_name,
@@ -1324,6 +1388,7 @@ def generate():
                     else False
                 ),
                 "orchestrator_present": orchestrator is not None,
+                "tool_catalogue": tool_catalogue_summary,
             },
             "context_stats": {
                 "sent_to_llm": context_stats,  # What was actually sent this turn
