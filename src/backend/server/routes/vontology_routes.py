@@ -636,12 +636,27 @@ def get_node_content_route():
         return jsonify({"error": "Missing 'identifier' parameter."}), 400
     try:
         data = get_vontology_node_content(identifier)
+
+        # Heuristic: strip trailing punctuation accidentally attached to #V# identifiers.
+        # This reduces noisy 404s when IDs appear at sentence boundaries (e.g. "#V#foo.").
+        if (
+            isinstance(identifier, str)
+            and identifier.startswith("#V#")
+            and "error" in data
+        ):
+            stripped = identifier.rstrip(".,:;!?)]}…")
+            if stripped != identifier and stripped.startswith("#V#"):
+                retry = get_vontology_node_content(stripped)
+                if "error" not in retry:
+                    data = retry
         if raw_only:
             # Provide a trimmed payload emphasizing raw_doc. Keep concept_id and display_name for context.
             # Avoid leaking rendered HTML/derived md_content when raw_only requested.
             trimmed = {
                 "concept_id": data.get("concept_id"),
                 "display_name": data.get("display_name"),
+                "kind": data.get("kind"),
+                "computed_kind": data.get("computed_kind"),
                 "raw_doc": data.get("raw_doc"),
             }
             # Preserve description only if it exists inside preserved_fields but not elsewhere

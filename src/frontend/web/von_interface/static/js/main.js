@@ -3,6 +3,7 @@ import { createOrActivateConceptTab } from './dynamicTabs.js';
 import { getLanguageDisplayName } from './languageConfig.js';
 import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
+import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
 import { isVontologyBusy, loadKeyConceptsForUser, preloadVontologyData, selectVontologyNodeByIdentifier, setupVontologySearchUI } from './vontology.js';
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -50,22 +51,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Global handler: clicking a Vontology token navigates to concept and selects node
   document.addEventListener('von:selectConceptById', (e) => {
-    const conceptId = e?.detail?.conceptId;
-    const createConceptTab = !!e?.detail?.createConceptTab;
-    if (!conceptId) return;
     try {
-      const normalizedId = conceptId.startsWith('#V#') ? conceptId : `#V#${conceptId}`;
-      if (createConceptTab) {
-        // When createConceptTab is true, create the concept tab but keep the user on the current tab.
-        // (Open in the background; do not switch focus.)
-        createOrActivateConceptTab(normalizedId, normalizedId, false);
-      } else {
-        // Original behaviour: switch to Vontology tab and select node
-        activateTab('vontologyTab');
-        setTimeout(() => {
-          selectVontologyNodeByIdentifier(normalizedId, createConceptTab);
-        }, 0);
-      }
+      // Async handler (do not block UI thread).
+      void handleSelectConceptByIdDetail(e?.detail, {
+        createOrActivateConceptTab,
+        activateTab,
+        selectVontologyNodeByIdentifier
+      });
     } catch (err) {
       console.warn('Failed to handle von:selectConceptById:', err);
     }
