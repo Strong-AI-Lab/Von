@@ -132,3 +132,6 @@ Icon?
 
 #Temporary file (delete after use)
 cleanup_exe.ps1
+
+# PR body drafts (local)
+pr_body_*.md
