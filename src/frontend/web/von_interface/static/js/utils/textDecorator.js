@@ -158,6 +158,31 @@ function shouldSkipTextNode(textNode, skipSelectors) {
 	return false;
 }
 
+function normaliseVontologyTokensForDisplay(text) {
+	const input = String(text ?? '');
+	if (!input) {
+		return input;
+	}
+
+	let output = input;
+
+	// Normalise non-trigger tokens that include a ZWSP: #V\u200B#id -> #V#id.
+	output = output.replace(/#([Vv])\u200B#/g, '#V#');
+
+	// Normalise lower-case variants.
+	output = output.replace(/#v#/g, '#V#');
+
+	// Recover from a regression where the leading '#' is dropped in display text:
+	// "V#person" -> "#V#person" (but do NOT rewrite "#V#person").
+	// Prefix capture avoids lookbehind to keep browser support broad.
+	output = output.replace(
+		/(^|[^#])([Vv])#([A-Za-z0-9_\./:–\-]+?)(?=[\s"'`]|$)/g,
+		(_, prefix, _v, conceptId) => `${prefix}#V#${conceptId}`
+	);
+
+	return output;
+}
+
 /**
  * Traverse existing DOM content and replace raw #V# tokens in text nodes with
  * clickable anchors. This is useful after Markdown rendering.
@@ -183,7 +208,7 @@ export function linkifyVontologyTokensInElement(root, options = {}) {
 
 	for (const textNode of textNodes) {
 		const value = textNode.nodeValue;
-		if (!value || !value.includes('#V#')) {
+		if (!value) {
 			continue;
 		}
 
@@ -191,7 +216,12 @@ export function linkifyVontologyTokensInElement(root, options = {}) {
 			continue;
 		}
 
-		const frag = createAnnotatedFragment(value);
+		const normalised = normaliseVontologyTokensForDisplay(value);
+		if (!normalised.includes('#V#')) {
+			continue;
+		}
+
+		const frag = createAnnotatedFragment(normalised);
 		try {
 			textNode.parentNode.insertBefore(frag, textNode);
 			textNode.parentNode.removeChild(textNode);
@@ -226,7 +256,7 @@ export function cartouchifyVontologyTokensInElement(root, options = {}) {
 
 	for (const textNode of textNodes) {
 		const value = textNode.nodeValue;
-		if (!value || !value.includes('#V#')) {
+		if (!value) {
 			continue;
 		}
 
@@ -234,7 +264,12 @@ export function cartouchifyVontologyTokensInElement(root, options = {}) {
 			continue;
 		}
 
-		const frag = createCartoucheFragment(value);
+		const normalised = normaliseVontologyTokensForDisplay(value);
+		if (!normalised.includes('#V#')) {
+			continue;
+		}
+
+		const frag = createCartoucheFragment(normalised);
 		try {
 			textNode.parentNode.insertBefore(frag, textNode);
 			textNode.parentNode.removeChild(textNode);

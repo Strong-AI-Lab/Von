@@ -12,10 +12,10 @@ export function detectMarkdown(text) {
         /\*[^*\s][^*]*[^*\s]\*/,    // Italic text (*text*) - must have content without spaces at edges
         /`[^`\s][^`]*[^`\s]*`/,     // Inline code (`code`) - must have content without spaces at edges
         /^```[\s\S]*?```$/m,        // Fenced code blocks
-        /^[-*+]\s+.+$/m,            // Lists (- * +)
-        /^\d+\.\s+.+$/m,            // Ordered lists (1. 2.)
+        /^\s*[-*+]\s+.+$/m,         // Lists (- * +) (allow leading indentation)
+        /^\s*\d+\.\s+.+$/m,         // Ordered lists (1. 2.) (allow leading indentation)
         /\[[^\]]+\]\([^)\s]+\)/,    // Links [text](url)
-        /^>\s+.+$/m                 // Blockquotes (> text)
+        /^\s*>\s+.+$/m              // Blockquotes (> text) (allow leading indentation)
     ];
 
     return patterns.some(pattern => pattern.test(text));
