@@ -169,6 +169,101 @@ def _normalise_nested_list_indentation(text: str) -> str:
     return "\n".join(lines)
 
 
+def _ensure_blank_line_before_top_level_lists(markdown_text: str) -> str:
+    """Insert a blank line before a top-level list that immediately follows a paragraph.
+
+    Python-Markdown (especially with sane_lists) can fail to recognise a list that starts
+    immediately after a paragraph line with no intervening blank line. This normaliser
+    makes that intent explicit while preserving fenced code blocks.
+    """
+
+    if not markdown_text:
+        return markdown_text
+
+    lines = markdown_text.replace("\r\n", "\n").split("\n")
+    out: list[str] = []
+    in_fence = False
+
+    top_level_list_re = re.compile(r"^([-*+])\s+\S")
+    top_level_ordered_re = re.compile(r"^(\d+)\.\s+\S")
+
+    for line in lines:
+        if re.match(r"^\s*```", line):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+
+        if in_fence:
+            out.append(line)
+            continue
+
+        is_top_level_list = bool(
+            top_level_list_re.match(line) or top_level_ordered_re.match(line)
+        )
+        if is_top_level_list and out:
+            prev = out[-1]
+            if prev.strip() != "":
+                # Avoid injecting extra blanks between successive list blocks.
+                if not re.match(r"^\s*([-*+]|\d+\.|>|#{1,6}\s)", prev):
+                    out.append("")
+
+        out.append(line)
+
+    return "\n".join(out)
+
+
+def _escape_vontology_hash_headings(markdown_text: str) -> str:
+    """Escape leading #V# tokens so they cannot be parsed as Markdown headings.
+
+    Python-Markdown accepts ATX headings without requiring a space after the
+    leading '#'. This means a plain concept ID like:
+
+        #V#disambiguation_workflow
+
+    can get misparsed as a heading (<h1>) instead of plain text. We escape only
+    the specific '#V#' prefix, outside fenced code blocks, so that users can
+    still write normal headings.
+
+    Future hardening idea (JVNAUTOSCI-818): if more Markdown edge cases appear,
+    consider a full encode/decode pipeline: replace '#V#' with a highly unlikely
+    sentinel token before Markdown rendering (outside fences), then decode it
+    back to '#V#' afterwards. That avoids all Markdown syntax interactions in a
+    single, reliable step.
+    """
+
+    if not markdown_text:
+        return markdown_text
+
+    lines = markdown_text.replace("\r\n", "\n").split("\n")
+    out: list[str] = []
+    in_fence = False
+
+    # Cases we need to cover:
+    # - Start of a line:        "#V#foo"
+    # - Start of list content:  "- #V#foo" (can become a heading inside <li>)
+    # - Blockquotes:            "> #V#foo" (can become a heading inside <blockquote>)
+    start_of_line_re = re.compile(r"^(\s*)(?<!\\)#V#")
+    list_item_re = re.compile(r"^(\s*(?:[-*+]|\d+\.))(\s+)(?<!\\)#V#")
+    blockquote_re = re.compile(r"^(\s*>\s*)(?<!\\)#V#")
+
+    for line in lines:
+        if re.match(r"^\s*```", line):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+
+        if in_fence:
+            out.append(line)
+            continue
+
+        updated = start_of_line_re.sub(r"\1\\#V#", line, count=1)
+        updated = list_item_re.sub(r"\1\2\\#V#", updated, count=1)
+        updated = blockquote_re.sub(r"\1\\#V#", updated, count=1)
+        out.append(updated)
+
+    return "\n".join(out)
+
+
 def render_markdown_to_safe_html(
     text: str, *, extensions: Iterable[str] | None = None
 ) -> str:
@@ -180,7 +275,9 @@ def render_markdown_to_safe_html(
     if not text:
         return ""
 
-    text = _normalise_nested_list_indentation(str(text))
+    text = _ensure_blank_line_before_top_level_lists(str(text))
+    text = _escape_vontology_hash_headings(text)
+    text = _normalise_nested_list_indentation(text)
 
     exts = (
         list(extensions)

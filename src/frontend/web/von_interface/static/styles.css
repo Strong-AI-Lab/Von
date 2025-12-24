@@ -3076,6 +3076,25 @@ footer {
     white-space: nowrap;
 }
 
+/* Chat header render-mode badge (Rendered/Text) */
+.chat-render-mode-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 0.78em;
+    background: #f3f4f6;
+    border: 1px solid #e5e7eb;
+    color: #374151;
+    white-space: nowrap;
+}
+
+.chat-render-mode-badge.rendered {
+    background: #ecfdf5;
+    border-color: #a7f3d0;
+    color: #065f46;
+}
+
 .prompt-input-overlay-inner {
     white-space: pre-wrap;
     word-break: break-word;
@@ -3093,6 +3112,7 @@ footer {
     color: #0f172a;
     font-size: 13px;
     line-height: 1.2;
+    font-weight: 400;
     cursor: pointer;
     white-space: nowrap;
     text-decoration: none !important;
@@ -5179,6 +5199,9 @@ body.settings-body {
 .markdown-rendered {
     line-height: 1.6;
     color: #374151;
+    /* Prevent parent containers (e.g. system messages) from centring/bolding markdown blocks */
+    text-align: left;
+    font-weight: 400;
 }
 
 /* Chat transcript markdown: keep hierarchy readable without huge headings */
@@ -5308,7 +5331,9 @@ body.settings-body {
 }
 
 .markdown-rendered li {
+    display: list-item;
     margin: 0.25em 0;
+    text-align: left;
 }
 
 .markdown-rendered ul {

@@ -48,6 +48,40 @@ function shouldRenderMarkdownForAssistant(message, debugData) {
     return detectMarkdown(text);
 }
 
+function updateChatRenderModeBadge(badgeEl, messageTextEl, details = {}) {
+    if (!badgeEl || !messageTextEl) {
+        return;
+    }
+
+    const renderMode = String(messageTextEl?.dataset?.renderMode || 'text');
+    const modeLabel = renderMode === 'rendered' ? 'Rendered' : 'Text';
+    badgeEl.textContent = `View: ${modeLabel}`;
+
+    const shouldRenderMarkdown = details.shouldRenderMarkdown === true;
+    const canRenderMarkdown = details.canRenderMarkdown === true;
+    const model = details.model ? String(details.model) : '';
+
+    badgeEl.classList.toggle('rendered', renderMode === 'rendered');
+    badgeEl.classList.toggle('text', renderMode !== 'rendered');
+
+    const reasons = [];
+    if (model) {
+        reasons.push(`model=${model}`);
+    }
+    reasons.push(`renderMode=${renderMode}`);
+
+    if (renderMode !== 'rendered') {
+        if (!canRenderMarkdown) {
+            reasons.push('no-toggle (markdown not detected)');
+        }
+        if (!shouldRenderMarkdown) {
+            reasons.push('shouldRenderMarkdownForAssistant=false');
+        }
+    }
+
+    badgeEl.title = reasons.join(' • ');
+}
+
 async function renderChatMarkdownIntoContainer(container, text) {
     const markdownText = String(text ?? '');
     const html = await renderMarkdownViaServer(markdownText);
@@ -80,6 +114,11 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
     if (!messageTextEl) {
         return;
     }
+
+    // Hard override: chat transcript containers can inherit centring/boldness.
+    // Keep message text consistently left-aligned in both raw and rendered modes.
+    messageTextEl.style.textAlign = 'left';
+    messageTextEl.style.fontWeight = '400';
 
     const raw = String(originalText ?? '');
     const nextMode = mode === 'text' ? 'text' : 'rendered';
@@ -124,6 +163,10 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
 function renderAssistantMessageContent(container, message, debugData) {
     const text = String(message ?? '');
     const shouldRenderMarkdown = shouldRenderMarkdownForAssistant(text, debugData);
+
+    // Hard override: chat transcript containers can inherit centring/boldness.
+    container.style.textAlign = 'left';
+    container.style.fontWeight = '400';
 
     if (!shouldRenderMarkdown) {
         try {
@@ -1092,6 +1135,11 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 }
             }
 
+            // Render-mode badge: shows whether this message is in Rendered/Text mode.
+            const renderModeBadge = document.createElement('span');
+            renderModeBadge.className = 'chat-render-mode-badge';
+            messageHeader.appendChild(renderModeBadge);
+
             // Add delete button
             if (turnId) {
                 const deleteButton = document.createElement('button');
@@ -1113,7 +1161,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             }
 
             const messageText = document.createElement('div');
-            messageText.style.cssText = 'color: #333; white-space: pre-wrap;';
+            messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400;';
             try {
                 const debugData = turnId ? llmDebugData.get(turnId) : null;
                 const rawText = String(message ?? '');
@@ -1134,11 +1182,23 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                         toggleButton.title = nextMode === 'text'
                             ? 'Show the rendered markdown view'
                             : 'Show the original (raw) text';
+
+                        updateChatRenderModeBadge(renderModeBadge, messageText, {
+                            canRenderMarkdown: true,
+                            shouldRenderMarkdown: shouldRenderMarkdownForAssistant(rawText, debugData),
+                            model: debugData?.model
+                        });
                     });
                     messageHeader.appendChild(toggleButton);
                 }
 
                 renderAssistantMessageContent(messageText, rawText, debugData);
+
+                updateChatRenderModeBadge(renderModeBadge, messageText, {
+                    canRenderMarkdown,
+                    shouldRenderMarkdown: shouldRenderMarkdownForAssistant(rawText, debugData),
+                    model: debugData?.model
+                });
             } catch (e) {
                 console.error('[chatTab] Failed to render Von message:', e);
                 messageText.textContent = String(message);
@@ -1209,7 +1269,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             }
 
             const messageText = document.createElement('div');
-            messageText.style.cssText = 'color: #333; white-space: pre-wrap;';
+            messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400;';
             const userText = String(message ?? '');
             const shouldRenderUserMarkdown = sender === 'User' && detectMarkdown(userText);
             if (shouldRenderUserMarkdown) {

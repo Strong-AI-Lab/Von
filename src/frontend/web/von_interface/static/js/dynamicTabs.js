@@ -3408,8 +3408,11 @@ async function populateNotesSection(conceptId, suffix) {
                 truncated = safeText.length > 800;
                 displayHtml = truncated ? safeText.slice(0, 800) + '…' : safeText || '<i>(empty)</i>';
                 const viewClasses = isMarkdown ? 'note-view markdown-rendered' : 'note-view';
+                const viewStyle = isMarkdown
+                    ? 'white-space:normal;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:hidden;'
+                    : 'white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:hidden;';
                 item.innerHTML = `
-                         <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:hidden;">${displayHtml}</div>
+                                                 <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="${viewStyle}">${displayHtml}</div>
                    <div class="note-edit hidden" style="margin-top:4px;">
                       <textarea class="note-textarea" style="width:100%;min-height:120px;font-family:monospace;font-size:0.8rem;padding:6px;">${escapeHtml(n.text || '')}</textarea>
                       <div style="margin-top:4px;display:flex;gap:8px;align-items:center;">
@@ -3432,6 +3435,8 @@ async function populateNotesSection(conceptId, suffix) {
                     if (viewEl) {
                         void renderSmartTextAsync(noteText, true).then((html) => {
                             viewEl.innerHTML = html || '<i>(empty)</i>';
+                            // Markdown is injected as HTML; do not preserve whitespace formatting.
+                            viewEl.style.whiteSpace = 'normal';
                         }).catch(() => {
                             // Leave plaintext fallback.
                         });
@@ -3727,8 +3732,11 @@ async function populateContentSection(conceptId, suffix) {
                 truncated = safeText.length > 1000;
                 displayHtml = truncated ? safeText.slice(0, 1000) + '…' : safeText || '<i>(empty)</i>';
                 const viewClasses = isMarkdown ? 'content-view markdown-rendered' : 'content-view';
+                const viewStyle = isMarkdown
+                    ? 'white-space:normal;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:hidden;'
+                    : 'white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:hidden;';
                 item.innerHTML = `
-                         <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:hidden;">${displayHtml}</div>
+                                                 <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="${viewStyle}">${displayHtml}</div>
                    <div class="content-edit hidden" style="margin-top:4px;">
                       <textarea class="content-textarea" style="width:100%;min-height:150px;font-family:monospace;font-size:0.8rem;padding:6px;">${escapeHtml(c.text || '')}</textarea>
                       <div style="margin-top:4px;display:flex;gap:8px;align-items:center;">
@@ -3751,6 +3759,8 @@ async function populateContentSection(conceptId, suffix) {
                     if (viewEl) {
                         void renderSmartTextAsync(contentText, true).then((html) => {
                             viewEl.innerHTML = html || '<i>(empty)</i>';
+                            // Markdown is injected as HTML; do not preserve whitespace formatting.
+                            viewEl.style.whiteSpace = 'normal';
                         }).catch(() => {
                             // Leave plaintext fallback.
                         });
