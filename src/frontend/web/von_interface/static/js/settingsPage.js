@@ -22,6 +22,7 @@ const LS_GMAIL_PROFILE = 'von_gmail_profile';
 const RUNTIME_REFRESH_MS = 12000;
 
 let runtimeIntervalId = null;
+let runtimeAbortController = null;
 
 function formatUptime(ms) {
   const totalSec = Math.floor(ms / 1000);
@@ -115,7 +116,9 @@ async function loadRuntimeStatus(manualRefresh = false) {
   }
 
   try {
+    try { runtimeAbortController?.abort(); } catch { }
     const controller = new AbortController();
+    runtimeAbortController = controller;
     const timeout = setTimeout(() => controller.abort(), 8000);
     const res = await fetch('/health', { cache: 'no-store', signal: controller.signal });
     clearTimeout(timeout);
@@ -139,6 +142,10 @@ async function loadRuntimeStatus(manualRefresh = false) {
 
     await loadRagStatus(ragPending);
   } catch (err) {
+    if (err && err.name === 'AbortError') {
+      // Expected when a newer poll supersedes an older one or the page is unloading.
+      return;
+    }
     console.warn('Failed to load runtime status', err);
     if (localEl) localEl.textContent = '—';
     if (publicEl) publicEl.textContent = '—';
@@ -168,6 +175,16 @@ function setupRuntimeSection() {
     runtimeIntervalId = setInterval(loadRuntimeStatus, RUNTIME_REFRESH_MS);
   }
 }
+
+window.addEventListener('beforeunload', () => {
+  try {
+    if (runtimeIntervalId) {
+      clearInterval(runtimeIntervalId);
+      runtimeIntervalId = null;
+    }
+  } catch { }
+  try { runtimeAbortController?.abort(); } catch { }
+});
 
 function getStoredJson(key) {
   try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; }

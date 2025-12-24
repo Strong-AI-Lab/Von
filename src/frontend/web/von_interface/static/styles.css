@@ -3175,6 +3175,22 @@ button.prompt-vontology-cartouche {
     border-color: #ffeeba;
 }
 
+/* Inline-code cartouches: only used when a <code> span contains exactly one #V#... token. */
+.vontology-cartouche.vontology-cartouche-inline-code {
+    padding: 1px 8px;
+    border-color: #d8b4fe;
+    background: #faf5ff;
+}
+
+.vontology-cartouche.vontology-cartouche-inline-code .vontology-cartouche-name {
+    font-weight: 500;
+}
+
+.vontology-cartouche.vontology-cartouche-inline-code .vontology-cartouche-id {
+    font-weight: 700;
+    color: #6d28d9;
+}
+
 .prompt-vontology-cartouche-remove {
     margin-left: 4px;
     font-weight: 700;

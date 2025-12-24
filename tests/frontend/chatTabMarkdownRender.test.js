@@ -48,6 +48,8 @@ describe('chat markdown rendering (assistant)', () => {
             '',
             '- Item',
             '',
+            'Inline code token: `#V#yejin_choi`',
+            '',
             '[good](https://example.com)',
             '',
             'See #V#person',
@@ -64,6 +66,7 @@ describe('chat markdown rendering (assistant)', () => {
         const assistantHtml = [
             '<h1>Title</h1>',
             '<ul><li>Item</li></ul>',
+            '<p>Inline code token: <code>#V#yejin_choi</code></p>',
             '<p><a href="https://example.com" target="_blank" rel="noopener noreferrer">good</a></p>',
             '<p>See #V#person</p>',
             '<pre><code>#V#person</code></pre>',
@@ -79,6 +82,12 @@ describe('chat markdown rendering (assistant)', () => {
             }
 
             if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                if (url.includes('identifier=%23V%23yejin_choi')) {
+                    return Promise.resolve({
+                        ok: true,
+                        json: async () => ({ display_name: 'Yejin Choi', kind: 'individual' })
+                    });
+                }
                 return Promise.resolve({
                     ok: true,
                     json: async () => ({ display_name: 'Person', kind: 'type' })
@@ -158,12 +167,18 @@ describe('chat markdown rendering (assistant)', () => {
         const cartouche = assistantMarkdown.querySelector('.vontology-cartouche[data-full-concept-id="#V#person"]');
         expect(cartouche).not.toBeNull();
 
+        // Inline code tokens should become cartouches, but only when the <code> span contains exactly the token.
+        const codeCartouche = assistantMarkdown.querySelector('.vontology-cartouche.vontology-cartouche-inline-code[data-full-concept-id="#V#yejin_choi"]');
+        expect(codeCartouche).not.toBeNull();
+
         // Allow async hydration to resolve (fetch + microtasks).
         await new Promise((resolve) => setTimeout(resolve, 0));
 
         expect(cartouche.textContent).toContain('Person');
         expect(cartouche.textContent).toContain('#V#person');
         expect(cartouche.textContent).toContain('Type');
+
+        expect(codeCartouche.textContent).toContain('#V#yejin_choi');
 
         // But must not linkify inside code blocks.
         const codeBlock = assistantMarkdown.querySelector('pre');
