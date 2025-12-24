@@ -332,6 +332,40 @@ function normaliseVontologyTokensForDisplay(text) {
 	return output;
 }
 
+function extractStandaloneVontologyToken(text) {
+	const normalised = normaliseVontologyTokensForDisplay(String(text ?? '')).trim();
+	if (!normalised) return null;
+	const m = normalised.match(/^#V#([A-Za-z0-9_\./:–\-]+)$/);
+	return m ? m[1] : null;
+}
+
+function cartouchifyStandaloneVontologyCodeSpans(root, options = {}) {
+	if (!root || !root.querySelectorAll) return;
+
+	const codeNodes = Array.from(root.querySelectorAll('code'));
+	for (const codeEl of codeNodes) {
+		try {
+			// Never replace code blocks.
+			if (codeEl.closest('pre')) continue;
+			// Avoid nesting inside links and existing cartouches.
+			if (codeEl.closest('a')) continue;
+			if (codeEl.closest('.vontology-cartouche')) continue;
+
+			// Only when the code span is purely text.
+			if (codeEl.childElementCount !== 0) continue;
+
+			const token = extractStandaloneVontologyToken(codeEl.textContent);
+			if (!token) continue;
+
+			const cartouche = createVontologyCartouche(`#V#${token}`, { variant: 'inline-code' });
+			cartouche.classList.add('vontology-cartouche-inline-code');
+			codeEl.replaceWith(cartouche);
+		} catch (_) {
+			// Ignore detached nodes or DOM mutation races.
+		}
+	}
+}
+
 /**
  * Traverse existing DOM content and replace raw #V# tokens in text nodes with
  * clickable anchors. This is useful after Markdown rendering.
@@ -425,6 +459,10 @@ export function cartouchifyVontologyTokensInElement(root, options = {}) {
 		} catch (_) {
 			// If the node was detached mid-iteration, ignore.
 		}
+	}
+
+	if (options && options.allowStandaloneCodeTokens) {
+		cartouchifyStandaloneVontologyCodeSpans(root, options);
 	}
 }
 
