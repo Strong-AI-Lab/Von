@@ -37,7 +37,9 @@ Purpose: Eliminate unnecessary confirmation prompts for standard, codified workf
 
 When To Act Automatically:
 - After implementing a fix & tests pass: Post JIRA comment (summary, root cause, fix, tests, risk, follow-ups) then transition issue to the correct state (usually Done) without asking.
+- When creating a new JIRA issue: assign it to the current user by default (unless the user explicitly names a different assignee).
 - Retry transient Atlassian 5xx or rate limit errors up to 3 times with exponential backoff (~30s total) before surfacing failure.
+- When a somewhat complex operation already has a lightweight LLM heuristic path (e.g. missing tool-use detection), prefer improving the heuristic behaviour (prompt/context/inputs) over adding brittle, case-specific string matching that will break as natural language phrasing evolves.
 - Preserve raw user-authored text in UI workflows (store original in dataset/raw attribute) whenever rendered/HTML transformations occur — pattern originates from description markdown preservation.
 - Consolidate duplicated DOM update logic into a single helper before expanding features (prevents regression drift).
 - Add a regression test for every state/format loss bug fix (load → edit → save → re-edit cycle) before declaring completion.
@@ -401,7 +403,7 @@ Please use the correct project key when creating new issues.
 
 To ensure consistency and maintain a clean history, all agents must follow this workflow for every task:
 
-1.  **JIRA Issue**: Ensure a JIRA issue exists for the task. If not, create one and assign it to the user (Project: `JVNAUTOSCI`).
+1.  **JIRA Issue**: Ensure a JIRA issue exists for the task. If not, create one and assign it to the current user by default (Project: `JVNAUTOSCI`) unless the user explicitly requests a different assignee.
 2.  **Branching**: Create a new branch from `main` using the JIRA key: `git checkout -b JVNAUTOSCI-XXX-short-description`.
 3.  **Implementation**:
     *   Make changes.

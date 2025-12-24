@@ -5,6 +5,7 @@
 // (#V\u200B#...) into the textarea so autocomplete does not re-trigger.
 // The overlay renders those tokens as cartouches and supports removal.
 
+import { getPreferredLanguage, selectBestNameForContext } from '../utils/nameSelection.js';
 import { createVontologyCartouche } from '../utils/textDecorator.js';
 
 const ZWSP = '\u200B';
@@ -235,7 +236,16 @@ async function fetchConceptMeta(fullId) {
             const nodeResp = await fetch(nodeUrl, { cache: 'no-store' });
             if (nodeResp.ok) {
                 const node = await nodeResp.json();
+                const preferredLanguage = getPreferredLanguage();
+                const rawNames =
+                    node?.raw_doc?.names ||
+                    node?.node?.raw_doc?.names ||
+                    node?.names ||
+                    node?.node?.names ||
+                    null;
+                const bestName = selectBestNameForContext(rawNames, preferredLanguage);
                 const name =
+                    bestName ||
                     node?.display_name ||
                     node?.name ||
                     node?.node?.display_name ||

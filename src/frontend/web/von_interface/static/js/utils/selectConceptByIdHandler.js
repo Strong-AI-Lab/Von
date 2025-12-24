@@ -1,3 +1,4 @@
+import { getPreferredLanguage, selectBestNameForContext } from './nameSelection.js';
 import { showToast } from './toast.js';
 
 export function normaliseVontologyId(value) {
@@ -127,8 +128,10 @@ async function fetchConceptMetadata(conceptId, fetchFn) {
 
     try {
         const json = await res.json();
+        const preferredLanguage = getPreferredLanguage();
+        const bestName = selectBestNameForContext(json?.raw_doc?.names, preferredLanguage);
         return {
-            displayName: json?.display_name || null,
+            displayName: bestName || json?.display_name || null,
             kind: json?.kind || json?.computed_kind || null
         };
     } catch (_) {
