@@ -1,8 +1,18 @@
 /** @jest-environment jsdom */
 
-const { simpleMarkdownToHtml } = require('../../src/frontend/web/von_interface/static/js/markdownUtils.js');
+const { detectMarkdown, simpleMarkdownToHtml } = require('../../src/frontend/web/von_interface/static/js/markdownUtils.js');
 
 describe('markdownUtils', () => {
+    test('detectMarkdown recognises indented list markers', () => {
+        const input = [
+            '5) Section',
+            '  - Item A',
+            '    - Item B'
+        ].join('\n');
+
+        expect(detectMarkdown(input)).toBe(true);
+    });
+
     test('removes orphan bullet-only line before fenced code block', () => {
         const input = [
             'Once you confirm, I will immediately perform:',

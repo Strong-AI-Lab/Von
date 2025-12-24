@@ -162,3 +162,56 @@ def test_render_markdown_renders_nested_lists(app_client):
         li.get_text(" ", strip=True) for li in nested_ul.find_all("li", recursive=False)
     ]
     assert nested_items == ["a", "b", "c"]
+
+
+def test_render_markdown_renders_list_after_paragraph_without_blank_line(app_client):
+    _, client = app_client
+
+    markdown = """5) How to represent this in the ontology (pragmatic approach)
+- Create the new types once:
+  - #V#disambiguation_input_profile (type)
+  - #V#disambiguation_result (type)
+"""
+
+    resp = client.post("/von/api/render_markdown", json={"text": markdown})
+    assert resp.status_code == 200
+
+    html = resp.get_json()["html"]
+    soup = BeautifulSoup(html, "html.parser")
+
+    uls = soup.find_all("ul")
+    assert uls, "Expected at least one <ul> to be rendered"
+
+    # Ensure the first list item is present.
+    list_text = soup.get_text(" ", strip=True)
+    assert "Create the new types once:" in list_text
+
+
+def test_render_markdown_does_not_parse_vontology_ids_as_headings(app_client):
+    _, client = app_client
+
+    # Python-Markdown accepts headings without requiring a space after '#'. A list
+    # item like "- #V#foo" can therefore be misparsed as a heading (<h1>) inside
+    # a <li>.
+    markdown = """- Types (class-level concepts)
+  - #V#disambiguation_workflow (type) — already exists; can be the generic workflow backbone.
+  - #V#disambiguation_input_profile (type) — represents the input knowledge state used to drive a disambiguation instance.
+
+> #V#disambiguation_result (type) — quoted example should also not become a heading.
+"""
+
+    resp = client.post("/von/api/render_markdown", json={"text": markdown})
+    assert resp.status_code == 200
+
+    html = resp.get_json()["html"]
+    soup = BeautifulSoup(html, "html.parser")
+
+    assert soup.find("h1") is None
+
+    text = soup.get_text(" ", strip=True)
+    assert "#V#disambiguation_workflow" in text
+    assert "#V#disambiguation_input_profile" in text
+    assert "#V#disambiguation_result" in text
+
+    # Ensure the normaliser does not leak markdown escape backslashes into HTML.
+    assert "\\#V#" not in html
