@@ -83,6 +83,134 @@ function normaliseKindClass(kind) {
 	return 'type';
 }
 
+let cartoucheContextMenu = null;
+let lastCartoucheContextMenuTriggerEl = null;
+let lastCartoucheContextMenuOpenAt = 0;
+
+async function copyToClipboard(text) {
+	const value = String(text ?? '');
+	if (!value) return;
+
+	// Prefer async Clipboard API.
+	try {
+		if (navigator?.clipboard?.writeText) {
+			await navigator.clipboard.writeText(value);
+			return;
+		}
+	} catch (_) {
+		// Fall through to legacy approach.
+	}
+
+	// Legacy fallback.
+	const textarea = document.createElement('textarea');
+	textarea.value = value;
+	textarea.setAttribute('readonly', '');
+	textarea.style.position = 'fixed';
+	textarea.style.left = '-9999px';
+	textarea.style.top = '-9999px';
+	document.body.appendChild(textarea);
+	textarea.focus();
+	textarea.select();
+	try {
+		document.execCommand('copy');
+	} finally {
+		try { textarea.remove(); } catch (_) { }
+	}
+}
+
+function hideCartoucheContextMenu() {
+	if (cartoucheContextMenu) {
+		cartoucheContextMenu.style.display = 'none';
+		cartoucheContextMenu.innerHTML = '';
+	}
+}
+
+function openCartoucheContextMenu(evt, triggerEl, fullConceptId) {
+	if (!cartoucheContextMenu) {
+		cartoucheContextMenu = document.createElement('div');
+		cartoucheContextMenu.className = 'cartouche-context-menu';
+		cartoucheContextMenu.style.position = 'fixed';
+		cartoucheContextMenu.style.zIndex = '10000';
+		cartoucheContextMenu.style.minWidth = '160px';
+		cartoucheContextMenu.style.background = '#ffffff';
+		cartoucheContextMenu.style.border = '1px solid #d1d5db';
+		cartoucheContextMenu.style.borderRadius = '6px';
+		cartoucheContextMenu.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+		cartoucheContextMenu.style.padding = '4px 0';
+		cartoucheContextMenu.style.fontSize = '14px';
+		cartoucheContextMenu.setAttribute('role', 'menu');
+		cartoucheContextMenu.setAttribute('aria-label', 'Concept actions');
+		document.body.appendChild(cartoucheContextMenu);
+
+		// Global dismissal handlers.
+		document.addEventListener('click', (e) => {
+			try {
+				// Ignore the synthetic (or immediate) click that may follow a contextmenu invocation.
+				if (lastCartoucheContextMenuTriggerEl && e.target === lastCartoucheContextMenuTriggerEl) {
+					if (Date.now() - lastCartoucheContextMenuOpenAt < 60) {
+						return;
+					}
+				}
+				if (cartoucheContextMenu && !cartoucheContextMenu.contains(e.target)) hideCartoucheContextMenu();
+			} catch (_) { /* no-op */ }
+		});
+		document.addEventListener('keydown', (e) => {
+			if (e.key === 'Escape') hideCartoucheContextMenu();
+		});
+		window.addEventListener('blur', hideCartoucheContextMenu);
+	}
+
+	// If the document was reset (e.g., in tests) and the element was removed, re-attach it.
+	if (cartoucheContextMenu && !document.body.contains(cartoucheContextMenu)) {
+		document.body.appendChild(cartoucheContextMenu);
+	}
+
+	lastCartoucheContextMenuTriggerEl = triggerEl;
+	lastCartoucheContextMenuOpenAt = Date.now();
+
+	// Build menu items.
+	cartoucheContextMenu.innerHTML = '';
+
+	const item = document.createElement('button');
+	item.type = 'button';
+	item.className = 'cartouche-context-menu-item';
+	item.setAttribute('role', 'menuitem');
+	item.textContent = 'Copy concept ID';
+	item.style.width = '100%';
+	item.style.textAlign = 'left';
+	item.style.padding = '8px 12px';
+	item.style.background = 'transparent';
+	item.style.border = 'none';
+	item.style.cursor = 'pointer';
+	item.style.color = '#1f2937';
+	item.addEventListener('click', async () => {
+		try {
+			await copyToClipboard(fullConceptId);
+		} finally {
+			hideCartoucheContextMenu();
+		}
+	});
+
+	cartoucheContextMenu.appendChild(item);
+
+	// Position.
+	const x = evt.clientX;
+	const y = evt.clientY;
+	cartoucheContextMenu.style.left = x + 'px';
+	cartoucheContextMenu.style.top = y + 'px';
+	requestAnimationFrame(() => {
+		const rect = cartoucheContextMenu.getBoundingClientRect();
+		let nx = rect.left, ny = rect.top;
+		const vw = window.innerWidth, vh = window.innerHeight;
+		if (rect.right > vw) nx = Math.max(4, vw - rect.width - 4);
+		if (rect.bottom > vh) ny = Math.max(4, vh - rect.height - 4);
+		cartoucheContextMenu.style.left = nx + 'px';
+		cartoucheContextMenu.style.top = ny + 'px';
+	});
+
+	cartoucheContextMenu.style.display = 'block';
+}
+
 export function createVontologyCartouche(conceptId, opts = {}) {
 	const idRaw = (conceptId || '').toString();
 	const fullId = idRaw.startsWith('#V#') ? idRaw : `#V#${idRaw}`;
@@ -107,6 +235,7 @@ export function createVontologyCartouche(conceptId, opts = {}) {
 	const kindClass = normaliseKindClass(opts.kind);
 	kind.className = `vontology-cartouche-kind ${kindClass}`;
 	kind.textContent = opts.kind ? formatKindLabel(opts.kind) : '…';
+	btn.dataset.kind = (opts.kind || '').toString();
 
 	btn.appendChild(name);
 	btn.appendChild(id);
@@ -119,8 +248,28 @@ export function createVontologyCartouche(conceptId, opts = {}) {
 		if (!raw) return;
 		btn.dispatchEvent(new CustomEvent('von:selectConceptById', {
 			bubbles: true,
-			detail: { conceptId: raw, createConceptTab: true }
+			detail: {
+				conceptId: raw,
+				createConceptTab: true,
+				kind: btn.dataset.kind || null,
+				modifierKeys: {
+					shiftKey: !!e.shiftKey,
+					altKey: !!e.altKey,
+					ctrlKey: !!e.ctrlKey,
+					metaKey: !!e.metaKey
+				}
+			}
 		}));
+	});
+
+	btn.addEventListener('contextmenu', (e) => {
+		try {
+			e.preventDefault();
+			e.stopPropagation();
+			openCartoucheContextMenu(e, btn, fullId);
+		} catch (err) {
+			console.warn('[textDecorator] cartouche context menu failed', err);
+		}
 	});
 
 	return btn;
