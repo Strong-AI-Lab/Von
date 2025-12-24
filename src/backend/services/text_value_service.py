@@ -348,6 +348,7 @@ def delete_text_relation_by_predicate_and_text(
     *,
     lang: Optional[str] = None,
     context: Optional[Dict[str, Any]] = None,
+    garbage_collect: bool = False,
 ) -> Dict[str, Any]:
     """Delete a text relation by predicate and text value. Optionally garbage-collect orphaned text values.
 
@@ -372,9 +373,7 @@ def delete_text_relation_by_predicate_and_text(
     )
     if not text_value:
         # Legacy fallback: direct text/lang lookup
-        text_value = TextValuesRepository.find_one(
-            {"text": raw_text, "lang": lang}
-        )
+        text_value = TextValuesRepository.find_one({"text": raw_text, "lang": lang})
     if not text_value:
         text_value = TextValuesRepository.find_one({"text": raw_text})
     if not text_value:
@@ -418,11 +417,12 @@ def delete_text_relation_by_predicate_and_text(
 
     # Check if the text value is now orphaned
     orphaned = False
-    others = TextRelationsRepository.find_one({"object_text_id": text_value_id})
-    if not others:
-        # Safe to delete the text value
-        TextValuesRepository.delete_one({"_id": ObjectId(text_value_id)})
-        orphaned = True
+    if garbage_collect:
+        others = TextRelationsRepository.find_one({"object_text_id": text_value_id})
+        if not others:
+            # Safe to delete the text value
+            TextValuesRepository.delete_one({"_id": ObjectId(text_value_id)})
+            orphaned = True
 
     return {
         "deleted": True,
@@ -433,7 +433,12 @@ def delete_text_relation_by_predicate_and_text(
     }
 
 
-def delete_text_relation(subject_concept_id: str, relation_id: str) -> Dict[str, Any]:
+def delete_text_relation(
+    subject_concept_id: str,
+    relation_id: str,
+    *,
+    garbage_collect: bool = False,
+) -> Dict[str, Any]:
     """Delete a specific text relation. Optionally garbage-collect orphaned text values.
 
     For now, we retain the TextValue (shared across relations) unless unreferenced;
@@ -449,7 +454,7 @@ def delete_text_relation(subject_concept_id: str, relation_id: str) -> Dict[str,
     tv_id = rel.get("object_text_id")
     TextRelationsRepository.delete_one({"_id": ObjectId(relation_id)})
     orphaned = False
-    if tv_id:
+    if tv_id and garbage_collect:
         # Check if any other relation references this text value
         others = TextRelationsRepository.find_one({"object_text_id": tv_id})
         if not others:
@@ -463,12 +468,244 @@ def delete_text_relation(subject_concept_id: str, relation_id: str) -> Dict[str,
     }
 
 
+def get_text_relations_summary(
+    subject_concept_id: str,
+    *,
+    predicates: Optional[List[str]] = None,
+    languages: Optional[List[str]] = None,
+    max_relation_ids_per_group: int = 25,
+) -> Dict[str, Any]:
+    """Return counts + relation IDs grouped by predicate/language.
+
+    This is intentionally "lightweight": it does not return full text bodies.
+
+    Notes:
+    - Text relation documents do not store language directly; language is derived from
+      the referenced text_values documents.
+    - `languages` is therefore a post-filter applied after resolving text value lang.
+    """
+    if not can_access_concept(subject_concept_id):
+        raise PermissionError("User cannot view text for an inaccessible concept")
+
+    pred_filter: Dict[str, Any] = {"subject_concept_id": subject_concept_id}
+    if predicates:
+        pred_filter["predicate"] = {
+            "$in": [p for p in predicates if isinstance(p, str)]
+        }
+
+    rels = list(
+        TextRelationsRepository.find(
+            pred_filter,
+            projection={
+                "_id": 1,
+                "predicate": 1,
+                "object_text_id": 1,
+                "created_at": 1,
+                "updated_at": 1,
+            },
+        )
+    )
+
+    tv_object_ids: List[ObjectId] = []
+    tv_string_ids: List[str] = []
+    for rel in rels:
+        tv_id = rel.get("object_text_id")
+        if not tv_id:
+            continue
+        if isinstance(tv_id, ObjectId):
+            tv_object_ids.append(tv_id)
+        elif isinstance(tv_id, str):
+            try:
+                tv_object_ids.append(ObjectId(tv_id))
+            except (InvalidId, TypeError):
+                tv_string_ids.append(tv_id)
+
+    tv_lang_by_id: Dict[str, str] = {}
+    if tv_object_ids:
+        for tv in TextValuesRepository.find(
+            {"_id": {"$in": tv_object_ids}},
+            projection={"lang": 1},
+        ):
+            tv_lang_by_id[str(tv.get("_id"))] = str(tv.get("lang") or "")
+    if tv_string_ids:
+        # Some stored ids may be non-ObjectId strings.
+        for tv in TextValuesRepository.find(
+            {"_id": {"$in": tv_string_ids}},
+            projection={"lang": 1},
+        ):
+            tv_lang_by_id[str(tv.get("_id"))] = str(tv.get("lang") or "")
+
+    language_allow = None
+    if languages:
+        language_allow = {str(lang) for lang in languages if isinstance(lang, str)}
+
+    grouped: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for rel in rels:
+        predicate = str(rel.get("predicate") or "")
+        tv_id = rel.get("object_text_id")
+        tv_id_str = str(tv_id) if tv_id is not None else ""
+        lang = tv_lang_by_id.get(tv_id_str) or ""
+
+        if language_allow is not None and lang not in language_allow:
+            continue
+
+        key = (predicate, lang)
+        bucket = grouped.get(key)
+        if bucket is None:
+            bucket = {
+                "predicate": predicate,
+                "language": lang,
+                "count": 0,
+                "relation_ids": [],
+                "latest_relation_id": None,
+                "latest_updated_at": None,
+            }
+            grouped[key] = bucket
+
+        bucket["count"] += 1
+        rel_id = str(rel.get("_id"))
+        if rel_id:
+            if len(bucket["relation_ids"]) < max_relation_ids_per_group:
+                bucket["relation_ids"].append(rel_id)
+
+        updated_at = rel.get("updated_at") or rel.get("created_at")
+        if updated_at is not None:
+            current_latest = bucket.get("latest_updated_at")
+            if current_latest is None or updated_at > current_latest:
+                bucket["latest_updated_at"] = updated_at
+                bucket["latest_relation_id"] = rel_id
+
+    summary_items = list(grouped.values())
+    summary_items.sort(
+        key=lambda x: (x.get("predicate") or "", x.get("language") or "")
+    )
+    for item in summary_items:
+        # Make datetime JSON-friendly
+        dt = item.get("latest_updated_at")
+        if isinstance(dt, datetime):
+            item["latest_updated_at"] = dt.isoformat()
+
+    return {
+        "success": True,
+        "concept_id": subject_concept_id,
+        "groups": summary_items,
+        "groups_found": len(summary_items),
+        "total_relations_scanned": len(rels),
+        "max_relation_ids_per_group": max_relation_ids_per_group,
+    }
+
+
+def upsert_singleton_text_relation(
+    *,
+    subject_concept_id: str,
+    predicate: str,
+    text: str,
+    lang: str = "en-NZ",
+    policy: str = "replace_others",
+    provenance: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
+    garbage_collect: bool = True,
+) -> Dict[str, Any]:
+    """Upsert text and enforce singleton semantics for (concept, predicate, language).
+
+    `policy='replace_others'` means: after inserting/upserting the desired relation,
+    delete all other relations for the same subject+predicate whose text_value language
+    matches `lang`.
+    """
+    if policy != "replace_others":
+        raise ValueError("Unsupported policy (expected 'replace_others')")
+
+    result = upsert_text_for_concept(
+        subject_concept_id=subject_concept_id,
+        predicate=predicate,
+        text=text,
+        lang=lang,
+        provenance=provenance,
+        context=context,
+    )
+    kept_relation_id = str(result.get("relation_id") or "")
+
+    rels = list(
+        TextRelationsRepository.find(
+            {
+                "subject_concept_id": subject_concept_id,
+                "predicate": predicate,
+            },
+            projection={"_id": 1, "object_text_id": 1},
+        )
+    )
+
+    tv_object_ids: List[ObjectId] = []
+    tv_ids_raw: List[str] = []
+    for rel in rels:
+        tv_id = rel.get("object_text_id")
+        if tv_id is None:
+            continue
+        if isinstance(tv_id, ObjectId):
+            tv_object_ids.append(tv_id)
+        else:
+            tv_id_str = str(tv_id)
+            try:
+                tv_object_ids.append(ObjectId(tv_id_str))
+            except (InvalidId, TypeError):
+                tv_ids_raw.append(tv_id_str)
+
+    tv_lang_by_id: Dict[str, str] = {}
+    if tv_object_ids:
+        for tv in TextValuesRepository.find(
+            {"_id": {"$in": tv_object_ids}},
+            projection={"lang": 1},
+        ):
+            tv_lang_by_id[str(tv.get("_id"))] = str(tv.get("lang") or "")
+    if tv_ids_raw:
+        for tv in TextValuesRepository.find(
+            {"_id": {"$in": tv_ids_raw}},
+            projection={"lang": 1},
+        ):
+            tv_lang_by_id[str(tv.get("_id"))] = str(tv.get("lang") or "")
+
+    replaced_relation_ids: List[str] = []
+    lang_normalised = (lang or "").strip()
+    for rel in rels:
+        rel_id = str(rel.get("_id"))
+        if not rel_id or rel_id == kept_relation_id:
+            continue
+
+        tv_id = rel.get("object_text_id")
+        tv_id_str = str(tv_id) if tv_id is not None else ""
+        rel_lang = tv_lang_by_id.get(tv_id_str) or ""
+
+        if rel_lang != lang_normalised:
+            continue
+
+        delete_text_relation(
+            subject_concept_id,
+            rel_id,
+            garbage_collect=garbage_collect,
+        )
+        replaced_relation_ids.append(rel_id)
+
+    return {
+        "success": True,
+        "concept_id": subject_concept_id,
+        "predicate": predicate,
+        "language": lang,
+        "kept_relation_id": kept_relation_id,
+        "replaced_relation_ids": replaced_relation_ids,
+        "replaced_count": len(replaced_relation_ids),
+        "relation_created": bool(result.get("relation_created")),
+        "text_value_id": result.get("text_value_id"),
+    }
+
+
 __all__ = [
     "RelationPredicate",
     "create_text_value",
     "link_text_to_concept",
     "upsert_text_for_concept",
+    "upsert_singleton_text_relation",
     "get_texts_for_concept",
+    "get_text_relations_summary",
     "update_text_relation_text",
     "delete_text_relation_by_predicate_and_text",
     "delete_text_relation",
