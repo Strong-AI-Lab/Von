@@ -50,6 +50,10 @@ class _MissingToolCallDetectorSpec:
 class ToolCallParsingError(Exception):
     """Raised when a model returns an invalid tool call payload."""
 
+    def __init__(self, message: str, *, raw_response: str | None = None) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response
+
 
 class InternalMCPChatOrchestrator:
     """Simple loop that allows the Von assistant to call internal tools."""
@@ -420,6 +424,9 @@ class InternalMCPChatOrchestrator:
             "- DO NOT say 'I will call' or 'Let me call' - just call it\n"
             "- You MAY batch multiple tool calls in ONE message as a JSON array (keep it to <= 4 calls)\n"
             "- After you receive the tool result (role 'tool'), respond naturally to the user\n\n"
+            "VERIFICATION & CONSISTENCY RULES:\n"
+            "- If the user doubts whether a specific concept_id exists (e.g. '#V#...') or challenges a claim about Vontology state, ALWAYS verify first using fetch_concept (or search_concepts) before responding.\n"
+            "- Do NOT reply with prose-only 'we should verify' / 'I will not assert unless I can verify' without actually calling a tool.\n\n"
             "If you output JSON, the system will execute that tool call immediately.\n\n"
             "IMPORTANT: arXiv paper conversions (PDF to markdown) can take 5-10 minutes.\n"
             "If read_paper fails, the paper may still be converting. Check with list_papers.\n\n"
@@ -997,7 +1004,8 @@ class InternalMCPChatOrchestrator:
             parsed, end = decoder.raw_decode(raw)
         except json.JSONDecodeError as exc:
             raise ToolCallParsingError(
-                "Tool call was not executed: invalid JSON in tool call response."
+                "Tool call was not executed: invalid JSON in tool call response.",
+                raw_response=text,
             ) from exc
 
         trailing = raw[end:].strip()
@@ -1047,7 +1055,8 @@ class InternalMCPChatOrchestrator:
                 if tool_call is None:
                     if looks_like_tool_call:
                         raise ToolCallParsingError(
-                            "Tool call was not executed: tool call batch must be a JSON array of tool-call objects."
+                            "Tool call was not executed: tool call batch must be a JSON array of tool-call objects.",
+                            raw_response=text,
                         )
                     return None
                 tool_calls.append(tool_call)
@@ -1056,7 +1065,8 @@ class InternalMCPChatOrchestrator:
         else:
             if looks_like_tool_call:
                 raise ToolCallParsingError(
-                    "Tool call was not executed: tool call must be a JSON object or array."
+                    "Tool call was not executed: tool call must be a JSON object or array.",
+                    raw_response=text,
                 )
             return None
 
@@ -1064,7 +1074,8 @@ class InternalMCPChatOrchestrator:
         if trailing:
             if trailing.startswith("{") or trailing.startswith("["):
                 raise ToolCallParsingError(
-                    "Tool call was not executed: multiple JSON values were emitted in one response."
+                    "Tool call was not executed: multiple JSON values were emitted in one response.",
+                    raw_response=text,
                 )
 
             snippet = trailing
@@ -1081,7 +1092,8 @@ class InternalMCPChatOrchestrator:
                 "["
             ):
                 raise ToolCallParsingError(
-                    "Tool call was not executed: multiple JSON values were emitted in one response."
+                    "Tool call was not executed: multiple JSON values were emitted in one response.",
+                    raw_response=text,
                 )
             snippet = post_fence_trailing
             if len(snippet) > 120:
@@ -1157,7 +1169,8 @@ class InternalMCPChatOrchestrator:
             parsed, end = decoder.raw_decode(raw)
         except json.JSONDecodeError as exc:
             raise ToolCallParsingError(
-                "Tool call was not executed: invalid JSON in tool call response."
+                "Tool call was not executed: invalid JSON in tool call response.",
+                raw_response=text,
             ) from exc
 
         is_tool_call = False
@@ -1198,7 +1211,8 @@ class InternalMCPChatOrchestrator:
         if trailing and is_tool_call:
             if trailing.startswith("{") or trailing.startswith("["):
                 raise ToolCallParsingError(
-                    "Tool call was not executed: multiple tool calls were emitted in one response."
+                    "Tool call was not executed: multiple tool calls were emitted in one response.",
+                    raw_response=text,
                 )
 
             # Some models append explanatory prose after a valid JSON tool call.
@@ -1219,7 +1233,8 @@ class InternalMCPChatOrchestrator:
                 "["
             ):
                 raise ToolCallParsingError(
-                    "Tool call was not executed: multiple tool calls were emitted in one response."
+                    "Tool call was not executed: multiple tool calls were emitted in one response.",
+                    raw_response=text,
                 )
             snippet = post_fence_trailing
             if len(snippet) > 120:
@@ -1242,7 +1257,8 @@ class InternalMCPChatOrchestrator:
         if not isinstance(parsed, MutableMapping):
             if looks_like_tool_call:
                 raise ToolCallParsingError(
-                    "Tool call was not executed: tool call must be a JSON object."
+                    "Tool call was not executed: tool call must be a JSON object.",
+                    raw_response=text,
                 )
             return None
 
@@ -1587,6 +1603,13 @@ class InternalMCPChatOrchestrator:
                     # Fallback to legacy heuristic only when classifier unavailable
                     if self._looks_like_missing_tool_call(response):
                         retry_reason = "heuristic missing tool call"
+                elif llm_flag is False:
+                    # Backstop: the LLM classifier can miss obvious cases.
+                    # If our conservative heuristic triggers, do the single retry anyway.
+                    if self._looks_like_missing_tool_call(response):
+                        retry_reason = (
+                            "heuristic missing tool call (classifier said no)"
+                        )
 
             # Always append a compact detection summary for UI debugging
             try:
@@ -1618,9 +1641,39 @@ class InternalMCPChatOrchestrator:
                     "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
                     "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects (no prose, no Markdown)."
                 )
+
+                try:
+                    aux_llm_calls.append(
+                        {
+                            "type": "missing_tool_call_retry",
+                            "stage": "prompt",
+                            "retry_reason": retry_reason,
+                            "prompt_preview": retry_prompt[:800],
+                        }
+                    )
+                except Exception:  # pragma: no cover - best effort only
+                    pass
+
                 retry_response = llm_client.generate(
                     retry_prompt, context=augmented_context, model=model
                 )
+
+                try:
+                    aux_llm_calls.append(
+                        {
+                            "type": "missing_tool_call_retry",
+                            "stage": "response",
+                            "retry_reason": retry_reason,
+                            "response_preview": (
+                                retry_response[:800]
+                                if isinstance(retry_response, str)
+                                else str(retry_response)[:800]
+                            ),
+                        }
+                    )
+                except Exception:  # pragma: no cover - best effort only
+                    pass
+
                 try:
                     retry_calls = self._extract_tool_calls(retry_response)
                 except ToolCallParsingError:

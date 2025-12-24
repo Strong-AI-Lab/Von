@@ -16,7 +16,9 @@ export function parseVontologyTokens(text) {
 	// Using space/quote/backtick as terminators eliminates ambiguity and runaway link concerns
 	// This supports concept IDs like: #V#person, #V#michael_witbrock_business_trip_akl_mel_26_29_nov_2025_air_nz
 	// NOTE: Parentheses are not allowed in concept IDs
-	const tokenRe = /#V#([A-Za-z0-9_\./:–\-]+?)(?=[\s"'`]|$)/g;
+	// Also treat common punctuation as a valid token boundary so we can cartouchify IDs
+	// at sentence boundaries (e.g., "#V#foo.", "(#V#bar)").
+	const tokenRe = /#V#([A-Za-z0-9_\./:–\-]+?)(?=[\s"'`\.,:;!?\)\]\}…]|$)/g;
 
 	let lastIndex = 0;
 	let match;
@@ -325,7 +327,7 @@ function normaliseVontologyTokensForDisplay(text) {
 	// "V#person" -> "#V#person" (but do NOT rewrite "#V#person").
 	// Prefix capture avoids lookbehind to keep browser support broad.
 	output = output.replace(
-		/(^|[^#])([Vv])#([A-Za-z0-9_\./:–\-]+?)(?=[\s"'`]|$)/g,
+		/(^|[^#])([Vv])#([A-Za-z0-9_\./:–\-]+?)(?=[\s"'`\.,:;!?\)\]\}…]|$)/g,
 		(_, prefix, _v, conceptId) => `${prefix}#V#${conceptId}`
 	);
 
