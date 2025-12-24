@@ -1307,7 +1307,7 @@ def get_all_vontology_nodes_with_details(identifier: str = "Thing"):
         }
 
 
-def get_vontology_node_content(identifier: str) -> dict:
+def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) -> dict:
     """
     Fetches a Vontology concept's details from MongoDB by its path, concept_id, or _id.
     Renders markdown content to HTML.
@@ -1395,7 +1395,7 @@ def get_vontology_node_content(identifier: str) -> dict:
 
     md_content = doc.get("md_content")
 
-    if md_content is None:
+    if md_content is None and reconstruct_md:
         logger.warning(
             f"Markdown content (md_content) missing for '{identifier}'. Reconstructing basic version."
         )
@@ -1417,7 +1417,7 @@ def get_vontology_node_content(identifier: str) -> dict:
         if notes:
             md_content += f"## Notes\n\n{notes}\n"
 
-    html = markdown.markdown(md_content)
+    html = markdown.markdown(md_content or "")
 
     # Normalize relationship fields to always be arrays for inference simplicity
     rels = doc.get("relationships", {}) or {}

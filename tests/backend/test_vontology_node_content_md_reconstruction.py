@@ -1,6 +1,7 @@
 import pytest
 
 from src.backend.vontology import utils_vontology
+from src.backend.db.repositories.concepts_repository import ConceptsRepository
 
 
 @pytest.fixture(autouse=True)
@@ -18,9 +19,13 @@ def test_reconstructed_md_content_omits_boilerplate_metadata_fields():
     if db is None:
         pytest.skip("MongoDB not configured for this test run")
 
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+
     concept_id = "#V#verified_entity_representation_agentic_workflow_design"
 
-    db["vontology_nodes"].insert_one(
+    concepts.insert_one(
         {
             "concept_id": concept_id,
             "names": [
@@ -50,3 +55,40 @@ def test_reconstructed_md_content_omits_boilerplate_metadata_fields():
     assert "Source Concept" not in md
     assert "SubConcept Of" not in md
     assert "Instance Of" not in md
+
+
+def test_reconstruct_md_false_preserves_missing_md_content():
+    db = utils_vontology.get_db()
+    if db is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concept_id = "#V#md_content_missing_reconstruct_md_false"
+
+    concepts.insert_one(
+        {
+            "concept_id": concept_id,
+            "names": [
+                {
+                    "name": "md_content missing reconstruct_md false",
+                    "type": "NL",
+                    "language": "en-NZ",
+                }
+            ],
+            "relationships": {
+                "is_an_instance_of": [],
+                "is_a_type_of": [],
+            },
+            # Intentionally no md_content.
+        }
+    )
+
+    payload = utils_vontology.get_vontology_node_content(
+        concept_id, reconstruct_md=False
+    )
+    assert "error" not in payload
+    assert payload.get("md_content") is None
+    assert payload.get("content_html") == ""

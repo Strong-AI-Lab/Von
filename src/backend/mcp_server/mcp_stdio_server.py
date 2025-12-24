@@ -52,6 +52,7 @@ from datetime import datetime, timezone
 from src.backend.vontology.utils_vontology import (
     create_vontology_concept,
     get_all_vontology_nodes_with_details,
+    get_vontology_node_content,
     get_vontology_tree,
     simulate_or_delete_concept,
 )
@@ -69,6 +70,8 @@ from src.backend.services.concept_search_service import search_concepts
 from src.backend.services.text_value_service import (
     upsert_text_for_concept,
     get_texts_for_concept,
+    get_text_relations_summary,
+    upsert_singleton_text_relation,
     update_text_relation_text,
     delete_text_relation,
     delete_text_relation_by_predicate_and_text,
@@ -427,6 +430,118 @@ async def list_tools() -> list[Tool]:
                     "language": {
                         "type": "string",
                         "description": "Optional: language code for predicate+text deletion",
+                    },
+                    "garbage_collect": {
+                        "type": "boolean",
+                        "description": "Optional: when true, delete orphaned text_values after relation removal",
+                        "default": False,
+                    },
+                },
+                "required": ["concept_id"],
+            },
+        ),
+        Tool(
+            name="get_text_relations_summary",
+            description="Return a lightweight summary of text relations for a concept: counts + relation IDs grouped by predicate/language (no full text bodies).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept to summarise text relations for",
+                    },
+                    "predicates": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional: filter by predicate allow-list",
+                    },
+                    "languages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional: filter by language allow-list (derived from text_values.lang)",
+                    },
+                    "max_relation_ids_per_group": {
+                        "type": "integer",
+                        "default": 25,
+                        "description": "Cap for relation IDs returned per predicate/language bucket",
+                    },
+                },
+                "required": ["concept_id"],
+            },
+        ),
+        Tool(
+            name="upsert_singleton_text_relation",
+            description="Upsert a text relation and enforce singleton semantics for (concept, predicate, language) by replacing any other relations in the same group.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept to attach text to",
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Text predicate (e.g., 'hasDescription')",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text to attach",
+                    },
+                    "language": {
+                        "type": "string",
+                        "default": "en-NZ",
+                        "description": "Language code for the singleton group",
+                    },
+                    "policy": {
+                        "type": "string",
+                        "default": "replace_others",
+                        "description": "Singleton policy (currently only replace_others)",
+                    },
+                    "garbage_collect": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When true, garbage-collect orphaned text_values for replaced relations",
+                    },
+                    "provenance": {
+                        "type": "object",
+                        "description": "Optional provenance metadata",
+                    },
+                    "context": {
+                        "type": "object",
+                        "description": "Optional relation context metadata",
+                    },
+                },
+                "required": ["concept_id", "predicate", "text"],
+            },
+        ),
+        Tool(
+            name="concept_exists",
+            description="Minimal existence/accessibility check for a concept_id.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to check",
+                    }
+                },
+                "required": ["concept_id"],
+            },
+        ),
+        Tool(
+            name="fetch_concept_content",
+            description="Fetch rendered markdown content for a concept (content_html + md_content + raw_doc). Use reconstruct_md=false to avoid masking missing md_content.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to fetch",
+                    },
+                    "reconstruct_md": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When false, do not reconstruct md_content if it is missing",
                     },
                 },
                 "required": ["concept_id"],
@@ -1552,6 +1667,7 @@ async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextCo
     predicate = arguments.get("predicate")
     text = arguments.get("text")
     language = arguments.get("language")
+    garbage_collect = bool(arguments.get("garbage_collect"))
 
     if not concept_id:
         return [_json_error("Missing concept_id parameter")]
@@ -1562,12 +1678,18 @@ async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextCo
             result = delete_text_relation(
                 subject_concept_id=concept_id,
                 relation_id=relation_id,
+                garbage_collect=garbage_collect,
             )
             payload = {
                 "success": True,
                 "deleted_relation_id": relation_id,
-                "deleted_text_preview": str(result.get("text", ""))[:100],
-                "text_value_cleaned_up": result.get("orphaned", False),
+                "deleted_text_preview": None,
+                "text_value_cleaned_up": bool(
+                    result.get(
+                        "orphaned_text_value_deleted",
+                        result.get("text_value_cleaned_up", False),
+                    )
+                ),
             }
         elif predicate and text:
             # Delete by predicate + text match
@@ -1576,15 +1698,22 @@ async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextCo
                 predicate=predicate,
                 text=text,
                 lang=language,
+                garbage_collect=garbage_collect,
             )
             payload = {
                 "success": True,
                 "deleted_relation_id": result.get("relation_id"),
                 "deleted_text_preview": text[:100],
-                "text_value_cleaned_up": result.get("orphaned_text_value_deleted", False),
+                "text_value_cleaned_up": result.get(
+                    "orphaned_text_value_deleted", False
+                ),
             }
         else:
-            return [_json_error("Must provide either relation_id or both predicate and text")]
+            return [
+                _json_error(
+                    "Must provide either relation_id or both predicate and text"
+                )
+            ]
 
         return [_json_text(payload)]
     except Exception as exc:
@@ -1711,6 +1840,93 @@ async def _handle_fetch_concept(arguments: dict[str, Any]) -> list[TextContent]:
         return [_json_text(concept)]
     except Exception as exc:
         return [_json_error(str(exc))]
+
+
+async def _handle_get_text_relations_summary(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    concept_id = arguments.get("concept_id")
+    if not concept_id:
+        return [_json_error("Missing concept_id parameter")]
+
+    try:
+        payload = get_text_relations_summary(
+            concept_id,
+            predicates=arguments.get("predicates"),
+            languages=arguments.get("languages"),
+            max_relation_ids_per_group=arguments.get("max_relation_ids_per_group", 25),
+        )
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [_json_error(f"Failed to summarise text relations: {exc}")]
+
+
+async def _handle_upsert_singleton_text_relation(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    concept_id = arguments.get("concept_id")
+    predicate = arguments.get("predicate")
+    text = arguments.get("text")
+
+    if not concept_id:
+        return [_json_error("Missing concept_id parameter")]
+    if not predicate:
+        return [_json_error("Missing predicate parameter")]
+    if not text:
+        return [_json_error("Missing text parameter")]
+
+    try:
+        payload = upsert_singleton_text_relation(
+            subject_concept_id=concept_id,
+            predicate=predicate,
+            text=text,
+            lang=arguments.get("language", "en-NZ"),
+            policy=arguments.get("policy", "replace_others"),
+            provenance=arguments.get("provenance"),
+            context=arguments.get("context"),
+            garbage_collect=arguments.get("garbage_collect", True),
+        )
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [_json_error(f"Failed to upsert singleton text relation: {exc}")]
+
+
+async def _handle_concept_exists(arguments: dict[str, Any]) -> list[TextContent]:
+    from src.backend.security.access_control import can_access_concept
+
+    concept_id = arguments.get("concept_id")
+    if not concept_id:
+        return [_json_error("Missing concept_id parameter")]
+
+    try:
+        doc = ConceptsRepository.find_one({"concept_id": concept_id}, {"_id": 1})
+        payload = {
+            "success": True,
+            "concept_id": concept_id,
+            "exists": bool(doc),
+            "accessible": can_access_concept(concept_id),
+        }
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [_json_error(f"Failed to check concept existence: {exc}")]
+
+
+async def _handle_fetch_concept_content(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    concept_id = arguments.get("concept_id")
+    if not concept_id:
+        return [_json_error("Missing concept_id parameter")]
+
+    reconstruct_md = arguments.get("reconstruct_md", True)
+    try:
+        payload = get_vontology_node_content(
+            concept_id, reconstruct_md=bool(reconstruct_md)
+        )
+        payload["success"] = "error" not in payload
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [_json_error(f"Failed to fetch concept content: {exc}")]
 
 
 async def _handle_search_concepts(arguments: dict[str, Any]) -> list[TextContent]:
@@ -2086,9 +2302,13 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "get_text_relations": _handle_get_text_relations,
     "update_text_relation": _handle_update_text_relation,
     "delete_text_relation": _handle_delete_text_relation,
+    "get_text_relations_summary": _handle_get_text_relations_summary,
+    "upsert_singleton_text_relation": _handle_upsert_singleton_text_relation,
     "add_names": _handle_add_names,
     "get_tree": _handle_get_tree,
     "fetch_concept": _handle_fetch_concept,
+    "fetch_concept_content": _handle_fetch_concept_content,
+    "concept_exists": _handle_concept_exists,
     "search_concepts": _handle_search_concepts,
     "vontology_concept_search": _handle_search_concepts,
     "extract_annotations": _handle_extract_annotations,

@@ -321,6 +321,7 @@ def _delete_text_relation(**kwargs):
     predicate = kwargs.get("predicate")
     text = kwargs.get("text")
     language = kwargs.get("language")
+    garbage_collect = bool(kwargs.get("garbage_collect"))
 
     if not concept_id:
         return {"error": "Missing 'concept_id' parameter"}
@@ -331,12 +332,18 @@ def _delete_text_relation(**kwargs):
             result = delete_text_relation(
                 subject_concept_id=concept_id,
                 relation_id=relation_id,
+                garbage_collect=garbage_collect,
             )
             return {
                 "success": True,
                 "deleted_relation_id": relation_id,
-                "deleted_text_preview": str(result.get("text", ""))[:100],
-                "text_value_cleaned_up": result.get("orphaned", False),
+                "deleted_text_preview": None,
+                "text_value_cleaned_up": bool(
+                    result.get(
+                        "orphaned_text_value_deleted",
+                        result.get("text_value_cleaned_up", False),
+                    )
+                ),
             }
         elif predicate and text:
             # Delete by predicate + text match
@@ -345,17 +352,123 @@ def _delete_text_relation(**kwargs):
                 predicate=predicate,
                 text=text,
                 lang=language,
+                garbage_collect=garbage_collect,
             )
             return {
                 "success": True,
                 "deleted_relation_id": result.get("relation_id"),
                 "deleted_text_preview": text[:100],
-                "text_value_cleaned_up": result.get("orphaned_text_value_deleted", False),
+                "text_value_cleaned_up": result.get(
+                    "orphaned_text_value_deleted", False
+                ),
             }
         else:
-            return {"error": "Must provide either relation_id or both predicate and text"}
+            return {
+                "error": "Must provide either relation_id or both predicate and text"
+            }
     except Exception as exc:
         return {"error": f"Failed to delete text relation: {exc}"}
+
+
+def _get_text_relations_summary(**kwargs):
+    from ...services.text_value_service import get_text_relations_summary
+
+    concept_id = kwargs.get("concept_id")
+    predicates = kwargs.get("predicates")
+    languages = kwargs.get("languages")
+    max_relation_ids_per_group = kwargs.get("max_relation_ids_per_group", 25)
+
+    if not concept_id:
+        return {"error": "Missing 'concept_id' parameter", "success": False}
+
+    try:
+        return get_text_relations_summary(
+            concept_id,
+            predicates=predicates,
+            languages=languages,
+            max_relation_ids_per_group=max_relation_ids_per_group,
+        )
+    except Exception as exc:
+        return {"error": f"Failed to summarise text relations: {exc}", "success": False}
+
+
+def _upsert_singleton_text_relation(**kwargs):
+    from ...services.text_value_service import upsert_singleton_text_relation
+
+    concept_id = kwargs.get("concept_id")
+    predicate = kwargs.get("predicate")
+    text = kwargs.get("text")
+    language = kwargs.get("language", "en-NZ")
+    policy = kwargs.get("policy", "replace_others")
+    garbage_collect = kwargs.get("garbage_collect")
+    provenance = kwargs.get("provenance")
+    context = kwargs.get("context")
+
+    if not concept_id:
+        return {"error": "Missing 'concept_id' parameter", "success": False}
+    if not predicate:
+        return {"error": "Missing 'predicate' parameter", "success": False}
+    if not text:
+        return {"error": "Missing 'text' parameter", "success": False}
+
+    try:
+        return upsert_singleton_text_relation(
+            subject_concept_id=concept_id,
+            predicate=predicate,
+            text=text,
+            lang=language,
+            policy=policy,
+            provenance=provenance,
+            context=context,
+            garbage_collect=(
+                True if garbage_collect is None else bool(garbage_collect)
+            ),
+        )
+    except Exception as exc:
+        return {
+            "error": f"Failed to upsert singleton text relation: {exc}",
+            "success": False,
+        }
+
+
+def _concept_exists(**kwargs):
+    from ...db.repositories.concepts_repository import ConceptsRepository
+    from ...security.access_control import can_access_concept
+
+    concept_id = kwargs.get("concept_id")
+    if not concept_id:
+        return {"error": "Missing 'concept_id' parameter", "success": False}
+
+    try:
+        doc = ConceptsRepository.find_one({"concept_id": concept_id}, {"_id": 1})
+        exists = bool(doc)
+        accessible = can_access_concept(concept_id)
+        return {
+            "success": True,
+            "concept_id": concept_id,
+            "exists": exists,
+            "accessible": accessible,
+        }
+    except Exception as exc:
+        return {"error": f"Failed to check concept existence: {exc}", "success": False}
+
+
+def _fetch_concept_content(**kwargs):
+    from ...vontology.utils_vontology import get_vontology_node_content
+
+    concept_id = kwargs.get("concept_id")
+    reconstruct_md = kwargs.get("reconstruct_md", True)
+    if not concept_id:
+        return {"error": "Missing 'concept_id' parameter", "success": False}
+
+    try:
+        payload = get_vontology_node_content(
+            concept_id, reconstruct_md=bool(reconstruct_md)
+        )
+        payload["success"] = "error" not in payload
+        return payload
+    except Exception as exc:
+        return {"error": f"Failed to fetch concept content: {exc}", "success": False}
 
 
 def _add_names_to_concept(**kwargs):
@@ -1303,9 +1416,111 @@ def _delete_text_relation_input_schema() -> Schema:
             "predicate": (str, type(None)),
             "text": (str, type(None)),
             "language": (str, type(None)),
+            "garbage_collect": (bool,),
         },
         allow_unknown=True,
-        description="delete_text_relation input: concept_id (str), relation_id (str, optional - preferred method), predicate (str, optional for predicate+text deletion), text (str, optional with predicate), language (str, optional)",
+        description="delete_text_relation input: concept_id (str), relation_id (str, optional - preferred method), predicate (str, optional for predicate+text deletion), text (str, optional with predicate), language (str, optional), garbage_collect (bool, optional - if true, delete orphaned text_values)",
+    )
+
+
+def _get_text_relations_summary_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={
+            "predicates": (list, type(None)),
+            "languages": (list, type(None)),
+            "max_relation_ids_per_group": (int, type(None)),
+        },
+        allow_unknown=True,
+        description="get_text_relations_summary input: concept_id (str), predicates (list[str] optional), languages (list[str] optional), max_relation_ids_per_group (int optional, default 25)",
+    )
+
+
+def _get_text_relations_summary_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "concept_id": str,
+            "groups": list,
+            "groups_found": int,
+            "total_relations_scanned": int,
+            "max_relation_ids_per_group": int,
+        },
+        optional={"error": (str, type(None))},
+        allow_unknown=True,
+        description="get_text_relations_summary output: success, concept_id, groups[{predicate, language, count, relation_ids, latest_relation_id, latest_updated_at}], groups_found, total_relations_scanned",
+    )
+
+
+def _upsert_singleton_text_relation_input_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+            "predicate": str,
+            "text": str,
+        },
+        optional={
+            "language": str,
+            "policy": str,
+            "garbage_collect": (bool, type(None)),
+            "provenance": (dict, type(None)),
+            "context": (dict, type(None)),
+        },
+        allow_unknown=True,
+        description="upsert_singleton_text_relation input: concept_id (str), predicate (str), text (str), language (str optional default en-NZ), policy (str optional default replace_others), garbage_collect (bool optional default true), provenance/context (dict optional)",
+    )
+
+
+def _upsert_singleton_text_relation_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "concept_id": str,
+            "predicate": str,
+            "language": str,
+            "kept_relation_id": str,
+            "replaced_relation_ids": list,
+            "replaced_count": int,
+            "relation_created": bool,
+        },
+        optional={
+            "text_value_id": (str, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description="upsert_singleton_text_relation output: success, kept_relation_id, replaced_relation_ids/count, relation_created, text_value_id",
+    )
+
+
+def _concept_exists_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={},
+        allow_unknown=True,
+        description="concept_exists input: concept_id (str)",
+    )
+
+
+def _concept_exists_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "concept_id": str,
+            "exists": bool,
+            "accessible": bool,
+        },
+        optional={"error": (str, type(None))},
+        allow_unknown=True,
+        description="concept_exists output: success, concept_id, exists (bool), accessible (bool)",
+    )
+
+
+def _fetch_concept_content_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={"reconstruct_md": (bool, type(None))},
+        allow_unknown=True,
+        description="fetch_concept_content input: concept_id (str), reconstruct_md (bool optional default true)",
     )
 
 
@@ -2882,6 +3097,38 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=_delete_text_relation_output_schema(),
             category="write",
             description="Delete a specific text relation by relation ID or by predicate+text match. Optionally garbage-collects orphaned text values. Use to remove unwanted text attachments from concepts.",
+        ),
+        MethodDefinition(
+            name="get_text_relations_summary",
+            handler=_get_text_relations_summary,
+            input_schema=_get_text_relations_summary_input_schema(),
+            output_schema=_get_text_relations_summary_output_schema(),
+            category="read",
+            description="Return a lightweight summary of text relations for a concept: counts + relation IDs grouped by predicate/language (no full text bodies). Use to quickly decide what to fetch next.",
+        ),
+        MethodDefinition(
+            name="upsert_singleton_text_relation",
+            handler=_upsert_singleton_text_relation,
+            input_schema=_upsert_singleton_text_relation_input_schema(),
+            output_schema=_upsert_singleton_text_relation_output_schema(),
+            category="write",
+            description="Upsert a text relation and enforce singleton semantics for (concept, predicate, language) by replacing any other relations in the same group.",
+        ),
+        MethodDefinition(
+            name="concept_exists",
+            handler=_concept_exists,
+            input_schema=_concept_exists_input_schema(),
+            output_schema=_concept_exists_output_schema(),
+            category="read",
+            description="Minimal existence/accessibility check for a concept_id. Use before expensive fetch operations or when you need to validate user input.",
+        ),
+        MethodDefinition(
+            name="fetch_concept_content",
+            handler=_fetch_concept_content,
+            input_schema=_fetch_concept_content_input_schema(),
+            output_schema=None,
+            category="read",
+            description="Fetch rendered markdown content for a concept (content_html + md_content + raw_doc). Use reconstruct_md=false to avoid masking missing md_content.",
         ),
         MethodDefinition(
             name="add_names",
