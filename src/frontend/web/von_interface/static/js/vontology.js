@@ -950,11 +950,11 @@ export async function fetchAndRenderVontologyTree() {
       elements.vontologyTreeContainer.innerHTML = `<p>Error loading Vontology tree: ${treeData.error}</p>`;
     } else if (treeData.tree !== undefined && treeData.tree !== null) {
       debugLog("[fetchAndRenderVontologyTree] treeData.tree structure:", JSON.stringify(treeData.tree, null, 2));
-      
+
       // CHICKEN-AND-EGG FIX: Check if tree is empty array (database is empty)
       if (Array.isArray(treeData.tree) && treeData.tree.length === 0) {
         console.log("[fetchAndRenderVontologyTree] Tree is empty - auto-creating Thing root concept");
-        
+
         // Show loading message
         elements.vontologyTreeContainer.innerHTML = `
           <div style="padding: 20px; text-align: center; color: #666;">
@@ -967,19 +967,19 @@ export async function fetchAndRenderVontologyTree() {
             </div>
           </div>
         `;
-        
+
         // Auto-create Thing
         try {
           const response = await fetch('/vontology/api/vontology/ensure_thing', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
           });
-          
+
           const result = await response.json();
-          
+
           if (result.success) {
             console.log(`[fetchAndRenderVontologyTree] Thing auto-created: created=${result.thing_created}, orphans_linked=${result.orphans_linked}`);
-            
+
             // Show success message briefly
             elements.vontologyTreeContainer.innerHTML = `
               <div style="padding: 20px; text-align: center; color: #2b8cff;">
@@ -987,13 +987,13 @@ export async function fetchAndRenderVontologyTree() {
                 <p>Root concept established. Refreshing tree...</p>
               </div>
             `;
-            
+
             // Refresh the tree after a brief delay
             setTimeout(() => {
               console.log("[fetchAndRenderVontologyTree] Refreshing tree after Thing creation");
               handleRefreshTree();
             }, 800);
-            
+
             hideProgressBar();
             return;
           } else {
@@ -1001,7 +1001,7 @@ export async function fetchAndRenderVontologyTree() {
           }
         } catch (error) {
           console.error("[fetchAndRenderVontologyTree] Failed to auto-create Thing:", error);
-          
+
           // Show error with manual fallback
           elements.vontologyTreeContainer.innerHTML = `
             <div style="padding: 20px; text-align: center; color: #666;">
@@ -1010,7 +1010,7 @@ export async function fetchAndRenderVontologyTree() {
               <p>You can create the root concept manually below.</p>
             </div>
           `;
-          
+
           // Enable manual creation mode as fallback
           handleNodeSelect(null, null, null, false, { mutateConceptTab: false });
           hideProgressBar();
@@ -1077,13 +1077,13 @@ export async function fetchAndRenderVontologyTree() {
       } else if (typeof processedTree === 'object' && processedTree !== null) {
         // CHICKEN-AND-EGG FIX: Check for auto-injected Thing placeholder before rendering
         // The backend auto-injects a Thing node even when DB is empty (mongo_id will be "")
-        const isPlaceholderTree = processedTree.id === '#V#thing' && 
-                                 processedTree.mongo_id === '' &&
-                                 (!processedTree.children || processedTree.children.length === 0);
-        
+        const isPlaceholderTree = processedTree.id === '#V#thing' &&
+          processedTree.mongo_id === '' &&
+          (!processedTree.children || processedTree.children.length === 0);
+
         if (isPlaceholderTree) {
           console.log("[fetchAndRenderVontologyTree] Detected auto-injected Thing placeholder - auto-creating real Thing");
-          
+
           // Show loading message
           elements.vontologyTreeContainer.innerHTML = `
             <div style="padding: 20px; text-align: center; color: #666;">
@@ -1096,19 +1096,19 @@ export async function fetchAndRenderVontologyTree() {
               </div>
             </div>
           `;
-          
+
           // Auto-create Thing
           try {
             const response = await fetch('/vontology/api/vontology/ensure_thing', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' }
             });
-            
+
             const result = await response.json();
-            
+
             if (result.success) {
               console.log(`[fetchAndRenderVontologyTree] Thing auto-created from placeholder: created=${result.thing_created}, orphans_linked=${result.orphans_linked}`);
-              
+
               // Show success and refresh
               elements.vontologyTreeContainer.innerHTML = `
                 <div style="padding: 20px; text-align: center; color: #2b8cff;">
@@ -1116,11 +1116,11 @@ export async function fetchAndRenderVontologyTree() {
                   <p>Refreshing tree...</p>
                 </div>
               `;
-              
+
               setTimeout(() => {
                 handleRefreshTree();
               }, 800);
-              
+
               hideProgressBar();
               return;
             } else {
@@ -1128,7 +1128,7 @@ export async function fetchAndRenderVontologyTree() {
             }
           } catch (error) {
             console.error("[fetchAndRenderVontologyTree] Failed to auto-create Thing from placeholder:", error);
-            
+
             // Show error with manual fallback
             elements.vontologyTreeContainer.innerHTML = `
               <div style="padding: 20px; text-align: center; color: #666;">
@@ -1137,13 +1137,13 @@ export async function fetchAndRenderVontologyTree() {
                 <p>Manual creation mode enabled below.</p>
               </div>
             `;
-            
+
             handleNodeSelect(null, null, null, false, { mutateConceptTab: false });
             hideProgressBar();
             return;
           }
         }
-        
+
         // Build subtree counts cache once
         subtreeCountMap = buildSubtreeCountCache([processedTree], entityCounts);
         debugLog("[fetchAndRenderVontologyTree] processedTree is a single object, processing as the root.");
@@ -1207,7 +1207,7 @@ export async function fetchAndRenderVontologyTree() {
           </p>
         </div>
       `;
-      
+
       // Enable empty-tree creation mode by triggering handleNodeSelect with null
       // This will show the creation panel with appropriate messaging
       handleNodeSelect(null, null, null, false, { mutateConceptTab: false });
@@ -3478,62 +3478,79 @@ async function selectSearchItem(item) {
     }
   } catch (_) { /* non-fatal */ }
   clearSearchResults();
-  try {
-    if (item.kind === 'individual') {
-      try {
-        const resp = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(item.id)}`);
-        if (resp.ok) {
-          const nodeData = await resp.json();
-          const candidatesRaw = nodeData?.is_an_instance_of || nodeData?.is_a || [];
-          // Normalize to concept_id strings
-          const candidateIds = [];
-          if (Array.isArray(candidatesRaw)) {
-            for (const c of candidatesRaw) {
-              if (!c) continue;
-              if (typeof c === 'string') candidateIds.push(c);
-              else if (c.concept_id) candidateIds.push(c.concept_id);
-              else if (c.id) candidateIds.push(c.id);
-              else if (c['@id']) candidateIds.push(c['@id']);
-            }
-          }
 
-          if (candidateIds.length) {
-            try {
-              const chosenType = await chooseBestTypeForIndividual(candidateIds);
-              if (chosenType) {
-                // Reveal and select the chosen TYPE in the tree (don't create a concept tab)
-                try { selectVontologyNodeByIdentifier(chosenType, /*createConceptTab*/ false); } catch (_) { }
-              } else {
-                console.debug('[selectSearchItem] No chosen type returned; skipping tree reveal for instance', item.id);
-              }
-            } catch (e) {
-              console.warn('[selectSearchItem] Error choosing best type for individual:', e);
-            }
-          } else {
-            console.debug('[selectSearchItem] No is_an_instance_of candidates found for individual', item.id);
-          }
-        } else {
-          console.debug('[selectSearchItem] node_content lookup failed for', item.id, 'status', resp.status);
-        }
-      } catch (e) {
-        console.warn('[selectSearchItem] Failed to fetch node_content for individual', item.id, e);
-      }
-    } else {
-      if (__vontologyTreeReady) {
-        try { selectVontologyNodeByIdentifier(item.id, false); } catch (_) { }
-      } else {
-        __pendingTreeSelections.push(item.id);
-      }
-    }
-  } catch (err) {
-    console.warn('[selectSearchItem] Error during tree reveal logic:', err);
-  }
+  // Open the concept tab immediately so selection never feels "dead".
+  // Any slower tree-reveal work runs in the background.
   try {
     // Use backend's three-way kind classification directly
-    const evt = new CustomEvent('open-concept-tab', { detail: { conceptId: item.id, conceptName: item.name || item.id, kind: item.kind, activate: false } });
+    const evt = new CustomEvent('open-concept-tab', {
+      detail: {
+        conceptId: item.id,
+        conceptName: item.name || item.id,
+        kind: item.kind,
+        activate: false
+      }
+    });
     document.dispatchEvent(evt);
   } catch (e) {
     console.error('[selectSearchItem] Failed to dispatch open-concept-tab event', e);
+  }
+
+  try {
+    void (async () => {
+      try {
+        if (item.kind === 'individual') {
+          try {
+            const resp = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(item.id)}`);
+            if (resp.ok) {
+              const nodeData = await resp.json();
+              const candidatesRaw = nodeData?.is_an_instance_of || nodeData?.is_a || [];
+              // Normalize to concept_id strings
+              const candidateIds = [];
+              if (Array.isArray(candidatesRaw)) {
+                for (const c of candidatesRaw) {
+                  if (!c) continue;
+                  if (typeof c === 'string') candidateIds.push(c);
+                  else if (c.concept_id) candidateIds.push(c.concept_id);
+                  else if (c.id) candidateIds.push(c.id);
+                  else if (c['@id']) candidateIds.push(c['@id']);
+                }
+              }
+
+              if (candidateIds.length) {
+                try {
+                  const chosenType = await chooseBestTypeForIndividual(candidateIds);
+                  if (chosenType) {
+                    // Reveal and select the chosen TYPE in the tree (don't create a concept tab)
+                    try { selectVontologyNodeByIdentifier(chosenType, /*createConceptTab*/ false); } catch (_) { }
+                  } else {
+                    console.debug('[selectSearchItem] No chosen type returned; skipping tree reveal for instance', item.id);
+                  }
+                } catch (e) {
+                  console.warn('[selectSearchItem] Error choosing best type for individual:', e);
+                }
+              } else {
+                console.debug('[selectSearchItem] No is_an_instance_of candidates found for individual', item.id);
+              }
+            } else {
+              console.debug('[selectSearchItem] node_content lookup failed for', item.id, 'status', resp.status);
+            }
+          } catch (e) {
+            console.warn('[selectSearchItem] Failed to fetch node_content for individual', item.id, e);
+          }
+        } else {
+          if (__vontologyTreeReady) {
+            try { selectVontologyNodeByIdentifier(item.id, false); } catch (_) { }
+          } else {
+            __pendingTreeSelections.push(item.id);
+          }
+        }
+      } catch (bgErr) {
+        console.warn('[selectSearchItem] Error during background tree reveal logic:', bgErr);
+      }
+    })();
+  } catch (err) {
+    console.warn('[selectSearchItem] Error during tree reveal logic:', err);
   }
   finally {
     if (inputEl) {
@@ -3638,7 +3655,7 @@ export async function handleCreateType() {
   // Check if tree is truly empty by looking for any vontology-node-name elements
   const hasExistingNodes = document.querySelector('.vontology-node-name[data-concept-id]') !== null;
   const isRootCreation = !parentId && !hasExistingNodes;
-  
+
   if (!parentId && !isRootCreation) {
     if (elements.createConceptStatusP) {
       elements.createConceptStatusP.textContent = "Please select a parent node first.";
@@ -3669,7 +3686,7 @@ export async function handleCreateType() {
     const createdConceptId = response?.concept_id || response?.concept?.concept_id;
     const createdConceptName = response?.concept?.name || newConceptName;
     const createdMongoId = response?.concept?.mongo_id;
-    
+
     if (isRootCreation) {
       // For root creation, refresh the entire tree to show the new root
       console.log('[handleCreateType] Root concept created, refreshing tree...');
@@ -4188,18 +4205,18 @@ function selectConcept(concept) {
 export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds = new Set()) {
   /**
    * Filter redundant nodes from the tree while preserving complete ontology paths.
-   * 
+   *
    * MODIFIED (JVNAUTOSCI-748): Fixed issue where intermediate nodes were being filtered out,
    * breaking the hierarchy display. The filter now:
-   * 
+   *
    * 1. PRESERVES all nodes that have children (they're part of valid paths)
    * 2. PRESERVES all leaf nodes (they're valid type concepts even without instances)
    * 3. PRESERVES nodes without entity count data (common for pure types)
    * 4. Only filters legacy nodes (non-#V# prefixed)
-   * 
+   *
    * Previous behavior: Would collapse intermediate nodes with no entities and one child,
    * causing chains like Thing -> AI -> ML -> DL to display as only Thing -> DL.
-   * 
+   *
    * New behavior: Maintains complete hierarchy structure, showing all intermediate
    * concepts regardless of entity counts.
    */
@@ -4274,13 +4291,13 @@ export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds 
   function isRedundant(node) {
     // MODIFIED: A node is redundant ONLY if it's truly isolated (no children with entities in subtree)
     // We should NOT collapse intermediate nodes that form valid paths in the ontology hierarchy
-    // 
+    //
     // Original logic was too aggressive: it would skip intermediate nodes with no entities and one child
     // This breaks hierarchical paths like: Thing -> AI -> ML -> DL -> Networks -> Transformers
     //
     // NEW RULE: Never consider a node redundant if it has any descendants (directly or indirectly)
     // This preserves the complete ontology structure while still filtering truly empty branches
-    
+
     if (!node.id || !entityCounts[node.id]) {
       return false; // No entity count data, keep the node to be safe
     }
@@ -4339,7 +4356,7 @@ export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds 
       // MODIFIED: Don't apply redundancy collapsing - preserve the hierarchy
       // The old logic would skip intermediate nodes, breaking the tree structure
       filteredChildren.push(filteredChild);
-      
+
       if ((i + 1) % RENDER_BATCH_SIZE === 0) {
         await yieldThread();
       }
@@ -4359,12 +4376,12 @@ export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds 
         const node = nodes[i];
         debugLog(`[filterRedundantNodes] Root node ${i}: ${node.name} (${node.id})`);
         const isLeaf = !node.children || node.children.length === 0;
-        
+
         // MODIFIED: If a node has children, it's part of the hierarchy - always keep it
         // Only filter root nodes that are truly empty (no children, no entities)
         const hasChildren = node.children && node.children.length > 0;
         const shouldKeep = isForcedVisible(node) || hasChildren || isLeaf || hasEntitiesInSubtree(node);
-        
+
         if (!shouldKeep) {
           debugLog(`[filterRedundantNodes] FILTERING OUT disconnected root: ${node.name} (${node.id}) - no entities in subtree`);
         } else {
@@ -4383,10 +4400,10 @@ export async function filterRedundantNodes(tree, entityCounts, forcedVisibleIds 
     } else if (nodes) {
       const isLeaf = !nodes.children || nodes.children.length === 0;
       const hasChildren = nodes.children && nodes.children.length > 0;
-      
+
       // MODIFIED: If a node has children, it's part of the hierarchy - keep it
       const shouldKeep = isForcedVisible(nodes) || hasChildren || isLeaf || hasEntitiesInSubtree(nodes);
-      
+
       if (!shouldKeep) {
         debugLog(`[filterRedundantNodes] Filtering out single disconnected node: ${nodes.name} (${nodes.id}) - no entities in subtree`);
         return null;
@@ -4410,6 +4427,9 @@ export function __test_setTreeReady(val) { if (typeof val === 'boolean') { __von
 export function __test_getPendingSelections() { return Array.isArray(__pendingTreeSelections) ? [...__pendingTreeSelections] : []; }
 // Export for testing
 export function __test_clearPendingSelections() { if (Array.isArray(__pendingTreeSelections)) { __pendingTreeSelections.length = 0; } }
+
+// Export for testing
+export function __test_selectSearchItem(item) { return selectSearchItem(item); }
 
 
 // Build a map of how many times each node appears as a child in the tree

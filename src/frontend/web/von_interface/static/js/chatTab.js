@@ -106,7 +106,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
     }
 
     // Preserve clickable #V# tokens, but never inside code blocks.
-    cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'] });
+    cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true });
     hydrateChatConceptCartouches(container);
 }
 
@@ -145,7 +145,7 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
     const cachedHtml = messageTextEl?.dataset?.renderedHtml;
     if (cachedHtml) {
         messageTextEl.innerHTML = cachedHtml;
-        cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'] });
+        cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true });
         hydrateChatConceptCartouches(messageTextEl);
         return;
     }
