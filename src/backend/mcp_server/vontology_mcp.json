@@ -206,6 +206,132 @@
                     "language": {
                         "type": "string",
                         "description": "Optional: language code for predicate+text deletion"
+                    },
+                    "garbage_collect": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Optional: when true, delete orphaned text_values after relation removal"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ]
+            }
+        },
+        {
+            "name": "get_text_relations_summary",
+            "description": "Return a lightweight summary of text relations for a concept: counts + relation IDs grouped by predicate/language (no full text bodies).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept to summarise text relations for"
+                    },
+                    "predicates": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Optional: filter by predicate allow-list"
+                    },
+                    "languages": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Optional: filter by language allow-list (derived from text_values.lang)"
+                    },
+                    "max_relation_ids_per_group": {
+                        "type": "integer",
+                        "default": 25,
+                        "description": "Cap for relation IDs returned per predicate/language bucket"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ]
+            }
+        },
+        {
+            "name": "upsert_singleton_text_relation",
+            "description": "Upsert a text relation and enforce singleton semantics for (concept, predicate, language) by replacing any other relations in the same group.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept to attach text to"
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Text predicate (e.g., 'hasDescription')"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text to attach"
+                    },
+                    "language": {
+                        "type": "string",
+                        "default": "en-NZ",
+                        "description": "Language code for the singleton group"
+                    },
+                    "policy": {
+                        "type": "string",
+                        "default": "replace_others",
+                        "description": "Singleton policy (currently only replace_others)"
+                    },
+                    "garbage_collect": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "When true, garbage-collect orphaned text_values for replaced relations"
+                    },
+                    "provenance": {
+                        "type": "object",
+                        "description": "Optional provenance metadata"
+                    },
+                    "context": {
+                        "type": "object",
+                        "description": "Optional relation context metadata"
+                    }
+                },
+                "required": [
+                    "concept_id",
+                    "predicate",
+                    "text"
+                ]
+            }
+        },
+        {
+            "name": "concept_exists",
+            "description": "Minimal existence/accessibility check for a concept_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to check"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ]
+            }
+        },
+        {
+            "name": "fetch_concept_content",
+            "description": "Fetch rendered markdown content for a concept (content_html + md_content + raw_doc). Use reconstruct_md=false to avoid masking missing md_content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to fetch"
+                    },
+                    "reconstruct_md": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "When false, do not reconstruct md_content if it is missing"
                     }
                 },
                 "required": [
