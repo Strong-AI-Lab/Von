@@ -44,6 +44,18 @@ When To Act Automatically:
 - Consolidate duplicated DOM update logic into a single helper before expanding features (prevents regression drift).
 - Add a regression test for every state/format loss bug fix (load → edit → save → re-edit cycle) before declaring completion.
 
+Jira assignee updates (do not misinterpret tooling):
+- If an issue is created without an assignee (or with the wrong one), it can usually be fixed retrospectively using the Atlassian MCP edit tool.
+- Preferred pattern (assignee by accountId):
+  ```python
+  mcp_atlassian_editJiraIssue(
+      cloudId="...",
+      issueIdOrKey="JVNAUTOSCI-XXX",
+      fields={"assignee": {"accountId": "<account_id>"}}
+  )
+  ```
+- Do not create a duplicate issue just to correct assignee unless the edit call fails due to permissions or workflow restrictions.
+
 When To Ask (Legitimate Blockers Only):
 - Ambiguous or missing JIRA issue key (multiple candidates, unparsable branch name).
 - Atlassian cloudId lookup fails after all retries.
