@@ -801,6 +801,7 @@ class InternalMCPChatOrchestrator:
         *,
         fallback_model: Optional[str],
         aux_log: Optional[List[Mapping[str, Any]]] = None,
+        path: str | None = None,
     ) -> Optional[bool]:
         """Run the Vontology-configured detector LLM to classify the response.
 
@@ -859,6 +860,7 @@ class InternalMCPChatOrchestrator:
                 aux_log.append(
                     {
                         "type": "missing_tool_call_classifier",
+                        "path": path or "",
                         "model": model_name or fallback_model or "default",
                         "model_raw": raw_model_name or "",
                         "model_resolved": model_name or "",
@@ -1488,6 +1490,7 @@ class InternalMCPChatOrchestrator:
                 llm_client,
                 fallback_model=model,
                 aux_log=aux_log,
+                path=path,
             )
 
             if llm_flag is not None:
@@ -1565,6 +1568,7 @@ class InternalMCPChatOrchestrator:
                 aux_llm_calls.append(
                     {
                         "type": "workflow_execution_trace",
+                        "path": "trace",
                         "workflow_id": trace.workflow_id,
                         "execution_id": trace.execution_id,
                         "stored": bool(stored_execution_id),
@@ -1809,6 +1813,7 @@ class InternalMCPChatOrchestrator:
                     aux_llm_calls.append(
                         {
                             "type": "missing_tool_call_retry",
+                            "path": assessment.path,
                             "stage": "prompt",
                             "retry_reason": assessment.retry_reason,
                             "prompt_preview": retry_prompt[:800],
@@ -1825,6 +1830,7 @@ class InternalMCPChatOrchestrator:
                     aux_llm_calls.append(
                         {
                             "type": "missing_tool_call_retry",
+                            "path": assessment.path,
                             "stage": "response",
                             "retry_reason": assessment.retry_reason,
                             "response_preview": (
