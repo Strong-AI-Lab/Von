@@ -131,9 +131,25 @@
       <div class="modal-actions">
         <button id="ragStatusCheck" type="button" class="btn-mini" title="Run integrity check">Run integrity
           check</button>
+        <button id="ragChatBackfill" type="button" class="btn-mini"
+          title="Associate legacy chat history with your current namespace and re-index to RAG" hidden>Backfill chat
+          history</button>
       </div>
       <div class="modal-actions">
         <button id="ragStatusClose" type="button">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- History Status Modal -->
+  <div id="historyStatusModal" class="modal" aria-hidden="true" role="dialog" aria-labelledby="historyStatusTitle">
+    <div class="modal-content">
+      <h2 id="historyStatusTitle">Chat history</h2>
+      <div id="historyStatusBody">
+        <p>Loading…</p>
+      </div>
+      <div class="modal-actions">
+        <button id="historyStatusClose" type="button">Close</button>
       </div>
     </div>
   </div>

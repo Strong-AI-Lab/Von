@@ -205,6 +205,22 @@ async function ensureUserContext() {
       console.log('[main] Populated von_current_user from settings');
     }
 
+    // When logged in, derive and persist the user/org namespace used by RAG status calls.
+    // Only set it if not already present (do not override manual/advanced workflows).
+    if (!localStorage.getItem('current_user_namespace') && settings.current_user_person_concept_id) {
+      try {
+        const userSlug = String(settings.current_user_person_concept_id).replace(/^#V#/, '');
+        const orgSlug = settings.current_organisation_concept_id
+          ? String(settings.current_organisation_concept_id).replace(/^#V#/, '')
+          : null;
+        const ns = orgSlug ? `#V#${userSlug}@${orgSlug}` : `#V#${userSlug}`;
+        localStorage.setItem('current_user_namespace', ns);
+        console.log('[main] Derived current_user_namespace from settings:', ns);
+      } catch (e) {
+        console.warn('[main] Failed to derive current_user_namespace from settings:', e);
+      }
+    }
+
     // Namespace fallback: if server does not provide user info, but a namespace is already
     // set locally (e.g., via manual selection), propagate it so downstream calls use it.
     if (!settings.current_user_person_id) {
@@ -334,6 +350,7 @@ function startHealthPolling() {
   const ragModalBody = ragModal ? document.getElementById('ragStatusBody') : null;
   const ragModalClose = ragModal ? document.getElementById('ragStatusClose') : null;
   const ragModalCheck = ragModal ? document.getElementById('ragStatusCheck') : null;
+  const ragChatBackfillBtn = ragModal ? document.getElementById('ragChatBackfill') : null;
   if (!pidSpan) return;
   // Copy-to-clipboard behavior for local IP address
   if (localIpSpan) {
@@ -462,13 +479,54 @@ function startHealthPolling() {
               const p = rs.pending;
               const i = rs.indexed;
               const f = (typeof rs.failed === 'number') ? rs.failed : 0;
+              const sessNs = rs.session_namespace || null;
+              const chSessions = (typeof rs.chat_history_sessions === 'number') ? rs.chat_history_sessions : 0;
+              const chMessages = (typeof rs.chat_history_messages === 'number') ? rs.chat_history_messages : 0;
+              const chOk = (typeof rs.chat_history_rag_success === 'number') ? rs.chat_history_rag_success : 0;
+              const chFail = (typeof rs.chat_history_rag_failed === 'number') ? rs.chat_history_rag_failed : 0;
+              const chInNs = (typeof rs.chat_history_sessions_in_namespace === 'number') ? rs.chat_history_sessions_in_namespace : null;
+              const chMissingNs = (typeof rs.chat_history_sessions_missing_namespace === 'number') ? rs.chat_history_sessions_missing_namespace : null;
+              const chOtherNs = (typeof rs.chat_history_sessions_other_namespace === 'number') ? rs.chat_history_sessions_other_namespace : null;
+
+              const titleParts = [
+                `Sessions indexed=${i}`,
+                `pending=${p}`,
+                `failed=${f}`
+              ];
+              if (sessNs) {
+                titleParts.push(`session_ns=${sessNs}`);
+              }
+              if (chSessions || chMessages || chOk || chFail) {
+                titleParts.push(`Chat sessions=${chSessions}`);
+                titleParts.push(`messages=${chMessages}`);
+                titleParts.push(`indexed=${chOk}`);
+                titleParts.push(`failed=${chFail}`);
+              }
+              const title = titleParts.join(' | ');
               if (p === 0) {
-                ragSpan.textContent = `Indexed ${i}`;
-                ragSpan.title = `Indexed=${i} | Pending=${p} | Failed=${f}`;
+                if (chSessions || chMessages || chOk || chFail) {
+                  if (chFail > 0) {
+                    ragSpan.textContent = `Indexed ${i} • Chat ${chOk}/${chFail} failed`;
+                  } else {
+                    ragSpan.textContent = `Indexed ${i} • Chat ${chOk}`;
+                  }
+                } else {
+                  ragSpan.textContent = `Indexed ${i}`;
+                }
+                ragSpan.title = title;
                 ragSpan.classList.remove('rag-active');
               } else {
-                ragSpan.textContent = `Indexed ${i} • ${p} pending`;
-                ragSpan.title = `Indexed=${i} | Pending=${p} | Failed=${f}`;
+                if (chFail > 0) {
+                  ragSpan.textContent = `Indexed ${i} • ${p} pending • Chat ${chFail} failed`;
+                } else {
+                  ragSpan.textContent = `Indexed ${i} • ${p} pending`;
+                }
+                ragSpan.title = title;
+                ragSpan.classList.add('rag-active');
+              }
+
+              // If chat has failures, surface as active even when pending is zero
+              if (chFail > 0) {
                 ragSpan.classList.add('rag-active');
               }
             }
@@ -514,14 +572,39 @@ function startHealthPolling() {
             ragModal.classList.add('open');
             ragModal.setAttribute('aria-hidden', 'false');
             ragModalBody.innerHTML = '<p>Loading…</p>';
+
+            if (ragChatBackfillBtn) {
+              ragChatBackfillBtn.hidden = true;
+              ragChatBackfillBtn.disabled = false;
+              ragChatBackfillBtn.title = 'Associate legacy chat history with your current namespace and re-index to RAG';
+            }
+
             const controller3 = new AbortController();
             const timeout3 = setTimeout(() => controller3.abort(), 8000);
             const ns2 = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
             const res3 = await fetch(ns2 ? (`/admin/rag_status?namespace=${encodeURIComponent(ns2)}`) : '/admin/rag_status', { cache: 'no-store', signal: controller3.signal });
             clearTimeout(timeout3);
             if (res3.ok) {
-              const rs = await res3.json();
+              let rs = await res3.json();
+              const backfillReason0 = rs?.chat_history_backfill_reason || null;
+              const backfillSessionNs = rs?.chat_history_backfill_session_namespace || null;
+              if (backfillReason0 === 'namespace_mismatch' && backfillSessionNs && backfillSessionNs !== ns2) {
+                try {
+                  localStorage.setItem('current_user_namespace', backfillSessionNs);
+                } catch (_) { /* ignore */ }
+
+                try {
+                  const controller3b = new AbortController();
+                  const timeout3b = setTimeout(() => controller3b.abort(), 8000);
+                  const res3b = await fetch(`/admin/rag_status?namespace=${encodeURIComponent(backfillSessionNs)}`, { cache: 'no-store', signal: controller3b.signal });
+                  clearTimeout(timeout3b);
+                  if (res3b.ok) {
+                    rs = await res3b.json();
+                  }
+                } catch (_) { /* ignore */ }
+              }
               const total = (typeof rs.total === 'number') ? rs.total : null;
+              const scopedSessions = (typeof rs.scoped_sessions === 'number') ? rs.scoped_sessions : null;
               const indexed = (typeof rs.indexed === 'number') ? rs.indexed : 0;
               const pending = (typeof rs.pending === 'number') ? rs.pending : 0;
               const failed = (typeof rs.failed === 'number') ? rs.failed : 0;
@@ -530,7 +613,54 @@ function startHealthPolling() {
               const interactions = (typeof rs.interactions === 'number') ? rs.interactions : null;
               const eligS = (typeof rs.eligible_sessions === 'number') ? rs.eligible_sessions : null;
               const eligI = (typeof rs.eligible_interactions === 'number') ? rs.eligible_interactions : null;
+              const sessionNs = rs.session_namespace || null;
+              const requestedNs = (typeof rs.namespace === 'string') ? rs.namespace : (ns2 || null);
+              const sessMissing = (typeof rs.sessions_missing_namespace === 'number') ? rs.sessions_missing_namespace : null;
+              const sessOther = (typeof rs.sessions_other_namespace === 'number') ? rs.sessions_other_namespace : null;
+              const sessBreakdown = Array.isArray(rs.sessions_namespace_breakdown) ? rs.sessions_namespace_breakdown : [];
+              const chSessions = (typeof rs.chat_history_sessions === 'number') ? rs.chat_history_sessions : 0;
+              const chMessages = (typeof rs.chat_history_messages === 'number') ? rs.chat_history_messages : 0;
+              const chOk = (typeof rs.chat_history_rag_success === 'number') ? rs.chat_history_rag_success : 0;
+              const chFail = (typeof rs.chat_history_rag_failed === 'number') ? rs.chat_history_rag_failed : 0;
+              const chInNs = (typeof rs.chat_history_sessions_in_namespace === 'number') ? rs.chat_history_sessions_in_namespace : null;
+              const chMissingNs = (typeof rs.chat_history_sessions_missing_namespace === 'number') ? rs.chat_history_sessions_missing_namespace : null;
+              const chOtherNs = (typeof rs.chat_history_sessions_other_namespace === 'number') ? rs.chat_history_sessions_other_namespace : null;
+              const backfillAvailable = !!rs.chat_history_backfill_available;
+              const backfillReason = rs.chat_history_backfill_reason || null;
+
+              const renderBreakdown = () => {
+                if (!sessBreakdown.length) {
+                  return '';
+                }
+
+                const items = sessBreakdown.map((row) => {
+                  const nsRaw = (typeof row?.namespace === 'string') ? row.namespace : null;
+                  const nsLabel = nsRaw ? nsRaw : '(missing namespace)';
+                  const total2 = (typeof row?.total === 'number') ? row.total : 0;
+                  const indexed2 = (typeof row?.indexed === 'number') ? row.indexed : 0;
+                  const pending2 = (typeof row?.pending === 'number') ? row.pending : 0;
+                  const failed2 = (typeof row?.failed === 'number') ? row.failed : 0;
+                  const skipped2 = (typeof row?.skipped === 'number') ? row.skipped : 0;
+                  const none2 = (typeof row?.none === 'number') ? row.none : 0;
+                  const isCurrent = sessionNs && nsRaw === sessionNs;
+                  const suffix = isCurrent ? ' (in scope)' : '';
+                  return `<li>${escapeHtml(nsLabel)}${escapeHtml(suffix)} — total ${total2} (indexed ${indexed2}, pending ${pending2}, failed ${failed2}, skipped ${skipped2}, none ${none2})</li>`;
+                });
+
+                return [
+                  '<details>',
+                  '<summary>Interaction sessions by namespace</summary>',
+                  '<ul>',
+                  ...items,
+                  '</ul>',
+                  '</details>'
+                ].join('');
+              };
+
               const html = [
+                requestedNs ? `<p><strong>Requested namespace:</strong> ${escapeHtml(requestedNs)}</p>` : '',
+                sessionNs ? `<p><strong>Session namespace:</strong> ${escapeHtml(sessionNs)}</p>` : '',
+                '<p><em>Note:</em> interaction sessions are scoped by a user-only namespace (e.g. <code>#V#user</code>). Chat history is scoped by a composite user@organisation namespace (e.g. <code>#V#user@org</code>).</p>',
                 '<ul>',
                 `<li><strong>Indexed:</strong> ${indexed}</li>`,
                 `<li><strong>Pending:</strong> ${pending}</li>`,
@@ -539,10 +669,45 @@ function startHealthPolling() {
                 '</ul>',
                 '<hr/>',
                 '<p>',
-                `Sessions: ${sessions ?? '—'} • Interactions: ${interactions ?? '—'} • Eligible sessions: ${eligS ?? '—'} • Eligible interactions: ${eligI ?? '—'}`,
+                `Sessions: ${sessions ?? '—'}`,
+                (scopedSessions !== null ? ` • Sessions in scope: ${scopedSessions}` : ''),
+                (sessMissing !== null ? ` • Missing namespace: ${sessMissing}` : ''),
+                (sessOther !== null ? ` • Other namespace: ${sessOther}` : ''),
+                ` • Interactions: ${interactions ?? '—'} • Eligible sessions: ${eligS ?? '—'} • Eligible interactions: ${eligI ?? '—'}`,
                 '</p>'
               ].join('');
-              ragModalBody.innerHTML = html;
+              const chatHtml = [
+                '<hr/>',
+                '<h3>Chat history</h3>',
+                '<ul>',
+                (() => {
+                  if (chInNs === null && chMissingNs === null && chOtherNs === null) {
+                    return `<li><strong>Sessions:</strong> ${chSessions}</li>`;
+                  }
+                  const parts = [];
+                  if (chInNs !== null) parts.push(`${chInNs} in namespace`);
+                  if (chMissingNs !== null) parts.push(`${chMissingNs} missing namespace (legacy)`);
+                  if (chOtherNs !== null) parts.push(`${chOtherNs} other namespace`);
+                  const suffix = parts.length ? ` (${parts.join(' • ')})` : '';
+                  return `<li><strong>Sessions:</strong> ${chSessions}${suffix}</li>`;
+                })(),
+                `<li><strong>Messages (stored):</strong> ${chMessages}</li>`,
+                `<li><strong>Messages indexed:</strong> ${chOk}</li>`,
+                `<li><strong>Messages failed:</strong> ${chFail}</li>`,
+                '</ul>'
+              ].join('');
+              const needsBackfill = (chMissingNs && chMissingNs > 0) || (chOtherNs && chOtherNs > 0);
+              const backfillNote = (!backfillAvailable && needsBackfill && backfillReason)
+                ? `<p><em>Backfill unavailable: ${backfillReason}</em></p>`
+                : '';
+              ragModalBody.innerHTML = html + renderBreakdown() + chatHtml + backfillNote;
+
+              if (ragChatBackfillBtn) {
+                ragChatBackfillBtn.hidden = !(backfillAvailable && needsBackfill);
+                if (!backfillAvailable && backfillReason === 'namespace_mismatch') {
+                  ragChatBackfillBtn.title = 'Backfill unavailable: namespace mismatch';
+                }
+              }
             } else {
               ragModalBody.innerHTML = '<p>Unable to load detailed status.</p>';
             }
@@ -550,6 +715,75 @@ function startHealthPolling() {
             ragModalBody.innerHTML = '<p>Unable to load detailed status.</p>';
           }
         });
+
+        if (ragChatBackfillBtn && !ragChatBackfillBtn._wired) {
+          ragChatBackfillBtn._wired = true;
+          ragChatBackfillBtn.addEventListener('click', async () => {
+            try {
+              const ok = window.confirm('Backfill legacy chat history into your current namespace and re-index to RAG? This may take a minute.');
+              if (!ok) return;
+              ragChatBackfillBtn.disabled = true;
+
+              ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Backfill running…</em></p>';
+
+              const controllerB = new AbortController();
+              const timeoutB = setTimeout(() => controllerB.abort(), 180000);
+              const resB = await fetch('/admin/chat_history_backfill', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ max_sessions: 25, max_messages: 2000, dry_run: false }),
+                cache: 'no-store',
+                signal: controllerB.signal
+              });
+              clearTimeout(timeoutB);
+
+              if (!resB.ok) {
+                const txt = await resB.text();
+                ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Backfill failed.</strong> ${txt}</p>`;
+                return;
+              }
+              const js = await resB.json();
+              const statusLine = js?.status ? `<p><strong>Status:</strong> ${js.status}</p>` : '';
+              const errorLine = js?.error ? `<p><strong>Error:</strong> ${js.error}</p>` : '';
+              const errors = Array.isArray(js?.errors) ? js.errors : [];
+              const errorsHtml = errors.length
+                ? [
+                  '<details>',
+                  `<summary>Errors (${errors.length})</summary>`,
+                  '<ul>',
+                  ...errors.slice(0, 20).map(e => `<li>${(e.session || 'session')} — ${(e.error || 'error')}</li>`),
+                  '</ul>',
+                  '</details>'
+                ].join('')
+                : '';
+              const summary = [
+                '<hr/>',
+                '<h3>Chat history backfill</h3>',
+                statusLine,
+                errorLine,
+                '<ul>',
+                `<li><strong>Sessions updated:</strong> ${js.sessions_updated ?? '—'}</li>`,
+                `<li><strong>Messages attempted:</strong> ${js.messages_indexed_attempted ?? '—'}</li>`,
+                `<li><strong>Messages indexed:</strong> ${js.messages_indexed_success ?? '—'}</li>`,
+                `<li><strong>Messages failed:</strong> ${js.messages_indexed_failed ?? '—'}</li>`,
+                `<li><strong>Messages skipped:</strong> ${js.messages_skipped ?? '—'}</li>`,
+                '</ul>'
+              ].join('');
+              ragModalBody.innerHTML = ragModalBody.innerHTML + summary + errorsHtml;
+
+              ragChatBackfillBtn.hidden = true;
+            } catch (e) {
+              const name = e && e.name ? e.name : 'Error';
+              const msg = e && e.message ? e.message : '';
+              const timedOutNote = name === 'AbortError'
+                ? '<p><em>Request timed out. The server may still be processing; reopen this status to see progress.</em></p>'
+                : '';
+              ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Backfill error.</strong> ${name}${msg ? `: ${msg}` : ''}</p>${timedOutNote}`;
+            } finally {
+              ragChatBackfillBtn.disabled = false;
+            }
+          });
+        }
         if (ragModalCheck) {
           ragModalCheck.addEventListener('click', async () => {
             try {

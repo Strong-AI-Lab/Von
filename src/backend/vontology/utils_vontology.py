@@ -1396,8 +1396,9 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
     md_content = doc.get("md_content")
 
     if md_content is None and reconstruct_md:
-        logger.warning(
-            f"Markdown content (md_content) missing for '{identifier}'. Reconstructing basic version."
+        logger.debug(
+            "Markdown content (md_content) missing for '%s'. Reconstructing basic version.",
+            identifier,
         )
         # Try to get name from multiple possible locations, with human-readable fallback
         # Prefer names[] "NL" entry; do not use metadata.title anymore

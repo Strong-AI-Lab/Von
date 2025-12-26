@@ -1550,9 +1550,37 @@ def history_length():
 
     try:
         length = chat_history_service.get_chat_history_length(user_concept_id)
-        return jsonify({"history_length": length, "authenticated": True})
+        session_count = chat_history_service.get_chat_history_session_count(
+            user_concept_id
+        )
+        return jsonify(
+            {
+                "history_length": length,
+                "session_count": session_count,
+                "authenticated": True,
+            }
+        )
     except Exception as e:
         print(f"Error retrieving history length: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/history/sessions", methods=["GET"])
+def history_sessions():
+    """Return per-session chat history counts for the current user."""
+
+    user_concept_id = session.get("user_concept_id")
+    if not user_concept_id:
+        return jsonify({"authenticated": False, "sessions": []})
+
+    limit = request.args.get("limit", default=50, type=int)
+    try:
+        sessions = chat_history_service.get_chat_history_session_summaries(
+            user_concept_id, limit=limit
+        )
+        return jsonify({"authenticated": True, "sessions": sessions})
+    except Exception as e:
+        print(f"Error retrieving history sessions: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1846,6 +1874,83 @@ def get_session_context():
 
     except Exception as e:
         print(f"Error getting session context: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/session/set_chat_session", methods=["POST"])
+def set_chat_session():
+    """Set the active chat session_id for the current authenticated user.
+
+    Request body: {session_id: str}
+    Returns: {status, session_id, history}
+
+    This enables the frontend to switch to a prior session and continue it.
+    """
+    try:
+        user_concept_id = session.get("user_concept_id")
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return jsonify({"error": "session_id required"}), 400
+        session_id = session_id.strip()
+
+        # Verify the session belongs to this user.
+        coll = chat_history_service.get_chat_history_collection_service()
+        if coll is None:
+            return jsonify({"error": "Chat history unavailable"}), 503
+
+        doc = coll.find_one(
+            {"user_id": user_concept_id, "session_id": session_id},
+            {"history": 1},
+        )
+        if not doc:
+            return jsonify({"error": "Session not found"}), 404
+
+        history = doc.get("history") or []
+        if not isinstance(history, list):
+            history = []
+
+        def _normalise_timestamp(value):
+            if isinstance(value, datetime):
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=timezone.utc)
+                return value.isoformat().replace("+00:00", "Z")
+            return value
+
+        normalised_history = []
+        for msg in history:
+            if not isinstance(msg, dict):
+                continue
+            out = dict(msg)
+            if "timestamp" in out:
+                out["timestamp"] = _normalise_timestamp(out.get("timestamp"))
+            normalised_history.append(out)
+
+        # Switch active session.
+        session["session_id"] = session_id
+        session.modified = True
+
+        # Clear any non-persistent context cache.
+        try:
+            current_app.config["CONTEXT"] = []
+        except Exception:
+            pass
+
+        return (
+            jsonify(
+                {
+                    "status": "updated",
+                    "session_id": session_id,
+                    "history": normalised_history,
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error setting chat session: {e}")
         return jsonify({"error": str(e)}), 500
 
 
