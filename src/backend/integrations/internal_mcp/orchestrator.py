@@ -993,10 +993,21 @@ class InternalMCPChatOrchestrator:
 
         looks_like_tool_call = any(
             token in raw
-            for token in (f'"{self._ACTION_FIELD}"', f'"{self._TOOL_FIELD}"')
+            for token in (
+                f'"{self._ACTION_FIELD}"',
+                f'"{self._TOOL_FIELD}"',
+                f'"{self._PAYLOAD_FIELD}"',
+                '"call_tool"',
+            )
         )
 
         if not (raw.startswith("{") or raw.startswith("[")):
+            return None
+
+        # Avoid raising parse errors for non-tool JSON (e.g., when the model
+        # returns a JSON answer or the user pasted JSON). Only attempt to parse
+        # tool calls when the response looks tool-shaped.
+        if not looks_like_tool_call:
             return None
 
         decoder = json.JSONDecoder()
@@ -1558,11 +1569,17 @@ class InternalMCPChatOrchestrator:
         # Detect JSON tool-call output for diagnostics (JVNAUTOSCI-698).
         # Only warn if we fail to parse/execute it.
         # Skip detection for structured path - it handles tool calls natively
+        tool_call_parse_error: ToolCallParsingError | None = None
+
         if not use_structured:
             is_json_action = self._is_json_action_response(response)
 
             # Extract potential tool request(s)
-            tool_calls = self._extract_tool_calls(response)
+            try:
+                tool_calls = self._extract_tool_calls(response)
+            except ToolCallParsingError as exc:
+                tool_calls = None
+                tool_call_parse_error = exc
             has_valid_tool_call = bool(tool_calls)
         else:
             # Structured path already extracted tool calls above
@@ -1584,9 +1601,12 @@ class InternalMCPChatOrchestrator:
             classifier_used = False
             retry_reason: Optional[str] = None
 
-            if fenced_detected:
+            if tool_call_parse_error is not None:
+                retry_reason = "tool call parse error"
+
+            if retry_reason is None and fenced_detected:
                 retry_reason = "fenced tool-call JSON detected"
-            else:
+            if retry_reason is None:
                 llm_flag = self._llm_detects_missing_tool_call(
                     response,
                     llm_client,
@@ -1626,6 +1646,11 @@ class InternalMCPChatOrchestrator:
                             else "no" if classifier_verdict is False else "unavailable"
                         ),
                         "retry_reason": retry_reason or "",
+                        "parse_error": (
+                            str(tool_call_parse_error)
+                            if tool_call_parse_error is not None
+                            else ""
+                        ),
                     }
                 )
             except Exception:  # pragma: no cover - best effort only
@@ -1683,6 +1708,37 @@ class InternalMCPChatOrchestrator:
                     tool_calls = retry_calls
                     has_valid_tool_call = True
                 else:
+                    # If we were already handling a tool-call parse error, keep
+                    # the user experience consistent with the route-level error
+                    # handling (but retain aux_llm_calls for debugging).
+                    if tool_call_parse_error is not None:
+                        rejected_tool_call = tool_call_parse_error.raw_response
+                        if isinstance(rejected_tool_call, str):
+                            rejected_tool_call = rejected_tool_call[:8000]
+
+                        result = OrchestratorResult(
+                            response_text=(
+                                "Tool call was not executed due to an MCP serialisation error. "
+                                f"({tool_call_parse_error})\n\n"
+                                "Please try again. If this keeps happening, copy the LLM debug output so we can reproduce it."
+                            ),
+                            extra_messages=(),
+                            tool_invocations=(
+                                {
+                                    "tool": "__tool_call_parse_error__",
+                                    "payload": (
+                                        {"raw_tool_call": rejected_tool_call}
+                                        if rejected_tool_call is not None
+                                        else {}
+                                    ),
+                                    "error": str(tool_call_parse_error),
+                                },
+                            ),
+                            aux_llm_calls=tuple(aux_llm_calls),
+                        )
+                        _persist_trace(status="completed")
+                        return result
+
                     result = OrchestratorResult(
                         response_text=response,
                         extra_messages=(),
