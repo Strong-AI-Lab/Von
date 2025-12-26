@@ -1316,12 +1316,12 @@ def create_flask_app(
     def db_status():
         """Return current database connection status (fallback vs Atlas) for UI indicator.
 
-        Response schema:
-          {
-            "using_fallback": bool | null,
-            "atlas_detected": bool | null,
-            "effective_host": str | null,   # redacted host:port only
-                        "timestamp": iso8601
+                Response schema:
+                    {
+                        "using_fallback": bool | null,
+                        "atlas_detected": bool | null,
+                        "effective_host": str | null,   # redacted host:port only
+                        "timestamp": iso8601,
                     }
                 """
         from datetime import datetime, timezone as _tz
