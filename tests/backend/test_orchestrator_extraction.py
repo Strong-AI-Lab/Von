@@ -410,3 +410,45 @@ def test_run_retries_when_classifier_misses_but_heuristic_triggers():
     assert result.tool_invocations
     assert result.response_text == "Final response"
     assert result.aux_llm_calls
+
+
+def test_run_recovers_from_invalid_tool_call_json_with_retry():
+    """Regression test: invalid JSON tool-call output should trigger a retry.
+
+    Previously, ToolCallParsingError would bubble out of orchestrator.run(),
+    short-circuiting the missing-tool-call recovery path.
+    """
+
+    gateway = _DummyGateway()
+    llm = _RecorderLLM(
+        [
+            # Initial response: clearly a tool call but malformed JSON.
+            '{"action":"call_tool","tool":"test","payload":{}',
+            # Retry response: valid tool call.
+            '{"action":"call_tool","tool":"test","payload":{}}',
+            # Follow-up after tool invocation.
+            "Final response",
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=1,
+    )
+
+    result = orchestrator.run(
+        prompt="hello",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert gateway.calls
+    assert result.tool_invocations
+    assert result.response_text == "Final response"
+
+    # Ensure we recorded the detection path and the retry attempt.
+    aux_types = [entry.get("type") for entry in result.aux_llm_calls]
+    assert "missing_tool_call_detection" in aux_types
+    assert "missing_tool_call_retry" in aux_types
