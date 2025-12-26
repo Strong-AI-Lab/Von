@@ -13,8 +13,11 @@ from typing import (
     List,
     Mapping,
     MutableMapping,
+    NotRequired,
     Optional,
+    Required,
     Sequence,
+    TypedDict,
 )
 
 from .gateway import InternalMCPGateway
@@ -37,6 +40,13 @@ class OrchestratorResult:
     aux_llm_calls: Sequence[Mapping[str, Any]]
 
 
+class _ToolCallRequest(TypedDict):
+    action: Required[str]
+    tool: Required[str]
+    payload: Required[MutableMapping[str, Any]]
+    _call_id: NotRequired[str]
+
+
 @dataclass(frozen=True)
 class _ModelTurnInterpretation:
     """Interpreted model output for a single assistant turn.
@@ -47,7 +57,7 @@ class _ModelTurnInterpretation:
     """
 
     response_text: str
-    tool_calls: Optional[List[MutableMapping[str, Any]]]
+    tool_calls: list[_ToolCallRequest] | None
     tool_call_parse_error: ToolCallParsingError | None
     is_json_action: bool
     fenced_tool_call_json: bool
@@ -1387,7 +1397,7 @@ class InternalMCPChatOrchestrator:
         fenced_detected = self._contains_fenced_tool_call_json(text)
         heuristic_missing = self._looks_like_missing_tool_call(text)
 
-        tool_calls: Optional[List[MutableMapping[str, Any]]] = None
+        tool_calls: list[_ToolCallRequest] | None = None
         tool_call_parse_error: ToolCallParsingError | None = None
         try:
             tool_calls = self._extract_tool_calls(text)
@@ -1617,6 +1627,7 @@ class InternalMCPChatOrchestrator:
         # Only warn if we fail to parse/execute it.
         # Skip detection for structured path - it handles tool calls natively
         tool_call_parse_error: ToolCallParsingError | None = None
+        interpretation: _ModelTurnInterpretation | None = None
 
         if not use_structured:
             interpretation = self._interpret_model_turn(response)
@@ -1642,7 +1653,7 @@ class InternalMCPChatOrchestrator:
             # Gather richer diagnostics for debug panels and logs
             fenced_detected = (
                 interpretation.fenced_tool_call_json
-                if not use_structured
+                if (not use_structured and interpretation is not None)
                 else self._contains_fenced_tool_call_json(response)
             )
             classifier_verdict: Optional[bool] = None
@@ -1671,7 +1682,7 @@ class InternalMCPChatOrchestrator:
                     # Fallback to legacy heuristic only when classifier unavailable
                     if (
                         interpretation.heuristic_missing_tool_call
-                        if not use_structured
+                        if (not use_structured and interpretation is not None)
                         else self._looks_like_missing_tool_call(response)
                     ):
                         retry_reason = "heuristic missing tool call"
@@ -1680,7 +1691,7 @@ class InternalMCPChatOrchestrator:
                     # If our conservative heuristic triggers, do the single retry anyway.
                     if (
                         interpretation.heuristic_missing_tool_call
-                        if not use_structured
+                        if (not use_structured and interpretation is not None)
                         else self._looks_like_missing_tool_call(response)
                     ):
                         retry_reason = (
