@@ -331,6 +331,7 @@ def test_llm_detector_returns_true_on_yes():
         llm,
         fallback_model="fallback-model",
         aux_log=aux_log,
+        path="legacy",
     )
 
     assert decision is True
@@ -338,6 +339,7 @@ def test_llm_detector_returns_true_on_yes():
     assert llm.calls[0]["context"] is None
     assert "search the web" in llm.calls[0]["prompt"]
     assert aux_log and aux_log[0]["type"] == "missing_tool_call_classifier"
+    assert aux_log[0]["path"] == "legacy"
 
 
 def test_llm_detector_strips_vontology_model_prefix_before_calling_llm():
@@ -357,12 +359,14 @@ def test_llm_detector_strips_vontology_model_prefix_before_calling_llm():
         llm,
         fallback_model="fallback-model",
         aux_log=aux_log,
+        path="legacy",
     )
 
     assert decision is False
     assert llm.calls[0]["model"] == "gpt-4o-mini"
     assert aux_log and aux_log[0]["model_raw"] == "#V#gpt-4o-mini"
     assert aux_log[0]["model_resolved"] == "gpt-4o-mini"
+    assert aux_log[0]["path"] == "legacy"
 
 
 def test_llm_detector_appends_response_when_placeholder_missing():
@@ -382,12 +386,14 @@ def test_llm_detector_appends_response_when_placeholder_missing():
         llm,
         fallback_model="fallback-model",
         aux_log=aux_log,
+        path="legacy",
     )
 
     assert decision is True
     assert "fetch JVNAUTOSCI-803" in llm.calls[0]["prompt"]
     assert aux_log and aux_log[0]["prompt_placeholder_response"] is False
     assert aux_log[0]["prompt_injection_mode"] == "append"
+    assert aux_log[0]["path"] == "legacy"
 
 
 def test_llm_detector_uses_fallback_model_when_missing():
@@ -407,11 +413,13 @@ def test_llm_detector_uses_fallback_model_when_missing():
         llm,
         fallback_model="fallback-model",
         aux_log=aux_log,
+        path="legacy",
     )
 
     assert decision is False
     assert llm.calls[0]["model"] == "fallback-model"
     assert aux_log and aux_log[0]["model"] == "fallback-model"
+    assert aux_log[0]["path"] == "legacy"
 
 
 def test_run_retries_when_llm_detector_flags_missing_tool_call():
@@ -453,6 +461,16 @@ def test_run_retries_when_llm_detector_flags_missing_tool_call():
     assert result.tool_invocations
     assert result.response_text == "Final response"
     assert result.aux_llm_calls
+
+    aux_by_type = {}
+    for entry in result.aux_llm_calls:
+        if isinstance(entry, dict) and isinstance(entry.get("type"), str):
+            aux_by_type.setdefault(entry["type"], []).append(entry)
+
+    assert aux_by_type["missing_tool_call_detection"][0]["path"] == "legacy"
+    assert aux_by_type["missing_tool_call_classifier"][0]["path"] == "legacy"
+    for retry_entry in aux_by_type["missing_tool_call_retry"]:
+        assert retry_entry["path"] == "legacy"
 
 
 def test_run_retries_when_classifier_misses_but_heuristic_triggers():
