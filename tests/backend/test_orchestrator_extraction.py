@@ -74,6 +74,23 @@ def test_extract_tool_calls_accepts_json_array_batch():
     assert calls[1]["payload"]["a"] == 1
 
 
+def test_interpret_model_turn_ignores_non_tool_json_without_error():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    interpretation = orchestrator._interpret_model_turn('{"foo": 1, "bar": [1, 2]}')
+    assert interpretation.tool_calls is None
+    assert interpretation.tool_call_parse_error is None
+    assert interpretation.is_json_action is False
+
+
+def test_interpret_model_turn_captures_tool_call_parse_error():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    interpretation = orchestrator._interpret_model_turn(
+        '{"action":"call_tool","tool":"test","payload":{}'
+    )
+    assert interpretation.tool_calls is None
+    assert isinstance(interpretation.tool_call_parse_error, ToolCallParsingError)
+
+
 def test_extract_tool_calls_accepts_fenced_json_array_batch():
     text = (
         "Here is the tool batch:\n"
