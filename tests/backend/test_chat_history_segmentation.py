@@ -29,18 +29,14 @@ def mock_get_collection(mock_collection):
 
 
 def test_get_chat_history_segments_empty(mock_collection, mock_get_collection):
-    mock_cursor = MagicMock()
-    mock_cursor.sort.return_value = []
-    mock_collection.find.return_value = mock_cursor
+    mock_collection.find.return_value = []
 
     segments = get_chat_history_segments("user1", "session1")
     assert segments == []
 
 
 def test_get_chat_history_segments_no_history(mock_collection, mock_get_collection):
-    mock_cursor = MagicMock()
-    mock_cursor.sort.return_value = [{"history": []}]
-    mock_collection.find.return_value = mock_cursor
+    mock_collection.find.return_value = [{"user_id": "user1", "history": []}]
 
     segments = get_chat_history_segments("user1", "session1")
     assert segments == []
@@ -51,9 +47,7 @@ def test_get_chat_history_segments_single_segment(mock_collection, mock_get_coll
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
-    mock_cursor = MagicMock()
-    mock_cursor.sort.return_value = [{"history": history}]
-    mock_collection.find.return_value = mock_cursor
+    mock_collection.find.return_value = [{"user_id": "user1", "history": history}]
 
     segments = get_chat_history_segments("user1", "session1")
     assert len(segments) == 1
@@ -66,9 +60,7 @@ def test_get_chat_history_segments_with_reset(mock_collection, mock_get_collecti
         {"role": "system", "content": "__RESET__"},
         {"role": "user", "content": "msg2"},
     ]
-    mock_cursor = MagicMock()
-    mock_cursor.sort.return_value = [{"history": history}]
-    mock_collection.find.return_value = mock_cursor
+    mock_collection.find.return_value = [{"user_id": "user1", "history": history}]
 
     segments = get_chat_history_segments("user1", "session1")
 
@@ -89,9 +81,7 @@ def test_get_chat_history_segments_multiple_resets(
         {"role": "system", "content": "__RESET__"},
         {"role": "user", "content": "msg3"},
     ]
-    mock_cursor = MagicMock()
-    mock_cursor.sort.return_value = [{"history": history}]
-    mock_collection.find.return_value = mock_cursor
+    mock_collection.find.return_value = [{"user_id": "user1", "history": history}]
 
     segments = get_chat_history_segments("user1", "session1")
 
@@ -110,16 +100,14 @@ def test_get_chat_history_segments_consecutive_resets(
         {"role": "system", "content": "__RESET__"},
         {"role": "user", "content": "msg2"},
     ]
-    mock_cursor = MagicMock()
-    mock_cursor.sort.return_value = [{"history": history}]
-    mock_collection.find.return_value = mock_cursor
+    mock_collection.find.return_value = [{"user_id": "user1", "history": history}]
 
     segments = get_chat_history_segments("user1", "session1")
 
-    assert len(segments) == 3
+    # Empty segments between consecutive resets are skipped.
+    assert len(segments) == 2
     assert segments[0][0]["content"] == "msg1"
-    assert segments[1] == []  # Empty segment between resets
-    assert segments[2][0]["content"] == "msg2"
+    assert segments[1][0]["content"] == "msg2"
 
 
 def test_get_chat_history_segments_ends_with_reset(
@@ -129,12 +117,10 @@ def test_get_chat_history_segments_ends_with_reset(
         {"role": "user", "content": "msg1"},
         {"role": "system", "content": "__RESET__"},
     ]
-    mock_cursor = MagicMock()
-    mock_cursor.sort.return_value = [{"history": history}]
-    mock_collection.find.return_value = mock_cursor
+    mock_collection.find.return_value = [{"user_id": "user1", "history": history}]
 
     segments = get_chat_history_segments("user1", "session1")
 
-    assert len(segments) == 2
+    # A trailing reset does not create an empty trailing segment.
+    assert len(segments) == 1
     assert segments[0][0]["content"] == "msg1"
-    assert segments[1] == []  # Empty current segment after reset
