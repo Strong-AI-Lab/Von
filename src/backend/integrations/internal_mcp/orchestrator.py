@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass
 from typing import (
     Any,
+    cast,
     Dict,
     Iterable,
     List,
@@ -976,7 +977,7 @@ class InternalMCPChatOrchestrator:
 
     def _extract_tool_calls(
         self, text: str
-    ) -> Optional[List[MutableMapping[str, Any]]]:
+    ) -> list[_ToolCallRequest] | None:
         """Extract one or more tool-call objects from the model response.
 
         Accepts either a single tool-call JSON object or a JSON array of tool-call
@@ -1048,15 +1049,17 @@ class InternalMCPChatOrchestrator:
 
         trailing = raw[end:].strip()
 
-        def _normalise_tool_call(candidate: Any) -> Optional[MutableMapping[str, Any]]:
+        def _normalise_tool_call(candidate: Any) -> _ToolCallRequest | None:
             if not isinstance(candidate, MutableMapping):
                 return None
 
-            has_tool = isinstance(candidate.get(self._TOOL_FIELD), str)
-            has_payload = isinstance(
-                candidate.get(self._PAYLOAD_FIELD, {}), MutableMapping
-            )
-            has_action = candidate.get(self._ACTION_FIELD) == self._CALL_ACTION
+            tool_name = candidate.get(self._TOOL_FIELD)
+            payload_value = candidate.get(self._PAYLOAD_FIELD)
+            action_value = candidate.get(self._ACTION_FIELD)
+
+            has_tool = isinstance(tool_name, str)
+            has_payload = isinstance(payload_value, MutableMapping)
+            has_action = action_value == self._CALL_ACTION
 
             missing_action = self._ACTION_FIELD not in candidate
             strict_shape = set(candidate.keys()) <= {
@@ -1069,9 +1072,7 @@ class InternalMCPChatOrchestrator:
                 describe_methods = getattr(self._gateway, "describe_methods", None)
                 if callable(describe_methods):
                     catalogue = describe_methods()
-                tool_name = candidate.get(self._TOOL_FIELD)
                 if isinstance(catalogue, Mapping) and tool_name in catalogue:
-                    candidate[self._ACTION_FIELD] = self._CALL_ACTION
                     has_action = True
                 else:
                     return None
@@ -1079,9 +1080,19 @@ class InternalMCPChatOrchestrator:
             if not (has_action and has_tool and has_payload):
                 return None
 
-            return candidate
+            tool_call: _ToolCallRequest = {
+                self._ACTION_FIELD: self._CALL_ACTION,
+                self._TOOL_FIELD: tool_name,
+                self._PAYLOAD_FIELD: cast(MutableMapping[str, Any], payload_value),
+            }
 
-        tool_calls: List[MutableMapping[str, Any]] = []
+            call_id = candidate.get("_call_id")
+            if isinstance(call_id, str) and call_id:
+                tool_call["_call_id"] = call_id
+
+            return tool_call
+
+        tool_calls: list[_ToolCallRequest] = []
         if isinstance(parsed, MutableMapping):
             tool_call = _normalise_tool_call(parsed)
             if tool_call is None:
