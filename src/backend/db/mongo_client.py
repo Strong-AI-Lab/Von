@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 from pathlib import Path
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -101,8 +102,66 @@ MONGO_ALLOW_LOCAL_FALLBACK = os.environ.get("MONGO_ALLOW_LOCAL_FALLBACK", "1") i
     "true",
     "True",
 )
-# Allow tests to override the target database name via environment.
-DATABASE_NAME = os.environ.get("VON_DB_NAME", "von_db")
+
+
+def _is_running_under_pytest() -> bool:
+    # PYTEST_CURRENT_TEST is the most reliable indicator.
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return True
+    return "pytest" in sys.modules
+
+
+def get_configured_database_name() -> str:
+    """Return the currently configured Mongo database name.
+
+    This reads the environment at call-time (not import-time).
+    """
+
+    name = os.environ.get("VON_DB_NAME")
+    if not isinstance(name, str) or not name.strip():
+        return "von_db"
+    return name.strip()
+
+
+# DEPRECATED: Prefer get_configured_database_name() which reads the environment at
+# call-time. This module-level constant is retained for compatibility.
+DATABASE_NAME = get_configured_database_name()
+
+
+def assert_safe_database_name_for_pytest(db_name: str) -> None:
+    """Fail fast if pytest is pointed at the production DB name."""
+
+    if not _is_running_under_pytest():
+        return
+    if db_name == "von_db":
+        raise RuntimeError(
+            "Safety guard: pytest is configured to use VON_DB_NAME=von_db. "
+            "Refusing to connect because tests may delete collections. "
+            "Set VON_DB_NAME=test_von_db (recommended) before running pytest."
+        )
+
+
+def assert_destructive_db_operation_allowed(operation: str) -> None:
+    """Block destructive DB operations on the production DB by default.
+
+    Set VON_ALLOW_PROD_DESTRUCTIVE_DB_OPS=1 to override.
+    """
+
+    db_name = get_configured_database_name()
+    if db_name != "von_db":
+        return
+    allow = os.environ.get("VON_ALLOW_PROD_DESTRUCTIVE_DB_OPS", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not allow:
+        raise RuntimeError(
+            f"Safety guard: refusing destructive DB operation '{operation}' on VON_DB_NAME=von_db. "
+            "Set VON_ALLOW_PROD_DESTRUCTIVE_DB_OPS=1 to override (dangerous)."
+        )
+
 
 # REFACTORING_NOTE: Collection names defined as per the refactoring plan.
 PEOPLE_COLLECTION_NAME = "people"  # To be phased out.
@@ -145,6 +204,9 @@ def get_db() -> Database | None:
     """
     global _mongo_client
     global _using_fallback, _effective_uri
+    db_name = get_configured_database_name()
+    assert_safe_database_name_for_pytest(db_name)
+
     if USE_MOCK_DB:
         if _mongo_client is None:
             if mongomock is None:
@@ -154,7 +216,7 @@ def get_db() -> Database | None:
             _mongo_client = mongomock.MongoClient()
             _effective_uri = "mongomock://"
             _using_fallback = False
-        return _mongo_client[DATABASE_NAME]
+        return _mongo_client[db_name]
 
     if _mongo_client is None:
         try:
@@ -293,7 +355,7 @@ def get_db() -> Database | None:
             print_connection_info()
 
     if _mongo_client:
-        return _mongo_client[DATABASE_NAME]
+        return _mongo_client[db_name]
     return None
 
 
@@ -755,7 +817,7 @@ if __name__ == "__main__":
     people_coll = get_people_collection()
     if people_coll is not None:
         print(
-            f"Successfully accessed DEPRECATED '{PEOPLE_COLLECTION_NAME}' collection in '{DATABASE_NAME}' database."
+            f"Successfully accessed DEPRECATED '{PEOPLE_COLLECTION_NAME}' collection in '{get_configured_database_name()}' database."
         )
     else:
         print("Failed to access people collection. Check MongoDB connection.")
@@ -764,7 +826,7 @@ if __name__ == "__main__":
     entities_coll = get_entities_collection()
     if entities_coll is not None:
         print(
-            f"Successfully accessed '{ENTITIES_COLLECTION_NAME}' collection in '{DATABASE_NAME}' database."
+            f"Successfully accessed '{ENTITIES_COLLECTION_NAME}' collection in '{get_configured_database_name()}' database."
         )
         # Example: Insert a test entity (if collection is empty)
         if entities_coll.count_documents({}) == 0:
@@ -808,7 +870,7 @@ if __name__ == "__main__":
     user_tracking_coll = get_user_entity_tracking_collection()
     if user_tracking_coll is not None:
         print(
-            f"Successfully accessed '{USER_ENTITY_TRACKING_COLLECTION_NAME}' collection in '{DATABASE_NAME}' database."
+            f"Successfully accessed '{USER_ENTITY_TRACKING_COLLECTION_NAME}' collection in '{get_configured_database_name()}' database."
         )
         # Example: Insert a test tracking entry (if collection is empty or for a new user)
         test_user_id = "test-user-main-script"
