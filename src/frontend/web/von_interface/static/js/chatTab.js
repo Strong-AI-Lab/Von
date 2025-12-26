@@ -220,10 +220,20 @@ function normaliseKindClass(kind) {
 async function fetchConceptMetaForChat(fullId) {
     try {
         // Prefer an exact lookup rather than fuzzy search: avoids incorrect labels.
-        const nodeUrl = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(fullId)}`;
+        const nodeUrl = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(fullId)}&raw_only=1&soft=1`;
         const nodeRes = await fetch(nodeUrl, { cache: 'no-store' });
         if (nodeRes.ok) {
             const node = await nodeRes.json();
+            const looksMissing =
+                node &&
+                node.concept_id == null &&
+                node.raw_doc == null &&
+                node.display_name == null &&
+                node.kind == null;
+
+            if (node && (node.not_found || node.error || looksMissing)) {
+                return null;
+            }
             const preferredLanguage = getUserContext()?.language || 'en-NZ';
             const rawNames =
                 node?.raw_doc?.names ||
@@ -556,6 +566,7 @@ async function updateHistoryLength() {
 
         if (response.ok) {
             const historyLength = data.history_length || 0;
+            const sessionCount = (typeof data.session_count === 'number') ? data.session_count : null;
             const authenticated = data.authenticated !== undefined ? data.authenticated : true;
             const historyLengthElement = document.getElementById('chat-history-length');
             if (historyLengthElement) {
@@ -563,7 +574,196 @@ async function updateHistoryLength() {
                     historyLengthElement.textContent = 'History: unauthenticated';
                 } else {
                     const contextCount = transcriptTurns.length;
-                    historyLengthElement.textContent = `History: ${contextCount} | ${historyLength}`;
+                    const chatsText = (sessionCount === null) ? '— chats' : `${sessionCount} chats`;
+                    historyLengthElement.textContent = `History: ${chatsText} | this ${contextCount}`;
+                    historyLengthElement.title = `Chat history: ${sessionCount ?? '—'} chats • total ${historyLength} messages • this session ${contextCount} messages`;
+                }
+
+                // Wire a lightweight history popup (scrollable list of sessions).
+                if (!historyLengthElement._wired) {
+                    historyLengthElement._wired = true;
+                    historyLengthElement.style.cursor = 'pointer';
+                    historyLengthElement.addEventListener('click', async () => {
+                        const modal = document.getElementById('historyStatusModal');
+                        const body = document.getElementById('historyStatusBody');
+                        const closeBtn = document.getElementById('historyStatusClose');
+                        const titleEl = document.getElementById('historyStatusTitle');
+                        if (!modal || !body) {
+                            return;
+                        }
+
+                        try {
+                            modal.classList.add('open');
+                            modal.setAttribute('aria-hidden', 'false');
+                            body.innerHTML = '<p>Loading…</p>';
+
+                            if (titleEl) {
+                                titleEl.textContent = 'Chat history';
+                            }
+
+                            if (closeBtn && !closeBtn._wired) {
+                                closeBtn._wired = true;
+                                closeBtn.addEventListener('click', () => {
+                                    modal.classList.remove('open');
+                                    modal.setAttribute('aria-hidden', 'true');
+                                });
+                            }
+
+                            // Fetch a fresh summary for the header.
+                            let totalMessages = null;
+                            let chats = null;
+                            try {
+                                const lenRes = await fetch('/von/history/length', { cache: 'no-store' });
+                                if (lenRes.ok) {
+                                    const lenJs = await lenRes.json();
+                                    totalMessages = (typeof lenJs?.history_length === 'number') ? lenJs.history_length : null;
+                                    chats = (typeof lenJs?.session_count === 'number') ? lenJs.session_count : null;
+                                }
+                            } catch (_) { /* ignore */ }
+
+                            const res = await fetch('/von/history/sessions?limit=50', { cache: 'no-store' });
+                            const js = await res.json();
+                            if (!res.ok || js?.authenticated === false) {
+                                body.innerHTML = '<p>History unavailable (not logged in).</p>';
+                                return;
+                            }
+
+                            const sessions = Array.isArray(js?.sessions) ? js.sessions : [];
+                            if (sessions.length === 0) {
+                                body.innerHTML = '<p>No saved sessions.</p>';
+                                return;
+                            }
+
+                            const currentCount = transcriptTurns.length;
+                            if (titleEl) {
+                                const chatsText2 = (chats === null) ? '— chats' : `${chats} chats`;
+                                const totalText2 = (totalMessages === null) ? '— total' : `${totalMessages} total`;
+                                titleEl.textContent = `Chat history — ${chatsText2} • ${totalText2} • this ${currentCount}`;
+                            }
+
+                            const rows = sessions.map((s) => {
+                                const sidRaw = s?.session_id ? String(s.session_id) : '(unknown session)';
+                                const sidShort = (sidRaw.length > 10) ? `${sidRaw.slice(0, 8)}…` : sidRaw;
+                                const count = (typeof s?.message_count === 'number') ? s.message_count : 0;
+
+                                const lastAt = (typeof s?.last_message_at === 'string') ? s.last_message_at : null;
+                                const lastAtShort = lastAt ? lastAt.replace('T', ' ').replace('Z', '') : '—';
+                                const preview = (typeof s?.preview === 'string' && s.preview.trim()) ? s.preview.trim() : '—';
+
+                                const ns = (typeof s?.namespace === 'string' && s.namespace.trim()) ? s.namespace.trim() : null;
+                                const nsShort = ns ? (ns.length > 48 ? `${ns.slice(0, 46)}…` : ns) : null;
+
+                                const sessionAttr = escapeHtml(sidRaw);
+
+                                return [
+                                    `<li class="history-session-row" role="button" tabindex="0" data-session-id="${sessionAttr}">`,
+                                    '<div class="history-session-content">',
+                                    `<strong class="history-session-id" title="${escapeHtml(sidRaw)}">${escapeHtml(sidShort)}</strong>`,
+                                    `<span class="history-session-meta">${count} msgs • last ${escapeHtml(lastAtShort)}${nsShort ? ` • ns ${escapeHtml(nsShort)}` : ''}</span>`,
+                                    `<span class="history-session-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</span>`,
+                                    '</div>',
+                                    '</li>'
+                                ].join('');
+                            });
+
+                            const summaryLine = `Showing ${sessions.length} most recent sessions (sorted by last message time)`;
+
+                            body.innerHTML = [
+                                `<p class="history-session-summary">${escapeHtml(summaryLine)}</p>`,
+                                '<div class="history-session-scroll">',
+                                '<ul class="history-session-list">',
+                                ...rows,
+                                '</ul>',
+                                '</div>'
+                            ].join('');
+
+                            const switchToSession = async (sessionId) => {
+                                const sid = String(sessionId || '').trim();
+                                if (!sid) {
+                                    return;
+                                }
+
+                                abortActiveChatRequest();
+
+                                const scrollableField2 = document.getElementById('scrollableField');
+                                if (!scrollableField2) {
+                                    return;
+                                }
+
+                                try {
+                                    body.innerHTML = '<p>Switching session…</p>';
+
+                                    const setRes = await fetch('/von/api/session/set_chat_session', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ session_id: sid })
+                                    });
+                                    const setJs = await setRes.json();
+                                    if (!setRes.ok) {
+                                        const msg = setJs?.error ? String(setJs.error) : 'Unable to switch session.';
+                                        body.innerHTML = `<p>${escapeHtml(msg)}</p>`;
+                                        return;
+                                    }
+
+                                    const history = Array.isArray(setJs?.history) ? setJs.history : [];
+
+                                    historySegmentsShown = 1;
+                                    totalHistorySegments = 1;
+                                    updateHistoryBanner();
+
+                                    rehydrateHistory(scrollableField2, history, {
+                                        scrollToBottom: true,
+                                        preserveScroll: false,
+                                        showResetNotice: false
+                                    });
+
+                                    modal.classList.remove('open');
+                                    modal.setAttribute('aria-hidden', 'true');
+
+                                    // Trigger immediate health poll to update RAG status with new session context.
+                                    document.dispatchEvent(new CustomEvent('von:contextReset', {
+                                        detail: { trigger: 'history_session_switch' }
+                                    }));
+
+                                    const promptInput = document.getElementById('promptInput');
+                                    if (promptInput) {
+                                        promptInput.focus();
+                                    }
+                                } catch (err) {
+                                    console.error('Error switching chat session:', err);
+                                    body.innerHTML = '<p>Unable to switch session.</p>';
+                                }
+                            };
+
+                            const list = body.querySelector('.history-session-list');
+                            if (list && !list._wiredSessionSwitch) {
+                                list._wiredSessionSwitch = true;
+
+                                list.addEventListener('click', (e) => {
+                                    const row = e.target?.closest ? e.target.closest('.history-session-row') : null;
+                                    const sid = row?.dataset?.sessionId;
+                                    if (sid) {
+                                        void switchToSession(sid);
+                                    }
+                                });
+
+                                list.addEventListener('keydown', (e) => {
+                                    if (e.key !== 'Enter' && e.key !== ' ') {
+                                        return;
+                                    }
+                                    const row = e.target?.closest ? e.target.closest('.history-session-row') : null;
+                                    const sid = row?.dataset?.sessionId;
+                                    if (sid) {
+                                        e.preventDefault();
+                                        void switchToSession(sid);
+                                    }
+                                });
+                            }
+                        } catch (err) {
+                            console.error('Error loading history sessions:', err);
+                            body.innerHTML = '<p>Unable to load history sessions.</p>';
+                        }
+                    });
                 }
             }
         } else {

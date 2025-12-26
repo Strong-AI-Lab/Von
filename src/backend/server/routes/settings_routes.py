@@ -39,6 +39,7 @@ from ...db.mongo_client import (
     get_db,
     get_effective_mongo_uri,
     is_using_fallback_uri,
+    assert_destructive_db_operation_allowed,
 )
 import re
 
@@ -1917,6 +1918,14 @@ def import_ontology():
         )
 
         try:
+            # Safety guard: dropping the concepts collection is destructive.
+            # By default, refuse to do this on VON_DB_NAME=von_db.
+            try:
+                assert_destructive_db_operation_allowed("settings_import_apply_drop")
+            except RuntimeError as guard_exc:
+                current_app.logger.error(str(guard_exc))
+                return jsonify({"error": str(guard_exc)}), 400
+
             concepts_collection.drop()
             coll2 = ConceptsRepository.collection()
             if coll2 is None:

@@ -632,6 +632,7 @@ def get_node_content_route():
     """
     identifier = request.args.get("identifier")
     raw_only = request.args.get("raw_only") in ("1", "true", "True")
+    soft_missing = request.args.get("soft") in ("1", "true", "True")
     if not identifier:
         return jsonify({"error": "Missing 'identifier' parameter."}), 400
     try:
@@ -649,6 +650,15 @@ def get_node_content_route():
                 retry = get_vontology_node_content(stripped)
                 if "error" not in retry:
                     data = retry
+
+        # Handle not-found/errors consistently even when raw_only is requested.
+        if "error" in data:
+            if soft_missing:
+                # Some UI flows (e.g., chat history hydration) may probe many concept IDs that
+                # no longer exist. Returning 200 avoids loud 404s in the browser network log.
+                return jsonify({**data, "not_found": True}), 200
+            status = 404 if "not found" in data["error"].lower() else 400
+            return jsonify(data), status
         if raw_only:
             # Provide a trimmed payload emphasizing raw_doc. Keep concept_id and display_name for context.
             # Avoid leaking rendered HTML/derived md_content when raw_only requested.
@@ -663,9 +673,6 @@ def get_node_content_route():
             if "description" in data:
                 trimmed["description"] = data["description"]
             return jsonify(trimmed), 200
-        if "error" in data:
-            status = 404 if "not found" in data["error"].lower() else 400
-            return jsonify(data), status
         return jsonify(data), 200
     except Exception as e:  # pragma: no cover
         current_app.logger.error(

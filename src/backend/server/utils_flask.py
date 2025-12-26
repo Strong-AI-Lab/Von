@@ -1,5 +1,4 @@
 import sys
-import sys
 import os
 
 # Adjust path to ensure project root and src are included for imports BEFORE any backend.* imports
@@ -59,6 +58,79 @@ from ..services.annotation_extraction_service import (
 
 # Define a version string
 APP_VERSION = "v20250421_1015_backend"  # Updated version
+
+
+def _is_running_under_pytest() -> bool:
+    # Avoid startup side-effects (DB writes, slow calls) during test imports.
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return True
+    return "pytest" in sys.modules
+
+
+def _startup_requeue_unindexed_interaction_sessions(app_logger: logging.Logger) -> None:
+    """Requeue eligible unindexed interaction_sessions back to pending.
+
+    This is a lightweight safety-net for cases where sessions were created/updated
+    but never got picked up by the background indexing worker.
+
+    It is deliberately conservative:
+    - only touches sessions with indexing_status missing/None/skipped
+    - only touches sessions with non-empty history or non-empty summary
+    - caps the number of sessions requeued per startup
+    """
+
+    try:
+        from datetime import datetime, timezone
+
+        db = get_db()
+        if db is None:
+            return
+
+        coll = db["interaction_sessions"]
+        limit = int(os.getenv("VON_RAG_STARTUP_REQUEUE_LIMIT", "25"))
+        if limit <= 0:
+            return
+
+        eligible_filter = {
+            "$or": [
+                {"history": {"$exists": True, "$ne": []}},
+                {"summary": {"$exists": True, "$type": "string", "$ne": ""}},
+            ]
+        }
+        status_filter = {
+            "$or": [
+                {"indexing_status": {"$exists": False}},
+                {"indexing_status": None},
+                {"indexing_status": "skipped"},
+            ]
+        }
+        cursor = (
+            coll.find({**eligible_filter, **status_filter}, {"_id": 1})
+            .sort([("last_updated_time", -1), ("_id", -1)])
+            .limit(limit)
+        )
+        ids = [d.get("_id") for d in cursor if d.get("_id") is not None]
+        if not ids:
+            return
+
+        now = datetime.now(timezone.utc)
+        result = coll.update_many(
+            {"_id": {"$in": ids}},
+            {"$set": {"indexing_status": "pending", "requeued_at": now}},
+        )
+        try:
+            app_logger.info(
+                "[startup] Requeued %d/%d eligible interaction sessions to pending.",
+                result.modified_count,
+                len(ids),
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            app_logger.warning("[startup] RAG requeue check failed: %s", exc)
+        except Exception:
+            pass
 
 
 def create_flask_app(
@@ -128,6 +200,30 @@ def create_flask_app(
         agent_gmail_oauth_bp, url_prefix="/von"
     )  # Agent Gmail OAuth endpoints (separate from user login)
     # ---------------------------
+
+    def _slug_from_maybe_concept_id(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        raw = value.strip()
+        if not raw:
+            return None
+        return raw[3:] if raw.startswith("#V#") else raw
+
+    def _get_session_user_slug(flask_session: object) -> str | None:
+        get = getattr(flask_session, "get", None)
+        if not callable(get):
+            return None
+
+        user_id = _slug_from_maybe_concept_id(get("user_id"))
+        if user_id:
+            return user_id.lower().replace(" ", "_")
+
+        user_concept_id = get("user_concept_id")
+        user_slug = _slug_from_maybe_concept_id(user_concept_id)
+        if user_slug:
+            return user_slug.lower().replace(" ", "_")
+
+        return None
 
     # --- Log App Version ---
     # Use app.logger if available, otherwise print
@@ -202,6 +298,25 @@ def create_flask_app(
             app.logger.warning("Failed to start DB monitor: %s", _e)
         except Exception:
             pass
+
+    # Lightweight startup reconcile: requeue eligible sessions that are not indexed.
+    # Skip during pytest to avoid DB side-effects during test imports.
+    if not _is_running_under_pytest():
+        try:
+            import threading
+
+            if os.getenv("VON_RAG_STARTUP_REQUEUE", "1").lower() in {"1", "true"}:
+                threading.Thread(
+                    target=_startup_requeue_unindexed_interaction_sessions,
+                    args=(app.logger,),
+                    daemon=True,
+                    name="rag_startup_requeue",
+                ).start()
+        except Exception as exc:  # pragma: no cover
+            try:
+                app.logger.warning("[startup] Failed to start requeue thread: %s", exc)
+            except Exception:
+                pass
 
     # Prompt concept health logging
     try:
@@ -319,6 +434,11 @@ def create_flask_app(
             if db is None:
                 return jsonify(error="db_unavailable"), 503
             sessions_coll = db["interaction_sessions"]
+            chat_history_coll = (
+                db["chat_history"]
+                if "chat_history" in db.list_collection_names()
+                else None
+            )
             interactions_coll = (
                 db["interactions"]
                 if "interactions" in db.list_collection_names()
@@ -326,8 +446,123 @@ def create_flask_app(
             )
             # Optional namespace filter: expects sessions to store a 'namespace' field
             ns = request.args.get("namespace")
-            sess_filter = {"namespace": ns} if ns else {}
+            session_ns = ns
+            # interaction_sessions currently use a user-only namespace (e.g. #V#user),
+            # while chat history uses a composite user@organisation namespace.
+            # If a composite namespace is provided, normalise to user-only for
+            # interaction_sessions filtering.
+            if ns:
+                try:
+                    from src.backend.services.namespace_service import parse_namespace
+
+                    parsed = parse_namespace(ns)
+                    if parsed.get("user_id"):
+                        session_ns = f"#V#{parsed['user_id']}"
+                except Exception:
+                    session_ns = ns
+
+            # Diagnostics: explain scoping precisely.
+            missing_namespace_filter = {
+                "$or": [
+                    {"namespace": {"$exists": False}},
+                    {"namespace": None},
+                    {"namespace": {"$in": ["", " "]}},
+                ]
+            }
+
+            sess_filter = {"namespace": session_ns} if session_ns else {}
             total_sessions = sessions_coll.count_documents({})
+            scoped_sessions = sessions_coll.count_documents(sess_filter or {})
+            sessions_missing_namespace = sessions_coll.count_documents(
+                missing_namespace_filter
+            )
+            sessions_other_namespace = None
+            if session_ns:
+                sessions_other_namespace = max(
+                    0, total_sessions - scoped_sessions - sessions_missing_namespace
+                )
+
+            sessions_namespace_breakdown = []
+            try:
+                pipeline = [
+                    {
+                        "$project": {
+                            "namespace": {"$ifNull": ["$namespace", "__MISSING__"]},
+                            "indexing_status": {"$ifNull": ["$indexing_status", "__NONE__"]},
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": "$namespace",
+                            "total": {"$sum": 1},
+                            "indexed": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$eq": ["$indexing_status", "indexed"]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                            "pending": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$eq": ["$indexing_status", "pending"]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                            "failed": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$eq": ["$indexing_status", "failed"]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                            "skipped": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$eq": ["$indexing_status", "skipped"]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                            "none": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$eq": ["$indexing_status", "__NONE__"]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                        }
+                    },
+                    {"$sort": {"total": -1}},
+                    {"$limit": 15},
+                ]
+                rows = list(sessions_coll.aggregate(pipeline))
+                for row in rows:
+                    ns_key = row.get("_id")
+                    if ns_key == "__MISSING__":
+                        ns_key = None
+                    sessions_namespace_breakdown.append(
+                        {
+                            "namespace": ns_key,
+                            "total": int(row.get("total", 0) or 0),
+                            "indexed": int(row.get("indexed", 0) or 0),
+                            "pending": int(row.get("pending", 0) or 0),
+                            "failed": int(row.get("failed", 0) or 0),
+                            "skipped": int(row.get("skipped", 0) or 0),
+                            "none": int(row.get("none", 0) or 0),
+                        }
+                    )
+            except Exception:
+                sessions_namespace_breakdown = []
             indexed = sessions_coll.count_documents(
                 {"indexing_status": "indexed", **sess_filter}
             )
@@ -368,20 +603,243 @@ def create_flask_app(
                         ]
                     }
                 )
+
+            chat_summary = {
+                "chat_history_sessions": 0,
+                "chat_history_messages": 0,
+                "chat_history_rag_success": 0,
+                "chat_history_rag_failed": 0,
+                "chat_history_sessions_in_namespace": 0,
+                "chat_history_sessions_missing_namespace": 0,
+                "chat_history_sessions_other_namespace": 0,
+                "chat_history_backfill_available": False,
+                "chat_history_backfill_reason": None,
+                "chat_history_backfill_session_namespace": None,
+            }
+            if chat_history_coll is not None:
+                # If a namespace is provided, treat it as a user@org scope and:
+                # - always scope chat history to that user (prevents cross-user leakage)
+                # - break down sessions by: in-namespace vs missing namespace (legacy) vs other namespace
+                user_id_for_ns = None
+                if ns:
+                    try:
+                        from src.backend.services.namespace_service import (
+                            parse_namespace,
+                        )
+
+                        parsed = parse_namespace(ns)
+                        if parsed.get("user_id"):
+                            user_id_for_ns = f"#V#{parsed['user_id']}"
+                    except Exception:
+                        user_id_for_ns = None
+
+                match = {"user_id": user_id_for_ns} if user_id_for_ns else {}
+
+                pipeline = [
+                    {"$match": match},
+                    {
+                        "$project": {
+                            "namespace": 1,
+                            "rag_indexed_success": {
+                                "$ifNull": ["$rag_indexed_success", 0]
+                            },
+                            "rag_indexed_failed": {
+                                "$ifNull": ["$rag_indexed_failed", 0]
+                            },
+                            "messages_stored": {
+                                "$cond": [
+                                    {"$isArray": "$history"},
+                                    {"$size": "$history"},
+                                    {"$ifNull": ["$message_count", 0]},
+                                ]
+                            },
+                            "in_namespace": {
+                                "$cond": [
+                                    {"$eq": ["$namespace", ns]},
+                                    1,
+                                    0,
+                                ]
+                            },
+                            "missing_namespace": {
+                                "$cond": [
+                                    {
+                                        "$eq": [
+                                            {"$ifNull": ["$namespace", None]},
+                                            None,
+                                        ]
+                                    },
+                                    1,
+                                    0,
+                                ]
+                            },
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": None,
+                            "sessions": {"$sum": 1},
+                            "sessions_in_namespace": {"$sum": "$in_namespace"},
+                            "sessions_missing_namespace": {
+                                "$sum": "$missing_namespace"
+                            },
+                            "messages": {"$sum": "$messages_stored"},
+                            "rag_success": {"$sum": "$rag_indexed_success"},
+                            "rag_failed": {"$sum": "$rag_indexed_failed"},
+                        }
+                    },
+                ]
+
+                agg = list(chat_history_coll.aggregate(pipeline))
+                if agg:
+                    sessions_total = int(agg[0].get("sessions", 0) or 0)
+                    sessions_in_namespace = int(
+                        agg[0].get("sessions_in_namespace", 0) or 0
+                    )
+                    sessions_missing_namespace = int(
+                        agg[0].get("sessions_missing_namespace", 0) or 0
+                    )
+                    sessions_other_namespace = max(
+                        0,
+                        sessions_total
+                        - sessions_in_namespace
+                        - sessions_missing_namespace,
+                    )
+                    chat_summary = {
+                        "chat_history_sessions": sessions_total,
+                        "chat_history_messages": int(agg[0].get("messages", 0) or 0),
+                        "chat_history_rag_success": int(
+                            agg[0].get("rag_success", 0) or 0
+                        ),
+                        "chat_history_rag_failed": int(
+                            agg[0].get("rag_failed", 0) or 0
+                        ),
+                        "chat_history_sessions_in_namespace": sessions_in_namespace,
+                        "chat_history_sessions_missing_namespace": sessions_missing_namespace,
+                        "chat_history_sessions_other_namespace": sessions_other_namespace,
+                        "chat_history_backfill_available": False,
+                        "chat_history_backfill_reason": None,
+                    }
+
+                # Availability is based on being logged in AND the requested namespace matching
+                # the current session-derived namespace (prevents cross-user actions).
+                if ns:
+                    try:
+                        from flask import session as flask_session
+                        from src.backend.services.namespace_service import (
+                            derive_namespace,
+                        )
+
+                        sess_user = _get_session_user_slug(flask_session)
+                        sess_org_raw = flask_session.get(
+                            "organisation_concept_id"
+                        ) or flask_session.get("org_id")
+                        sess_org = _slug_from_maybe_concept_id(sess_org_raw)
+                        sess_ns = flask_session.get("namespace")
+                        if not sess_ns and sess_user:
+                            sess_ns = derive_namespace(sess_user, sess_org)
+
+                        chat_summary["chat_history_backfill_session_namespace"] = (
+                            sess_ns
+                        )
+
+                        is_authenticated = bool(
+                            sess_user or flask_session.get("user_concept_id")
+                        )
+
+                        if not is_authenticated:
+                            chat_summary["chat_history_backfill_available"] = False
+                            chat_summary["chat_history_backfill_reason"] = (
+                                "not_authenticated"
+                            )
+                        elif sess_ns != ns:
+                            chat_summary["chat_history_backfill_available"] = False
+                            chat_summary["chat_history_backfill_reason"] = (
+                                "namespace_mismatch"
+                            )
+                        else:
+                            chat_summary["chat_history_backfill_available"] = True
+                            chat_summary["chat_history_backfill_reason"] = None
+                    except Exception:
+                        chat_summary["chat_history_backfill_available"] = False
+                        chat_summary["chat_history_backfill_reason"] = "unavailable"
             return jsonify(
                 {
                     "total": total_sessions,
+                    "scoped_sessions": scoped_sessions,
                     "indexed": indexed,
                     "pending": pending,
                     "failed": failed,
                     "skipped": skipped,
+                    "sessions_missing_namespace": sessions_missing_namespace,
+                    "sessions_other_namespace": sessions_other_namespace,
+                    "sessions_namespace_breakdown": sessions_namespace_breakdown,
                     "sessions": total_sessions,
                     "interactions": total_interactions,
                     "eligible_sessions": eligible_sessions,
                     "eligible_interactions": eligible_interactions,
                     "namespace": ns,
+                    "session_namespace": session_ns,
+                    **chat_summary,
                 }
             )
+        except Exception as e:
+            return jsonify(error="unexpected", detail=str(e)), 500
+
+    @app.route("/admin/chat_history_backfill", methods=["POST"])
+    def admin_chat_history_backfill():
+        """Backfill legacy chat history to the current user@org namespace and RAG.
+
+        Logged-in only. Uses the current Flask session to derive user/org/namespace.
+        Optional JSON body:
+          {"max_sessions": int, "max_messages": int, "dry_run": bool}
+        """
+        try:
+            from flask import session as flask_session
+            from src.backend.services.namespace_service import derive_namespace
+            from src.backend.services import chat_history_service
+
+            sess_user_slug = _get_session_user_slug(flask_session)
+            sess_user_concept_id = flask_session.get("user_concept_id")
+
+            if not (sess_user_slug or sess_user_concept_id):
+                return jsonify(error="Not authenticated"), 401
+
+            sess_org_raw = flask_session.get(
+                "organisation_concept_id"
+            ) or flask_session.get("org_id")
+            sess_org = _slug_from_maybe_concept_id(sess_org_raw)
+            sess_role = flask_session.get("role_in_org")
+
+            target_ns = flask_session.get("namespace")
+            if not target_ns and sess_user_slug:
+                target_ns = derive_namespace(sess_user_slug, sess_org)
+
+            if not isinstance(target_ns, str) or not target_ns:
+                return jsonify(error="Not authenticated"), 401
+
+            user_concept_id = (
+                sess_user_concept_id
+                if isinstance(sess_user_concept_id, str) and sess_user_concept_id
+                else (f"#V#{sess_user_slug}" if sess_user_slug else None)
+            )
+            if not user_concept_id:
+                return jsonify(error="Not authenticated"), 401
+
+            body = request.get_json(silent=True) or {}
+            max_sessions = int(body.get("max_sessions", 10))
+            max_messages = int(body.get("max_messages", 500))
+            dry_run = bool(body.get("dry_run", False))
+
+            res = chat_history_service.backfill_chat_history_for_user(
+                user_concept_id=user_concept_id,
+                target_namespace=target_ns,
+                organisation_concept_id=sess_org,
+                role_in_org=sess_role,
+                max_sessions=max_sessions,
+                max_messages=max_messages,
+                dry_run=dry_run,
+            )
+            return jsonify(res)
         except Exception as e:
             return jsonify(error="unexpected", detail=str(e)), 500
 
@@ -395,7 +853,18 @@ def create_flask_app(
             db["interactions"] if "interactions" in db.list_collection_names() else None
         )
         ns = request.args.get("namespace")
-        sess_filter = {"namespace": ns} if ns else {}
+        session_ns = ns
+        if ns:
+            try:
+                from src.backend.services.namespace_service import parse_namespace
+
+                parsed = parse_namespace(ns)
+                if parsed.get("user_id"):
+                    session_ns = f"#V#{parsed['user_id']}"
+            except Exception:
+                session_ns = ns
+
+        sess_filter = {"namespace": session_ns} if session_ns else {}
         result = {
             "sessions": sessions_coll.count_documents(sess_filter or {}),
             "interactions": (
@@ -427,6 +896,7 @@ def create_flask_app(
             "eligible_interactions": 0,
             "anomalies": [],
             "namespace": ns,
+            "session_namespace": session_ns,
         }
         if interactions_coll is not None:
             result["eligible_interactions"] = interactions_coll.count_documents(
@@ -846,14 +1316,14 @@ def create_flask_app(
     def db_status():
         """Return current database connection status (fallback vs Atlas) for UI indicator.
 
-        Response schema:
-          {
-            "using_fallback": bool | null,
-            "atlas_detected": bool | null,
-            "effective_host": str | null,   # redacted host:port only
-            "timestamp": iso8601
-          }
-        """
+                Response schema:
+                    {
+                        "using_fallback": bool | null,
+                        "atlas_detected": bool | null,
+                        "effective_host": str | null,   # redacted host:port only
+                        "timestamp": iso8601,
+                    }
+                """
         from datetime import datetime, timezone as _tz
 
         using_fallback = None
