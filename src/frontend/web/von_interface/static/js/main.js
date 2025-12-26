@@ -614,6 +614,10 @@ function startHealthPolling() {
               const eligS = (typeof rs.eligible_sessions === 'number') ? rs.eligible_sessions : null;
               const eligI = (typeof rs.eligible_interactions === 'number') ? rs.eligible_interactions : null;
               const sessionNs = rs.session_namespace || null;
+              const requestedNs = (typeof rs.namespace === 'string') ? rs.namespace : (ns2 || null);
+              const sessMissing = (typeof rs.sessions_missing_namespace === 'number') ? rs.sessions_missing_namespace : null;
+              const sessOther = (typeof rs.sessions_other_namespace === 'number') ? rs.sessions_other_namespace : null;
+              const sessBreakdown = Array.isArray(rs.sessions_namespace_breakdown) ? rs.sessions_namespace_breakdown : [];
               const chSessions = (typeof rs.chat_history_sessions === 'number') ? rs.chat_history_sessions : 0;
               const chMessages = (typeof rs.chat_history_messages === 'number') ? rs.chat_history_messages : 0;
               const chOk = (typeof rs.chat_history_rag_success === 'number') ? rs.chat_history_rag_success : 0;
@@ -623,8 +627,40 @@ function startHealthPolling() {
               const chOtherNs = (typeof rs.chat_history_sessions_other_namespace === 'number') ? rs.chat_history_sessions_other_namespace : null;
               const backfillAvailable = !!rs.chat_history_backfill_available;
               const backfillReason = rs.chat_history_backfill_reason || null;
+
+              const renderBreakdown = () => {
+                if (!sessBreakdown.length) {
+                  return '';
+                }
+
+                const items = sessBreakdown.map((row) => {
+                  const nsRaw = (typeof row?.namespace === 'string') ? row.namespace : null;
+                  const nsLabel = nsRaw ? nsRaw : '(missing namespace)';
+                  const total2 = (typeof row?.total === 'number') ? row.total : 0;
+                  const indexed2 = (typeof row?.indexed === 'number') ? row.indexed : 0;
+                  const pending2 = (typeof row?.pending === 'number') ? row.pending : 0;
+                  const failed2 = (typeof row?.failed === 'number') ? row.failed : 0;
+                  const skipped2 = (typeof row?.skipped === 'number') ? row.skipped : 0;
+                  const none2 = (typeof row?.none === 'number') ? row.none : 0;
+                  const isCurrent = sessionNs && nsRaw === sessionNs;
+                  const suffix = isCurrent ? ' (in scope)' : '';
+                  return `<li>${escapeHtml(nsLabel)}${escapeHtml(suffix)} — total ${total2} (indexed ${indexed2}, pending ${pending2}, failed ${failed2}, skipped ${skipped2}, none ${none2})</li>`;
+                });
+
+                return [
+                  '<details>',
+                  '<summary>Interaction sessions by namespace</summary>',
+                  '<ul>',
+                  ...items,
+                  '</ul>',
+                  '</details>'
+                ].join('');
+              };
+
               const html = [
-                sessionNs ? `<p><strong>Session namespace:</strong> ${sessionNs}</p>` : '',
+                requestedNs ? `<p><strong>Requested namespace:</strong> ${escapeHtml(requestedNs)}</p>` : '',
+                sessionNs ? `<p><strong>Session namespace:</strong> ${escapeHtml(sessionNs)}</p>` : '',
+                '<p><em>Note:</em> interaction sessions are scoped by a user-only namespace (e.g. <code>#V#user</code>). Chat history is scoped by a composite user@organisation namespace (e.g. <code>#V#user@org</code>).</p>',
                 '<ul>',
                 `<li><strong>Indexed:</strong> ${indexed}</li>`,
                 `<li><strong>Pending:</strong> ${pending}</li>`,
@@ -635,6 +671,8 @@ function startHealthPolling() {
                 '<p>',
                 `Sessions: ${sessions ?? '—'}`,
                 (scopedSessions !== null ? ` • Sessions in scope: ${scopedSessions}` : ''),
+                (sessMissing !== null ? ` • Missing namespace: ${sessMissing}` : ''),
+                (sessOther !== null ? ` • Other namespace: ${sessOther}` : ''),
                 ` • Interactions: ${interactions ?? '—'} • Eligible sessions: ${eligS ?? '—'} • Eligible interactions: ${eligI ?? '—'}`,
                 '</p>'
               ].join('');
@@ -662,7 +700,7 @@ function startHealthPolling() {
               const backfillNote = (!backfillAvailable && needsBackfill && backfillReason)
                 ? `<p><em>Backfill unavailable: ${backfillReason}</em></p>`
                 : '';
-              ragModalBody.innerHTML = html + chatHtml + backfillNote;
+              ragModalBody.innerHTML = html + renderBreakdown() + chatHtml + backfillNote;
 
               if (ragChatBackfillBtn) {
                 ragChatBackfillBtn.hidden = !(backfillAvailable && needsBackfill);
