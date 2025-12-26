@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass
 from typing import (
     Any,
+    cast,
     Dict,
     Iterable,
     List,
@@ -62,6 +63,23 @@ class _ModelTurnInterpretation:
     is_json_action: bool
     fenced_tool_call_json: bool
     heuristic_missing_tool_call: bool
+
+
+@dataclass(frozen=True)
+class _MissingToolCallAssessment:
+    """Assessment result for whether a single tool-call retry should occur.
+
+    This isolates *policy* (when to retry) from orchestration mechanics so the
+    retry behaviour can evolve without tangling more logic into `run()`.
+    """
+
+    path: str
+    is_json_action: bool
+    fenced_json: bool
+    classifier_used: bool
+    classifier_verdict: bool | None
+    retry_reason: str | None
+    tool_call_parse_error: ToolCallParsingError | None
 
 
 @dataclass(frozen=True)
@@ -974,9 +992,7 @@ class InternalMCPChatOrchestrator:
         except (json.JSONDecodeError, TypeError):
             return False
 
-    def _extract_tool_calls(
-        self, text: str
-    ) -> Optional[List[MutableMapping[str, Any]]]:
+    def _extract_tool_calls(self, text: str) -> list[_ToolCallRequest] | None:
         """Extract one or more tool-call objects from the model response.
 
         Accepts either a single tool-call JSON object or a JSON array of tool-call
@@ -1048,15 +1064,17 @@ class InternalMCPChatOrchestrator:
 
         trailing = raw[end:].strip()
 
-        def _normalise_tool_call(candidate: Any) -> Optional[MutableMapping[str, Any]]:
+        def _normalise_tool_call(candidate: Any) -> _ToolCallRequest | None:
             if not isinstance(candidate, MutableMapping):
                 return None
 
-            has_tool = isinstance(candidate.get(self._TOOL_FIELD), str)
-            has_payload = isinstance(
-                candidate.get(self._PAYLOAD_FIELD, {}), MutableMapping
-            )
-            has_action = candidate.get(self._ACTION_FIELD) == self._CALL_ACTION
+            tool_name = candidate.get(self._TOOL_FIELD)
+            payload_value = candidate.get(self._PAYLOAD_FIELD)
+            action_value = candidate.get(self._ACTION_FIELD)
+
+            has_tool = isinstance(tool_name, str)
+            has_payload = isinstance(payload_value, MutableMapping)
+            has_action = action_value == self._CALL_ACTION
 
             missing_action = self._ACTION_FIELD not in candidate
             strict_shape = set(candidate.keys()) <= {
@@ -1069,9 +1087,7 @@ class InternalMCPChatOrchestrator:
                 describe_methods = getattr(self._gateway, "describe_methods", None)
                 if callable(describe_methods):
                     catalogue = describe_methods()
-                tool_name = candidate.get(self._TOOL_FIELD)
                 if isinstance(catalogue, Mapping) and tool_name in catalogue:
-                    candidate[self._ACTION_FIELD] = self._CALL_ACTION
                     has_action = True
                 else:
                     return None
@@ -1079,9 +1095,19 @@ class InternalMCPChatOrchestrator:
             if not (has_action and has_tool and has_payload):
                 return None
 
-            return candidate
+            tool_call: _ToolCallRequest = {
+                self._ACTION_FIELD: self._CALL_ACTION,
+                self._TOOL_FIELD: tool_name,
+                self._PAYLOAD_FIELD: cast(MutableMapping[str, Any], payload_value),
+            }
 
-        tool_calls: List[MutableMapping[str, Any]] = []
+            call_id = candidate.get("_call_id")
+            if isinstance(call_id, str) and call_id:
+                tool_call["_call_id"] = call_id
+
+            return tool_call
+
+        tool_calls: list[_ToolCallRequest] = []
         if isinstance(parsed, MutableMapping):
             tool_call = _normalise_tool_call(parsed)
             if tool_call is None:
@@ -1413,6 +1439,88 @@ class InternalMCPChatOrchestrator:
             heuristic_missing_tool_call=heuristic_missing,
         )
 
+    def _assess_missing_tool_call(
+        self,
+        *,
+        response_text: str,
+        use_structured: bool,
+        interpretation: _ModelTurnInterpretation | None,
+        llm_client: Any,
+        model: str | None,
+        aux_log: list[Mapping[str, Any]],
+        tool_call_parse_error: ToolCallParsingError | None,
+    ) -> _MissingToolCallAssessment:
+        """Decide whether to attempt a single retry for a missing tool call."""
+
+        path = "structured" if use_structured else "legacy"
+
+        is_json_action = (
+            interpretation.is_json_action
+            if (not use_structured and interpretation is not None)
+            else self._is_json_action_response(response_text)
+        )
+
+        fenced_detected = (
+            interpretation.fenced_tool_call_json
+            if (not use_structured and interpretation is not None)
+            else self._contains_fenced_tool_call_json(response_text)
+        )
+
+        heuristic_missing = (
+            interpretation.heuristic_missing_tool_call
+            if (not use_structured and interpretation is not None)
+            else self._looks_like_missing_tool_call(response_text)
+        )
+
+        classifier_used = False
+        classifier_verdict: bool | None = None
+        retry_reason: str | None = None
+
+        if tool_call_parse_error is not None:
+            retry_reason = "tool call parse error"
+
+        if retry_reason is None and fenced_detected:
+            retry_reason = "fenced tool-call JSON detected"
+
+        if retry_reason is None:
+            llm_flag = self._llm_detects_missing_tool_call(
+                response_text,
+                llm_client,
+                fallback_model=model,
+                aux_log=aux_log,
+            )
+
+            if llm_flag is not None:
+                classifier_used = True
+                classifier_verdict = llm_flag
+
+            if llm_flag is True:
+                retry_reason = "LLM classifier flagged missing tool call"
+            elif llm_flag is None:
+                # Fallback to legacy heuristic only when classifier unavailable.
+                if heuristic_missing:
+                    retry_reason = "heuristic missing tool call"
+            elif llm_flag is False:
+                # Backstop: the LLM classifier can miss obvious cases.
+                if heuristic_missing:
+                    retry_reason = "heuristic missing tool call (classifier said no)"
+
+        return _MissingToolCallAssessment(
+            path=path,
+            is_json_action=is_json_action,
+            fenced_json=fenced_detected,
+            classifier_used=classifier_used,
+            classifier_verdict=classifier_verdict,
+            retry_reason=retry_reason,
+            tool_call_parse_error=tool_call_parse_error,
+        )
+
+    def _missing_tool_call_retry_prompt(self) -> str:
+        return (
+            "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
+            "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects (no prose, no Markdown)."
+        )
+
     def run(
         self,
         *,
@@ -1557,6 +1665,7 @@ class InternalMCPChatOrchestrator:
                     response = llm_response.text_response or ""
                     tool_calls = [
                         {
+                            self._ACTION_FIELD: self._CALL_ACTION,
                             self._TOOL_FIELD: tc.tool_name,
                             self._PAYLOAD_FIELD: tc.payload,
                             "_call_id": tc.call_id,  # Preserve for tracing (JVNAUTOSCI-803)
@@ -1651,68 +1760,33 @@ class InternalMCPChatOrchestrator:
                 )
 
             # Gather richer diagnostics for debug panels and logs
-            fenced_detected = (
-                interpretation.fenced_tool_call_json
-                if (not use_structured and interpretation is not None)
-                else self._contains_fenced_tool_call_json(response)
+            assessment = self._assess_missing_tool_call(
+                response_text=response,
+                use_structured=use_structured,
+                interpretation=interpretation,
+                llm_client=llm_client,
+                model=model,
+                aux_log=aux_llm_calls,
+                tool_call_parse_error=tool_call_parse_error,
             )
-            classifier_verdict: Optional[bool] = None
-            classifier_used = False
-            retry_reason: Optional[str] = None
-
-            if tool_call_parse_error is not None:
-                retry_reason = "tool call parse error"
-
-            if retry_reason is None and fenced_detected:
-                retry_reason = "fenced tool-call JSON detected"
-            if retry_reason is None:
-                llm_flag = self._llm_detects_missing_tool_call(
-                    response,
-                    llm_client,
-                    fallback_model=model,
-                    aux_log=aux_llm_calls,
-                )
-
-                if llm_flag is not None:
-                    classifier_used = True
-                    classifier_verdict = llm_flag
-                if llm_flag is True:
-                    retry_reason = "LLM classifier flagged missing tool call"
-                elif llm_flag is None:
-                    # Fallback to legacy heuristic only when classifier unavailable
-                    if (
-                        interpretation.heuristic_missing_tool_call
-                        if (not use_structured and interpretation is not None)
-                        else self._looks_like_missing_tool_call(response)
-                    ):
-                        retry_reason = "heuristic missing tool call"
-                elif llm_flag is False:
-                    # Backstop: the LLM classifier can miss obvious cases.
-                    # If our conservative heuristic triggers, do the single retry anyway.
-                    if (
-                        interpretation.heuristic_missing_tool_call
-                        if (not use_structured and interpretation is not None)
-                        else self._looks_like_missing_tool_call(response)
-                    ):
-                        retry_reason = (
-                            "heuristic missing tool call (classifier said no)"
-                        )
 
             # Always append a compact detection summary for UI debugging
             try:
                 aux_llm_calls.append(
                     {
                         "type": "missing_tool_call_detection",
-                        "path": "structured" if use_structured else "legacy",
-                        "is_json_action": is_json_action,
-                        "fenced_json": fenced_detected,
-                        "classifier_used": classifier_used,
+                        "path": assessment.path,
+                        "is_json_action": assessment.is_json_action,
+                        "fenced_json": assessment.fenced_json,
+                        "classifier_used": assessment.classifier_used,
                         "classifier_verdict": (
                             "yes"
-                            if classifier_verdict is True
-                            else "no" if classifier_verdict is False else "unavailable"
+                            if assessment.classifier_verdict is True
+                            else "no"
+                            if assessment.classifier_verdict is False
+                            else "unavailable"
                         ),
-                        "retry_reason": retry_reason or "",
+                        "retry_reason": assessment.retry_reason or "",
                         "parse_error": (
                             str(tool_call_parse_error)
                             if tool_call_parse_error is not None
@@ -1723,23 +1797,20 @@ class InternalMCPChatOrchestrator:
             except Exception:  # pragma: no cover - best effort only
                 pass
 
-            if retry_reason:
+            if assessment.retry_reason:
                 self._logger.info(
                     "[mcp_orchestrator] Model response looks like a missing tool call (%s); retrying once (model=%s).",
-                    retry_reason,
+                    assessment.retry_reason,
                     model or "default",
                 )
-                retry_prompt = (
-                    "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
-                    "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects (no prose, no Markdown)."
-                )
+                retry_prompt = self._missing_tool_call_retry_prompt()
 
                 try:
                     aux_llm_calls.append(
                         {
                             "type": "missing_tool_call_retry",
                             "stage": "prompt",
-                            "retry_reason": retry_reason,
+                            "retry_reason": assessment.retry_reason,
                             "prompt_preview": retry_prompt[:800],
                         }
                     )
@@ -1755,7 +1826,7 @@ class InternalMCPChatOrchestrator:
                         {
                             "type": "missing_tool_call_retry",
                             "stage": "response",
-                            "retry_reason": retry_reason,
+                            "retry_reason": assessment.retry_reason,
                             "response_preview": (
                                 retry_response[:800]
                                 if isinstance(retry_response, str)

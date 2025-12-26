@@ -91,6 +91,77 @@ def test_interpret_model_turn_captures_tool_call_parse_error():
     assert isinstance(interpretation.tool_call_parse_error, ToolCallParsingError)
 
 
+def test_assess_missing_tool_call_prefers_parse_error_over_fence_and_classifier():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    llm = _RecorderLLM(["NO"])
+    aux_log: list[Mapping[str, Any]] = []
+
+    assessment = orchestrator._assess_missing_tool_call(
+        response_text="{bad json",
+        use_structured=False,
+        interpretation=None,
+        llm_client=llm,
+        model="primary-model",
+        aux_log=aux_log,
+        tool_call_parse_error=ToolCallParsingError("bad", raw_response="{bad json"),
+    )
+
+    assert assessment.retry_reason == "tool call parse error"
+
+
+def test_assess_missing_tool_call_uses_fenced_json_reason_without_classifier_call():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    llm = _RecorderLLM(["YES"])  # Would be consumed if classifier were called.
+    aux_log: list[Mapping[str, Any]] = []
+
+    interpretation = orchestrator._interpret_model_turn(
+        "```json\n{\"action\":\"call_tool\",\"tool\":\"test\",\"payload\":{}}\n```"
+    )
+
+    assessment = orchestrator._assess_missing_tool_call(
+        response_text=interpretation.response_text,
+        use_structured=False,
+        interpretation=interpretation,
+        llm_client=llm,
+        model="primary-model",
+        aux_log=aux_log,
+        tool_call_parse_error=None,
+    )
+
+    assert assessment.retry_reason == "fenced tool-call JSON detected"
+    assert not llm.calls
+
+
+def test_assess_missing_tool_call_backstops_classifier_no_with_heuristic_yes():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    orchestrator._missing_tool_call_detector_loaded = True
+    orchestrator._missing_tool_call_detector = _MissingToolCallDetectorSpec(
+        action_id="#V#detect_missing_tool_call_action",
+        prompt_id="#V#missing_tool_call_detection_prompt",
+        prompt_text="Answer YES or NO for: {response}",
+        model="detector-model",
+    )
+
+    llm = _RecorderLLM(["NO"])
+    aux_log: list[Mapping[str, Any]] = []
+
+    response_text = "I'll do that now and execute the tools."
+    interpretation = orchestrator._interpret_model_turn(response_text)
+    assert interpretation.heuristic_missing_tool_call
+
+    assessment = orchestrator._assess_missing_tool_call(
+        response_text=interpretation.response_text,
+        use_structured=False,
+        interpretation=interpretation,
+        llm_client=llm,
+        model="primary-model",
+        aux_log=aux_log,
+        tool_call_parse_error=None,
+    )
+
+    assert assessment.retry_reason == "heuristic missing tool call (classifier said no)"
+
+
 def test_extract_tool_calls_accepts_fenced_json_array_batch():
     text = (
         "Here is the tool batch:\n"
