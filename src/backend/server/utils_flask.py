@@ -461,9 +461,108 @@ def create_flask_app(
                 except Exception:
                     session_ns = ns
 
+            # Diagnostics: explain scoping precisely.
+            missing_namespace_filter = {
+                "$or": [
+                    {"namespace": {"$exists": False}},
+                    {"namespace": None},
+                    {"namespace": {"$in": ["", " "]}},
+                ]
+            }
+
             sess_filter = {"namespace": session_ns} if session_ns else {}
             total_sessions = sessions_coll.count_documents({})
             scoped_sessions = sessions_coll.count_documents(sess_filter or {})
+            sessions_missing_namespace = sessions_coll.count_documents(
+                missing_namespace_filter
+            )
+            sessions_other_namespace = None
+            if session_ns:
+                sessions_other_namespace = max(
+                    0, total_sessions - scoped_sessions - sessions_missing_namespace
+                )
+
+            sessions_namespace_breakdown = []
+            try:
+                pipeline = [
+                    {
+                        "$project": {
+                            "namespace": {"$ifNull": ["$namespace", "__MISSING__"]},
+                            "indexing_status": {"$ifNull": ["$indexing_status", "__NONE__"]},
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": "$namespace",
+                            "total": {"$sum": 1},
+                            "indexed": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$eq": ["$indexing_status", "indexed"]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                            "pending": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$eq": ["$indexing_status", "pending"]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                            "failed": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$eq": ["$indexing_status", "failed"]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                            "skipped": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$eq": ["$indexing_status", "skipped"]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                            "none": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$eq": ["$indexing_status", "__NONE__"]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                        }
+                    },
+                    {"$sort": {"total": -1}},
+                    {"$limit": 15},
+                ]
+                rows = list(sessions_coll.aggregate(pipeline))
+                for row in rows:
+                    ns_key = row.get("_id")
+                    if ns_key == "__MISSING__":
+                        ns_key = None
+                    sessions_namespace_breakdown.append(
+                        {
+                            "namespace": ns_key,
+                            "total": int(row.get("total", 0) or 0),
+                            "indexed": int(row.get("indexed", 0) or 0),
+                            "pending": int(row.get("pending", 0) or 0),
+                            "failed": int(row.get("failed", 0) or 0),
+                            "skipped": int(row.get("skipped", 0) or 0),
+                            "none": int(row.get("none", 0) or 0),
+                        }
+                    )
+            except Exception:
+                sessions_namespace_breakdown = []
             indexed = sessions_coll.count_documents(
                 {"indexing_status": "indexed", **sess_filter}
             )
@@ -671,6 +770,9 @@ def create_flask_app(
                     "pending": pending,
                     "failed": failed,
                     "skipped": skipped,
+                    "sessions_missing_namespace": sessions_missing_namespace,
+                    "sessions_other_namespace": sessions_other_namespace,
+                    "sessions_namespace_breakdown": sessions_namespace_breakdown,
                     "sessions": total_sessions,
                     "interactions": total_interactions,
                     "eligible_sessions": eligible_sessions,
@@ -1219,9 +1321,9 @@ def create_flask_app(
             "using_fallback": bool | null,
             "atlas_detected": bool | null,
             "effective_host": str | null,   # redacted host:port only
-            "timestamp": iso8601
-          }
-        """
+                        "timestamp": iso8601
+                    }
+                """
         from datetime import datetime, timezone as _tz
 
         using_fallback = None
