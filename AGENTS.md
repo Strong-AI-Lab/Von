@@ -80,7 +80,11 @@ Operational Checklist (Mental Pass Before Finishing a Task):
 Failure Handling Patterns:
 - Transient API errors: Retry (exponential). Final failure → show status + truncated body (<300 chars) + next recommended action.
 - Tool not available: Request enabling precise tool group; do NOT fabricate manual raw HTTP calls.
-- Flaky MCP providers (especially Atlassian/JIRA): If repeated tool calls fail with timeouts, connection errors, or intermittent 401/403/5xx responses despite correct inputs, treat it as a provider/session issue. Ask the user to use the provider’s **Restart Server** action (extension-managed MCP providers have a restart command in the MCP Servers UI). If that does not resolve it, ask the user to restart VS Code’s extension host (or run **Developer: Reload Window**) and then retry.
+- Flaky MCP providers (especially Atlassian/JIRA): If tool calls fail with timeouts, connection errors, or intermittent 401/403/5xx responses despite correct inputs, treat it as a provider/session issue.
+  - Before asking the user to restart anything, do a bounded self-heal retry: re-run the same tool call once (or up to twice total) with short backoff (e.g., ~1s then ~3s). This catches common “token just refreshed / provider waking up” cases.
+  - If it still fails, re-check the session by calling the accessible-resources tool once; if that also fails, then ask the user to use the provider’s **Restart Server** action (extension-managed MCP providers have a restart command in the MCP Servers UI).
+  - If **Restart Server** does not resolve it, ask the user to restart VS Code’s extension host (or run **Developer: Reload Window**) and then retry.
+  - Do not loop indefinitely: cap total retries per operation (e.g., 2) and surface the last error with a clear recommended next action.
 - Cache/Data Structure Sensitivity: Never reorder or shrink tuple/dict cache structures relied upon by diagnostics (append only; update summariser accordingly).
 
 Language & Shell Consistency:
