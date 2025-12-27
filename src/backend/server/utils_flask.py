@@ -444,22 +444,25 @@ def create_flask_app(
                 if "interactions" in db.list_collection_names()
                 else None
             )
-            # Optional namespace filter: expects sessions to store a 'namespace' field
+            # Optional namespace filter: interaction_sessions may store either a
+            # user-only namespace (#V#user) or a composite namespace (#V#user@org).
+            # For backwards compatibility, if a composite namespace is provided we
+            # scope to BOTH values.
             ns = request.args.get("namespace")
-            session_ns = ns
-            # interaction_sessions currently use a user-only namespace (e.g. #V#user),
-            # while chat history uses a composite user@organisation namespace.
-            # If a composite namespace is provided, normalise to user-only for
-            # interaction_sessions filtering.
+            session_ns_values: list[str] | None = None
             if ns:
+                session_ns_values = [ns]
                 try:
                     from src.backend.services.namespace_service import parse_namespace
 
                     parsed = parse_namespace(ns)
                     if parsed.get("user_id"):
-                        session_ns = f"#V#{parsed['user_id']}"
+                        user_only = f"#V#{parsed['user_id']}"
+                        if user_only not in session_ns_values:
+                            session_ns_values.append(user_only)
                 except Exception:
-                    session_ns = ns
+                    # If the namespace is not parseable, treat it as an opaque key.
+                    pass
 
             # Diagnostics: explain scoping precisely.
             missing_namespace_filter = {
@@ -470,14 +473,17 @@ def create_flask_app(
                 ]
             }
 
-            sess_filter = {"namespace": session_ns} if session_ns else {}
+            if session_ns_values:
+                sess_filter = {"namespace": {"$in": session_ns_values}}
+            else:
+                sess_filter = {}
             total_sessions = sessions_coll.count_documents({})
             scoped_sessions = sessions_coll.count_documents(sess_filter or {})
             sessions_missing_namespace = sessions_coll.count_documents(
                 missing_namespace_filter
             )
             sessions_other_namespace = None
-            if session_ns:
+            if session_ns_values:
                 sessions_other_namespace = max(
                     0, total_sessions - scoped_sessions - sessions_missing_namespace
                 )
@@ -488,7 +494,9 @@ def create_flask_app(
                     {
                         "$project": {
                             "namespace": {"$ifNull": ["$namespace", "__MISSING__"]},
-                            "indexing_status": {"$ifNull": ["$indexing_status", "__NONE__"]},
+                            "indexing_status": {
+                                "$ifNull": ["$indexing_status", "__NONE__"]
+                            },
                         }
                     },
                     {
@@ -612,6 +620,7 @@ def create_flask_app(
                 "chat_history_sessions_in_namespace": 0,
                 "chat_history_sessions_missing_namespace": 0,
                 "chat_history_sessions_other_namespace": 0,
+                "chat_history_session_details": None,
                 "chat_history_backfill_available": False,
                 "chat_history_backfill_reason": None,
                 "chat_history_backfill_session_namespace": None,
@@ -634,6 +643,13 @@ def create_flask_app(
                         user_id_for_ns = None
 
                 match = {"user_id": user_id_for_ns} if user_id_for_ns else {}
+
+                include_detail = request.args.get("detail", "").lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
 
                 pipeline = [
                     {"$match": match},
@@ -716,9 +732,172 @@ def create_flask_app(
                         "chat_history_sessions_in_namespace": sessions_in_namespace,
                         "chat_history_sessions_missing_namespace": sessions_missing_namespace,
                         "chat_history_sessions_other_namespace": sessions_other_namespace,
+                        "chat_history_session_details": None,
                         "chat_history_backfill_available": False,
                         "chat_history_backfill_reason": None,
                     }
+
+                # Optional per-session breakdown (for diagnostics / UI modal).
+                # Only return details when a namespace is provided so we can scope
+                # by user_id safely.
+                if include_detail and user_id_for_ns:
+                    try:
+                        details_pipeline = [
+                            {"$match": match},
+                            {
+                                "$project": {
+                                    "_id": 0,
+                                    "session_id": 1,
+                                    "namespace": 1,
+                                    "rag_indexed_success": {
+                                        "$ifNull": ["$rag_indexed_success", 0]
+                                    },
+                                    "rag_indexed_failed": {
+                                        "$ifNull": ["$rag_indexed_failed", 0]
+                                    },
+                                    "messages_stored": {
+                                        "$cond": [
+                                            {"$isArray": "$history"},
+                                            {"$size": "$history"},
+                                            {"$ifNull": ["$message_count", 0]},
+                                        ]
+                                    },
+                                    "messages_non_reset": {
+                                        "$cond": [
+                                            {"$isArray": "$history"},
+                                            {
+                                                "$size": {
+                                                    "$filter": {
+                                                        "input": "$history",
+                                                        "as": "m",
+                                                        "cond": {
+                                                            "$not": {
+                                                                "$and": [
+                                                                    {
+                                                                        "$eq": [
+                                                                            "$$m.role",
+                                                                            "system",
+                                                                        ]
+                                                                    },
+                                                                    {
+                                                                        "$eq": [
+                                                                            "$$m.content",
+                                                                            "__RESET__",
+                                                                        ]
+                                                                    },
+                                                                ]
+                                                            }
+                                                        },
+                                                    }
+                                                }
+                                            },
+                                            {"$ifNull": ["$message_count", 0]},
+                                        ]
+                                    },
+                                    "messages_indexable": {
+                                        "$cond": [
+                                            {"$isArray": "$history"},
+                                            {
+                                                "$size": {
+                                                    "$filter": {
+                                                        "input": "$history",
+                                                        "as": "m",
+                                                        "cond": {
+                                                            "$and": [
+                                                                {
+                                                                    "$not": {
+                                                                        "$and": [
+                                                                            {
+                                                                                "$eq": [
+                                                                                    "$$m.role",
+                                                                                    "system",
+                                                                                ]
+                                                                            },
+                                                                            {
+                                                                                "$eq": [
+                                                                                    "$$m.content",
+                                                                                    "__RESET__",
+                                                                                ]
+                                                                            },
+                                                                        ]
+                                                                    }
+                                                                },
+                                                                {
+                                                                    "$eq": [
+                                                                        {
+                                                                            "$type": "$$m.content"
+                                                                        },
+                                                                        "string",
+                                                                    ]
+                                                                },
+                                                                {
+                                                                    "$gt": [
+                                                                        {
+                                                                            "$strLenCP": {
+                                                                                "$trim": {
+                                                                                    "input": "$$m.content"
+                                                                                }
+                                                                            }
+                                                                        },
+                                                                        0,
+                                                                    ]
+                                                                },
+                                                            ]
+                                                        },
+                                                    }
+                                                }
+                                            },
+                                            {"$ifNull": ["$message_count", 0]},
+                                        ]
+                                    },
+                                    "in_namespace": {
+                                        "$cond": [
+                                            {"$eq": ["$namespace", ns]},
+                                            True,
+                                            False,
+                                        ]
+                                    },
+                                }
+                            },
+                            {
+                                "$addFields": {
+                                    "messages_indexed_total": {
+                                        "$add": [
+                                            "$rag_indexed_success",
+                                            "$rag_indexed_failed",
+                                        ]
+                                    },
+                                }
+                            },
+                            {
+                                "$addFields": {
+                                    "messages_missing_index": {
+                                        "$max": [
+                                            0,
+                                            {
+                                                "$subtract": [
+                                                    "$messages_indexable",
+                                                    "$messages_indexed_total",
+                                                ]
+                                            },
+                                        ]
+                                    }
+                                }
+                            },
+                            {
+                                "$sort": {
+                                    "messages_missing_index": -1,
+                                    "messages_non_reset": -1,
+                                }
+                            },
+                            {"$limit": 100},
+                        ]
+
+                        details = list(chat_history_coll.aggregate(details_pipeline))
+                        chat_summary["chat_history_session_details"] = details
+                    except Exception:
+                        # Best-effort diagnostics only; never fail rag_status.
+                        chat_summary["chat_history_session_details"] = None
 
                 # Availability is based on being logged in AND the requested namespace matching
                 # the current session-derived namespace (prevents cross-user actions).
@@ -778,7 +957,10 @@ def create_flask_app(
                     "eligible_sessions": eligible_sessions,
                     "eligible_interactions": eligible_interactions,
                     "namespace": ns,
-                    "session_namespace": session_ns,
+                    "session_namespace": (
+                        session_ns_values[0] if session_ns_values else None
+                    ),
+                    "session_namespaces": session_ns_values,
                     **chat_summary,
                 }
             )
@@ -843,6 +1025,164 @@ def create_flask_app(
         except Exception as e:
             return jsonify(error="unexpected", detail=str(e)), 500
 
+    @app.route("/admin/chat_history_reindex", methods=["POST"])
+    def admin_chat_history_reindex():
+        """Reindex chat history messages for the current user/namespace into RAG.
+
+        This is intended to repair older sessions that were never indexed, while
+        keeping namespace isolation intact.
+
+                Optional JSON body:
+                    {
+                        "max_sessions": int,
+                        "max_messages": int,
+                        "reset_counters": bool,
+                        "dry_run": bool,
+                        "session_ids": [str],
+
+                        # Chunked mode (recommended for reliability):
+                        # If provided, requires exactly one session_id.
+                        "chunk_start": int,
+                        "chunk_size": int
+                    }
+        """
+        try:
+            from flask import session as flask_session
+            from src.backend.services.namespace_service import derive_namespace
+            from src.backend.services import chat_history_service
+
+            sess_user_slug = _get_session_user_slug(flask_session)
+            sess_user_concept_id = flask_session.get("user_concept_id")
+
+            if not (sess_user_slug or sess_user_concept_id):
+                return jsonify(error="Not authenticated"), 401
+
+            sess_org_raw = flask_session.get(
+                "organisation_concept_id"
+            ) or flask_session.get("org_id")
+            sess_org = _slug_from_maybe_concept_id(sess_org_raw)
+            sess_role = flask_session.get("role_in_org")
+
+            target_ns = request.args.get("namespace") or flask_session.get("namespace")
+            if not target_ns and sess_user_slug:
+                target_ns = derive_namespace(sess_user_slug, sess_org)
+
+            if not isinstance(target_ns, str) or not target_ns:
+                return jsonify(error="Not authenticated"), 401
+
+            # Prevent cross-user / cross-namespace actions.
+            sess_ns = flask_session.get("namespace")
+            if not sess_ns and sess_user_slug:
+                sess_ns = derive_namespace(sess_user_slug, sess_org)
+            if sess_ns != target_ns:
+                return (
+                    jsonify(error="namespace_mismatch", session_namespace=sess_ns),
+                    403,
+                )
+
+            user_concept_id = (
+                sess_user_concept_id
+                if isinstance(sess_user_concept_id, str) and sess_user_concept_id
+                else (f"#V#{sess_user_slug}" if sess_user_slug else None)
+            )
+            if not user_concept_id:
+                return jsonify(error="Not authenticated"), 401
+
+            body = request.get_json(silent=True) or {}
+            max_sessions = int(body.get("max_sessions", 50))
+            max_messages = int(body.get("max_messages", 5000))
+            reset_counters = bool(body.get("reset_counters", True))
+            dry_run = bool(body.get("dry_run", False))
+            session_ids = body.get("session_ids")
+            if not isinstance(session_ids, list):
+                session_ids = None
+
+            chunk_start = body.get("chunk_start")
+            chunk_size = body.get("chunk_size")
+            use_chunked = chunk_start is not None or chunk_size is not None
+
+            if use_chunked:
+                if (
+                    not session_ids
+                    or len(session_ids) != 1
+                    or not isinstance(session_ids[0], str)
+                ):
+                    return (
+                        jsonify(
+                            error="invalid_request",
+                            detail="chunked reindex requires exactly one session_id",
+                        ),
+                        400,
+                    )
+                sid = session_ids[0]
+                try:
+                    import time
+
+                    t0 = time.monotonic()
+                except Exception:
+                    t0 = None
+
+                try:
+                    app.logger.info(
+                        "[chat_history_reindex] chunk start user=%s ns=%s session=%s chunk_start=%s chunk_size=%s dry_run=%s",
+                        user_concept_id,
+                        target_ns,
+                        sid,
+                        int(chunk_start or 0),
+                        int(chunk_size or 25),
+                        bool(dry_run),
+                    )
+                except Exception:
+                    pass
+
+                res = chat_history_service.reindex_chat_history_session_chunk(
+                    user_concept_id=user_concept_id,
+                    target_namespace=target_ns,
+                    organisation_concept_id=sess_org,
+                    role_in_org=sess_role,
+                    session_id=sid,
+                    chunk_start=int(chunk_start or 0),
+                    chunk_size=int(chunk_size or 25),
+                    reset_counters=reset_counters,
+                    dry_run=dry_run,
+                )
+
+                try:
+                    elapsed_ms = (
+                        int((time.monotonic() - t0) * 1000) if t0 is not None else None
+                    )
+                    app.logger.info(
+                        "[chat_history_reindex] chunk done user=%s ns=%s session=%s attempted=%s ok=%s failed=%s next=%s done=%s elapsed_ms=%s errors=%s",
+                        user_concept_id,
+                        target_ns,
+                        sid,
+                        res.get("messages_indexed_attempted"),
+                        res.get("messages_indexed_success"),
+                        res.get("messages_indexed_failed"),
+                        res.get("next_chunk_start"),
+                        res.get("done"),
+                        elapsed_ms,
+                        len(res.get("errors") or []),
+                    )
+                except Exception:
+                    pass
+                return jsonify(res)
+
+            res = chat_history_service.reindex_chat_history_for_user_namespace(
+                user_concept_id=user_concept_id,
+                target_namespace=target_ns,
+                organisation_concept_id=sess_org,
+                role_in_org=sess_role,
+                session_ids=session_ids,
+                max_sessions=max_sessions,
+                max_messages=max_messages,
+                reset_counters=reset_counters,
+                dry_run=dry_run,
+            )
+            return jsonify(res)
+        except Exception as e:
+            return jsonify(error="unexpected", detail=str(e)), 500
+
     @app.route("/admin/rag_integrity", methods=["POST"])
     def admin_rag_integrity():
         db = get_db()
@@ -852,21 +1192,31 @@ def create_flask_app(
         interactions_coll = (
             db["interactions"] if "interactions" in db.list_collection_names() else None
         )
+        # Optional namespace filter: interaction_sessions may store either a user-only
+        # namespace (#V#user) or a composite namespace (#V#user@org). For backwards
+        # compatibility, if a composite namespace is provided we scope to BOTH values.
         ns = request.args.get("namespace")
-        session_ns = ns
+        session_ns_values: list[str] | None = None
         if ns:
+            session_ns_values = [ns]
             try:
                 from src.backend.services.namespace_service import parse_namespace
 
                 parsed = parse_namespace(ns)
                 if parsed.get("user_id"):
-                    session_ns = f"#V#{parsed['user_id']}"
+                    user_only = f"#V#{parsed['user_id']}"
+                    if user_only not in session_ns_values:
+                        session_ns_values.append(user_only)
             except Exception:
-                session_ns = ns
+                # If the namespace is not parseable, treat it as an opaque key.
+                pass
 
-        sess_filter = {"namespace": session_ns} if session_ns else {}
+        sess_filter = (
+            {"namespace": {"$in": session_ns_values}} if session_ns_values else {}
+        )
         result = {
             "sessions": sessions_coll.count_documents(sess_filter or {}),
+            "scoped_sessions": sessions_coll.count_documents(sess_filter or {}),
             "interactions": (
                 interactions_coll.count_documents({})
                 if interactions_coll is not None
@@ -896,7 +1246,8 @@ def create_flask_app(
             "eligible_interactions": 0,
             "anomalies": [],
             "namespace": ns,
-            "session_namespace": session_ns,
+            "session_namespace": (session_ns_values[0] if session_ns_values else None),
+            "session_namespaces": session_ns_values,
         }
         if interactions_coll is not None:
             result["eligible_interactions"] = interactions_coll.count_documents(
@@ -1316,14 +1667,14 @@ def create_flask_app(
     def db_status():
         """Return current database connection status (fallback vs Atlas) for UI indicator.
 
-                Response schema:
-                    {
-                        "using_fallback": bool | null,
-                        "atlas_detected": bool | null,
-                        "effective_host": str | null,   # redacted host:port only
-                        "timestamp": iso8601,
-                    }
-                """
+        Response schema:
+            {
+                "using_fallback": bool | null,
+                "atlas_detected": bool | null,
+                "effective_host": str | null,   # redacted host:port only
+                "timestamp": iso8601,
+            }
+        """
         from datetime import datetime, timezone as _tz
 
         using_fallback = None

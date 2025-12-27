@@ -1786,12 +1786,24 @@ def get_active_interactions_for_concept(
 
     try:
         # Find active sessions for this concept and user
+        query: dict[str, Any] = {
+            "concept_id": ObjectId(concept_id),
+            "user_id": user_id,
+        }
+
+        # If an organisation is selected in the current request context, scope
+        # active interactions to that organisation.
+        try:
+            from flask import session as flask_session
+
+            org_id = flask_session.get("organisation_concept_id")
+            if org_id:
+                query["organisation_concept_id"] = org_id
+        except Exception:
+            pass
+
         active_sessions = list(
-            sessions_coll.find(
-                {
-                    "concept_id": ObjectId(concept_id),
-                }
-            ).sort("last_updated_time", -1)
+            sessions_coll.find(query).sort("last_updated_time", -1)
         )  # Most recent first
 
         # Convert ObjectId to string for JSON serialization
@@ -1815,7 +1827,10 @@ def get_active_interactions_for_concept(
         raise ConceptServiceError(f"Could not retrieve active interactions: {e}") from e
 
 
-def resume_interaction_session(interaction_id: str) -> Dict[str, Any]:
+def resume_interaction_session(
+    interaction_id: str,
+    user_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Resumes an existing interaction session by returning its current state.
 
     Args:
@@ -1831,7 +1846,7 @@ def resume_interaction_session(interaction_id: str) -> Dict[str, Any]:
     logger.info(f"Resuming interaction session: {interaction_id}")
 
     try:
-        session = get_interaction_session_by_id(interaction_id)
+        session = get_interaction_session_by_id(interaction_id, user_id=user_id)
         if not session:
             raise ConceptServiceError(f"Interaction session {interaction_id} not found")
 
@@ -2598,7 +2613,11 @@ def update_concept_description(concept_id: str, new_description: str) -> bool:
         return False
 
 
-def get_interaction_session_by_id(interaction_id: str) -> Optional[Dict[str, Any]]:
+def get_interaction_session_by_id(
+    interaction_id: str,
+    user_id: Optional[str] = None,
+    organisation_concept_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """Retrieves an interaction session by its ID.
 
     Args:
@@ -2618,8 +2637,33 @@ def get_interaction_session_by_id(interaction_id: str) -> Optional[Dict[str, Any
 
     sessions_coll = db[interaction_session_collection_name]
 
+    query: dict[str, Any]
     try:
-        session = sessions_coll.find_one({"_id": ObjectId(interaction_id)})
+        query = {"_id": ObjectId(interaction_id)}
+    except Exception as e:
+        logger.error(
+            f"Error retrieving interaction session with ID {interaction_id}: {e}"
+        )
+        raise ConceptServiceError(
+            f"Invalid interaction ID format or database error for ID {interaction_id}."
+        ) from e
+
+    if user_id:
+        query["user_id"] = user_id
+
+    if organisation_concept_id is None:
+        try:
+            from flask import session as flask_session
+
+            organisation_concept_id = flask_session.get("organisation_concept_id")
+        except Exception:
+            organisation_concept_id = None
+
+    if organisation_concept_id:
+        query["organisation_concept_id"] = organisation_concept_id
+
+    try:
+        session = sessions_coll.find_one(query)
         if session:
             logger.info(f"Found interaction session with ID: {interaction_id}")
             return session

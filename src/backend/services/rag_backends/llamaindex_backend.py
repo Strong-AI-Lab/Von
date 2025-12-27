@@ -1,13 +1,24 @@
-"""
+"""src.backend.services.rag_backends.llamaindex_backend
+
 LlamaIndex RAG Backend Implementation (Apache-2.0)
 
 This module implements the RAGService protocol using LlamaIndex.
 It is imported lazily to avoid hard dependencies.
+
+Namespace behaviour:
+- The RAGService interface supports a `namespace` argument on upsert/query/delete.
+- This backend treats namespace as a hard isolation boundary by persisting a
+    separate on-disk index per namespace.
+- Documents are also stamped with `metadata["namespace"]` to aid debugging and
+    allow defensive filtering.
 """
 
+import hashlib
 import os
+import re
 from typing import Iterable, Dict, Any, Optional, List, Tuple
-from ..rag_service import RAGService, RAGBackendUnavailable
+
+from ..rag_service import RAGService
 
 try:
     from llama_index import (
@@ -27,38 +38,76 @@ except ImportError as e:
 class LlamaIndexRAGService(RAGService):
     def __init__(self, persistence_dir: str = "./data/rag_storage"):
         self.persistence_dir = persistence_dir
-        self.index = None
 
-        # Ensure persistence directory exists
-        if not os.path.exists(self.persistence_dir):
-            os.makedirs(self.persistence_dir)
+        # Cache of namespace -> index instance
+        self._indices: Dict[str, Any] = {}
+
+        # Ensure base persistence directory exists
+        os.makedirs(self.persistence_dir, exist_ok=True)
 
         # Initialize ServiceContext (can be customized with specific LLM/Embed model)
         # For now, we rely on env vars (OPENAI_API_KEY) or defaults
         # Note: In 0.9.x ServiceContext.from_defaults() uses OpenAI by default if key is present
         self.service_context = ServiceContext.from_defaults()
 
-        # Try to load existing index
+    def _resolve_effective_namespace(self, namespace: Optional[str]) -> str:
+        # Keep behaviour consistent with other parts of the system that may
+        # set VON_DEFAULT_NAMESPACE.
+        return namespace or os.getenv("VON_DEFAULT_NAMESPACE") or "chat_history"
+
+    def _namespace_dirname(self, namespace: str) -> str:
+        """Return a filesystem-safe, collision-resistant directory name."""
+        normalised = namespace.strip()
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", normalised)
+        digest = hashlib.sha1(normalised.encode("utf-8")).hexdigest()[:12]
+        return f"{safe}_{digest}"
+
+    def _namespace_persist_dir(self, namespace: str) -> str:
+        # Group namespace indices under a single subdirectory to avoid mixing
+        # with legacy flat storage.
+        return os.path.join(
+            self.persistence_dir, "namespaces", self._namespace_dirname(namespace)
+        )
+
+    def _maybe_load_index(self, namespace: str) -> Any:
+        if namespace in self._indices:
+            return self._indices[namespace]
+
+        persist_dir = self._namespace_persist_dir(namespace)
+        if not os.path.isdir(persist_dir):
+            return None
+
+        # Avoid calling LlamaIndex load on an empty directory.
         try:
-            storage_context = StorageContext.from_defaults(
-                persist_dir=self.persistence_dir
-            )
-            self.index = load_index_from_storage(
+            if not os.listdir(persist_dir):
+                return None
+        except Exception:
+            return None
+
+        try:
+            storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
+            index = load_index_from_storage(
                 storage_context, service_context=self.service_context
             )
         except Exception:
-            # If load fails (e.g. empty dir), start with empty index
-            self.index = None
+            return None
 
-    def _get_or_create_index(self, documents: List[Document] = []) -> Any:
-        if self.index:
-            return self.index
+        self._indices[namespace] = index
+        return index
 
-        self.index = VectorStoreIndex.from_documents(
+    def _get_or_create_index(self, namespace: str, documents: List[Document]) -> Any:
+        index = self._maybe_load_index(namespace)
+        if index is not None:
+            return index
+
+        persist_dir = self._namespace_persist_dir(namespace)
+        os.makedirs(persist_dir, exist_ok=True)
+        index = VectorStoreIndex.from_documents(
             documents, service_context=self.service_context
         )
-        self.index.storage_context.persist(persist_dir=self.persistence_dir)
-        return self.index
+        index.storage_context.persist(persist_dir=persist_dir)
+        self._indices[namespace] = index
+        return index
 
     def upsert_documents(
         self,
@@ -72,7 +121,9 @@ class LlamaIndexRAGService(RAGService):
         LlamaIndex 0.9.x simple index doesn't support granular updates easily without a vector store.
         For this implementation, we will convert dicts to Documents and insert them.
         """
-        llama_docs = []
+        effective_namespace = self._resolve_effective_namespace(namespace)
+
+        llama_docs: List[Document] = []
         for doc in docs:
             # Convert dict to LlamaIndex Document
             text = doc.get("text", "")
@@ -88,21 +139,59 @@ class LlamaIndexRAGService(RAGService):
             else:
                 l_doc = Document(text=text)
 
+            # Stamp namespace into metadata to support filtering/debugging.
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["namespace"] = effective_namespace
             l_doc.metadata = metadata
             llama_docs.append(l_doc)
 
         if not llama_docs:
             return (0, 0)
 
-        if self.index is None:
-            self._get_or_create_index(llama_docs)
-        else:
-            # For simple VectorStoreIndex, insert() adds to the index
-            for l_doc in llama_docs:
-                self.index.insert(l_doc)
-            self.index.storage_context.persist(persist_dir=self.persistence_dir)
+        index = self._maybe_load_index(effective_namespace)
+        if index is None:
+            index = self._get_or_create_index(effective_namespace, llama_docs)
+            return (len(llama_docs), 0)
 
-        return (len(llama_docs), 0)
+        success = 0
+        failed = 0
+
+        def _persist() -> None:
+            index.storage_context.persist(
+                persist_dir=self._namespace_persist_dir(effective_namespace)
+            )
+
+        # Prefer bulk insertion when supported (significantly faster for embedding-backed indices).
+        try:
+            insert_documents = getattr(index, "insert_documents", None)
+            if callable(insert_documents):
+                insert_documents(llama_docs)
+                success = len(llama_docs)
+                _persist()
+                return (success, failed)
+        except Exception:
+            # Fall back to per-document insertion below.
+            pass
+
+        # Fallback: per-document insertion, optionally allowing partial failures.
+        for l_doc in llama_docs:
+            try:
+                index.insert(l_doc)
+                success += 1
+            except Exception:
+                failed += 1
+                if not allow_partial_failures:
+                    raise
+
+        if success > 0:
+            try:
+                _persist()
+            except Exception:
+                # Persist failures should not mask successful indexing.
+                pass
+
+        return (success, failed)
 
     def delete_documents(
         self,
@@ -114,19 +203,23 @@ class LlamaIndexRAGService(RAGService):
         Delete documents from the index.
         Note: Simple VectorStoreIndex delete might be limited depending on the store.
         """
-        if not self.index:
+        effective_namespace = self._resolve_effective_namespace(namespace)
+        index = self._maybe_load_index(effective_namespace)
+        if not index:
             return 0
 
         count = 0
         for doc_id in ids:
             try:
-                self.index.delete_ref_doc(doc_id, delete_from_docstore=True)
+                index.delete_ref_doc(doc_id, delete_from_docstore=True)
                 count += 1
             except Exception:
                 pass
 
         if count > 0:
-            self.index.storage_context.persist(persist_dir=self.persistence_dir)
+            index.storage_context.persist(
+                persist_dir=self._namespace_persist_dir(effective_namespace)
+            )
 
         return count
 
@@ -139,50 +232,37 @@ class LlamaIndexRAGService(RAGService):
         hybrid: bool = True,
         permissions_context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        if not self.index:
+        effective_namespace = self._resolve_effective_namespace(namespace)
+        index = self._maybe_load_index(effective_namespace)
+        if not index:
             return []
 
-        filters = None
-        if permissions_context:
-            try:
-                from llama_index.vector_stores.types import (
-                    MetadataFilters,
-                    MetadataFilter,
-                )
-
-                filter_list = []
-
-                # Filter by user_id if present
-                if "user_id" in permissions_context:
-                    filter_list.append(
-                        MetadataFilter(
-                            key="user_id", value=permissions_context["user_id"]
-                        )
-                    )
-
-                # Filter by organisation_concept_id if present (org-scoped access)
-                if (
-                    "organisation_concept_id" in permissions_context
-                    and permissions_context["organisation_concept_id"]
-                ):
-                    filter_list.append(
-                        MetadataFilter(
-                            key="organisation_concept_id",
-                            value=permissions_context["organisation_concept_id"],
-                        )
-                    )
-
-                if filter_list:
-                    filters = MetadataFilters(filters=filter_list)
-            except ImportError:
-                # Fallback or log warning if types cannot be imported (unlikely given check)
-                pass
-
-        retriever = self.index.as_retriever(similarity_top_k=top_k, filters=filters)
+        # Note: Metadata filtering support varies by vector store implementation.
+        # To ensure correctness, we do coarse retrieval first then apply filtering
+        # locally.
+        retriever = index.as_retriever(similarity_top_k=max(top_k * 10, top_k))
         nodes = retriever.retrieve(query_text)
+
+        def _matches_permissions(metadata: Any) -> bool:
+            if not permissions_context:
+                return True
+            if not isinstance(metadata, dict):
+                return False
+
+            user_id = permissions_context.get("user_id")
+            if user_id and metadata.get("user_id") != user_id:
+                return False
+
+            org_id = permissions_context.get("organisation_concept_id")
+            if org_id and metadata.get("organisation_concept_id") != org_id:
+                return False
+
+            return True
 
         results = []
         for node in nodes:
+            if not _matches_permissions(getattr(node.node, "metadata", None)):
+                continue
             results.append(
                 {
                     "id": node.node.ref_doc_id or node.node.node_id,
@@ -191,6 +271,9 @@ class LlamaIndexRAGService(RAGService):
                     "score": node.score,
                 }
             )
+
+            if len(results) >= top_k:
+                break
 
         return results
 
