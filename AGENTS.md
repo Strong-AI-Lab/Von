@@ -15,6 +15,10 @@ This document provides an overview of key files within the `docs` directory that
 > 7. Keep changes minimal, well‑scoped, and update related tests/documentation.
 > 8. When uncertain, ask succinctly—do not guess or fabricate behaviour.
 > 9. Always check VS Code’s Problems panel (or run `get_errors`) after edits and whenever the user reports an error.
+> 10. Avoid writing monolithic code to solve the immediate problem at hand. Wherever possible, write very well factored code, where operations happen in a single, well controlled place, and then that function or method is reused ubiquitously. This allows for more reliable revision in the future, and is far less likely to lead to inconsistent operations. When planning these functions, make sure they are at an appropriate level of abstraction to allow for change in the underlying implementation while maintaining coherent overall semantics.
+> 11. When starting a new task or implementing a new function, carefully build a broad overview of the context in which it will be performed, including both the purpose and the current implementation of related work.
+> 12. Remember that this work is for an AI system that richly integrates knowledge management, representation and acquisition, with LLM capabilities and reasoning. Reasoning and representation can be done by logic, logical form, and text-based methods. There is a core "vontology" with a current underlying representation, but the possibility of other implementations should be acknowledged.
+> 13. Prefer to use MCP tools (vontology, Jira, MongoDB) if available over writing "here" commands or scripts. This is only a weak preference - if MCP doesn't work, let the user know and try an alternative method.
 
 ## 🇳🇿 CRITICAL: New Zealand English Only
 
