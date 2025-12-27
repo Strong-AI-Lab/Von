@@ -17,6 +17,7 @@ def collect_indexed_sessions(limit: int = 1000) -> List[dict]:
         {"indexing_status": "indexed"},
         {
             "_id": 1,
+            "namespace": 1,
             "embedding": 1,
             "summary": 1,
             "history": 1,
@@ -44,6 +45,8 @@ def collect_indexed_sessions(limit: int = 1000) -> List[dict]:
             "indexed_at": str(doc.get("indexed_at")) if doc.get("indexed_at") else None,
             "source": "interaction_session",
         }
+        if doc.get("namespace"):
+            metadata["namespace"] = doc["namespace"]
         if doc.get("user_id"):
             metadata["user_id"] = doc["user_id"]
         if doc.get("organisation_concept_id"):
@@ -54,6 +57,7 @@ def collect_indexed_sessions(limit: int = 1000) -> List[dict]:
         items.append(
             {
                 "id": str(doc.get("_id")),
+                "namespace": doc.get("namespace"),
                 "text": text,
                 "embedding": doc.get("embedding"),
                 "metadata": metadata,
@@ -72,6 +76,12 @@ def sync_to_chat_store(namespace: Optional[str] = None, limit: int = 1000) -> di
     added = 0
     failed = 0
     for item in indexed:
+        target_namespace = (
+            namespace
+            or item.get("namespace")
+            or (item.get("metadata") or {}).get("namespace")
+            or "chat_history"
+        )
         doc = {
             "id": item.get("id"),
             "text": item.get("text", ""),
@@ -82,13 +92,13 @@ def sync_to_chat_store(namespace: Optional[str] = None, limit: int = 1000) -> di
 
         try:
             success_count, failure_count = service.upsert_documents(
-                [doc], namespace=namespace
+                [doc], namespace=target_namespace
             )
         except Exception:
             # Retry without embedding if backend rejects it
             doc.pop("embedding", None)
             success_count, failure_count = service.upsert_documents(
-                [doc], namespace=namespace
+                [doc], namespace=target_namespace
             )
 
         added += success_count
@@ -112,6 +122,7 @@ def sync_one_session(session_id: str, namespace: Optional[str] = None) -> dict:
         {"_id": ObjectId(session_id), "indexing_status": "indexed"},
         {
             "_id": 1,
+            "namespace": 1,
             "embedding": 1,
             "summary": 1,
             "history": 1,
@@ -152,6 +163,8 @@ def sync_one_session(session_id: str, namespace: Optional[str] = None) -> dict:
         "indexed_at": str(doc.get("indexed_at")) if doc.get("indexed_at") else None,
         "source": "interaction_session",
     }
+    if doc.get("namespace"):
+        metadata["namespace"] = doc["namespace"]
     if doc.get("user_id"):
         metadata["user_id"] = doc["user_id"]
     if doc.get("organisation_concept_id"):
@@ -168,7 +181,7 @@ def sync_one_session(session_id: str, namespace: Optional[str] = None) -> dict:
     if isinstance(embedding, list) and embedding:
         upsert_doc["embedding"] = embedding
 
-    ns = namespace or "chat_history"
+    ns = namespace or doc.get("namespace") or "chat_history"
     try:
         success_count, failure_count = service.upsert_documents(
             [upsert_doc], namespace=ns
