@@ -16,11 +16,11 @@ This document provides an overview of key files within the `docs` directory that
 > 8. When uncertain, ask succinctly—do not guess or fabricate behaviour.
 > 9. Always check VS Code’s Problems panel (or run `get_errors`) after edits and whenever the user reports an error.
 > 10. Avoid writing monolithic code to solve the immediate problem at hand. Wherever possible, factor work into small, composable functions with clear responsibilities. Prefer local, purpose-built helpers over a single global “do everything” helper or a new mini‑framework. Choose abstractions that are just deep enough to support likely near‑term change.
-> 
+>
 > For high‑risk state changes (database writes, Vontology/concept mutations, user identity/auth/org handling), prefer a single, well-defined authoritative pathway (service/tool/API) and reuse it consistently. Treat “another way of doing the same mutation” as a design smell and apply extra care: trace the call path, add/update tests, and avoid bypassing logging/validation.
 > 11. When starting a new task or implementing a new function, build enough context to act confidently: confirm the purpose, identify the relevant existing code paths (especially the authoritative mutation pathway), and note key constraints. For small fixes, timebox this investigation and start with the smallest safe change.
 > 12. Remember that this work is for an AI system that richly integrates knowledge management, representation and acquisition, with LLM capabilities and reasoning. Reasoning and representation can be done by logic, logical form, and text-based methods. There is a core "vontology" with a current underlying representation, but the possibility of other implementations should be acknowledged.
-> 13. Prefer to use MCP tools (vontology, Jira, MongoDB) if available over writing "here" commands or scripts. This is only a weak preference - if MCP doesn't work, let the user know and try an alternative method.
+> 13. Use MCP tools (Vontology, JIRA, MongoDB) by default over writing ad-hoc scripts or direct database code. If MCP does not support your case, explain why and use the smallest safe alternative.
 
 ## 🇳🇿 CRITICAL: New Zealand English Only
 
@@ -50,7 +50,7 @@ When To Act Automatically:
 - Consolidate duplicated DOM update logic into a single helper before expanding features (prevents regression drift).
 - Add a regression test for every state/format loss bug fix (load → edit → save → re-edit cycle) before declaring completion.
 
-Jira assignee updates (do not misinterpret tooling):
+JIRA assignee updates (do not misinterpret tooling):
 - If an issue is created without an assignee (or with the wrong one), it can usually be fixed retrospectively using the Atlassian MCP edit tool.
 - Preferred pattern (assignee by accountId):
   ```python
