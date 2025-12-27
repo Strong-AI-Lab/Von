@@ -558,3 +558,85 @@ def test_run_recovers_from_invalid_tool_call_json_with_retry():
     aux_types = [entry.get("type") for entry in result.aux_llm_calls]
     assert "missing_tool_call_detection" in aux_types
     assert "missing_tool_call_retry" in aux_types
+
+
+def test_run_recovers_from_late_turn_invalid_tool_call_json_with_retry():
+    """Regression test (JVNAUTOSCI-842): late-turn parse errors should not crash.
+
+    Scenario: after executing a tool, the follow-up response attempts another tool
+    call but emits malformed JSON. The orchestrator should retry once and continue.
+    """
+
+    gateway = _DummyGateway()
+    llm = _RecorderLLM(
+        [
+            # Initial response: tool call.
+            '{"action":"call_tool","tool":"test","payload":{}}',
+            # Follow-up after tool invocation: malformed JSON tool call.
+            '{"action":"call_tool","tool":"test","payload":{}',
+            # Retry response: valid tool call.
+            '{"action":"call_tool","tool":"test","payload":{}}',
+            # Follow-up after second tool invocation.
+            "Final response",
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=2,
+    )
+
+    result = orchestrator.run(
+        prompt="hello",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert len(gateway.calls) == 2
+    assert result.response_text == "Final response"
+    assert all(inv.get("tool") != "__tool_call_parse_error__" for inv in result.tool_invocations)
+
+    aux_types = [entry.get("type") for entry in result.aux_llm_calls]
+    assert "missing_tool_call_detection" in aux_types
+    assert "missing_tool_call_retry" in aux_types
+
+
+def test_run_surfaces_late_turn_parse_error_when_retry_also_invalid():
+    """Regression test (JVNAUTOSCI-842): late-turn parse errors should surface cleanly.
+
+    If both the original follow-up and the retry response are malformed, the
+    orchestrator should return an actionable serialisation error and include a
+    parse-error tool invocation (while preserving earlier tool invocations).
+    """
+
+    gateway = _DummyGateway()
+    llm = _RecorderLLM(
+        [
+            # Initial response: tool call.
+            '{"action":"call_tool","tool":"test","payload":{}}',
+            # Follow-up after tool invocation: malformed JSON tool call.
+            '{"action":"call_tool","tool":"test","payload":{}',
+            # Retry response: still malformed.
+            '{"action":"call_tool","tool":"test","payload":{}',
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=2,
+    )
+
+    result = orchestrator.run(
+        prompt="hello",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert len(gateway.calls) == 1
+    assert "Tool call was not executed due to an MCP serialisation error" in result.response_text
+    assert any(inv.get("tool") == "__tool_call_parse_error__" for inv in result.tool_invocations)
+    assert any(inv.get("tool") == "test" for inv in result.tool_invocations)

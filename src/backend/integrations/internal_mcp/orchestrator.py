@@ -1537,6 +1537,40 @@ class InternalMCPChatOrchestrator:
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
 
+        def _build_tool_call_parse_error_result(
+            tool_call_parse_error: ToolCallParsingError,
+            *,
+            invocations_override: Sequence[Mapping[str, Any]] = (),
+            tool_messages_override: Sequence[Mapping[str, Any]] = (),
+        ) -> OrchestratorResult:
+            rejected_tool_call = tool_call_parse_error.raw_response
+            if isinstance(rejected_tool_call, str):
+                rejected_tool_call = rejected_tool_call[:8000]
+
+            tool_invocations = list(invocations_override)
+            tool_invocations.append(
+                {
+                    "tool": "__tool_call_parse_error__",
+                    "payload": (
+                        {"raw_tool_call": rejected_tool_call}
+                        if rejected_tool_call is not None
+                        else {}
+                    ),
+                    "error": str(tool_call_parse_error),
+                }
+            )
+
+            return OrchestratorResult(
+                response_text=(
+                    "Tool call was not executed due to an MCP serialisation error. "
+                    f"({tool_call_parse_error})\n\n"
+                    "Please try again. If this keeps happening, copy the LLM debug output so we can reproduce it."
+                ),
+                extra_messages=tuple(tool_messages_override),
+                tool_invocations=tuple(tool_invocations),
+                aux_llm_calls=tuple(aux_llm_calls),
+            )
+
         trace_enabled = os.getenv("VON_WORKFLOWS_TRACE_ENABLED", "0").lower() in {
             "1",
             "true",
@@ -1856,29 +1890,8 @@ class InternalMCPChatOrchestrator:
                     # the user experience consistent with the route-level error
                     # handling (but retain aux_llm_calls for debugging).
                     if tool_call_parse_error is not None:
-                        rejected_tool_call = tool_call_parse_error.raw_response
-                        if isinstance(rejected_tool_call, str):
-                            rejected_tool_call = rejected_tool_call[:8000]
-
-                        result = OrchestratorResult(
-                            response_text=(
-                                "Tool call was not executed due to an MCP serialisation error. "
-                                f"({tool_call_parse_error})\n\n"
-                                "Please try again. If this keeps happening, copy the LLM debug output so we can reproduce it."
-                            ),
-                            extra_messages=(),
-                            tool_invocations=(
-                                {
-                                    "tool": "__tool_call_parse_error__",
-                                    "payload": (
-                                        {"raw_tool_call": rejected_tool_call}
-                                        if rejected_tool_call is not None
-                                        else {}
-                                    ),
-                                    "error": str(tool_call_parse_error),
-                                },
-                            ),
-                            aux_llm_calls=tuple(aux_llm_calls),
+                        result = _build_tool_call_parse_error_result(
+                            tool_call_parse_error,
                         )
                         _persist_trace(status="completed")
                         return result
@@ -1919,7 +1932,111 @@ class InternalMCPChatOrchestrator:
             if first_iteration_structured:
                 first_iteration_structured = False  # Only skip once
             else:
-                tool_calls = self._extract_tool_calls(current_response)
+                try:
+                    tool_calls = self._extract_tool_calls(current_response)
+                except ToolCallParsingError as exc:
+                    # Late-turn parse errors (after tool execution) should not crash the
+                    # orchestrator; route through the same single-retry recovery logic.
+                    assessment = self._assess_missing_tool_call(
+                        response_text=(
+                            current_response
+                            if isinstance(current_response, str)
+                            else str(current_response)
+                        ),
+                        use_structured=False,
+                        interpretation=None,
+                        llm_client=llm_client,
+                        model=model,
+                        aux_log=aux_llm_calls,
+                        tool_call_parse_error=exc,
+                    )
+
+                    try:
+                        aux_llm_calls.append(
+                            {
+                                "type": "missing_tool_call_detection",
+                                "path": assessment.path,
+                                "is_json_action": assessment.is_json_action,
+                                "fenced_json": assessment.fenced_json,
+                                "classifier_used": assessment.classifier_used,
+                                "classifier_verdict": (
+                                    "yes"
+                                    if assessment.classifier_verdict is True
+                                    else "no"
+                                    if assessment.classifier_verdict is False
+                                    else "unavailable"
+                                ),
+                                "retry_reason": assessment.retry_reason or "",
+                                "parse_error": str(exc),
+                            }
+                        )
+                    except Exception:  # pragma: no cover - best effort only
+                        pass
+
+                    if assessment.retry_reason:
+                        retry_prompt = self._missing_tool_call_retry_prompt()
+                        try:
+                            aux_llm_calls.append(
+                                {
+                                    "type": "missing_tool_call_retry",
+                                    "path": assessment.path,
+                                    "stage": "prompt",
+                                    "retry_reason": assessment.retry_reason,
+                                    "prompt_preview": retry_prompt[:800],
+                                }
+                            )
+                        except Exception:  # pragma: no cover
+                            pass
+
+                        retry_response = llm_client.generate(
+                            retry_prompt, context=augmented_context, model=model
+                        )
+                        try:
+                            aux_llm_calls.append(
+                                {
+                                    "type": "missing_tool_call_retry",
+                                    "path": assessment.path,
+                                    "stage": "response",
+                                    "retry_reason": assessment.retry_reason,
+                                    "response_preview": (
+                                        retry_response[:800]
+                                        if isinstance(retry_response, str)
+                                        else str(retry_response)[:800]
+                                    ),
+                                }
+                            )
+                        except Exception:  # pragma: no cover
+                            pass
+
+                        try:
+                            retry_calls = self._extract_tool_calls(retry_response)
+                        except ToolCallParsingError as retry_exc:
+                            result = _build_tool_call_parse_error_result(
+                                retry_exc,
+                                invocations_override=tuple(invocations),
+                                tool_messages_override=tuple(tool_messages),
+                            )
+                            _persist_trace(status="completed")
+                            return result
+
+                        if retry_calls:
+                            current_response = retry_response
+                            tool_calls = retry_calls
+                        else:
+                            current_response = (
+                                retry_response
+                                if isinstance(retry_response, str)
+                                else str(retry_response)
+                            )
+                            break
+                    else:
+                        result = _build_tool_call_parse_error_result(
+                            exc,
+                            invocations_override=tuple(invocations),
+                            tool_messages_override=tuple(tool_messages),
+                        )
+                        _persist_trace(status="completed")
+                        return result
 
             if not tool_calls:
                 break
@@ -1968,9 +2085,23 @@ class InternalMCPChatOrchestrator:
                     )
 
                 if not isinstance(tool_name, str):
-                    raise ToolCallParsingError("Tool name must be a string.")
+                    raise ToolCallParsingError(
+                        "Tool name must be a string.",
+                        raw_response=(
+                            current_response
+                            if isinstance(current_response, str)
+                            else str(current_response)
+                        ),
+                    )
                 if not isinstance(payload, MutableMapping):
-                    raise ToolCallParsingError("Tool payload must be a JSON object.")
+                    raise ToolCallParsingError(
+                        "Tool payload must be a JSON object.",
+                        raw_response=(
+                            current_response
+                            if isinstance(current_response, str)
+                            else str(current_response)
+                        ),
+                    )
 
                 try:
                     if tool_name.startswith("gmail_"):
