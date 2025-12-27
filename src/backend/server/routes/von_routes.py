@@ -1056,24 +1056,37 @@ def generate():
         # Derive user namespace for MCP tool isolation (JVNAUTOSCI-760)
         user_namespace = None
         if user_concept_id:
-            # Convert concept ID to namespace format (#V#michael_witbrock)
-            # Handle both full concept ID and person ID formats
-            if user_concept_id.startswith("#V#"):
-                user_namespace = user_concept_id
-            else:
-                # Normalize to namespace format
-                user_id_normalized = (
-                    user_concept_id.lower()
-                    .replace(" ", "_")
-                    .replace("#v#", "")
-                    .replace("#", "")
+            session_namespace = session.get("namespace")
+            if (
+                isinstance(session_namespace, str)
+                and session_namespace.strip()
+                and session_namespace.startswith("#V#")
+            ):
+                user_namespace = session_namespace.strip()
+                current_app.logger.info(
+                    "[NAMESPACE] Using session namespace=%s for user_concept_id=%s",
+                    user_namespace,
+                    user_concept_id,
                 )
-                user_namespace = f"#V#{user_id_normalized}"
-            current_app.logger.info(
-                "[NAMESPACE] Derived user_namespace=%s from user_concept_id=%s",
-                user_namespace,
-                user_concept_id,
-            )
+            else:
+                # Convert concept ID to namespace format (#V#michael_witbrock)
+                # Handle both full concept ID and person ID formats
+                if user_concept_id.startswith("#V#"):
+                    user_namespace = user_concept_id
+                else:
+                    # Normalize to namespace format
+                    user_id_normalized = (
+                        user_concept_id.lower()
+                        .replace(" ", "_")
+                        .replace("#v#", "")
+                        .replace("#", "")
+                    )
+                    user_namespace = f"#V#{user_id_normalized}"
+                current_app.logger.info(
+                    "[NAMESPACE] Derived user_namespace=%s from user_concept_id=%s",
+                    user_namespace,
+                    user_concept_id,
+                )
         else:
             current_app.logger.warning(
                 "[NAMESPACE] No user_concept_id - user_namespace=None (RAG unavailable)"

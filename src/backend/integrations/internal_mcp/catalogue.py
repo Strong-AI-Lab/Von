@@ -2039,10 +2039,12 @@ def _search_knowledge_base(**kwargs):
 
             if flask_session.get("user_id"):
                 permissions_context["user_id"] = flask_session.get("user_id")
-            if flask_session.get("org_id"):
-                permissions_context["organisation_concept_id"] = flask_session.get(
-                    "org_id"
-                )
+            org_concept_id = flask_session.get("organisation_concept_id")
+            if not org_concept_id:
+                # Backwards compatibility for older session key.
+                org_concept_id = flask_session.get("org_id")
+            if org_concept_id:
+                permissions_context["organisation_concept_id"] = org_concept_id
         except (ImportError, RuntimeError):
             # Not in Flask context - use user_id from kwargs if available
             if isinstance(user_id, str) and user_id.strip():
