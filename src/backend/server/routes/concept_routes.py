@@ -808,8 +808,24 @@ def submit_concept_answer_route(concept_id: str):
         # The call below would be more like:
         # result = concept_service.process_answer_for_interaction(interaction_id, answer, concept_id)
         # Since `submit_concept_answer` is what's in the service, we'll call that,
-        # acknowledging the `session` parameter issue.        # Fetch the interaction session by ID
-        session = concept_service.get_interaction_session_by_id(interaction_id)
+        # acknowledging the `session` parameter issue.
+
+        # Use the centralized and secure method to get the effective user concept ID
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_id = get_effective_user_concept_id()
+        if not user_id:
+            return (
+                jsonify(
+                    error="Missing user context: provide X-User-Client-ID header or establish session"
+                ),
+                400,
+            )
+
+        # Fetch the interaction session by ID (scoped to effective user/org)
+        session = concept_service.get_interaction_session_by_id(
+            interaction_id, user_id=user_id
+        )
         if not session:
             current_app.logger.warning(
                 f"Interaction session not found for ID: {interaction_id}"
@@ -906,8 +922,21 @@ def resume_interaction_route(concept_id: str):
         if not data or "interaction_id" not in data:
             return jsonify(error="interaction_id is required"), 400
 
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_id = get_effective_user_concept_id()
+        if not user_id:
+            return (
+                jsonify(
+                    error="Missing user context: provide X-User-Client-ID header or establish session"
+                ),
+                400,
+            )
+
         interaction_id = data["interaction_id"]
-        resumed_session = concept_service.resume_interaction_session(interaction_id)
+        resumed_session = concept_service.resume_interaction_session(
+            interaction_id, user_id=user_id
+        )
 
         return jsonify(resumed_session), 200
 

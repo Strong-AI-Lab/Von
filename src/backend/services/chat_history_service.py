@@ -26,13 +26,15 @@ def get_session_context() -> Dict[str, Any]:
         from flask import session as flask_session
 
         return {
-            "org_id": flask_session.get("org_id"),
+            # Prefer current key, fall back to legacy.
+            "organisation_concept_id": flask_session.get("organisation_concept_id")
+            or flask_session.get("org_id"),
             "role_in_org": flask_session.get("role_in_org"),
             "namespace": flask_session.get("namespace"),
         }
     except (ImportError, RuntimeError):
         # Not in Flask context or session not available
-        return {"org_id": None, "role_in_org": None}
+        return {"organisation_concept_id": None, "role_in_org": None}
 
 
 class ChatHistoryServiceError(Exception):
@@ -288,8 +290,9 @@ def add_message_to_history(
                     }
 
                     # Include organisation and role metadata if available
-                    if session_context.get("org_id"):
-                        metadata["organisation_concept_id"] = session_context["org_id"]
+                    org_concept_id = session_context.get("organisation_concept_id")
+                    if org_concept_id:
+                        metadata["organisation_concept_id"] = org_concept_id
                     if session_context.get("role_in_org"):
                         metadata["role_in_org"] = session_context["role_in_org"]
 
@@ -297,9 +300,25 @@ def add_message_to_history(
                     if not isinstance(ns, str) or not ns.strip():
                         ns = "chat_history"
                     rag.upsert_documents([doc], namespace=ns)
+
+                    # Track indexing progress per chat session for status UI.
+                    try:
+                        chat_history_coll.update_one(
+                            {"user_id": user_id, "session_id": session_id},
+                            {"$inc": {"rag_indexed_success": 1}},
+                        )
+                    except Exception:
+                        pass
             except Exception as e:
                 # Log but don't fail the chat request
                 logger.warning(f"Failed to index chat message to RAG: {e}")
+                try:
+                    chat_history_coll.update_one(
+                        {"user_id": user_id, "session_id": session_id},
+                        {"$inc": {"rag_indexed_failed": 1}},
+                    )
+                except Exception:
+                    pass
 
     except PyMongoError as e:
         logger.error(f"Error adding message to history: {e}", exc_info=True)
@@ -695,3 +714,416 @@ def backfill_chat_history_for_user(
     except PyMongoError as e:
         logger.error(f"Error during chat history backfill: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Backfill failed: {e}") from e
+
+
+def reindex_chat_history_for_user_namespace(
+    *,
+    user_concept_id: str,
+    target_namespace: str,
+    organisation_concept_id: Optional[str] = None,
+    role_in_org: Optional[str] = None,
+    session_ids: Optional[List[str]] = None,
+    max_sessions: int = 50,
+    max_messages: int = 5000,
+    reset_counters: bool = True,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Reindex chat history messages into RAG for sessions already in a namespace.
+
+    This exists because older chat sessions may have:
+    - never been indexed (RAG not available at the time), or
+    - been indexed with non-deterministic IDs (hard to deduplicate), or
+    - missing/incorrect per-session counters.
+
+    Behaviour:
+    - Scopes to documents with {user_id=user_concept_id, namespace=target_namespace}
+    - Indexes only non-reset messages with non-empty string content
+    - Uses deterministic IDs (idempotent) so repeated runs are safe
+    - Optionally resets rag_indexed_success/failed per session before reindexing
+    """
+
+    if not isinstance(user_concept_id, str) or not user_concept_id:
+        raise ChatHistoryServiceError("user_concept_id is required")
+    if not isinstance(target_namespace, str) or not target_namespace:
+        raise ChatHistoryServiceError("target_namespace is required")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    safe_max_sessions = 50
+    if isinstance(max_sessions, int) and max_sessions > 0:
+        safe_max_sessions = min(max_sessions, 2000)
+
+    safe_max_messages = 5000
+    if isinstance(max_messages, int) and max_messages > 0:
+        safe_max_messages = min(max_messages, 200000)
+
+    rag = None
+    if get_rag_service:
+        try:
+            rag = get_rag_service()
+        except Exception:
+            rag = None
+
+    query: Dict[str, Any] = {
+        "user_id": user_concept_id,
+        "namespace": target_namespace,
+    }
+    if session_ids:
+        query["session_id"] = {"$in": [sid for sid in session_ids if sid]}
+
+    sessions_examined = 0
+    sessions_reindexed = 0
+    messages_indexed_attempted = 0
+    messages_indexed_success = 0
+    messages_indexed_failed = 0
+    errors: List[Dict[str, Any]] = []
+
+    deterministic_namespace_uuid = uuid.UUID("8c5a7fa9-9a7c-4f0f-8c1f-f4ad7f9f6fd7")
+
+    try:
+        cursor = chat_history_coll.find(query)
+
+        for doc in cursor:
+            if sessions_examined >= safe_max_sessions:
+                break
+            sessions_examined += 1
+
+            session_id = doc.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                continue
+
+            if reset_counters and not dry_run:
+                try:
+                    chat_history_coll.update_one(
+                        {"_id": doc["_id"]},
+                        {"$set": {"rag_indexed_success": 0, "rag_indexed_failed": 0}},
+                    )
+                except Exception:
+                    # Best-effort only.
+                    pass
+
+            history = doc.get("history") or []
+            if not isinstance(history, list) or not history:
+                continue
+
+            did_any = False
+            for idx, msg in enumerate(history):
+                if messages_indexed_attempted >= safe_max_messages:
+                    break
+                if not isinstance(msg, dict) or _is_reset_marker(msg):
+                    continue
+
+                content = msg.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    continue
+
+                messages_indexed_attempted += 1
+                did_any = True
+
+                if rag is None or dry_run:
+                    messages_indexed_success += 1
+                    continue
+
+                try:
+                    ts = _coerce_datetime(msg.get("timestamp"))
+                    doc_id = str(
+                        uuid.uuid5(
+                            deterministic_namespace_uuid,
+                            f"{target_namespace}|{user_concept_id}|{session_id}|{idx}",
+                        )
+                    )
+                    text = content.strip()
+                    if len(text) > 5000:
+                        text = text[:5000]
+
+                    metadata = {
+                        "type": "chat_message",
+                        "user_id": user_concept_id,
+                        "session_id": session_id,
+                        "role": msg.get("role", "unknown"),
+                        "timestamp": ts.isoformat() if ts else None,
+                        "organisation_concept_id": organisation_concept_id,
+                        "role_in_org": role_in_org,
+                        "reindexed": True,
+                    }
+
+                    rag.upsert_documents(
+                        [{"id": doc_id, "text": text, "metadata": metadata}],
+                        namespace=target_namespace,
+                    )
+                    messages_indexed_success += 1
+
+                    try:
+                        chat_history_coll.update_one(
+                            {"user_id": user_concept_id, "session_id": session_id},
+                            {"$inc": {"rag_indexed_success": 1}},
+                        )
+                    except Exception:
+                        pass
+                except Exception as e:
+                    messages_indexed_failed += 1
+                    errors.append(
+                        {
+                            "type": "index_failed",
+                            "session_id": session_id,
+                            "message_index": idx,
+                            "error": str(e),
+                        }
+                    )
+                    try:
+                        chat_history_coll.update_one(
+                            {"user_id": user_concept_id, "session_id": session_id},
+                            {"$inc": {"rag_indexed_failed": 1}},
+                        )
+                    except Exception:
+                        pass
+
+            if did_any:
+                sessions_reindexed += 1
+
+        return {
+            "status": "ok",
+            "user_concept_id": user_concept_id,
+            "target_namespace": target_namespace,
+            "dry_run": bool(dry_run),
+            "reset_counters": bool(reset_counters),
+            "sessions_examined": sessions_examined,
+            "sessions_reindexed": sessions_reindexed,
+            "messages_indexed_attempted": messages_indexed_attempted,
+            "messages_indexed_success": messages_indexed_success,
+            "messages_indexed_failed": messages_indexed_failed,
+            "errors": errors,
+        }
+    except PyMongoError as e:
+        logger.error(f"Error during chat history reindex: {e}", exc_info=True)
+        raise ChatHistoryServiceError(f"Reindex failed: {e}") from e
+
+
+def reindex_chat_history_session_chunk(
+    *,
+    user_concept_id: str,
+    target_namespace: str,
+    session_id: str,
+    organisation_concept_id: Optional[str] = None,
+    role_in_org: Optional[str] = None,
+    chunk_start: int = 0,
+    chunk_size: int = 25,
+    reset_counters: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Reindex a single chat history session in small chunks.
+
+    This exists to make long-running reindex operations reliable:
+    - Each call processes at most `chunk_size` indexable messages.
+    - Returns `next_chunk_start` so the client can resume.
+
+    `chunk_start` is an index into the raw `history` list (not filtered).
+    This keeps resumption stable across calls.
+    """
+
+    if not isinstance(user_concept_id, str) or not user_concept_id:
+        raise ChatHistoryServiceError("user_concept_id is required")
+    if not isinstance(target_namespace, str) or not target_namespace:
+        raise ChatHistoryServiceError("target_namespace is required")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required")
+
+    safe_chunk_start = 0
+    if isinstance(chunk_start, int) and chunk_start > 0:
+        safe_chunk_start = min(chunk_start, 1_000_000)
+
+    safe_chunk_size = 25
+    if isinstance(chunk_size, int) and chunk_size > 0:
+        safe_chunk_size = min(chunk_size, 500)
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    rag = None
+    if get_rag_service:
+        try:
+            rag = get_rag_service()
+        except Exception:
+            rag = None
+
+    doc = chat_history_coll.find_one(
+        {
+            "user_id": user_concept_id,
+            "namespace": target_namespace,
+            "session_id": session_id,
+        },
+        {"history": 1, "_id": 1},
+    )
+    if not doc:
+        return {
+            "status": "not_found",
+            "user_concept_id": user_concept_id,
+            "target_namespace": target_namespace,
+            "session_id": session_id,
+            "chunk_start": safe_chunk_start,
+            "chunk_size": safe_chunk_size,
+            "done": True,
+        }
+
+    history = doc.get("history") or []
+    if not isinstance(history, list) or not history:
+        return {
+            "status": "ok",
+            "user_concept_id": user_concept_id,
+            "target_namespace": target_namespace,
+            "session_id": session_id,
+            "chunk_start": safe_chunk_start,
+            "chunk_size": safe_chunk_size,
+            "history_len": 0,
+            "indexable_total": 0,
+            "messages_indexed_attempted": 0,
+            "messages_indexed_success": 0,
+            "messages_indexed_failed": 0,
+            "errors": [],
+            "next_chunk_start": 0,
+            "done": True,
+        }
+
+    history_len = len(history)
+    indexable_total = 0
+    for msg in history:
+        if not isinstance(msg, dict) or _is_reset_marker(msg):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        indexable_total += 1
+
+    if reset_counters and not dry_run:
+        try:
+            chat_history_coll.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"rag_indexed_success": 0, "rag_indexed_failed": 0}},
+            )
+        except Exception:
+            pass
+
+    deterministic_namespace_uuid = uuid.UUID("8c5a7fa9-9a7c-4f0f-8c1f-f4ad7f9f6fd7")
+    docs_to_upsert: List[Dict[str, Any]] = []
+    errors: List[Dict[str, Any]] = []
+
+    next_chunk_start = history_len
+    for idx in range(safe_chunk_start, history_len):
+        msg = history[idx]
+        if not isinstance(msg, dict) or _is_reset_marker(msg):
+            continue
+
+        content = msg.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+
+        ts = _coerce_datetime(msg.get("timestamp"))
+        doc_id = str(
+            uuid.uuid5(
+                deterministic_namespace_uuid,
+                f"{target_namespace}|{user_concept_id}|{session_id}|{idx}",
+            )
+        )
+        text = content.strip()
+        if len(text) > 5000:
+            text = text[:5000]
+
+        metadata = {
+            "type": "chat_message",
+            "user_id": user_concept_id,
+            "session_id": session_id,
+            "role": msg.get("role", "unknown"),
+            "timestamp": ts.isoformat() if ts else None,
+            "organisation_concept_id": organisation_concept_id,
+            "role_in_org": role_in_org,
+            "reindexed": True,
+        }
+
+        docs_to_upsert.append({"id": doc_id, "text": text, "metadata": metadata})
+
+        if len(docs_to_upsert) >= safe_chunk_size:
+            next_chunk_start = idx + 1
+            break
+
+    if not docs_to_upsert:
+        return {
+            "status": "ok",
+            "user_concept_id": user_concept_id,
+            "target_namespace": target_namespace,
+            "session_id": session_id,
+            "chunk_start": safe_chunk_start,
+            "chunk_size": safe_chunk_size,
+            "history_len": history_len,
+            "indexable_total": indexable_total,
+            "messages_indexed_attempted": 0,
+            "messages_indexed_success": 0,
+            "messages_indexed_failed": 0,
+            "errors": [],
+            "next_chunk_start": history_len,
+            "done": True,
+        }
+
+    messages_indexed_attempted = len(docs_to_upsert)
+    messages_indexed_success = 0
+    messages_indexed_failed = 0
+
+    if rag is None or dry_run:
+        messages_indexed_success = messages_indexed_attempted
+    else:
+        try:
+            s, f = rag.upsert_documents(
+                docs_to_upsert,
+                namespace=target_namespace,
+                allow_partial_failures=True,
+            )
+            messages_indexed_success += int(s or 0)
+            messages_indexed_failed += int(f or 0)
+        except Exception as e:
+            # Best-effort: treat the whole chunk as failed.
+            messages_indexed_failed += messages_indexed_attempted
+            errors.append(
+                {
+                    "type": "index_failed",
+                    "session_id": session_id,
+                    "chunk_start": safe_chunk_start,
+                    "chunk_size": safe_chunk_size,
+                    "error": str(e),
+                }
+            )
+
+    if not dry_run:
+        try:
+            if messages_indexed_success:
+                chat_history_coll.update_one(
+                    {"user_id": user_concept_id, "session_id": session_id},
+                    {"$inc": {"rag_indexed_success": messages_indexed_success}},
+                )
+            if messages_indexed_failed:
+                chat_history_coll.update_one(
+                    {"user_id": user_concept_id, "session_id": session_id},
+                    {"$inc": {"rag_indexed_failed": messages_indexed_failed}},
+                )
+        except Exception:
+            pass
+
+    done = next_chunk_start >= history_len
+
+    return {
+        "status": "ok",
+        "user_concept_id": user_concept_id,
+        "target_namespace": target_namespace,
+        "session_id": session_id,
+        "chunk_start": safe_chunk_start,
+        "chunk_size": safe_chunk_size,
+        "history_len": history_len,
+        "indexable_total": indexable_total,
+        "messages_indexed_attempted": messages_indexed_attempted,
+        "messages_indexed_success": messages_indexed_success,
+        "messages_indexed_failed": messages_indexed_failed,
+        "errors": errors,
+        "next_chunk_start": next_chunk_start,
+        "done": done,
+    }
