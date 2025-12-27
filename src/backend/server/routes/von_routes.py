@@ -1093,6 +1093,215 @@ def generate():
             )
 
         # ---------------------------------------------------------
+        # Tool-backed RAG counts (avoid KA vs chat-history confusion)
+        # ---------------------------------------------------------
+        # We bypass the LLM for simple factual questions about indexed sessions,
+        # because the assistant can otherwise confuse:
+        # - interaction sessions (KA sessions) vs
+        # - chat history sessions.
+        def _is_rag_counts_question(text: str) -> bool:
+            lowered = (text or "").strip().lower()
+            if not lowered:
+                return False
+
+            # Keep this intentionally narrow to avoid hijacking normal chat.
+            count_triggers = (
+                "how many",
+                "count",
+                "number of",
+            )
+            domain_triggers = (
+                "indexed",
+                "rag",
+            )
+            chat_triggers = (
+                "chat session",
+                "chat sessions",
+                "chat history",
+            )
+            ka_triggers = (
+                "ka",
+                "interaction session",
+                "interaction sessions",
+            )
+
+            has_count = any(t in lowered for t in count_triggers)
+            has_domain = any(t in lowered for t in domain_triggers)
+            refers_chat = any(t in lowered for t in chat_triggers)
+            refers_ka = any(t in lowered for t in ka_triggers)
+
+            # Examples:
+            # - "How many indexed chat sessions can you see?"
+            # - "How many chat history sessions are indexed?"
+            # - "How many KA sessions are indexed?"
+            return has_count and has_domain and (refers_chat or refers_ka)
+
+        if (
+            user_concept_id
+            and user_namespace
+            and gateway is not None
+            and getattr(gateway, "enabled", False)
+            and _is_rag_counts_question(prompt_text)
+        ):
+            import json as _json
+
+            user_id_for_history: str = user_concept_id
+
+            tool_invocations = []
+            try:
+                tool_result = gateway.invoke(
+                    "rag_get_status",
+                    {"namespace": user_namespace, "detail": 1},
+                )
+                payload = tool_result.payload
+                duration_ms = getattr(tool_result, "duration_ms", None)
+
+                tool_payload = _json.dumps(
+                    {
+                        "tool": "rag_get_status",
+                        "status": "ok",
+                        "duration_ms": duration_ms,
+                        "payload": payload,
+                    },
+                    default=str,
+                )
+                tool_messages = [{"role": "tool", "content": tool_payload}]
+                tool_invocations = [
+                    {
+                        "tool": "rag_get_status",
+                        "payload": {"namespace": user_namespace, "detail": 1},
+                        "duration_ms": duration_ms,
+                        "direct_user_call": False,
+                    }
+                ]
+
+                # Summarise counts in a way that makes the KA vs chat distinction explicit.
+                rs = payload if isinstance(payload, dict) else {}
+                ka_indexed = rs.get("indexed")
+                ch_sessions = rs.get("chat_history_sessions_in_namespace")
+                if ch_sessions is None:
+                    ch_sessions = rs.get("chat_history_sessions")
+
+                ch_details = rs.get("chat_history_session_details")
+                fully_indexed = None
+                any_indexed = None
+                if isinstance(ch_details, list) and ch_details:
+
+                    def _as_int(value):
+                        try:
+                            return int(value)
+                        except Exception:
+                            return 0
+
+                    fully_indexed = 0
+                    any_indexed = 0
+                    for row in ch_details:
+                        if not isinstance(row, dict):
+                            continue
+                        missing = _as_int(row.get("messages_missing_index"))
+                        ok = _as_int(row.get("rag_indexed_success"))
+                        fail = _as_int(row.get("rag_indexed_failed"))
+                        indexed_total = row.get("messages_indexed_total")
+                        indexed_total_int = (
+                            _as_int(indexed_total)
+                            if indexed_total is not None
+                            else (ok + fail)
+                        )
+
+                        if indexed_total_int > 0:
+                            any_indexed += 1
+                        if missing <= 0:
+                            fully_indexed += 1
+
+                parts = []
+                parts.append(
+                    f"Chat history sessions (in namespace): {ch_sessions if ch_sessions is not None else '—'}"
+                )
+                if any_indexed is not None:
+                    parts.append(
+                        f"Chat history sessions with any indexed messages: {any_indexed}"
+                    )
+                if fully_indexed is not None:
+                    parts.append(
+                        f"Chat history sessions fully indexed (missing=0): {fully_indexed}"
+                    )
+                parts.append(
+                    f"KA interaction sessions indexed: {ka_indexed if ka_indexed is not None else '—'}"
+                )
+
+                response_text = (
+                    "Here are the server-truth counts (RAG status), keeping chat history separate from KA interaction sessions:\n\n"
+                    + "\n".join(f"- {p}" for p in parts)
+                )
+            except Exception as exc:
+                response_text = (
+                    f"I could not retrieve RAG status via internal tools: {exc}"
+                )
+                tool_messages = []
+
+            # Persist messages in history/context.
+            chat_history_service.add_message_to_history(
+                user_id_for_history,
+                session_id,
+                {"role": "user", "content": prompt_text},
+            )
+            for tool_msg in _truncate_large_tool_results(
+                tool_messages, max_tool_content_chars=5000
+            ):
+                chat_history_service.add_message_to_history(
+                    user_id_for_history, session_id, tool_msg
+                )
+            chat_history_service.add_message_to_history(
+                user_id_for_history,
+                session_id,
+                {"role": "assistant", "content": response_text},
+            )
+            current_app.config["CONTEXT"] = _limit_context_size(
+                current_app.config["CONTEXT"], max_messages=20
+            )
+
+            context_stats = _calculate_context_stats(context)
+            current_context_stats = _calculate_context_stats(
+                current_app.config["CONTEXT"]
+            )
+            tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
+
+            llm_debug_info = {
+                "interaction_timestamp_utc": interaction_timestamp_utc,
+                "model": model_name,
+                "messages": (
+                    [{"role": "user", "content": prompt_text}] + tool_messages
+                ),
+                "response": response_text,
+                "user_prompt": user_prompt_debug,
+                "context_stats": {
+                    "sent_to_llm": context_stats,
+                    "stored_context": current_context_stats,
+                },
+                "tool_stats": tool_stats,
+                "tool_invocations": tool_invocations,
+                "fastpath": {
+                    "name": "rag_counts",
+                    "bypassed_llm": True,
+                    "used_tool": bool(tool_messages),
+                    "enabled": True,
+                },
+            }
+            llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+
+            return jsonify(
+                {
+                    "response": response_text,
+                    "fastpath": {
+                        "name": "rag_counts",
+                        "bypassed_llm": True,
+                        "used_tool": bool(tool_messages),
+                    },
+                    "llm_debug": llm_debug_info,
+                }
+            )
+
+        # ---------------------------------------------------------
         # Optional debug mode: allow user-issued tool calls
         # ---------------------------------------------------------
         # This is disabled by default because it bypasses the LLM's behavioural

@@ -714,7 +714,8 @@ async function updateHistoryLength() {
                                     rehydrateHistory(scrollableField2, history, {
                                         scrollToBottom: true,
                                         preserveScroll: false,
-                                        showResetNotice: false
+                                        showResetNotice: false,
+                                        forceScrollToBottom: true
                                     });
 
                                     modal.classList.remove('open');
@@ -779,7 +780,8 @@ async function loadChatHistory(options = {}) {
         segments,
         scrollToBottom = true,
         preserveScroll = false,
-        showResetNotice = false
+        showResetNotice = false,
+        forceScrollToBottom = false
     } = options;
 
     const scrollableField = document.getElementById('scrollableField');
@@ -810,7 +812,8 @@ async function loadChatHistory(options = {}) {
             rehydrateHistory(scrollableField, data.history, {
                 scrollToBottom,
                 preserveScroll,
-                showResetNotice
+                showResetNotice,
+                forceScrollToBottom
             });
 
             updateHistoryBanner();
@@ -830,11 +833,35 @@ async function loadChatHistory(options = {}) {
     }
 }
 
+function forceScrollToBottomWithRetries(scrollableField, options = {}) {
+    const { attempts = 6 } = options;
+    const maxAttempts = Number.isInteger(attempts) && attempts > 0 ? attempts : 1;
+
+    const requestFrame = (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function')
+        ? window.requestAnimationFrame.bind(window)
+        : (cb) => setTimeout(cb, 0);
+
+    let remaining = maxAttempts;
+    const tick = () => {
+        if (!scrollableField || remaining <= 0) {
+            return;
+        }
+
+        scrollableField.scrollTop = scrollableField.scrollHeight;
+        remaining -= 1;
+        requestFrame(tick);
+    };
+
+    // A few frames is usually enough to catch delayed markdown/layout changes.
+    requestFrame(tick);
+}
+
 function rehydrateHistory(scrollableField, historyMessages, options = {}) {
     const {
         scrollToBottom = true,
         preserveScroll = false,
-        showResetNotice = false
+        showResetNotice = false,
+        forceScrollToBottom = false
     } = options;
 
     const previousScrollHeight = scrollableField.scrollHeight;
@@ -874,6 +901,10 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             scrollableField.scrollTop = previousScrollTop + Math.max(delta, 0);
         } else if (scrollToBottom) {
             scrollableField.scrollTop = scrollableField.scrollHeight;
+
+            if (forceScrollToBottom) {
+                forceScrollToBottomWithRetries(scrollableField);
+            }
         }
         // Update history display to reflect new context count
         updateHistoryLength();
@@ -1212,8 +1243,9 @@ async function handleResetContext() {
             historySegmentsShown = 1;
             const loaded = await loadChatHistory({
                 segments: 1,
-                scrollToBottom: false,
-                showResetNotice: true
+                scrollToBottom: true,
+                showResetNotice: true,
+                forceScrollToBottom: true
             });
 
             if (!loaded) {

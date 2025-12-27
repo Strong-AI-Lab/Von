@@ -2032,12 +2032,18 @@ def _search_knowledge_base(**kwargs):
                 "success": False,
             }
 
-        # Build permissions context from Flask session for org-scoped RAG filtering
+        # Build permissions context from Flask session for org-scoped RAG filtering.
+        # IMPORTANT: Use concept IDs (e.g. #V#user) rather than email/usernames.
         permissions_context = {}
         try:
             from flask import session as flask_session
 
-            if flask_session.get("user_id"):
+            user_concept_id = flask_session.get("user_concept_id")
+            if isinstance(user_concept_id, str) and user_concept_id.strip():
+                permissions_context["user_id"] = user_concept_id.strip()
+            elif flask_session.get("user_id"):
+                # Backwards compatibility: some sessions store a non-concept user_id.
+                # Fall back to that only if we don't have a concept ID.
                 permissions_context["user_id"] = flask_session.get("user_id")
             org_concept_id = flask_session.get("organisation_concept_id")
             if not org_concept_id:
@@ -2194,9 +2200,12 @@ def _rag_get_status(**kwargs):
 
     try:
         ns = kwargs.get("namespace") or os.environ.get("VON_DEFAULT_NAMESPACE")
+        detail = kwargs.get("detail")
         url = "http://127.0.0.1:5002/admin/rag_status"
         if ns:
             url = f"{url}?namespace={ns}"
+        if detail:
+            url = f"{url}{'&' if '?' in url else '?'}detail=1"
         res = requests.get(url, timeout=5)
         if res.ok:
             return res.json()
@@ -3441,7 +3450,7 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             output_schema=None,
             category="read",
-            description="List all RAG-indexed chat sessions/conversations for the current user. Returns total count and session metadata. Use this to answer 'how many RAG sessions' or 'what conversations are indexed'. Namespace filtered automatically.",
+            description="List all RAG-indexed interaction sessions (KA sessions) for the current user. Returns total count and session metadata. Use this to answer 'how many KA sessions are indexed'. Namespace filtered automatically.",
         ),
         MethodDefinition(
             name="rag_get_item",

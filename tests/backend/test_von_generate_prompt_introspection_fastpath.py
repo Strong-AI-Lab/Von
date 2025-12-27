@@ -275,3 +275,68 @@ def test_prompt_introspection_fastpath_disabled_by_default_does_not_trigger(
 
     llm_debug = data.get("llm_debug") or {}
     assert "prompt_introspection_fastpath" not in llm_debug
+
+
+def test_rag_counts_fastpath_bypasses_llm_and_separates_chat_vs_ka(app, monkeypatch):
+    # This fast-path is intentionally NOT gated by VON_DETERMINISTIC_INTROSPECTION,
+    # because it prevents KA vs chat-history confusion for factual status questions.
+
+    gateway_payload = {
+        "success": True,
+        "namespace": "#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+        "indexed": 10,  # KA interaction sessions
+        "chat_history_sessions": 42,
+        "chat_history_sessions_in_namespace": 42,
+        "chat_history_session_details": [
+            {
+                "session_id": "s1",
+                "messages_missing_index": 0,
+                "rag_indexed_success": 3,
+                "rag_indexed_failed": 0,
+            },
+            {
+                "session_id": "s2",
+                "messages_missing_index": 0,
+                "rag_indexed_success": 5,
+                "rag_indexed_failed": 0,
+            },
+        ],
+    }
+
+    # Even if deterministic introspection is disabled, this path should run.
+    monkeypatch.delenv("VON_DETERMINISTIC_INTROSPECTION", raising=False)
+
+    gateway = _StubGateway(gateway_payload)
+    app.config["INTERNAL_MCP_GATEWAY"] = gateway
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = object()
+
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["namespace"] = "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "How many indexed chat sessions can you see?"},
+    )
+    if resp.status_code != 200:
+        raise AssertionError(
+            f"Unexpected status {resp.status_code}: {resp.get_json() or resp.get_data(as_text=True)}"
+        )
+
+    data = resp.get_json() or {}
+    assert data.get("fastpath", {}).get("name") == "rag_counts"
+    assert data.get("fastpath", {}).get("bypassed_llm") is True
+
+    text = data.get("response", "")
+    assert "Chat history sessions" in text
+    assert "KA interaction sessions" in text
+    assert "42" in text
+    assert "10" in text
+
+    assert gateway.calls, "expected gateway.invoke() to be called"
+    assert gateway.calls[0]["method_name"] == "rag_get_status"
+    assert (
+        gateway.calls[0]["payload"].get("namespace")
+        == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
+    )
+    assert gateway.calls[0]["payload"].get("detail") == 1

@@ -21,7 +21,7 @@ export function detectMarkdown(text) {
     return patterns.some(pattern => pattern.test(text));
 }
 
-function escapeHtml(text) {
+export function escapeHtml(text) {
     return String(text).replace(/[&<>"']/g, (c) => (
         {
             '&': '&amp;',
