@@ -1,6 +1,7 @@
 import { initializeDomElements, initializeInfoPopup, loadAndDisplayGlobalModelInFooter } from './domUtils.js';
 import { createOrActivateConceptTab } from './dynamicTabs.js';
 import { getLanguageDisplayName } from './languageConfig.js';
+import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
@@ -470,7 +471,7 @@ function startHealthPolling() {
         try {
           const controller2 = new AbortController();
           const timeout2 = setTimeout(() => controller2.abort(), 5000);
-          const ns = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
+          const ns = (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
           const res2 = await fetch(ns ? (`/admin/rag_status?namespace=${encodeURIComponent(ns)}`) : '/admin/rag_status', { cache: 'no-store', signal: controller2.signal });
           clearTimeout(timeout2);
           if (res2.ok) {
@@ -489,7 +490,7 @@ function startHealthPolling() {
               const chOtherNs = (typeof rs.chat_history_sessions_other_namespace === 'number') ? rs.chat_history_sessions_other_namespace : null;
 
               const titleParts = [
-                `Sessions indexed=${i}`,
+                `KA sessions indexed=${i}`,
                 `pending=${p}`,
                 `failed=${f}`
               ];
@@ -506,20 +507,20 @@ function startHealthPolling() {
               if (p === 0) {
                 if (chSessions || chMessages || chOk || chFail) {
                   if (chFail > 0) {
-                    ragSpan.textContent = `Indexed ${i} • Chat ${chOk}/${chFail} failed`;
+                    ragSpan.textContent = `KA ${i} • Chat ${chOk}/${chFail} failed`;
                   } else {
-                    ragSpan.textContent = `Indexed ${i} • Chat ${chOk}`;
+                    ragSpan.textContent = `KA ${i} • Chat ${chOk}`;
                   }
                 } else {
-                  ragSpan.textContent = `Indexed ${i}`;
+                  ragSpan.textContent = `KA ${i}`;
                 }
                 ragSpan.title = title;
                 ragSpan.classList.remove('rag-active');
               } else {
                 if (chFail > 0) {
-                  ragSpan.textContent = `Indexed ${i} • ${p} pending • Chat ${chFail} failed`;
+                  ragSpan.textContent = `KA ${i} • ${p} pending • Chat ${chFail} failed`;
                 } else {
-                  ragSpan.textContent = `Indexed ${i} • ${p} pending`;
+                  ragSpan.textContent = `KA ${i} • ${p} pending`;
                 }
                 ragSpan.title = title;
                 ragSpan.classList.add('rag-active');
@@ -573,6 +574,434 @@ function startHealthPolling() {
             ragModal.setAttribute('aria-hidden', 'false');
             ragModalBody.innerHTML = '<p>Loading…</p>';
 
+            // Prepare modal action buttons (idempotent)
+            const modalActions = ragModal.querySelector('.modal-actions');
+            if (modalActions && !modalActions._ragExtrasWired) {
+              modalActions._ragExtrasWired = true;
+
+              function formatDuration(ms) {
+                const safeMs = (typeof ms === 'number' && ms >= 0) ? ms : 0;
+                const totalSeconds = Math.round(safeMs / 1000);
+                const s = totalSeconds % 60;
+                const totalMinutes = Math.floor(totalSeconds / 60);
+                const m = totalMinutes % 60;
+                const h = Math.floor(totalMinutes / 60);
+                if (h > 0) return `${h}h ${m}m ${s}s`;
+                if (m > 0) return `${m}m ${s}s`;
+                return `${s}s`;
+              }
+
+              async function runChatHistoryReindex({ forcedSessionId = null, forcedChunkStart = 0, forceSkipConfirm = false } = {}) {
+                const modalActions = ragModal.querySelector('.modal-actions');
+                const activeNs = (modalActions && modalActions._ragActiveNamespace) ? modalActions._ragActiveNamespace : '';
+                const ns = activeNs || (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
+
+                const confirmMsg = forcedSessionId
+                  ? `Resume chat history reindex for namespace:\n\n${ns || '(no namespace)'}\n\nSession:\n${forcedSessionId}\n\nThis may take a few minutes.`
+                  : `Reindex chat history for namespace:\n\n${ns || '(no namespace)'}\n\nThis may take a few minutes.`;
+                if (!forceSkipConfirm) {
+                  const ok = window.confirm(confirmMsg);
+                  if (!ok) return;
+                }
+
+                // Build a target list from the last-loaded detailed status so we can show progress and
+                // identify exactly which session fails.
+                const status = window.__vonLastRagStatusJson || null;
+                const details = Array.isArray(status?.chat_history_session_details)
+                  ? status.chat_history_session_details
+                  : [];
+
+                let targets = details
+                  .filter(d => (d && typeof d.session_id === 'string' && d.session_id) && (typeof d.messages_missing_index === 'number') && d.messages_missing_index > 0)
+                  .sort((a, b) => (b.messages_missing_index || 0) - (a.messages_missing_index || 0));
+
+                if (forcedSessionId) {
+                  targets = targets.filter(t => t && t.session_id === forcedSessionId);
+                }
+
+                if (!targets.length) {
+                  ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>No missing chat history messages detected to reindex.</em></p>';
+                  return;
+                }
+
+                const totalMissingPlanned = targets.reduce((sum, t) => sum + (t?.messages_missing_index || 0), 0);
+                let elapsedMsTotal = 0;
+                let processedTotal = 0;
+
+                const progressToken = Date.now();
+                const progressId = `ragReindexProgress_${progressToken}`;
+                const progressTextId = `ragReindexProgressText_${progressToken}`;
+                const msgProgressId = `ragReindexMsgProgress_${progressToken}`;
+                const msgProgressTextId = `ragReindexMsgProgressText_${progressToken}`;
+                ragModalBody.innerHTML = ragModalBody.innerHTML + [
+                  '<hr/>',
+                  '<h3>Chat history reindex</h3>',
+                  `<p><em>Reindex running…</em></p>`,
+                  `<p><strong>Namespace:</strong> ${escapeHtml(ns || '(no namespace)')}</p>`,
+                  `<p><strong>Sessions to reindex:</strong> ${targets.length}</p>`,
+                  `<progress id="${progressId}" max="${targets.length}" value="0" style="width:100%;"></progress>`,
+                  `<div id="${progressTextId}" style="margin-top:6px;"></div>`,
+                  `<progress id="${msgProgressId}" max="1" value="0" style="width:100%;margin-top:10px;"></progress>`,
+                  `<div id="${msgProgressTextId}" style="margin-top:6px;"></div>`
+                ].join('');
+
+                const progressEl = document.getElementById(progressId);
+                const progressTextEl = document.getElementById(progressTextId);
+                const msgProgressEl = document.getElementById(msgProgressId);
+                const msgProgressTextEl = document.getElementById(msgProgressTextId);
+
+                const startedAt = new Date().toISOString();
+                const perSessionResults = [];
+                const aggregate = {
+                  sessions_targeted: targets.length,
+                  sessions_completed: 0,
+                  messages_indexed_attempted: 0,
+                  messages_indexed_success: 0,
+                  messages_indexed_failed: 0,
+                  errors: []
+                };
+
+                let lastSid = null;
+                let lastChunkStart = null;
+                let lastChunkNo = null;
+
+                for (let i = 0; i < targets.length; i++) {
+                  const t = targets[i];
+                  const sid = t.session_id;
+                  const missing = t.messages_missing_index;
+                  lastSid = sid;
+
+                  if (progressEl) progressEl.value = i;
+                  if (progressTextEl) {
+                    const etaTxt = (processedTotal > 0 && totalMissingPlanned > 0)
+                      ? (() => {
+                        const remaining = Math.max(0, totalMissingPlanned - processedTotal);
+                        const avgMsPerMsg = elapsedMsTotal / Math.max(1, processedTotal);
+                        return ` • ETA ~${formatDuration(remaining * avgMsPerMsg)}`;
+                      })()
+                      : '';
+                    progressTextEl.textContent = `Reindexing session ${i + 1}/${targets.length}: ${sid} (missing ${missing})${etaTxt}`;
+                  }
+
+                  // Chunked mode: avoids long requests and gives per-message progress.
+                  const url = ns ? (`/admin/chat_history_reindex?namespace=${encodeURIComponent(ns)}`) : '/admin/chat_history_reindex';
+                  // Larger sessions can take a long time to embed/index; use smaller chunks.
+                  const chunkSize = (missing && missing >= 200) ? 10 : 25;
+                  let chunkStart = (forcedSessionId && sid === forcedSessionId && typeof forcedChunkStart === 'number' && forcedChunkStart > 0)
+                    ? forcedChunkStart
+                    : 0;
+                  let chunkNo = 0;
+                  let sessionIndexableTotal = null;
+                  let sessionProcessed = 0;
+                  const sessionChunks = [];
+                  let sessionHadFailure = false;
+
+                  // Adaptive timeout for slow embedding/indexing. Starts at 2 min, grows on AbortError.
+                  let timeoutMs = 120000;
+                  const maxTimeoutMs = 15 * 60 * 1000;
+
+                  while (true) {
+                    chunkNo += 1;
+                    lastChunkNo = chunkNo;
+                    lastChunkStart = chunkStart;
+
+                    let res;
+                    const chunkAttemptStarted = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+
+                    // Retry loop for slow chunks and transient HTTP errors.
+                    for (let attempt = 1; attempt <= 3; attempt++) {
+                      const controllerR = new AbortController();
+                      const timeoutR = setTimeout(() => controllerR.abort(), timeoutMs);
+                      try {
+                        res = await fetch(url, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            reset_counters: (chunkNo === 1),
+                            dry_run: false,
+                            session_ids: [sid],
+                            chunk_start: chunkStart,
+                            chunk_size: chunkSize
+                          }),
+                          cache: 'no-store',
+                          signal: controllerR.signal
+                        });
+
+                        // Retry on transient server/proxy issues.
+                        if (!res.ok && (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504)) {
+                          const delayMs = Math.min(15000, 1000 * Math.pow(2, attempt - 1));
+                          await new Promise(resolve => setTimeout(resolve, delayMs));
+                          continue;
+                        }
+
+                        break;
+                      } catch (err) {
+                        const name = err && err.name ? err.name : '';
+                        if (name === 'AbortError') {
+                          // The server may still be processing; increase timeout and retry this same chunk.
+                          timeoutMs = Math.min(maxTimeoutMs, Math.max(timeoutMs * 2, 180000));
+                          const delayMs = Math.min(3000, 500 * attempt);
+                          await new Promise(resolve => setTimeout(resolve, delayMs));
+                          continue;
+                        }
+                        throw err;
+                      } finally {
+                        clearTimeout(timeoutR);
+                      }
+                    }
+
+                    if (!res) {
+                      const err = {
+                        type: 'timeout',
+                        session_id: sid,
+                        chunk_start: chunkStart,
+                        chunk_no: chunkNo,
+                        message: 'Request timed out; server may still be processing.'
+                      };
+                      aggregate.errors.push(err);
+                      sessionHadFailure = true;
+                      perSessionResults.push({ session_id: sid, ok: false, error: err, chunks: sessionChunks });
+
+                      window.__vonLastRagReindexJson = {
+                        status: 'error',
+                        namespace: ns,
+                        started_at: startedAt,
+                        failed_session_id: sid,
+                        failed_at_session_index: i,
+                        failed_chunk_no: chunkNo,
+                        failed_chunk_start: chunkStart,
+                        per_session_results: perSessionResults,
+                        aggregate
+                      };
+
+                      ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Reindex timed out.</strong> Session ${escapeHtml(sid)} (chunk ${chunkNo}, start ${chunkStart}).</p><p><em>The server may still be processing this chunk. Reopen this status to see progress, then you can retry or resume reindex if needed.</em></p>`;
+                      return;
+                    }
+
+                    if (!res.ok) {
+                      const txt = await res.text();
+                      const err = {
+                        type: 'http_error',
+                        session_id: sid,
+                        chunk_start: chunkStart,
+                        chunk_no: chunkNo,
+                        http_status: res.status,
+                        response_text: txt || ''
+                      };
+                      aggregate.errors.push(err);
+                      sessionHadFailure = true;
+                      perSessionResults.push({ session_id: sid, ok: false, error: err, chunks: sessionChunks });
+
+                      window.__vonLastRagReindexJson = {
+                        status: 'error',
+                        namespace: ns,
+                        started_at: startedAt,
+                        failed_session_id: sid,
+                        failed_at_session_index: i,
+                        failed_chunk_no: chunkNo,
+                        failed_chunk_start: chunkStart,
+                        per_session_results: perSessionResults,
+                        aggregate
+                      };
+
+                      ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Reindex failed.</strong> Session ${escapeHtml(sid)} (chunk ${chunkNo}, start ${chunkStart}) returned HTTP ${res.status}.</p><pre style="white-space:pre-wrap;max-height:220px;overflow:auto;">${escapeHtml(txt || '')}</pre>`;
+                      return;
+                    }
+
+                    const js = await res.json();
+                    const chunkFinished = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+                    const chunkElapsedMs = Math.max(0, Math.round(chunkFinished - chunkAttemptStarted));
+                    sessionChunks.push({ ...js, client_elapsed_ms: chunkElapsedMs, client_timeout_ms: timeoutMs, client_chunk_no: chunkNo });
+
+                    if (typeof js?.indexable_total === 'number') {
+                      sessionIndexableTotal = js.indexable_total;
+                    }
+
+                    const attempted = (js?.messages_indexed_attempted || 0);
+                    const ok = (js?.messages_indexed_success || 0);
+                    const fail = (js?.messages_indexed_failed || 0);
+                    const errors = Array.isArray(js?.errors) ? js.errors : [];
+
+                    aggregate.messages_indexed_attempted += attempted;
+                    aggregate.messages_indexed_success += ok;
+                    aggregate.messages_indexed_failed += fail;
+                    if (errors.length) {
+                      aggregate.errors.push(...errors.map(e => ({ ...e, session_id: e.session_id || sid })));
+                    }
+
+                    const chunkProcessed = (ok + fail);
+                    sessionProcessed += chunkProcessed;
+                    if (chunkProcessed > 0) {
+                      processedTotal += chunkProcessed;
+                      elapsedMsTotal += chunkElapsedMs;
+                    }
+
+                    if (msgProgressEl) {
+                      msgProgressEl.max = (sessionIndexableTotal || Math.max(1, (missing || 1)));
+                      msgProgressEl.value = Math.min(msgProgressEl.max, sessionProcessed);
+                    }
+                    if (msgProgressTextEl) {
+                      const totalTxt = sessionIndexableTotal ? String(sessionIndexableTotal) : String(missing || '?');
+                      const etaTxt = (processedTotal > 0 && totalMissingPlanned > 0)
+                        ? (() => {
+                          const remaining = Math.max(0, totalMissingPlanned - processedTotal);
+                          const avgMsPerMsg = elapsedMsTotal / Math.max(1, processedTotal);
+                          return ` • ETA ~${formatDuration(remaining * avgMsPerMsg)}`;
+                        })()
+                        : '';
+                      msgProgressTextEl.textContent = `Session progress: ${sessionProcessed}/${totalTxt} messages (chunk ${chunkNo})${etaTxt}`;
+                    }
+
+                    const next = (typeof js?.next_chunk_start === 'number') ? js.next_chunk_start : null;
+                    const done = !!js?.done;
+                    if (done || next === null || next === chunkStart) {
+                      break;
+                    }
+                    chunkStart = next;
+                  }
+
+                  aggregate.sessions_completed += 1;
+                  perSessionResults.push({ session_id: sid, ok: !sessionHadFailure, chunks: sessionChunks });
+                }
+
+                if (progressEl) progressEl.value = targets.length;
+                if (progressTextEl) progressTextEl.textContent = `Completed ${targets.length}/${targets.length} sessions.`;
+                if (msgProgressEl) {
+                  msgProgressEl.value = msgProgressEl.max;
+                }
+                if (msgProgressTextEl) {
+                  msgProgressTextEl.textContent = 'Session progress: complete.';
+                }
+
+                const finishedAt = new Date().toISOString();
+                window.__vonLastRagReindexJson = {
+                  status: 'ok',
+                  namespace: ns,
+                  started_at: startedAt,
+                  finished_at: finishedAt,
+                  per_session_results: perSessionResults,
+                  aggregate
+                };
+
+                const summary = [
+                  '<hr/>',
+                  '<h3>Chat history reindex result</h3>',
+                  '<ul>',
+                  `<li><strong>Sessions targeted:</strong> ${aggregate.sessions_targeted}</li>`,
+                  `<li><strong>Sessions completed:</strong> ${aggregate.sessions_completed}</li>`,
+                  `<li><strong>Messages attempted:</strong> ${aggregate.messages_indexed_attempted}</li>`,
+                  `<li><strong>Messages indexed:</strong> ${aggregate.messages_indexed_success}</li>`,
+                  `<li><strong>Messages failed:</strong> ${aggregate.messages_indexed_failed}</li>`,
+                  `<li><strong>Total errors recorded:</strong> ${aggregate.errors.length}</li>`,
+                  '</ul>',
+                  '<p><em>Tip: reopen this modal to refresh the status table.</em></p>'
+                ].join('');
+                ragModalBody.innerHTML = ragModalBody.innerHTML + summary;
+              }
+
+              const copyBtn = document.createElement('button');
+              copyBtn.className = 'btn-mini';
+              copyBtn.textContent = 'Copy JSON';
+              copyBtn.title = 'Copy the raw RAG status JSON payload (and last reindex/backfill action, if any)';
+              copyBtn.addEventListener('click', async () => {
+                try {
+                  const payload = {
+                    rag_status: window.__vonLastRagStatusJson || null,
+                    last_chat_history_backfill: window.__vonLastRagBackfillJson || null,
+                    last_chat_history_reindex: window.__vonLastRagReindexJson || null,
+                  };
+                  const txt = JSON.stringify(payload, null, 2);
+                  if (!txt) {
+                    ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>No JSON payload available yet. Open the modal again after it loads.</em></p>';
+                    return;
+                  }
+                  await navigator.clipboard.writeText(txt);
+                  ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Copied JSON to clipboard.</em></p>';
+                } catch (e) {
+                  ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Copy failed.</em></p>';
+                }
+              });
+
+              const reindexBtn = document.createElement('button');
+              reindexBtn.className = 'btn-mini';
+              reindexBtn.textContent = 'Reindex chat history';
+              reindexBtn.title = 'Reindex chat history messages into RAG for your current namespace';
+              reindexBtn.hidden = true;
+              reindexBtn.addEventListener('click', async () => {
+                try {
+                  reindexBtn.disabled = true;
+                  if (modalActions) {
+                    modalActions._ragActionInProgress = true;
+                  }
+                  await runChatHistoryReindex();
+
+                } catch (e) {
+                  const name = e && e.name ? e.name : 'Error';
+                  const msg = e && e.message ? e.message : '';
+                  const timedOutNote = name === 'AbortError'
+                    ? '<p><em>Request timed out. The server may still be processing; reopen this status to see progress.</em></p>'
+                    : '';
+                  const errObj = { type: 'exception', name, message: msg };
+                  window.__vonLastRagReindexJson = {
+                    status: 'error',
+                    namespace: (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || null,
+                    error: errObj
+                  };
+                  ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Reindex error.</strong> ${escapeHtml(name)}${msg ? `: ${escapeHtml(msg)}` : ''}</p>${timedOutNote}<p><em>You can use “Copy JSON” to capture this failure.</em></p>`;
+                } finally {
+                  reindexBtn.disabled = false;
+                  try {
+                    const modalActions = ragModal.querySelector('.modal-actions');
+                    if (modalActions) {
+                      modalActions._ragActionInProgress = false;
+                    }
+                  } catch (_) { /* ignore */ }
+                }
+              });
+
+              const resumeBtn = document.createElement('button');
+              resumeBtn.className = 'btn-mini';
+              resumeBtn.textContent = 'Resume reindex';
+              resumeBtn.title = 'Resume chat history reindex from the last recorded failure (session + chunk start)';
+              resumeBtn.hidden = true;
+              resumeBtn.addEventListener('click', async () => {
+                try {
+                  const last = window.__vonLastRagReindexJson || null;
+                  const sid = (last && last.status === 'error') ? (last.failed_session_id || null) : null;
+                  const chunkStart = (last && last.status === 'error' && typeof last.failed_chunk_start === 'number') ? last.failed_chunk_start : 0;
+                  if (!sid) {
+                    ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>No resumable reindex failure recorded yet.</em></p>';
+                    return;
+                  }
+
+                  resumeBtn.disabled = true;
+                  if (modalActions) {
+                    modalActions._ragActionInProgress = true;
+                  }
+                  await runChatHistoryReindex({ forcedSessionId: sid, forcedChunkStart: chunkStart });
+                } catch (e) {
+                  const name = e && e.name ? e.name : 'Error';
+                  const msg = e && e.message ? e.message : '';
+                  ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Resume error.</strong> ${escapeHtml(name)}${msg ? `: ${escapeHtml(msg)}` : ''}</p>`;
+                } finally {
+                  resumeBtn.disabled = false;
+                  try {
+                    const modalActions = ragModal.querySelector('.modal-actions');
+                    if (modalActions) {
+                      modalActions._ragActionInProgress = false;
+                    }
+                  } catch (_) { /* ignore */ }
+                }
+              });
+
+              modalActions.appendChild(copyBtn);
+              modalActions.appendChild(reindexBtn);
+              modalActions.appendChild(resumeBtn);
+              modalActions._ragCopyBtn = copyBtn;
+              modalActions._ragReindexBtn = reindexBtn;
+              modalActions._ragResumeBtn = resumeBtn;
+            }
+
             if (ragChatBackfillBtn) {
               ragChatBackfillBtn.hidden = true;
               ragChatBackfillBtn.disabled = false;
@@ -580,12 +1009,33 @@ function startHealthPolling() {
             }
 
             const controller3 = new AbortController();
-            const timeout3 = setTimeout(() => controller3.abort(), 8000);
-            const ns2 = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
-            const res3 = await fetch(ns2 ? (`/admin/rag_status?namespace=${encodeURIComponent(ns2)}`) : '/admin/rag_status', { cache: 'no-store', signal: controller3.signal });
+            const timeout3 = setTimeout(() => controller3.abort(), 15000);
+            const ns2 = (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
+            const url3 = ns2
+              ? (`/admin/rag_status?namespace=${encodeURIComponent(ns2)}&detail=1`)
+              : '/admin/rag_status';
+            let res3 = await fetch(url3, { cache: 'no-store', signal: controller3.signal });
             clearTimeout(timeout3);
+
+            // If a namespaced call fails (e.g., bad localStorage value), retry once without namespace.
+            if (!res3.ok && ns2) {
+              try {
+                res3 = await fetch('/admin/rag_status', { cache: 'no-store' });
+              } catch (_) { /* ignore */ }
+            }
+
             if (res3.ok) {
-              let rs = await res3.json();
+              let rs;
+              try {
+                rs = await res3.json();
+              } catch (_) {
+                const txt = await res3.text();
+                ragModalBody.innerHTML = `<p>Unable to load detailed status.</p><p><strong>Parse error.</strong> Response was not JSON.</p><pre style="white-space:pre-wrap;max-height:220px;overflow:auto;">${escapeHtml(txt || '')}</pre>`;
+                return;
+              }
+
+              // Save last JSON for Copy JSON.
+              try { window.__vonLastRagStatusJson = rs; } catch (_) { /* ignore */ }
               const backfillReason0 = rs?.chat_history_backfill_reason || null;
               const backfillSessionNs = rs?.chat_history_backfill_session_namespace || null;
               if (backfillReason0 === 'namespace_mismatch' && backfillSessionNs && backfillSessionNs !== ns2) {
@@ -596,7 +1046,7 @@ function startHealthPolling() {
                 try {
                   const controller3b = new AbortController();
                   const timeout3b = setTimeout(() => controller3b.abort(), 8000);
-                  const res3b = await fetch(`/admin/rag_status?namespace=${encodeURIComponent(backfillSessionNs)}`, { cache: 'no-store', signal: controller3b.signal });
+                  const res3b = await fetch(`/admin/rag_status?namespace=${encodeURIComponent(backfillSessionNs)}&detail=1`, { cache: 'no-store', signal: controller3b.signal });
                   clearTimeout(timeout3b);
                   if (res3b.ok) {
                     rs = await res3b.json();
@@ -615,6 +1065,24 @@ function startHealthPolling() {
               const eligI = (typeof rs.eligible_interactions === 'number') ? rs.eligible_interactions : null;
               const sessionNs = rs.session_namespace || null;
               const requestedNs = (typeof rs.namespace === 'string') ? rs.namespace : (ns2 || null);
+
+              // Keep the modal action namespace aligned with what the server reports.
+              // This prevents actions (like reindex) from accidentally using a stale
+              // user-only namespace from localStorage.
+              try {
+                const modalActions = ragModal.querySelector('.modal-actions');
+                if (modalActions) {
+                  modalActions._ragActiveNamespace = requestedNs || sessionNs || '';
+                }
+              } catch (_) { /* ignore */ }
+
+              // If we have a composite namespace, prefer it as the persisted current namespace.
+              try {
+                const prefer = requestedNs || sessionNs;
+                if (typeof prefer === 'string' && prefer.includes('@')) {
+                  localStorage.setItem('current_user_namespace', prefer);
+                }
+              } catch (_) { /* ignore */ }
               const sessMissing = (typeof rs.sessions_missing_namespace === 'number') ? rs.sessions_missing_namespace : null;
               const sessOther = (typeof rs.sessions_other_namespace === 'number') ? rs.sessions_other_namespace : null;
               const sessBreakdown = Array.isArray(rs.sessions_namespace_breakdown) ? rs.sessions_namespace_breakdown : [];
@@ -625,6 +1093,7 @@ function startHealthPolling() {
               const chInNs = (typeof rs.chat_history_sessions_in_namespace === 'number') ? rs.chat_history_sessions_in_namespace : null;
               const chMissingNs = (typeof rs.chat_history_sessions_missing_namespace === 'number') ? rs.chat_history_sessions_missing_namespace : null;
               const chOtherNs = (typeof rs.chat_history_sessions_other_namespace === 'number') ? rs.chat_history_sessions_other_namespace : null;
+              const chDetails = Array.isArray(rs.chat_history_session_details) ? rs.chat_history_session_details : null;
               const backfillAvailable = !!rs.chat_history_backfill_available;
               const backfillReason = rs.chat_history_backfill_reason || null;
 
@@ -660,7 +1129,7 @@ function startHealthPolling() {
               const html = [
                 requestedNs ? `<p><strong>Requested namespace:</strong> ${escapeHtml(requestedNs)}</p>` : '',
                 sessionNs ? `<p><strong>Session namespace:</strong> ${escapeHtml(sessionNs)}</p>` : '',
-                '<p><em>Note:</em> interaction sessions are scoped by a user-only namespace (e.g. <code>#V#user</code>). Chat history is scoped by a composite user@organisation namespace (e.g. <code>#V#user@org</code>).</p>',
+                '<p><em>Note:</em> interaction sessions may be stored under either a user-only namespace (e.g. <code>#V#user</code>) or a composite user@organisation namespace (e.g. <code>#V#user@org</code>). This status view scopes to the requested namespace and may include the user-only namespace for compatibility. Chat history is scoped by a composite user@organisation namespace.</p>',
                 '<ul>',
                 `<li><strong>Indexed:</strong> ${indexed}</li>`,
                 `<li><strong>Pending:</strong> ${pending}</li>`,
@@ -692,15 +1161,86 @@ function startHealthPolling() {
                   return `<li><strong>Sessions:</strong> ${chSessions}${suffix}</li>`;
                 })(),
                 `<li><strong>Messages (stored):</strong> ${chMessages}</li>`,
+                (() => {
+                  // Reset markers are stored in history but intentionally excluded from indexing.
+                  // Only available when we have per-session details.
+                  const details = Array.isArray(chDetails) ? chDetails : null;
+                  if (!details || !details.length) return '';
+                  const resetMarkers = details.reduce((acc, row) => {
+                    const stored = (typeof row?.messages_stored === 'number') ? row.messages_stored : 0;
+                    const nonReset = (typeof row?.messages_non_reset === 'number') ? row.messages_non_reset : 0;
+                    return acc + Math.max(0, stored - nonReset);
+                  }, 0);
+                  return `<li><strong>Reset markers:</strong> ${resetMarkers}</li>`;
+                })(),
                 `<li><strong>Messages indexed:</strong> ${chOk}</li>`,
                 `<li><strong>Messages failed:</strong> ${chFail}</li>`,
                 '</ul>'
               ].join('');
+
+              const renderChatSessionDetails = () => {
+                if (!chDetails || !chDetails.length) return '';
+
+                const rows = chDetails.slice(0, 60).map((row) => {
+                  const sid = (typeof row?.session_id === 'string') ? row.session_id : '(unknown session)';
+                  const nsRaw = (typeof row?.namespace === 'string') ? row.namespace : '(missing namespace)';
+                  const stored = (typeof row?.messages_stored === 'number') ? row.messages_stored : 0;
+                  const nonReset = (typeof row?.messages_non_reset === 'number') ? row.messages_non_reset : 0;
+                  const resetMarkers = Math.max(0, stored - nonReset);
+                  const indexable = (typeof row?.messages_indexable === 'number') ? row.messages_indexable : nonReset;
+                  const ok = (typeof row?.rag_indexed_success === 'number') ? row.rag_indexed_success : 0;
+                  const fail = (typeof row?.rag_indexed_failed === 'number') ? row.rag_indexed_failed : 0;
+                  const indexedTotal = (typeof row?.messages_indexed_total === 'number') ? row.messages_indexed_total : (ok + fail);
+                  const missing = (typeof row?.messages_missing_index === 'number') ? row.messages_missing_index : Math.max(0, indexable - indexedTotal);
+                  const inScope = (row?.in_namespace === true);
+                  const suffix = inScope ? ' (in requested namespace)' : '';
+                  return `<li><code>${escapeHtml(sid)}</code> — ${escapeHtml(nsRaw)}${escapeHtml(suffix)}: stored ${stored}, reset markers ${resetMarkers}, non-reset ${nonReset}, indexable ${indexable}, indexed ${indexedTotal} (ok ${ok}, failed ${fail}), missing ${missing}</li>`;
+                });
+
+                const truncated = chDetails.length > 60
+                  ? `<p><em>Showing 60 of ${chDetails.length} sessions (sorted by missing count).</em></p>`
+                  : '';
+
+                return [
+                  '<details>',
+                  '<summary>Chat sessions indexing breakdown</summary>',
+                  truncated,
+                  '<ul>',
+                  ...rows,
+                  '</ul>',
+                  '</details>'
+                ].join('');
+              };
               const needsBackfill = (chMissingNs && chMissingNs > 0) || (chOtherNs && chOtherNs > 0);
               const backfillNote = (!backfillAvailable && needsBackfill && backfillReason)
                 ? `<p><em>Backfill unavailable: ${backfillReason}</em></p>`
                 : '';
-              ragModalBody.innerHTML = html + renderBreakdown() + chatHtml + backfillNote;
+              ragModalBody.innerHTML = html + renderBreakdown() + chatHtml + renderChatSessionDetails() + backfillNote;
+
+              // Show reindex button when there are missing indexable messages and the
+              // user is allowed to run actions for this namespace.
+              try {
+                const modalActions = ragModal.querySelector('.modal-actions');
+                const reindexBtn = modalActions ? modalActions._ragReindexBtn : null;
+                const resumeBtn = modalActions ? modalActions._ragResumeBtn : null;
+                if (reindexBtn) {
+                  const hasMissing = !!(chDetails && chDetails.some(r => (r && typeof r.messages_missing_index === 'number' && r.messages_missing_index > 0)));
+                  reindexBtn.hidden = !(backfillAvailable && hasMissing);
+                }
+                if (resumeBtn) {
+                  const last = window.__vonLastRagReindexJson || null;
+                  const canResume = !!(
+                    backfillAvailable
+                    && last
+                    && last.status === 'error'
+                    && typeof last.failed_session_id === 'string'
+                    && last.failed_session_id
+                    && typeof last.failed_chunk_start === 'number'
+                    && last.failed_chunk_start >= 0
+                  );
+                  resumeBtn.hidden = !canResume;
+                }
+              } catch (_) { /* ignore */ }
 
               if (ragChatBackfillBtn) {
                 ragChatBackfillBtn.hidden = !(backfillAvailable && needsBackfill);
@@ -709,10 +1249,25 @@ function startHealthPolling() {
                 }
               }
             } else {
-              ragModalBody.innerHTML = '<p>Unable to load detailed status.</p>';
+              let details = '';
+              try {
+                const txt = await res3.text();
+                details = txt ? `<pre style="white-space:pre-wrap;max-height:220px;overflow:auto;">${escapeHtml(txt)}</pre>` : '';
+              } catch (_) { /* ignore */ }
+
+              const attempted = ns2 ? (`/admin/rag_status?namespace=${encodeURIComponent(ns2)}`) : '/admin/rag_status';
+              ragModalBody.innerHTML = `<p>Unable to load detailed status.</p><p><strong>HTTP ${res3.status}</strong> while fetching <code>${escapeHtml(attempted)}</code>.</p>${details}`;
             }
           } catch (_) {
-            ragModalBody.innerHTML = '<p>Unable to load detailed status.</p>';
+            const attempted = (() => {
+              try {
+                const ns2 = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
+                return ns2 ? (`/admin/rag_status?namespace=${encodeURIComponent(ns2)}`) : '/admin/rag_status';
+              } catch (_) {
+                return '/admin/rag_status';
+              }
+            })();
+            ragModalBody.innerHTML = `<p>Unable to load detailed status.</p><p><em>Request failed or timed out.</em> Attempted <code>${escapeHtml(attempted)}</code>.</p>`;
           }
         });
 
@@ -723,6 +1278,13 @@ function startHealthPolling() {
               const ok = window.confirm('Backfill legacy chat history into your current namespace and re-index to RAG? This may take a minute.');
               if (!ok) return;
               ragChatBackfillBtn.disabled = true;
+
+              try {
+                const modalActions = ragModal.querySelector('.modal-actions');
+                if (modalActions) {
+                  modalActions._ragActionInProgress = true;
+                }
+              } catch (_) { /* ignore */ }
 
               ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>Backfill running…</em></p>';
 
@@ -739,10 +1301,16 @@ function startHealthPolling() {
 
               if (!resB.ok) {
                 const txt = await resB.text();
+                window.__vonLastRagBackfillJson = {
+                  status: 'error',
+                  http_status: resB.status,
+                  response_text: txt || ''
+                };
                 ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Backfill failed.</strong> ${txt}</p>`;
                 return;
               }
               const js = await resB.json();
+              window.__vonLastRagBackfillJson = js;
               const statusLine = js?.status ? `<p><strong>Status:</strong> ${js.status}</p>` : '';
               const errorLine = js?.error ? `<p><strong>Error:</strong> ${js.error}</p>` : '';
               const errors = Array.isArray(js?.errors) ? js.errors : [];
@@ -751,7 +1319,7 @@ function startHealthPolling() {
                   '<details>',
                   `<summary>Errors (${errors.length})</summary>`,
                   '<ul>',
-                  ...errors.slice(0, 20).map(e => `<li>${(e.session || 'session')} — ${(e.error || 'error')}</li>`),
+                  ...errors.slice(0, 20).map(e => `<li>${escapeHtml((e.session || 'session') + '')} — ${escapeHtml((e.error || 'error') + '')}</li>`),
                   '</ul>',
                   '</details>'
                 ].join('')
@@ -778,9 +1346,19 @@ function startHealthPolling() {
               const timedOutNote = name === 'AbortError'
                 ? '<p><em>Request timed out. The server may still be processing; reopen this status to see progress.</em></p>'
                 : '';
+              window.__vonLastRagBackfillJson = {
+                status: 'error',
+                error: { type: 'exception', name, message: msg }
+              };
               ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Backfill error.</strong> ${name}${msg ? `: ${msg}` : ''}</p>${timedOutNote}`;
             } finally {
               ragChatBackfillBtn.disabled = false;
+              try {
+                const modalActions = ragModal.querySelector('.modal-actions');
+                if (modalActions) {
+                  modalActions._ragActionInProgress = false;
+                }
+              } catch (_) { /* ignore */ }
             }
           });
         }
@@ -790,7 +1368,7 @@ function startHealthPolling() {
               ragModalCheck.disabled = true;
               const controller4 = new AbortController();
               const timeout4 = setTimeout(() => controller4.abort(), 15000);
-              const ns3 = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
+              const ns3 = (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
               const url4 = ns3 ? (`/admin/rag_integrity?namespace=${encodeURIComponent(ns3)}`) : '/admin/rag_integrity';
               const res4 = await fetch(url4, { method: 'POST', cache: 'no-store', signal: controller4.signal });
               clearTimeout(timeout4);
@@ -851,13 +1429,27 @@ function startHealthPolling() {
         // ragModalBody.parentElement.querySelector('.modal-actions').appendChild(syncBtn);
         if (ragModalClose) {
           ragModalClose.addEventListener('click', () => {
+            try {
+              const modalActions = ragModal.querySelector('.modal-actions');
+              if (modalActions && modalActions._ragActionInProgress) {
+                const ok = window.confirm('An admin action is still running. Close anyway?');
+                if (!ok) return;
+              }
+            } catch (_) { /* ignore */ }
             ragModal.classList.remove('open');
             ragModal.setAttribute('aria-hidden', 'true');
           });
         }
-        // Close on backdrop click
+        // Close on backdrop click (but do not allow accidental dismissal while a long-running
+        // admin action is in progress, because it makes errors hard to capture).
         ragModal.addEventListener('click', (ev) => {
           if (ev.target === ragModal) {
+            try {
+              const modalActions = ragModal.querySelector('.modal-actions');
+              if (modalActions && modalActions._ragActionInProgress) {
+                return;
+              }
+            } catch (_) { /* ignore */ }
             ragModal.classList.remove('open');
             ragModal.setAttribute('aria-hidden', 'true');
           }
