@@ -80,7 +80,7 @@ Operational Checklist (Mental Pass Before Finishing a Task):
 Failure Handling Patterns:
 - Transient API errors: Retry (exponential). Final failure → show status + truncated body (<300 chars) + next recommended action.
 - Tool not available: Request enabling precise tool group; do NOT fabricate manual raw HTTP calls.
-- Flaky MCP providers (especially Atlassian/JIRA): If repeated tool calls fail with timeouts, connection errors, or intermittent 401/403/5xx responses despite correct inputs, treat it as a provider/session issue. Ask the user to restart VS Code’s extension host (or run **Developer: Reload Window**) and then retry.
+- Flaky MCP providers (especially Atlassian/JIRA): If repeated tool calls fail with timeouts, connection errors, or intermittent 401/403/5xx responses despite correct inputs, treat it as a provider/session issue. Ask the user to use the provider’s **Restart Server** action (extension-managed MCP providers have a restart command in the MCP Servers UI). If that does not resolve it, ask the user to restart VS Code’s extension host (or run **Developer: Reload Window**) and then retry.
 - Cache/Data Structure Sensitivity: Never reorder or shrink tuple/dict cache structures relied upon by diagnostics (append only; update summariser accordingly).
 
 Language & Shell Consistency:
