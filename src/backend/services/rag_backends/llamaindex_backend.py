@@ -16,9 +16,12 @@ Namespace behaviour:
 import hashlib
 import os
 import re
+import time
+from datetime import datetime, timezone
 from typing import Iterable, Dict, Any, Optional, List, Tuple
 
 from ..rag_service import RAGService
+from ...utils.concept_id_utils import normalise_concept_id_for_compare
 
 try:
     from llama_index import (
@@ -49,6 +52,9 @@ class LlamaIndexRAGService(RAGService):
         # For now, we rely on env vars (OPENAI_API_KEY) or defaults
         # Note: In 0.9.x ServiceContext.from_defaults() uses OpenAI by default if key is present
         self.service_context = ServiceContext.from_defaults()
+
+        # Best-effort diagnostics for UI/debugging.
+        self._last_query_info: Dict[str, Any] | None = None
 
     def _resolve_effective_namespace(self, namespace: Optional[str]) -> str:
         # Keep behaviour consistent with other parts of the system that may
@@ -240,7 +246,9 @@ class LlamaIndexRAGService(RAGService):
         # Note: Metadata filtering support varies by vector store implementation.
         # To ensure correctness, we do coarse retrieval first then apply filtering
         # locally.
-        retriever = index.as_retriever(similarity_top_k=max(top_k * 10, top_k))
+        similarity_top_k = max(top_k * 10, top_k)
+        start = time.perf_counter()
+        retriever = index.as_retriever(similarity_top_k=similarity_top_k)
         nodes = retriever.retrieve(query_text)
 
         def _matches_permissions(metadata: Any) -> bool:
@@ -250,12 +258,18 @@ class LlamaIndexRAGService(RAGService):
                 return False
 
             user_id = permissions_context.get("user_id")
-            if user_id and metadata.get("user_id") != user_id:
-                return False
+            if user_id:
+                if normalise_concept_id_for_compare(
+                    metadata.get("user_id")
+                ) != normalise_concept_id_for_compare(user_id):
+                    return False
 
             org_id = permissions_context.get("organisation_concept_id")
-            if org_id and metadata.get("organisation_concept_id") != org_id:
-                return False
+            if org_id:
+                if normalise_concept_id_for_compare(
+                    metadata.get("organisation_concept_id")
+                ) != normalise_concept_id_for_compare(org_id):
+                    return False
 
             return True
 
@@ -274,6 +288,22 @@ class LlamaIndexRAGService(RAGService):
 
             if len(results) >= top_k:
                 break
+
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        try:
+            self._last_query_info = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "effective_namespace": effective_namespace,
+                "query_length": len(query_text or ""),
+                "top_k": int(top_k),
+                "similarity_top_k": int(similarity_top_k),
+                "retrieved": len(nodes) if isinstance(nodes, list) else None,
+                "returned": len(results),
+                "elapsed_ms": elapsed_ms,
+            }
+        except Exception:
+            # Never let diagnostics interfere with retrieval.
+            pass
 
         return results
 

@@ -21,6 +21,9 @@ from __future__ import annotations
 from typing import Protocol, Iterable, Dict, Any, Optional, List, Tuple
 
 
+_RAG_SERVICE_SINGLETONS: dict[str, "RAGService"] = {}
+
+
 class RAGService(Protocol):
     """Protocol for pluggable RAG backends."""
 
@@ -81,6 +84,23 @@ class RAGBackendUnavailable(RuntimeError):
     pass
 
 
+def peek_rag_service(backend: Optional[str] = None) -> Optional[RAGService]:
+    """Return a cached RAG service instance without initialising anything.
+
+    This is useful for lightweight diagnostics endpoints (e.g., UI runtime hints)
+    where we must not trigger slow imports/model initialisation.
+    """
+
+    name = (backend or "llamaindex").lower()
+    return _RAG_SERVICE_SINGLETONS.get(name)
+
+
+def list_initialised_rag_backends() -> List[str]:
+    """Return backend names that already have an initialised singleton."""
+
+    return sorted(_RAG_SERVICE_SINGLETONS.keys())
+
+
 def get_rag_service(backend: Optional[str] = None) -> RAGService:
     """
     Factory to obtain a RAGService implementation.
@@ -91,17 +111,29 @@ def get_rag_service(backend: Optional[str] = None) -> RAGService:
     - default      → prefer LlamaIndex, fallback to Haystack
     """
     name = (backend or "llamaindex").lower()
+
+    cached = _RAG_SERVICE_SINGLETONS.get(name)
+    if cached is not None:
+        return cached
+
     if name == "llamaindex":
         try:
             from .rag_backends.llamaindex_backend import LlamaIndexRAGService  # type: ignore
 
-            return LlamaIndexRAGService()
+            service = LlamaIndexRAGService()
+            _RAG_SERVICE_SINGLETONS[name] = service
+            return service
         except Exception as e:
             # Fallback to Haystack if LlamaIndex not available
             try:
                 from .rag_backends.haystack_backend import HaystackRAGService  # type: ignore
 
-                return HaystackRAGService()
+                service = HaystackRAGService()
+                # Cache under both keys so callers asking for llamaindex do not
+                # repeatedly retry a failing import.
+                _RAG_SERVICE_SINGLETONS["haystack"] = service
+                _RAG_SERVICE_SINGLETONS[name] = service
+                return service
             except Exception:
                 raise RAGBackendUnavailable(
                     f"No RAG backend available (llamaindex failure: {e})"
@@ -110,7 +142,9 @@ def get_rag_service(backend: Optional[str] = None) -> RAGService:
         try:
             from .rag_backends.haystack_backend import HaystackRAGService  # type: ignore
 
-            return HaystackRAGService()
+            service = HaystackRAGService()
+            _RAG_SERVICE_SINGLETONS[name] = service
+            return service
         except Exception as e:
             raise RAGBackendUnavailable(f"Haystack backend unavailable: {e}")
     else:
