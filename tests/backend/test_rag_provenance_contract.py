@@ -170,8 +170,10 @@ def test_search_knowledge_base_derives_permissions_context_from_namespace(monkey
     }
 
 
-def test_rag_list_collections_requires_namespace():
+def test_rag_list_collections_requires_namespace(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.delenv("VON_DEFAULT_NAMESPACE", raising=False)
 
     result = cat._rag_list_collections()
     assert result["success"] is False
@@ -192,6 +194,7 @@ def test_rag_list_collections_includes_expected_collections():
     assert "ka_sessions" in collections
     assert "chat_history_sessions" in collections
     assert "rag_documents" in collections
+    assert "vontology_text_relations" in collections
 
     # Capability flags prevent the model inferring behaviour from missing tools.
     by_name = {c["collection"]: c for c in result["collections"]}
@@ -199,6 +202,11 @@ def test_rag_list_collections_includes_expected_collections():
     assert by_name["ka_sessions"]["get_supported"] is True
     assert by_name["rag_documents"]["list_supported"] is False
     assert by_name["rag_documents"]["get_supported"] is False
+
+    # Text relations are discoverable via search once indexed.
+    assert by_name["vontology_text_relations"]["search_supported"] is True
+    assert by_name["vontology_text_relations"]["list_supported"] is True
+    assert by_name["vontology_text_relations"]["get_supported"] is True
 
 
 def test_rag_list_indexed_supports_chat_history_sessions(monkeypatch):

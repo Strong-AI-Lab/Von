@@ -2298,7 +2298,13 @@ def _rag_get_status(**kwargs):
         ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
         ns = ns_report.get("namespace") or os.environ.get("VON_DEFAULT_NAMESPACE")
         detail = kwargs.get("detail")
-        url = "http://127.0.0.1:5002/admin/rag_status"
+        base_url = (
+            os.environ.get("VON_HTTP_BASE_URL")
+            or os.environ.get("VON_WEB_BASE_URL")
+            or "http://127.0.0.1:5000"
+        )
+        base_url = base_url.rstrip("/")
+        url = f"{base_url}/admin/rag_status"
         if ns:
             url = f"{url}?namespace={ns}"
         if detail:
@@ -2368,6 +2374,10 @@ def _resolve_rag_collection_from_kwargs(kwargs: dict) -> dict[str, object]:
         "chat_history": "chat_history_sessions",
         "chat_history_session": "chat_history_sessions",
         "chat_history_sessions": "chat_history_sessions",
+        "text_relations": "vontology_text_relations",
+        "text_relation": "vontology_text_relations",
+        "text": "vontology_text_relations",
+        "vontology_text_relations": "vontology_text_relations",
     }
     effective = aliases.get(lowered, lowered)
     return {
@@ -2449,6 +2459,25 @@ def _rag_list_collections(**kwargs):
             "get_supported_reason": "not_addressable",
             "item_kind": "rag_chunk",
             "source_system": "rag.llamaindex",
+        },
+        {
+            "collection": "vontology_text_relations",
+            "label": "Vontology text relations",
+            "description": (
+                "Concept-linked text values stored in MongoDB (text_relations + text_values), such as hasName/hasDescription/hasContent. "
+                "These can be indexed into the vector-store so they are discoverable via search_knowledge_base. "
+                "Use rag_sync_text_relations to (re)index them for a namespace."
+            ),
+            "list_tool": "rag_list_indexed",
+            "get_tool": "rag_get_item",
+            "search_tool": "search_knowledge_base",
+            "list_supported": True,
+            "get_supported": True,
+            "search_supported": True,
+            "list_supported_reason": None,
+            "get_supported_reason": None,
+            "item_kind": "vontology_text_relation",
+            "source_system": "mongo.text_relations",
         },
     ]
 
@@ -2627,6 +2656,93 @@ def _rag_list_indexed(**kwargs):
             source_system="mongo.chat_history",
         )
 
+    if collection == "vontology_text_relations":
+        from ...services.rag_text_relation_sync_service import (
+            list_text_relation_index_items,
+        )
+
+        scan_limit = int(kwargs.get("scan_limit", 5000))
+        predicates = kwargs.get("predicates")
+        if predicates is not None and not isinstance(predicates, list):
+            return {
+                "error": "invalid_predicates",
+                "message": "predicates must be an array of strings",
+                "collection": collection,
+                **collection_report,
+                "effective_namespace": ns,
+                "effective_namespace_source": ns_report.get("namespace_source"),
+                **ns_report,
+                "success": False,
+            }
+
+        languages = kwargs.get("languages")
+        if languages is not None and not isinstance(languages, list):
+            return {
+                "error": "invalid_languages",
+                "message": "languages must be an array of strings",
+                "collection": collection,
+                **collection_report,
+                "effective_namespace": ns,
+                "effective_namespace_source": ns_report.get("namespace_source"),
+                **ns_report,
+                "success": False,
+            }
+
+        report = list_text_relation_index_items(
+            namespace=ns,
+            limit=limit,
+            offset=offset,
+            scan_limit=scan_limit,
+            predicates=predicates,
+            languages=languages,
+        )
+
+        raw_items = report.get("items") if isinstance(report, dict) else None
+        items = []
+        if isinstance(raw_items, list):
+            for row in raw_items:
+                if not isinstance(row, dict):
+                    continue
+                items.append(
+                    {
+                        "collection": collection,
+                        "session_id": row.get("relation_id"),
+                        "relation_id": row.get("relation_id"),
+                        "subject_concept_id": row.get("subject_concept_id"),
+                        "predicate": row.get("predicate"),
+                        "lang": row.get("lang"),
+                        "preview_length": row.get("preview_length"),
+                        "updated_at": row.get("updated_at"),
+                        "namespace": ns,
+                        "item_kind": "vontology_text_relation",
+                        "source_system": "mongo.text_relations",
+                        "namespace_source": ns_report.get("namespace_source"),
+                    }
+                )
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "items": items,
+            "total": report.get("total") if isinstance(report, dict) else None,
+            "scanned": report.get("scanned") if isinstance(report, dict) else None,
+            "scan_limit": (
+                report.get("scan_limit") if isinstance(report, dict) else scan_limit
+            ),
+            "limit": limit,
+            "offset": offset,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="rag_text_relation_list",
+            source_system="mongo.text_relations",
+        )
+
     return {
         "error": "unknown_collection",
         "message": f"Unknown collection: {collection}",
@@ -2754,6 +2870,45 @@ def _rag_get_item(**kwargs):
             source_system="mongo.chat_history",
         )
 
+    if collection == "vontology_text_relations":
+        from ...services.rag_text_relation_sync_service import get_text_relation_preview
+
+        doc = get_text_relation_preview(namespace=ns, relation_id=session_id)
+        if doc is None:
+            return {
+                "error": "not_found",
+                "collection": collection,
+                **collection_report,
+                "effective_namespace": ns,
+                "effective_namespace_source": ns_report.get("namespace_source"),
+                **ns_report,
+                "success": False,
+            }
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "session_id": session_id,
+            "relation_id": doc.metadata.get("relation_id"),
+            "subject_concept_id": doc.metadata.get("subject_concept_id"),
+            "predicate": doc.metadata.get("predicate"),
+            "lang": doc.metadata.get("lang"),
+            "namespace": ns,
+            "preview": (doc.text or "")[:4000],
+            "item_kind": "vontology_text_relation",
+            "source_system": "mongo.text_relations",
+            "namespace_source": ns_report.get("namespace_source"),
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="rag_text_relation_item",
+            source_system="mongo.text_relations",
+        )
+
     return {
         "error": "unknown_collection",
         "message": f"Unknown collection: {collection}",
@@ -2764,6 +2919,59 @@ def _rag_get_item(**kwargs):
         **ns_report,
         "success": False,
     }
+
+
+def _rag_sync_text_relations(**kwargs):
+    from ...services.rag_text_relation_sync_service import sync_text_relations_to_rag
+
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns = ns_report.get("namespace")
+
+    # SECURITY: Require namespace for RAG access - prevents cross-user data leakage
+    if not ns:
+        return {
+            "error": "namespace_required",
+            "message": "RAG sync requires an explicit namespace (e.g. #V#user@org)",
+            **ns_report,
+            "success": False,
+        }
+
+    predicates = kwargs.get("predicates")
+    if predicates is not None and not isinstance(predicates, list):
+        return {
+            "error": "invalid_predicates",
+            "message": "predicates must be an array of strings",
+            **ns_report,
+            "success": False,
+        }
+
+    languages = kwargs.get("languages")
+    if languages is not None and not isinstance(languages, list):
+        return {
+            "error": "invalid_languages",
+            "message": "languages must be an array of strings",
+            **ns_report,
+            "success": False,
+        }
+
+    limit = int(kwargs.get("limit", 5000))
+    batch_size = int(kwargs.get("batch_size", 200))
+
+    payload = sync_text_relations_to_rag(
+        namespace=ns,
+        predicates=predicates,
+        languages=languages,
+        limit=limit,
+        batch_size=batch_size,
+    )
+    if isinstance(payload, dict):
+        payload.update(ns_report)
+        payload = _with_rag_provenance(
+            payload=payload,
+            item_kind="rag_sync_text_relations",
+            source_system="services.rag_text_relation_sync_service",
+        )
+    return payload
 
 
 # Gmail MCP handlers (read-only surface)
@@ -3905,6 +4113,31 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=None,
             category="read",
             description="Get one indexed item (session) with a safe text preview. Respects namespace isolation.",
+        ),
+        MethodDefinition(
+            name="rag_sync_text_relations",
+            handler=_rag_sync_text_relations,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "predicates": (list,),
+                    "languages": (list,),
+                    "limit": (int,),
+                    "batch_size": (int,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Index Vontology text relations (text_relations + text_values) into the vector-store for a namespace."
+                ),
+            ),
+            output_schema=None,
+            category="write",
+            timeout_sec=60.0,
+            description=(
+                "Upsert Vontology text relations into the RAG vector-store so they are discoverable via search_knowledge_base. "
+                "Requires an explicit namespace."
+            ),
         ),
     ]
 
