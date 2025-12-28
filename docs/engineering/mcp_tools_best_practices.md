@@ -333,10 +333,11 @@ db['vontology_nodes'].update_one(
 ### ❌ DON'T: Use HTTP endpoints when MCP tools are available
 
 ```bash
-# ❌ WRONG - MCP tools provide same functionality
-curl -X POST http://localhost:5002/upsert_text_relation \
+# ❌ WRONG - Prefer MCP (stdio) for agent workflows in VS Code.
+# HTTP routes are for Von's web server/admin endpoints, not MCP tool calls.
+curl -X POST http://localhost:5000/vontology/api/vontology/create_concept \
   -H "Content-Type: application/json" \
-  -d '{"concept_id": "#V#x", "predicate": "hasContent", "text": "..."}'
+  -d '{"parent_id": "#V#thing", "new_concept_name": "example"}'
 ```
 
 ### ❌ DON'T: Import internal service modules in agent workflows
@@ -490,8 +491,8 @@ mcp_add_relationship(
 
 **Fix**:
 1. Check [vontology_mcp.json](../../src/backend/mcp_server/vontology_mcp.json) for tool list
-2. Verify server running: `curl http://localhost:5002/health`
-3. Use correct interface: stdio for VS Code, HTTP for external clients
+2. Verify Von web server running: `curl http://localhost:5000/health`
+3. Use correct interface: stdio for VS Code (see `.vscode/mcp.json`), HTTP only for Von web routes/admin endpoints
 
 ### Issue: Parameter validation failed
 
