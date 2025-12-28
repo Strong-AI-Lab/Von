@@ -10,6 +10,16 @@
       ],
       "cwd": "${workspaceFolder}"
     },
+    "vonrag": {
+      "type": "stdio",
+      "command": "pdm",
+      "args": [
+        "run",
+        "python",
+        "src/backend/mcp_server/rag_mcp_stdio_server.py"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
     "arxiv": {
       "type": "stdio",
       "command": "uv",

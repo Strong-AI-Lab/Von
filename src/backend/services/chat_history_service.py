@@ -31,10 +31,18 @@ def get_session_context() -> Dict[str, Any]:
             or flask_session.get("org_id"),
             "role_in_org": flask_session.get("role_in_org"),
             "namespace": flask_session.get("namespace"),
+            # Compatibility alias: some call sites historically looked up org_id.
+            "org_id": flask_session.get("organisation_concept_id")
+            or flask_session.get("org_id"),
         }
     except (ImportError, RuntimeError):
         # Not in Flask context or session not available
-        return {"organisation_concept_id": None, "role_in_org": None}
+        return {
+            "organisation_concept_id": None,
+            "role_in_org": None,
+            "namespace": None,
+            "org_id": None,
+        }
 
 
 class ChatHistoryServiceError(Exception):
@@ -233,7 +241,9 @@ def add_message_to_history(
         # Prefer an explicit session namespace, else derive one from user/org when possible.
         ns = session_context.get("namespace")
         if not isinstance(ns, str) or not ns.strip():
-            org_id = session_context.get("org_id")
+            org_id = session_context.get(
+                "organisation_concept_id"
+            ) or session_context.get("org_id")
             if isinstance(org_id, str) and org_id.strip():
                 try:
                     from src.backend.services.namespace_service import derive_namespace
@@ -292,7 +302,11 @@ def add_message_to_history(
                     # Include organisation and role metadata if available
                     org_concept_id = session_context.get("organisation_concept_id")
                     if org_concept_id:
-                        metadata["organisation_concept_id"] = org_concept_id
+                        from ..utils.concept_id_utils import ensure_v_concept_prefix
+
+                        metadata["organisation_concept_id"] = (
+                            ensure_v_concept_prefix(org_concept_id) or org_concept_id
+                        )
                     if session_context.get("role_in_org"):
                         metadata["role_in_org"] = session_context["role_in_org"]
 
