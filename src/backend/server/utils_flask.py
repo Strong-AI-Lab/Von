@@ -967,6 +967,149 @@ def create_flask_app(
         except Exception as e:
             return jsonify(error="unexpected", detail=str(e)), 500
 
+    @app.route("/admin/rag_runtime")
+    def rag_runtime():
+        """Return lightweight RAG runtime info for UI diagnostics.
+
+        Intended for local dev UX (e.g., showing which embedder is active).
+        Must never expose secrets (API keys, tokens).
+
+        Query params:
+          - namespace (optional)
+        """
+
+        import os
+
+        def _describe_component(obj):
+            if obj is None:
+                return None
+            try:
+                cls = obj.__class__
+                info = {
+                    "class_name": getattr(cls, "__name__", None),
+                    "module": getattr(cls, "__module__", None),
+                }
+                for attr in ("model_name", "model", "name"):
+                    try:
+                        v = getattr(obj, attr, None)
+                        if isinstance(v, str) and v.strip():
+                            info[attr] = v.strip()
+                    except Exception:
+                        pass
+                return info
+            except Exception:
+                return None
+
+        try:
+            from src.backend.services.rag_service import (
+                RAGBackendUnavailable,
+                peek_rag_service,
+            )
+
+            ns = request.args.get("namespace")
+
+            # Do not initialise a RAG backend just to render diagnostics.
+            # Initialising LlamaIndex (or its embedder) can be slow and can block
+            # the UI if the dev server is single-threaded.
+            service = peek_rag_service()
+
+            if service is None:
+                effective_namespace = ns or os.getenv("VON_DEFAULT_NAMESPACE")
+                return jsonify(
+                    {
+                        "success": True,
+                        "service_initialised": False,
+                        "requested_namespace": ns,
+                        "effective_namespace": effective_namespace,
+                        "backend": {
+                            "requested": "llamaindex",
+                            "class_name": None,
+                            "module": None,
+                        },
+                        "persistence_dir": None,
+                        "index_persist_dir": None,
+                        "index_cached": False,
+                        "embedder": None,
+                        "llm": None,
+                        "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
+                        "last_query": None,
+                        "note": "RAG service not initialised yet; open this panel again after the first RAG query/index operation.",
+                    }
+                )
+
+            effective_namespace = None
+            try:
+                resolver = getattr(service, "_resolve_effective_namespace", None)
+                if callable(resolver):
+                    effective_namespace = resolver(ns)
+                else:
+                    effective_namespace = ns or os.getenv("VON_DEFAULT_NAMESPACE")
+            except Exception:
+                effective_namespace = ns or os.getenv("VON_DEFAULT_NAMESPACE")
+
+            index_persist_dir = None
+            try:
+                ns_dir = getattr(service, "_namespace_persist_dir", None)
+                if callable(ns_dir) and isinstance(effective_namespace, str):
+                    index_persist_dir = ns_dir(effective_namespace)
+            except Exception:
+                index_persist_dir = None
+
+            index_cached = False
+            try:
+                indices = getattr(service, "_indices", None)
+                if isinstance(indices, dict) and isinstance(effective_namespace, str):
+                    index_cached = effective_namespace in indices
+            except Exception:
+                index_cached = False
+
+            embedder = None
+            llm = None
+            try:
+                sc = getattr(service, "service_context", None)
+                if sc is not None:
+                    embedder = _describe_component(getattr(sc, "embed_model", None))
+                    llm = _describe_component(getattr(sc, "llm", None))
+            except Exception:
+                pass
+
+            last_query = None
+            try:
+                last_query = getattr(service, "_last_query_info", None)
+            except Exception:
+                last_query = None
+
+            payload = {
+                "success": True,
+                "service_initialised": True,
+                "requested_namespace": ns,
+                "effective_namespace": effective_namespace,
+                "backend": {
+                    "class_name": service.__class__.__name__,
+                    "module": service.__class__.__module__,
+                },
+                "persistence_dir": getattr(service, "persistence_dir", None),
+                "index_persist_dir": index_persist_dir,
+                "index_cached": index_cached,
+                "embedder": embedder,
+                "llm": llm,
+                "openai_key_present": bool(os.getenv("OPENAI_API_KEY")),
+                "last_query": last_query,
+            }
+            return jsonify(payload)
+
+        except RAGBackendUnavailable as e:
+            return (
+                jsonify(
+                    success=False,
+                    error="rag_backend_unavailable",
+                    message=str(e),
+                ),
+                503,
+            )
+        except Exception as e:
+            return jsonify(success=False, error="unexpected", detail=str(e)), 500
+
     @app.route("/admin/chat_history_backfill", methods=["POST"])
     def admin_chat_history_backfill():
         """Backfill legacy chat history to the current user@org namespace and RAG.

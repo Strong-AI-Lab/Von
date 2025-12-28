@@ -349,6 +349,7 @@ function startHealthPolling() {
   const ragDetailsBtn = document.getElementById('ragIndexingValue');
   const ragModal = document.getElementById('ragStatusModal');
   const ragModalBody = ragModal ? document.getElementById('ragStatusBody') : null;
+  const ragRuntimeHint = ragModal ? document.getElementById('ragRuntimeHint') : null;
   const ragModalClose = ragModal ? document.getElementById('ragStatusClose') : null;
   const ragModalCheck = ragModal ? document.getElementById('ragStatusCheck') : null;
   const ragChatBackfillBtn = ragModal ? document.getElementById('ragChatBackfill') : null;
@@ -573,6 +574,59 @@ function startHealthPolling() {
             ragModal.classList.add('open');
             ragModal.setAttribute('aria-hidden', 'false');
             ragModalBody.innerHTML = '<p>Loading…</p>';
+
+            if (ragRuntimeHint) {
+              ragRuntimeHint.textContent = 'Runtime: loading…';
+              // Do not block status rendering on this diagnostic call.
+              void (async () => {
+                try {
+                  const controllerRt = new AbortController();
+                  const timeoutRt = setTimeout(() => controllerRt.abort(), 8000);
+                  const nsRt = (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
+                  const urlRt = nsRt
+                    ? (`/admin/rag_runtime?namespace=${encodeURIComponent(nsRt)}`)
+                    : '/admin/rag_runtime';
+                  const resRt = await fetch(urlRt, { cache: 'no-store', signal: controllerRt.signal });
+                  clearTimeout(timeoutRt);
+
+                  if (resRt.ok) {
+                    const rt = await resRt.json();
+                    try { window.__vonLastRagRuntimeJson = rt; } catch (_) { /* ignore */ }
+
+                    const serviceInitialised = (rt && typeof rt.service_initialised === 'boolean') ? rt.service_initialised : null;
+                    const backend = rt?.backend?.class_name || (serviceInitialised === false ? 'not initialised' : '—');
+                    const embedder = rt?.embedder?.class_name || (serviceInitialised === false ? '—' : '—');
+                    const embedModel = rt?.embedder?.model_name || rt?.embedder?.model || null;
+                    const lastMs = (typeof rt?.last_query?.elapsed_ms === 'number') ? rt.last_query.elapsed_ms : null;
+                    const lastAt = (typeof rt?.last_query?.timestamp === 'string') ? rt.last_query.timestamp : null;
+                    const openaiKey = (typeof rt?.openai_key_present === 'boolean') ? rt.openai_key_present : null;
+
+                    const parts = [];
+                    parts.push(`Backend: ${backend}`);
+                    if (serviceInitialised !== false) {
+                      parts.push(`Embedder: ${embedder}${embedModel ? ` (${embedModel})` : ''}`);
+                    }
+                    if (lastMs !== null) {
+                      parts.push(`Last search: ${lastMs}ms${lastAt ? ` @ ${lastAt}` : ''}`);
+                    }
+                    if (openaiKey === true) {
+                      parts.push('OpenAI key: present');
+                    } else if (openaiKey === false) {
+                      parts.push('OpenAI key: not set');
+                    }
+
+                    ragRuntimeHint.textContent = parts.join(' • ');
+                  } else {
+                    ragRuntimeHint.textContent = 'Runtime: unavailable';
+                  }
+                } catch (e) {
+                  const name = e && e.name ? e.name : '';
+                  ragRuntimeHint.textContent = (name === 'AbortError')
+                    ? 'Runtime: timed out'
+                    : 'Runtime: unavailable';
+                }
+              })();
+            }
 
             // Prepare modal action buttons (idempotent)
             const modalActions = ragModal.querySelector('.modal-actions');

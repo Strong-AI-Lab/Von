@@ -82,6 +82,16 @@ def test_interpret_model_turn_ignores_non_tool_json_without_error():
     assert interpretation.is_json_action is False
 
 
+def test_interpret_model_turn_flags_tool_result_shaped_json_as_json_action():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    interpretation = orchestrator._interpret_model_turn(
+        '{"tool": "test", "status": "ok", "payload": {"x": 1}}'
+    )
+    assert interpretation.tool_calls is None
+    assert interpretation.tool_call_parse_error is None
+    assert interpretation.is_json_action is True
+
+
 def test_interpret_model_turn_captures_tool_call_parse_error():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     interpretation = orchestrator._interpret_model_turn(
@@ -115,7 +125,7 @@ def test_assess_missing_tool_call_uses_fenced_json_reason_without_classifier_cal
     aux_log: list[Mapping[str, Any]] = []
 
     interpretation = orchestrator._interpret_model_turn(
-        "```json\n{\"action\":\"call_tool\",\"tool\":\"test\",\"payload\":{}}\n```"
+        '```json\n{"action":"call_tool","tool":"test","payload":{}}\n```'
     )
 
     assessment = orchestrator._assess_missing_tool_call(
@@ -129,6 +139,30 @@ def test_assess_missing_tool_call_uses_fenced_json_reason_without_classifier_cal
     )
 
     assert assessment.retry_reason == "fenced tool-call JSON detected"
+    assert not llm.calls
+
+
+def test_assess_missing_tool_call_retries_on_json_action_without_classifier_call():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    llm = _RecorderLLM(["YES"])  # Would be consumed if classifier were called.
+    aux_log: list[Mapping[str, Any]] = []
+
+    interpretation = orchestrator._interpret_model_turn(
+        '{"tool": "test", "status": "ok", "payload": {"x": 1}}'
+    )
+    assert interpretation.is_json_action
+
+    assessment = orchestrator._assess_missing_tool_call(
+        response_text=interpretation.response_text,
+        use_structured=False,
+        interpretation=interpretation,
+        llm_client=llm,
+        model="primary-model",
+        aux_log=aux_log,
+        tool_call_parse_error=None,
+    )
+
+    assert assessment.retry_reason == "JSON tool-call output detected"
     assert not llm.calls
 
 
@@ -326,7 +360,7 @@ def test_llm_detector_returns_true_on_yes():
 
     llm = _RecorderLLM(["YES"])
     aux_log: list[Mapping[str, Any]] = []
-    decision = orchestrator._llm_detects_missing_tool_call(
+    invoked, decision = orchestrator._llm_detects_missing_tool_call(
         "I'm going to search the web",
         llm,
         fallback_model="fallback-model",
@@ -334,6 +368,7 @@ def test_llm_detector_returns_true_on_yes():
         path="legacy",
     )
 
+    assert invoked is True
     assert decision is True
     assert llm.calls[0]["model"] == "detector-model"
     assert llm.calls[0]["context"] is None
@@ -354,7 +389,7 @@ def test_llm_detector_strips_vontology_model_prefix_before_calling_llm():
 
     llm = _RecorderLLM(["NO"])
     aux_log: list[Mapping[str, Any]] = []
-    decision = orchestrator._llm_detects_missing_tool_call(
+    invoked, decision = orchestrator._llm_detects_missing_tool_call(
         "I will fetch that now",
         llm,
         fallback_model="fallback-model",
@@ -362,6 +397,7 @@ def test_llm_detector_strips_vontology_model_prefix_before_calling_llm():
         path="legacy",
     )
 
+    assert invoked is True
     assert decision is False
     assert llm.calls[0]["model"] == "gpt-4o-mini"
     assert aux_log and aux_log[0]["model_raw"] == "#V#gpt-4o-mini"
@@ -381,7 +417,7 @@ def test_llm_detector_appends_response_when_placeholder_missing():
 
     llm = _RecorderLLM(["YES"])
     aux_log: list[Mapping[str, Any]] = []
-    decision = orchestrator._llm_detects_missing_tool_call(
+    invoked, decision = orchestrator._llm_detects_missing_tool_call(
         "I'll fetch JVNAUTOSCI-803 now",
         llm,
         fallback_model="fallback-model",
@@ -389,6 +425,7 @@ def test_llm_detector_appends_response_when_placeholder_missing():
         path="legacy",
     )
 
+    assert invoked is True
     assert decision is True
     assert "fetch JVNAUTOSCI-803" in llm.calls[0]["prompt"]
     assert aux_log and aux_log[0]["prompt_placeholder_response"] is False
@@ -408,7 +445,7 @@ def test_llm_detector_uses_fallback_model_when_missing():
 
     llm = _RecorderLLM(["NO"])
     aux_log: list[Mapping[str, Any]] = []
-    decision = orchestrator._llm_detects_missing_tool_call(
+    invoked, decision = orchestrator._llm_detects_missing_tool_call(
         "Normal explanatory text",
         llm,
         fallback_model="fallback-model",
@@ -416,6 +453,7 @@ def test_llm_detector_uses_fallback_model_when_missing():
         path="legacy",
     )
 
+    assert invoked is True
     assert decision is False
     assert llm.calls[0]["model"] == "fallback-model"
     assert aux_log and aux_log[0]["model"] == "fallback-model"
@@ -518,6 +556,47 @@ def test_run_retries_when_classifier_misses_but_heuristic_triggers():
     assert result.aux_llm_calls
 
 
+def test_run_retries_when_response_uses_smart_quotes_promising_tool_use():
+    """Regression test: smart quotes should not bypass missing-tool-call detection.
+
+    Some models emit curly apostrophes (e.g., "I’m") which previously bypassed
+    the promise-pattern heuristic and prevented a retry.
+
+    When the fallback detector is active, the orchestrator should still recover
+    deterministically (without consuming an extra LLM turn for classification).
+    """
+
+    gateway = _DummyGateway()
+    llm = _RecorderLLM(
+        [
+            # Initial response: promises a tool-backed action, but emits no tool JSON.
+            "I’m going to search the knowledge base now.",
+            '{"action": "call_tool", "tool": "test", "payload": {}}',
+            "Final response",
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=1,
+    )
+
+    result = orchestrator.run(
+        prompt="hello",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert gateway.calls
+    assert result.tool_invocations
+    assert result.response_text == "Final response"
+    aux_types = [entry.get("type") for entry in result.aux_llm_calls]
+    assert "missing_tool_call_detection" in aux_types
+    assert "missing_tool_call_retry" in aux_types
+
+
 def test_run_recovers_from_invalid_tool_call_json_with_retry():
     """Regression test: invalid JSON tool-call output should trigger a retry.
 
@@ -596,7 +675,10 @@ def test_run_recovers_from_late_turn_invalid_tool_call_json_with_retry():
 
     assert len(gateway.calls) == 2
     assert result.response_text == "Final response"
-    assert all(inv.get("tool") != "__tool_call_parse_error__" for inv in result.tool_invocations)
+    assert all(
+        inv.get("tool") != "__tool_call_parse_error__"
+        for inv in result.tool_invocations
+    )
 
     aux_types = [entry.get("type") for entry in result.aux_llm_calls]
     assert "missing_tool_call_detection" in aux_types
@@ -637,6 +719,12 @@ def test_run_surfaces_late_turn_parse_error_when_retry_also_invalid():
     )
 
     assert len(gateway.calls) == 1
-    assert "Tool call was not executed due to an MCP serialisation error" in result.response_text
-    assert any(inv.get("tool") == "__tool_call_parse_error__" for inv in result.tool_invocations)
+    assert (
+        "Tool call was not executed due to an MCP serialisation error"
+        in result.response_text
+    )
+    assert any(
+        inv.get("tool") == "__tool_call_parse_error__"
+        for inv in result.tool_invocations
+    )
     assert any(inv.get("tool") == "test" for inv in result.tool_invocations)

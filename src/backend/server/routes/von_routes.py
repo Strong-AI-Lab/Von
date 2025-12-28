@@ -1055,6 +1055,14 @@ def generate():
 
         # Derive user namespace for MCP tool isolation (JVNAUTOSCI-760)
         user_namespace = None
+        namespace_source = "missing"
+        namespace_report: dict[str, object] = {
+            "authenticated": bool(user_concept_id),
+            "user_concept_id": user_concept_id,
+            "session_namespace": session.get("namespace"),
+            "namespace": None,
+            "namespace_source": None,
+        }
         if user_concept_id:
             session_namespace = session.get("namespace")
             if (
@@ -1063,6 +1071,7 @@ def generate():
                 and session_namespace.startswith("#V#")
             ):
                 user_namespace = session_namespace.strip()
+                namespace_source = "session.namespace"
                 current_app.logger.info(
                     "[NAMESPACE] Using session namespace=%s for user_concept_id=%s",
                     user_namespace,
@@ -1073,6 +1082,7 @@ def generate():
                 # Handle both full concept ID and person ID formats
                 if user_concept_id.startswith("#V#"):
                     user_namespace = user_concept_id
+                    namespace_source = "user_concept_id"
                 else:
                     # Normalize to namespace format
                     user_id_normalized = (
@@ -1082,6 +1092,7 @@ def generate():
                         .replace("#", "")
                     )
                     user_namespace = f"#V#{user_id_normalized}"
+                    namespace_source = "derived_from_user_concept_id"
                 current_app.logger.info(
                     "[NAMESPACE] Derived user_namespace=%s from user_concept_id=%s",
                     user_namespace,
@@ -1091,6 +1102,21 @@ def generate():
             current_app.logger.warning(
                 "[NAMESPACE] No user_concept_id - user_namespace=None (RAG unavailable)"
             )
+
+        namespace_report["namespace"] = user_namespace
+        namespace_report["namespace_source"] = namespace_source
+
+        rag_trace: dict[str, object] = {
+            "authenticated": bool(user_concept_id),
+            "namespace": user_namespace,
+            "namespace_source": namespace_source,
+            "retrieval_attempted": False,
+            "retrieval_attempt_reason": (
+                None if user_concept_id else "not_authenticated"
+            ),
+            "tools_invoked": [],
+            "tool_results_included_in_prompt": False,
+        }
 
         # ---------------------------------------------------------
         # Tool-backed RAG counts (avoid KA vs chat-history confusion)
@@ -1425,6 +1451,7 @@ def generate():
                         "messages": current_turn_messages,
                         "response": response_text,
                         "user_prompt": user_prompt_debug,
+                        "namespace_report": namespace_report,
                         "context_stats": {
                             "sent_to_llm": context_stats,
                             "stored_context": current_context_stats,
@@ -1434,10 +1461,19 @@ def generate():
                         "aux_llm_calls": [],
                     }
 
+                    rag_trace["tools_invoked"] = [
+                        inv.get("tool")
+                        for inv in tool_invocations
+                        if isinstance(inv, dict) and isinstance(inv.get("tool"), str)
+                    ]
+                    rag_trace["retrieval_attempted"] = False
+                    rag_trace["retrieval_attempt_reason"] = "direct_tool_call"
+
                     return jsonify(
                         {
                             "response": response_text,
                             "llm_debug": llm_debug_info,
+                            "rag_trace": rag_trace,
                         }
                     )
 
@@ -1470,6 +1506,28 @@ def generate():
                 auxiliary_llm_calls = list(
                     getattr(orchestrator_result, "aux_llm_calls", [])
                 )
+
+                invoked_tools = []
+                for inv in tool_invocations:
+                    if not isinstance(inv, dict):
+                        continue
+                    name = inv.get("tool") or inv.get("method")
+                    if isinstance(name, str) and name:
+                        invoked_tools.append(name)
+
+                rag_trace["tools_invoked"] = invoked_tools
+                rag_trace["retrieval_attempted"] = (
+                    "search_knowledge_base" in invoked_tools
+                )
+                if rag_trace["retrieval_attempted"]:
+                    rag_trace["retrieval_attempt_reason"] = "tool_invoked"
+                else:
+                    rag_trace["retrieval_attempt_reason"] = (
+                        "no_rag_retrieval_tool_invoked"
+                        if user_concept_id
+                        else "not_authenticated"
+                    )
+                rag_trace["tool_results_included_in_prompt"] = bool(tool_messages)
             except ToolCallParsingError as exc:
                 current_app.logger.warning(
                     "[mcp_orchestrator] Invalid tool request payload: %s", exc
@@ -1602,6 +1660,7 @@ def generate():
             "messages": current_turn_messages,
             "response": response_text,
             "user_prompt": user_prompt_debug,
+            "namespace_report": namespace_report,
             "internal_mcp": {
                 "gateway_present": gateway is not None,
                 "gateway_enabled": (
@@ -1671,7 +1730,13 @@ def generate():
             current_app.config["CONTEXT"], max_messages=20
         )
 
-        return jsonify({"response": response_text, "llm_debug": llm_debug_info})
+        return jsonify(
+            {
+                "response": response_text,
+                "llm_debug": llm_debug_info,
+                "rag_trace": rag_trace,
+            }
+        )
     except Exception as e:
         print(f"Error during generation: {e}")  # Log error server-side
         # Return error with debug info showing the current turn only (not full context)
@@ -1700,7 +1765,12 @@ def generate():
             "tool_invocations": [],
         }
         error_debug_info["warnings"] = _derive_llm_debug_warnings(error_debug_info)
-        return jsonify({"error": str(e), "llm_debug": error_debug_info}), 500
+        body = {"error": str(e), "llm_debug": error_debug_info}
+        if "rag_trace" in locals():
+            body["rag_trace"] = rag_trace
+        if "namespace_report" in locals():
+            body["namespace_report"] = namespace_report
+        return jsonify(body), 500
 
 
 @von_bp.route("/history", methods=["GET"])

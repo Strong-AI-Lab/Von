@@ -6178,6 +6178,16 @@ body.settings-body {
     animation: pulse-rag 2s infinite;
 }
 
+.rag-runtime-hint {
+    font-size: 0.85rem;
+    color: #4b5563;
+    background: #f8fafc;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin: 8px 0 10px;
+}
+
 /* Organisation Selector Component */
 .org-selector-wrapper {
     display: flex;

@@ -76,6 +76,11 @@ class _MissingToolCallAssessment:
     path: str
     is_json_action: bool
     fenced_json: bool
+    classifier_invoked: bool
+    classifier_has_verdict: bool
+    # Backwards-compatible alias retained for existing debug consumers.
+    # Historically this effectively meant "classifier produced a yes/no verdict".
+    # It now means "classifier was invoked".
     classifier_used: bool
     classifier_verdict: bool | None
     retry_reason: str | None
@@ -108,6 +113,18 @@ class InternalMCPChatOrchestrator:
     _TOOL_FIELD = "tool"
     _PAYLOAD_FIELD = "payload"
     _MISSING_TOOL_CALL_ACTION_ID = "#V#detect_missing_tool_call_action"
+    _FALLBACK_MISSING_TOOL_CALL_PROMPT = (
+        "You are a strict classifier for an agent system that can call tools via JSON.\n"
+        "Your job: decide whether the assistant response *promises* to call tools (or says it is about to do so) "
+        "but does not actually emit a tool-call JSON object/array.\n\n"
+        "Rules:\n"
+        "- Answer ONLY 'YES' or 'NO'.\n"
+        "- Answer YES if the response contains phrases like 'I will', 'I’m going to', 'Proceeding now', 'Invoking', "
+        "or similar action narration *and* references tool-like actions (search, fetch, create/update, MCP, ontology).\n"
+        "- Answer NO for normal explanations, summaries, or questions that are not claiming to execute tools now.\n\n"
+        "Assistant response:\n"
+        "{response}\n"
+    )
 
     def __init__(
         self,
@@ -432,11 +449,11 @@ class InternalMCPChatOrchestrator:
         # Inform agent about authentication status and tool availability
         auth_status = ""
         if user_namespace:
-            auth_status = f"\n\n🔐 AUTHENTICATION STATUS: Authenticated (namespace: {user_namespace})\nRAG tools (search_knowledge_base, rag_list_indexed, rag_get_item) are AVAILABLE.\n"
+            auth_status = f"\n\n🔐 AUTHENTICATION STATUS: Authenticated (namespace: {user_namespace})\nRAG tools (rag_list_collections, search_knowledge_base, rag_list_indexed, rag_get_item) are AVAILABLE.\n"
         else:
             auth_status = (
                 "\n\n⚠️ AUTHENTICATION STATUS: NOT AUTHENTICATED\n"
-                "RAG tools (search_knowledge_base, rag_list_indexed, rag_get_item) are UNAVAILABLE.\n"
+                "RAG tools (rag_list_collections, search_knowledge_base, rag_list_indexed, rag_get_item) are UNAVAILABLE.\n"
                 "These tools require user authentication to prevent cross-user data access.\n"
                 "If user asks about their RAG data/sessions/indexed content, explain they need to log in first.\n"
             )
@@ -452,9 +469,10 @@ class InternalMCPChatOrchestrator:
             "If user asks a direct factual question needing verification → USE qna_search\n"
             "If searching within specific domain/context (e.g., site:example.com) → USE context_search\n"
             "If user asks about arXiv papers by author, topic, or ID → USE list_papers or read_paper\n"
-            'If user asks about RAG sessions/conversations ("how many", "what\'s indexed", "list sessions") → USE rag_list_indexed\n'
-            "If user wants to see RAG content from a specific session → USE rag_get_item\n"
-            "If user wants to search their indexed conversations by topic/keyword → USE search_knowledge_base\n\n"
+            'If user asks "what\'s in my RAG store?" or asks about RAG *collections/sources* → USE rag_list_collections\n'
+            'If user asks about RAG sessions ("how many", "what\'s indexed", "list sessions") → USE rag_list_indexed (often with collection=...)\n'
+            "If user wants to see RAG content from a specific session → USE rag_get_item (often with collection=...)\n"
+            "If user wants semantic/topic search over indexed content → USE search_knowledge_base\n\n"
             "CRITICAL: Your training data has a cutoff date. For anything described as current/recent/new, "
             "you MUST use search tools to get up-to-date information.\n\n"
             "HOW TO INVOKE A TOOL:\n"
@@ -509,7 +527,16 @@ class InternalMCPChatOrchestrator:
         if not text:
             return False
 
-        lowered = text.lower()
+        # Normalise common Unicode punctuation (smart quotes) so heuristics behave
+        # consistently across models and frontends.
+        normalised = (
+            text.replace("\u2019", "'")
+            .replace("\u2018", "'")
+            .replace("\u2032", "'")
+            .replace("\u201c", '"')
+            .replace("\u201d", '"')
+        )
+        lowered = normalised.lower()
         triggers = (
             "here is the actual ontology operation",
             "here's the actual ontology operation",
@@ -741,8 +768,22 @@ class InternalMCPChatOrchestrator:
     def _get_missing_tool_call_detector(self) -> Optional[_MissingToolCallDetectorSpec]:
         """Load the missing-tool-call detector spec from the Vontology (best effort)."""
 
+        fallback_enabled = os.getenv(
+            "VON_MISSING_TOOL_CALL_CLASSIFIER_FALLBACK", "1"
+        ).lower() in {"1", "true"}
+
+        def _fallback_spec() -> Optional[_MissingToolCallDetectorSpec]:
+            if not fallback_enabled:
+                return None
+            return _MissingToolCallDetectorSpec(
+                action_id="fallback_missing_tool_call_detector",
+                prompt_id=None,
+                prompt_text=self._FALLBACK_MISSING_TOOL_CALL_PROMPT,
+                model=None,
+            )
+
         if self._missing_tool_call_detector_loaded:
-            return self._missing_tool_call_detector
+            return self._missing_tool_call_detector or _fallback_spec()
 
         self._missing_tool_call_detector_loaded = True
 
@@ -767,8 +808,8 @@ class InternalMCPChatOrchestrator:
             action = None
 
         if not isinstance(action, Mapping):
-            self._missing_tool_call_detector = None
-            return None
+            self._missing_tool_call_detector = _fallback_spec()
+            return self._missing_tool_call_detector
 
         prompt_id = self._first_relationship_value(action, "#V#uses_prompt")
         model_id = self._first_relationship_value(action, "#V#uses_llm_model")
@@ -783,8 +824,8 @@ class InternalMCPChatOrchestrator:
                 self._MISSING_TOOL_CALL_ACTION_ID,
                 prompt_id or "",
             )
-            self._missing_tool_call_detector = None
-            return None
+            self._missing_tool_call_detector = _fallback_spec()
+            return self._missing_tool_call_detector
 
         self._missing_tool_call_detector = _MissingToolCallDetectorSpec(
             action_id=self._MISSING_TOOL_CALL_ACTION_ID,
@@ -802,20 +843,26 @@ class InternalMCPChatOrchestrator:
         fallback_model: Optional[str],
         aux_log: Optional[List[Mapping[str, Any]]] = None,
         path: str | None = None,
-    ) -> Optional[bool]:
+    ) -> tuple[bool, Optional[bool]]:
         """Run the Vontology-configured detector LLM to classify the response.
 
-        Returns True if the classifier says the model promised a tool call but
-        didn't emit one, False if the classifier says no, and None if detection
-        could not be performed (missing prompt/model or errors).
+        Returns (invoked, verdict).
+
+        invoked:
+            True if we attempted to call the classifier LLM.
+        verdict:
+            True if the classifier says the model promised a tool call but didn't
+            emit one, False if the classifier says no, and None if no yes/no
+            verdict could be obtained (unavailable prompt/model, errors, or
+            unexpected output).
         """
 
         if not isinstance(response, str) or not response.strip():
-            return None
+            return False, None
 
         detector = self._get_missing_tool_call_detector()
         if not detector or not detector.prompt_text:
-            return None
+            return False, None
 
         # Avoid ballooning the classifier input; we only need the last response.
         truncated_response = response.strip()
@@ -850,10 +897,10 @@ class InternalMCPChatOrchestrator:
                 model_name or "default",
                 exc,
             )
-            return None
+            return True, None
 
         if not isinstance(classifier_output, str):
-            return None
+            return True, None
 
         try:
             if aux_log is not None:
@@ -875,13 +922,13 @@ class InternalMCPChatOrchestrator:
         except Exception:  # pragma: no cover - defensive
             pass
 
-        verdict = classifier_output.strip().lower()
-        if verdict.startswith("yes"):
-            return True
-        if verdict.startswith("no"):
-            return False
+        verdict_text = classifier_output.strip().lower()
+        if verdict_text.startswith("yes"):
+            return True, True
+        if verdict_text.startswith("no"):
+            return True, False
 
-        return None
+        return True, None
 
     @staticmethod
     def _contains_fenced_tool_call_json(response: str) -> bool:
@@ -978,14 +1025,23 @@ class InternalMCPChatOrchestrator:
                 parsed[self._PAYLOAD_FIELD], dict
             )
 
-            # Some models omit the action field even when they are clearly
-            # attempting a tool call. Treat this as a likely tool call response
-            # for diagnostics (execution is handled separately).
+            # Some models omit the action field or emit tool-call-like JSON with
+            # extra diagnostics keys (e.g., status/duration_ms). Treat these as a
+            # likely tool-call attempt for diagnostics/recovery.
+            allowed_tool_like_keys = {
+                self._ACTION_FIELD,
+                self._TOOL_FIELD,
+                self._PAYLOAD_FIELD,
+                "status",
+                "duration_ms",
+                "error",
+                "_call_id",
+            }
             missing_action_but_tool_shape = (
                 self._ACTION_FIELD not in parsed
                 and has_tool
                 and has_payload
-                and set(parsed.keys()) <= {self._TOOL_FIELD, self._PAYLOAD_FIELD}
+                and set(parsed.keys()) <= allowed_tool_like_keys
             )
 
             return (
@@ -1474,7 +1530,8 @@ class InternalMCPChatOrchestrator:
             else self._looks_like_missing_tool_call(response_text)
         )
 
-        classifier_used = False
+        classifier_invoked = False
+        classifier_has_verdict = False
         classifier_verdict: bool | None = None
         retry_reason: str | None = None
 
@@ -1484,35 +1541,86 @@ class InternalMCPChatOrchestrator:
         if retry_reason is None and fenced_detected:
             retry_reason = "fenced tool-call JSON detected"
 
+        # If the model emits a tool-call-like JSON blob (often a tool result shape)
+        # but we did not extract an executable tool call, retry once and demand a
+        # pure tool-call JSON object/array.
+        if retry_reason is None and is_json_action:
+            retry_reason = "JSON tool-call output detected"
+
         if retry_reason is None:
-            llm_flag = self._llm_detects_missing_tool_call(
-                response_text,
-                llm_client,
-                fallback_model=model,
-                aux_log=aux_log,
-                path=path,
+            lowered = response_text.lower() if isinstance(response_text, str) else ""
+            mentions_tools = any(
+                token in lowered
+                for token in (
+                    "tool",
+                    "mcp",
+                    "ontology",
+                    "rag",
+                    "search",
+                    "fetch",
+                    "create",
+                    "update",
+                    "delete",
+                    "jira",
+                    "confluence",
+                    "gmail",
+                    "arxiv",
+                )
             )
 
+            detector = self._get_missing_tool_call_detector()
+            fallback_detector = bool(
+                detector
+                and isinstance(getattr(detector, "action_id", None), str)
+                and detector.action_id == "fallback_missing_tool_call_detector"
+            )
+
+            # If the conservative heuristic already fires and we're using the
+            # fallback classifier spec, skip the classifier call to avoid
+            # unnecessary extra LLM traffic (and to keep recovery deterministic
+            # in unit tests that stub the LLM client).
+            if heuristic_missing and fallback_detector:
+                retry_reason = "heuristic missing tool call"
+                llm_flag = None
+                classifier_invoked = False
+            elif not heuristic_missing and not mentions_tools:
+                # Normal prose: don't bother running the classifier.
+                llm_flag = None
+                classifier_invoked = False
+            else:
+                classifier_invoked, llm_flag = self._llm_detects_missing_tool_call(
+                    response_text,
+                    llm_client,
+                    fallback_model=model,
+                    aux_log=aux_log,
+                    path=path,
+                )
+
             if llm_flag is not None:
-                classifier_used = True
+                classifier_has_verdict = True
                 classifier_verdict = llm_flag
 
-            if llm_flag is True:
-                retry_reason = "LLM classifier flagged missing tool call"
-            elif llm_flag is None:
-                # Fallback to legacy heuristic only when classifier unavailable.
-                if heuristic_missing:
-                    retry_reason = "heuristic missing tool call"
-            elif llm_flag is False:
-                # Backstop: the LLM classifier can miss obvious cases.
-                if heuristic_missing:
-                    retry_reason = "heuristic missing tool call (classifier said no)"
+            if retry_reason is None:
+                if llm_flag is True:
+                    retry_reason = "LLM classifier flagged missing tool call"
+                elif llm_flag is None:
+                    # Fallback to legacy heuristic only when classifier unavailable.
+                    if heuristic_missing:
+                        retry_reason = "heuristic missing tool call"
+                elif llm_flag is False:
+                    # Backstop: the LLM classifier can miss obvious cases.
+                    if heuristic_missing:
+                        retry_reason = (
+                            "heuristic missing tool call (classifier said no)"
+                        )
 
         return _MissingToolCallAssessment(
             path=path,
             is_json_action=is_json_action,
             fenced_json=fenced_detected,
-            classifier_used=classifier_used,
+            classifier_invoked=classifier_invoked,
+            classifier_has_verdict=classifier_has_verdict,
+            classifier_used=classifier_invoked,
             classifier_verdict=classifier_verdict,
             retry_reason=retry_reason,
             tool_call_parse_error=tool_call_parse_error,
@@ -1816,13 +1924,17 @@ class InternalMCPChatOrchestrator:
                         "path": assessment.path,
                         "is_json_action": assessment.is_json_action,
                         "fenced_json": assessment.fenced_json,
+                        "classifier_invoked": assessment.classifier_invoked,
+                        "classifier_has_verdict": assessment.classifier_has_verdict,
                         "classifier_used": assessment.classifier_used,
                         "classifier_verdict": (
                             "yes"
                             if assessment.classifier_verdict is True
-                            else "no"
-                            if assessment.classifier_verdict is False
-                            else "unavailable"
+                            else (
+                                "no"
+                                if assessment.classifier_verdict is False
+                                else "unavailable"
+                            )
                         ),
                         "retry_reason": assessment.retry_reason or "",
                         "parse_error": (
@@ -1958,13 +2070,17 @@ class InternalMCPChatOrchestrator:
                                 "path": assessment.path,
                                 "is_json_action": assessment.is_json_action,
                                 "fenced_json": assessment.fenced_json,
+                                "classifier_invoked": assessment.classifier_invoked,
+                                "classifier_has_verdict": assessment.classifier_has_verdict,
                                 "classifier_used": assessment.classifier_used,
                                 "classifier_verdict": (
                                     "yes"
                                     if assessment.classifier_verdict is True
-                                    else "no"
-                                    if assessment.classifier_verdict is False
-                                    else "unavailable"
+                                    else (
+                                        "no"
+                                        if assessment.classifier_verdict is False
+                                        else "unavailable"
+                                    )
                                 ),
                                 "retry_reason": assessment.retry_reason or "",
                                 "parse_error": str(exc),
