@@ -23,7 +23,9 @@ After editing `.vscode/mcp.json`, reload VS Code (or restart the MCP servers) so
 
 ## Namespace requirement
 
-All tools require an explicit `namespace` and fail closed when it is missing. This reduces accidental cross-namespace access during local development.
+Tools accept an optional `namespace`. If omitted, the server will fall back to `VON_DEFAULT_NAMESPACE` from the repo-root `.env`.
+
+It still fails closed if neither `namespace` nor `VON_DEFAULT_NAMESPACE` is set. This reduces accidental cross-namespace access during local development.
 
 ## Notes
 

@@ -627,7 +627,9 @@ To ensure a standardized, stable, and secure way for AI agents to interact with 
 
 ### Available MCP Server Endpoints
 
-The server is located at `src/backend/mcp_server/mcp_server.py` and, when running, is typically available at `http://127.0.0.1:5002`.
+The Vontology MCP server is provided as a **stdio** MCP server (no HTTP port) via `src/backend/mcp_server/mcp_stdio_server.py`.
+
+Von's main web server runs separately (default `http://127.0.0.1:5000` when launched via `run.ps1`) and exposes admin endpoints such as `/admin/rag_status` on that same port.
 
 | Endpoint                  | Method | Description                                                                                             |
 | ------------------------- | ------ | ------------------------------------------------------------------------------------------------------- |
