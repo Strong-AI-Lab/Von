@@ -2004,9 +2004,57 @@ def _update_concept_output_schema() -> Schema:
 
 
 # RAG Tool Handlers and Schemas
+def _resolve_rag_namespace_from_kwargs(kwargs: dict) -> dict:
+    """Resolve namespace for RAG tools and report provenance.
+
+    SECURITY: Do not infer namespaces from arbitrary client-provided user ids.
+    Prefer explicit namespace (tool payload) and allow an env default for dev.
+    """
+
+    import os
+
+    raw = kwargs.get("namespace")
+    if isinstance(raw, str) and raw.strip():
+        return {
+            "namespace": raw.strip(),
+            "namespace_source": "request.namespace",
+            "namespace_resolution_note": None,
+        }
+
+    env_ns = os.environ.get("VON_DEFAULT_NAMESPACE")
+    if isinstance(env_ns, str) and env_ns.strip():
+        return {
+            "namespace": env_ns.strip(),
+            "namespace_source": "env.VON_DEFAULT_NAMESPACE",
+            "namespace_resolution_note": "fallback",
+        }
+
+    return {
+        "namespace": None,
+        "namespace_source": "missing",
+        "namespace_resolution_note": "namespace_required",
+    }
+
+
+def _with_rag_provenance(*, payload: dict, item_kind: str, source_system: str) -> dict:
+    result = dict(payload)
+    provenance = {
+        "item_kind": item_kind,
+        "source_system": source_system,
+        "namespace": payload.get("namespace"),
+        "namespace_source": payload.get("namespace_source"),
+    }
+    existing = result.get("provenance")
+    if isinstance(existing, dict):
+        provenance = {**existing, **provenance}
+    result["provenance"] = provenance
+    return result
+
+
 def _search_knowledge_base(**kwargs):
     from ...services.rag_service import get_rag_service, RAGBackendUnavailable
-    import os
+
+    import time
 
     query_text = kwargs.get("query")
     if not query_text:
@@ -2014,21 +2062,15 @@ def _search_knowledge_base(**kwargs):
 
     try:
         service = get_rag_service()  # Default backend
-        # Resolve effective namespace: prefer explicit, else env, else derive from user.id if provided
-        ns = kwargs.get("namespace")
-        if not ns:
-            ns = os.environ.get("VON_DEFAULT_NAMESPACE")
-        if not ns:
-            user = kwargs.get("user")
-            user_id = user.get("id") if isinstance(user, dict) else None
-            if isinstance(user_id, str) and user_id.strip():
-                ns = f"#V#{user_id.strip().lower().replace(' ', '_')}"
+        ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+        ns = ns_report.get("namespace")
 
         # SECURITY: Require namespace for RAG search - prevents cross-user data leakage
         if not ns:
             return {
                 "error": "namespace_required",
                 "message": "RAG search requires authenticated user context (namespace)",
+                **ns_report,
                 "success": False,
             }
 
@@ -2052,19 +2094,73 @@ def _search_knowledge_base(**kwargs):
             if org_concept_id:
                 permissions_context["organisation_concept_id"] = org_concept_id
         except (ImportError, RuntimeError):
-            # Not in Flask context - use user_id from kwargs if available
+            # Not in Flask context (e.g., external MCP stdio server).
+            # Derive the same effective filtering keys we use in-server when possible.
+            user = kwargs.get("user")
+            user_id = user.get("id") if isinstance(user, dict) else None
             if isinstance(user_id, str) and user_id.strip():
-                permissions_context["user_id"] = (
-                    user_id.strip().lower().replace(" ", "_")
-                )
+                # IMPORTANT: Use concept IDs verbatim (case sensitive, e.g. #V#person).
+                permissions_context["user_id"] = user_id.strip()
 
+            org_concept_id = kwargs.get("organisation_concept_id")
+            if isinstance(org_concept_id, str) and org_concept_id.strip():
+                permissions_context["organisation_concept_id"] = org_concept_id.strip()
+
+            # If the namespace is in the user@org form, it contains enough
+            # information to derive both IDs without trusting arbitrary inputs.
+            if isinstance(ns, str) and "@" in ns:
+                user_part, org_part = ns.split("@", 1)
+                if user_part.strip() and "user_id" not in permissions_context:
+                    permissions_context["user_id"] = user_part.strip()
+                if (
+                    org_part.strip()
+                    and "organisation_concept_id" not in permissions_context
+                ):
+                    org_part_clean = org_part.strip()
+                    if not org_part_clean.startswith("#V#"):
+                        org_part_clean = f"#V#{org_part_clean}"
+                    permissions_context["organisation_concept_id"] = org_part_clean
+
+        start = time.perf_counter()
         results = service.query(
             query_text=query_text,
             top_k=kwargs.get("top_k", 5),
             namespace=ns,
             permissions_context=permissions_context if permissions_context else None,
         )
-        return {"results": results, "count": len(results), "success": True}
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+        # Provenance-first: stamp RAG retrieval results so downstream consumers cannot
+        # mistake them for chat history or KA sessions.
+        stamped_results = []
+        if isinstance(results, list):
+            for row in results:
+                if not isinstance(row, dict):
+                    stamped_results.append(row)
+                    continue
+                meta = row.get("metadata")
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta = {
+                    **meta,
+                    "item_kind": "rag_chunk",
+                    "source_system": "rag.llamaindex",
+                    "namespace": ns,
+                    "namespace_source": ns_report.get("namespace_source"),
+                }
+                stamped_results.append({**row, "metadata": meta})
+        else:
+            stamped_results = results
+
+        return {
+            "results": stamped_results,
+            "count": len(stamped_results) if isinstance(stamped_results, list) else 0,
+            "elapsed_ms": elapsed_ms,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
     except RAGBackendUnavailable as e:
         return {"error": f"RAG service unavailable: {e}", "success": False}
     except Exception as e:
@@ -2199,7 +2295,8 @@ def _rag_get_status(**kwargs):
     import os
 
     try:
-        ns = kwargs.get("namespace") or os.environ.get("VON_DEFAULT_NAMESPACE")
+        ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+        ns = ns_report.get("namespace") or os.environ.get("VON_DEFAULT_NAMESPACE")
         detail = kwargs.get("detail")
         url = "http://127.0.0.1:5002/admin/rag_status"
         if ns:
@@ -2208,140 +2305,464 @@ def _rag_get_status(**kwargs):
             url = f"{url}{'&' if '?' in url else '?'}detail=1"
         res = requests.get(url, timeout=5)
         if res.ok:
-            return res.json()
+            payload = res.json()
+            if isinstance(payload, dict):
+                payload.update(ns_report)
+                payload = _with_rag_provenance(
+                    payload=payload,
+                    item_kind="rag_status_report",
+                    source_system="http.admin_rag_status",
+                )
+            return payload
         return {"error": f"HTTP {res.status_code}", "success": False}
     except Exception as e:
         return {"error": str(e), "success": False}
 
 
-def _rag_list_indexed(**kwargs):
-    from ...db.connection_manager import get_db
-    import os
+def _resolve_rag_collection_from_kwargs(kwargs: dict) -> dict[str, object]:
+    """Resolve a user-provided collection selector.
 
-    db = get_db()
-    if db is None:
-        return {"error": "db_unavailable", "success": False}
-    coll = db["interaction_sessions"]
-    limit = int(kwargs.get("limit", 20))
-    offset = int(kwargs.get("offset", 0))
+    This exists to prevent silent defaults: responses should echo what the
+    caller asked for vs what was actually used.
+    """
 
-    # Resolve effective namespace: prefer explicit, else env, else derive from user.id if provided
-    ns = kwargs.get("namespace")
-    if not ns:
-        ns = os.environ.get("VON_DEFAULT_NAMESPACE")
-    if not ns:
-        user = kwargs.get("user")
-        user_id = user.get("id") if isinstance(user, dict) else None
-        if isinstance(user_id, str) and user_id.strip():
-            ns = f"#V#{user_id.strip().lower().replace(' ', '_')}"
+    raw = kwargs.get("collection")
+    if raw is None:
+        return {
+            "requested_collection": None,
+            "effective_collection": "ka_sessions",
+            "collection_source": "default",
+            "collection_resolution_note": "default",
+        }
+
+    if not isinstance(raw, str):
+        return {
+            "requested_collection": raw,
+            "effective_collection": "ka_sessions",
+            "collection_source": "default",
+            "collection_resolution_note": "invalid",
+        }
+
+    cleaned = raw.strip()
+    if not cleaned:
+        return {
+            "requested_collection": raw,
+            "effective_collection": "ka_sessions",
+            "collection_source": "default",
+            "collection_resolution_note": "empty",
+        }
+
+    lowered = cleaned.lower()
+    aliases = {
+        "ka": "ka_sessions",
+        "ka_session": "ka_sessions",
+        "ka_sessions": "ka_sessions",
+        "interaction": "ka_sessions",
+        "interaction_session": "ka_sessions",
+        "interaction_sessions": "ka_sessions",
+        "indexed_sessions": "ka_sessions",
+        "indexed": "ka_sessions",
+        "chat": "chat_history_sessions",
+        "chat_session": "chat_history_sessions",
+        "chat_sessions": "chat_history_sessions",
+        "chat_history": "chat_history_sessions",
+        "chat_history_session": "chat_history_sessions",
+        "chat_history_sessions": "chat_history_sessions",
+    }
+    effective = aliases.get(lowered, lowered)
+    return {
+        "requested_collection": cleaned,
+        "effective_collection": effective,
+        "collection_source": (
+            "request.collection_alias" if effective != lowered else "request.collection"
+        ),
+        "collection_resolution_note": (
+            f"alias:{lowered}" if effective != lowered else None
+        ),
+    }
+
+
+def _rag_list_collections(**kwargs):
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns = ns_report.get("namespace")
 
     # SECURITY: Require namespace for RAG access - prevents cross-user data leakage
     if not ns:
         return {
             "error": "namespace_required",
             "message": "RAG access requires authenticated user context (namespace)",
+            **ns_report,
             "success": False,
         }
 
-    # Build query with namespace filter
-    query = {"indexing_status": "indexed", "namespace": ns}
+    collections = [
+        {
+            "collection": "ka_sessions",
+            "label": "Indexed KA interaction sessions",
+            "description": (
+                "Interaction sessions stored in MongoDB (interaction_sessions) that have been indexed. "
+                "Use when you want to list or inspect KA sessions, not individual vector-store chunks."
+            ),
+            "list_tool": "rag_list_indexed",
+            "get_tool": "rag_get_item",
+            "search_tool": "search_knowledge_base",
+            "list_supported": True,
+            "get_supported": True,
+            "search_supported": True,
+            "list_supported_reason": None,
+            "get_supported_reason": None,
+            "item_kind": "ka_interaction_session",
+            "source_system": "mongo.interaction_sessions",
+        },
+        {
+            "collection": "chat_history_sessions",
+            "label": "Chat history sessions",
+            "description": (
+                "Chat session documents stored in MongoDB (chat_history). These may be indexed into the vector store "
+                "incrementally per message. Use when you want to list or inspect chat sessions."
+            ),
+            "list_tool": "rag_list_indexed",
+            "get_tool": "rag_get_item",
+            "search_tool": "search_knowledge_base",
+            "list_supported": True,
+            "get_supported": True,
+            "search_supported": True,
+            "list_supported_reason": None,
+            "get_supported_reason": None,
+            "item_kind": "chat_history_session",
+            "source_system": "mongo.chat_history",
+        },
+        {
+            "collection": "rag_documents",
+            "label": "Vector-store documents/chunks",
+            "description": (
+                "Semantic search index content (vector-store chunks). Not directly listable yet; use search_knowledge_base "
+                "to retrieve relevant chunks, or rag_get_status for counts."
+            ),
+            "list_tool": None,
+            "get_tool": None,
+            "search_tool": "search_knowledge_base",
+            "list_supported": False,
+            "get_supported": False,
+            "search_supported": True,
+            "list_supported_reason": "not_listable",
+            "get_supported_reason": "not_addressable",
+            "item_kind": "rag_chunk",
+            "source_system": "rag.llamaindex",
+        },
+    ]
 
-    cursor = (
-        coll.find(
-            query,
-            {"_id": 1, "indexed_at": 1, "summary": 1, "history": 1, "namespace": 1},
-        )
-        .skip(offset)
-        .limit(limit)
-    )
-    items = []
-    for doc in cursor:
-        preview_len = 0
-        if isinstance(doc.get("summary"), str):
-            preview_len += len(doc["summary"])
-        history = doc.get("history") or []
-        if isinstance(history, list):
-            for h in history:
-                content = h.get("content")
-                if isinstance(content, str):
-                    preview_len += len(content)
-        items.append(
-            {
-                "session_id": str(doc.get("_id")),
-                "indexed_at": (
-                    str(doc.get("indexed_at")) if doc.get("indexed_at") else None
-                ),
-                "preview_length": preview_len,
-                "namespace": doc.get("namespace"),
-            }
-        )
-    total = coll.count_documents(query)
-    return {
-        "items": items,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "namespace": ns,
+    payload = {
+        "collections": collections,
+        "count": len(collections),
+        "effective_namespace": ns,
+        "effective_namespace_source": ns_report.get("namespace_source"),
+        **ns_report,
         "success": True,
+    }
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="rag_collection_list",
+        source_system="internal_mcp.catalogue",
+    )
+
+
+def _rag_list_indexed(**kwargs):
+    from ...db.connection_manager import get_db
+
+    db = get_db()
+    if db is None:
+        return {"error": "db_unavailable", "success": False}
+    collection_report = _resolve_rag_collection_from_kwargs(kwargs)
+    collection = collection_report.get("effective_collection")
+    limit = int(kwargs.get("limit", 20))
+    offset = int(kwargs.get("offset", 0))
+
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns = ns_report.get("namespace")
+
+    # SECURITY: Require namespace for RAG access - prevents cross-user data leakage
+    if not ns:
+        return {
+            "error": "namespace_required",
+            "message": "RAG access requires authenticated user context (namespace)",
+            **ns_report,
+            "success": False,
+        }
+
+    if not isinstance(collection, str) or not collection:
+        collection = "ka_sessions"
+
+    if collection == "ka_sessions":
+        coll = db["interaction_sessions"]
+
+        # Build query with namespace filter
+        query = {"indexing_status": "indexed", "namespace": ns}
+
+        cursor = (
+            coll.find(
+                query,
+                {
+                    "_id": 1,
+                    "indexed_at": 1,
+                    "summary": 1,
+                    "history": 1,
+                    "namespace": 1,
+                },
+            )
+            .skip(offset)
+            .limit(limit)
+        )
+        items = []
+        for doc in cursor:
+            preview_len = 0
+            if isinstance(doc.get("summary"), str):
+                preview_len += len(doc["summary"])
+            history = doc.get("history") or []
+            if isinstance(history, list):
+                for h in history:
+                    content = h.get("content")
+                    if isinstance(content, str):
+                        preview_len += len(content)
+            items.append(
+                {
+                    "collection": collection,
+                    "session_id": str(doc.get("_id")),
+                    "indexed_at": (
+                        str(doc.get("indexed_at")) if doc.get("indexed_at") else None
+                    ),
+                    "preview_length": preview_len,
+                    "namespace": doc.get("namespace"),
+                    "item_kind": "ka_interaction_session",
+                    "source_system": "mongo.interaction_sessions",
+                    "namespace_source": ns_report.get("namespace_source"),
+                }
+            )
+        total = coll.count_documents(query)
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="rag_indexed_session_list",
+            source_system="mongo.interaction_sessions",
+        )
+
+    if collection == "chat_history_sessions":
+        coll = db["chat_history"]
+
+        query = {"namespace": ns}
+        cursor = (
+            coll.find(
+                query,
+                {
+                    "session_id": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                    "history": 1,
+                    "namespace": 1,
+                    "rag_indexed_success": 1,
+                    "rag_indexed_failed": 1,
+                },
+            )
+            .skip(offset)
+            .limit(limit)
+        )
+        items = []
+        for doc in cursor:
+            preview_len = 0
+            history = doc.get("history") or []
+            if isinstance(history, list):
+                for h in history:
+                    content = h.get("content")
+                    if isinstance(content, str):
+                        preview_len += len(content)
+            items.append(
+                {
+                    "collection": collection,
+                    "session_id": doc.get("session_id"),
+                    "created_at": (
+                        str(doc.get("created_at")) if doc.get("created_at") else None
+                    ),
+                    "updated_at": (
+                        str(doc.get("updated_at")) if doc.get("updated_at") else None
+                    ),
+                    "preview_length": preview_len,
+                    "message_count": len(history) if isinstance(history, list) else 0,
+                    "rag_indexed_success": doc.get("rag_indexed_success"),
+                    "rag_indexed_failed": doc.get("rag_indexed_failed"),
+                    "namespace": doc.get("namespace"),
+                    "item_kind": "chat_history_session",
+                    "source_system": "mongo.chat_history",
+                    "namespace_source": ns_report.get("namespace_source"),
+                }
+            )
+
+        total = coll.count_documents(query)
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="rag_chat_session_list",
+            source_system="mongo.chat_history",
+        )
+
+    return {
+        "error": "unknown_collection",
+        "message": f"Unknown collection: {collection}",
+        "collection": collection,
+        **collection_report,
+        "effective_namespace": ns,
+        "effective_namespace_source": ns_report.get("namespace_source"),
+        **ns_report,
+        "success": False,
     }
 
 
 def _rag_get_item(**kwargs):
     from ...db.connection_manager import get_db
     from bson import ObjectId
-    import os
 
     db = get_db()
     if db is None:
         return {"error": "db_unavailable", "success": False}
+    collection_report = _resolve_rag_collection_from_kwargs(kwargs)
+    collection = collection_report.get("effective_collection")
     session_id = kwargs.get("session_id")
     if not session_id:
         return {"error": "Missing session_id", "success": False}
 
-    # Resolve effective namespace: prefer explicit, else env, else derive from user.id if provided
-    ns = kwargs.get("namespace")
-    if not ns:
-        ns = os.environ.get("VON_DEFAULT_NAMESPACE")
-    if not ns:
-        user = kwargs.get("user")
-        user_id = user.get("id") if isinstance(user, dict) else None
-        if isinstance(user_id, str) and user_id.strip():
-            ns = f"#V#{user_id.strip().lower().replace(' ', '_')}"
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns = ns_report.get("namespace")
 
     # SECURITY: Require namespace for RAG access - prevents cross-user data leakage
     if not ns:
         return {
             "error": "namespace_required",
             "message": "RAG access requires authenticated user context (namespace)",
+            **ns_report,
             "success": False,
         }
 
-    coll = db["interaction_sessions"]
-    try:
-        query = {"_id": ObjectId(session_id), "namespace": ns}
-    except Exception:
-        query = {"_id": session_id, "namespace": ns}
+    if not isinstance(collection, str) or not collection:
+        collection = "ka_sessions"
 
-    doc = coll.find_one(query)
-    if not doc:
-        return {"error": "not_found", "success": False}
-    # Build a safe preview
-    preview = []
-    if isinstance(doc.get("summary"), str):
-        preview.append(doc["summary"])
-    history = doc.get("history") or []
-    if isinstance(history, list):
-        for h in history:
-            c = h.get("content")
-            if isinstance(c, str):
-                preview.append(c)
+    if collection == "ka_sessions":
+        coll = db["interaction_sessions"]
+        try:
+            query = {"_id": ObjectId(session_id), "namespace": ns}
+        except Exception:
+            query = {"_id": session_id, "namespace": ns}
+
+        doc = coll.find_one(query)
+        if not doc:
+            return {"error": "not_found", "success": False}
+
+        # Build a safe preview
+        preview = []
+        if isinstance(doc.get("summary"), str):
+            preview.append(doc["summary"])
+        history = doc.get("history") or []
+        if isinstance(history, list):
+            for h in history:
+                c = h.get("content")
+                if isinstance(c, str):
+                    preview.append(c)
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "session_id": str(doc.get("_id")),
+            "indexing_status": doc.get("indexing_status"),
+            "indexed_at": (
+                str(doc.get("indexed_at")) if doc.get("indexed_at") else None
+            ),
+            "namespace": doc.get("namespace"),
+            "preview": "\n\n".join(preview)[:4000],
+            "item_kind": "ka_interaction_session",
+            "source_system": "mongo.interaction_sessions",
+            "namespace_source": ns_report.get("namespace_source"),
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="rag_indexed_session_item",
+            source_system="mongo.interaction_sessions",
+        )
+
+    if collection == "chat_history_sessions":
+        coll = db["chat_history"]
+        doc = coll.find_one({"session_id": session_id, "namespace": ns})
+        if not doc:
+            return {"error": "not_found", "success": False}
+
+        history = doc.get("history") or []
+        preview_parts = []
+        if isinstance(history, list):
+            for h in history:
+                c = h.get("content")
+                if isinstance(c, str):
+                    preview_parts.append(c)
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "session_id": doc.get("session_id"),
+            "created_at": (
+                str(doc.get("created_at")) if doc.get("created_at") else None
+            ),
+            "updated_at": (
+                str(doc.get("updated_at")) if doc.get("updated_at") else None
+            ),
+            "namespace": doc.get("namespace"),
+            "message_count": len(history) if isinstance(history, list) else 0,
+            "preview": "\n\n".join(preview_parts)[:4000],
+            "item_kind": "chat_history_session",
+            "source_system": "mongo.chat_history",
+            "namespace_source": ns_report.get("namespace_source"),
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="rag_chat_session_item",
+            source_system="mongo.chat_history",
+        )
+
     return {
-        "session_id": str(doc.get("_id")),
-        "indexing_status": doc.get("indexing_status"),
-        "indexed_at": str(doc.get("indexed_at")) if doc.get("indexed_at") else None,
-        "namespace": doc.get("namespace"),
-        "preview": "\n\n".join(preview)[:4000],
-        "success": True,
+        "error": "unknown_collection",
+        "message": f"Unknown collection: {collection}",
+        "collection": collection,
+        **collection_report,
+        "effective_namespace": ns,
+        "effective_namespace_source": ns_report.get("namespace_source"),
+        **ns_report,
+        "success": False,
     }
 
 
@@ -3436,11 +3857,28 @@ def build_default_catalogue() -> MethodCatalogue:
             description="Get RAG status: totals, eligible counts, indexed/pending/failed/skipped. Mirrors /admin/rag_status.",
         ),
         MethodDefinition(
+            name="rag_list_collections",
+            handler=_rag_list_collections,
+            input_schema=Schema(
+                required={},
+                optional={"namespace": (str, type(None))},
+                allow_unknown=True,
+                description="List available RAG collections/sources for the current namespace",
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "List available RAG collections/sources for the current user/namespace. "
+                "Use when user asks 'what is in my RAG store?' or needs to disambiguate KA sessions vs chat sessions vs vector chunks."
+            ),
+        ),
+        MethodDefinition(
             name="rag_list_indexed",
             handler=_rag_list_indexed,
             input_schema=Schema(
                 required={},
                 optional={
+                    "collection": (str, type(None)),
                     "limit": (int,),
                     "offset": (int,),
                     "namespace": (str, type(None)),
@@ -3457,7 +3895,10 @@ def build_default_catalogue() -> MethodCatalogue:
             handler=_rag_get_item,
             input_schema=Schema(
                 required={"session_id": str},
-                optional={"namespace": (str, type(None))},
+                optional={
+                    "namespace": (str, type(None)),
+                    "collection": (str, type(None)),
+                },
                 allow_unknown=True,
                 description="Fetch one indexed session with optional namespace filter",
             ),

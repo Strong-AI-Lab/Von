@@ -186,6 +186,14 @@ These are concrete changes that would reduce confusion and tighten isolation:
    - “No namespace → no RAG access.”
    - “Namespace used for list/get must match namespace used for indexing/sync.”
 
+5. Prefer provenance stamping for persisted artefacts (where practical).
+  - When Von persists objects that may later be surfaced to an agent or UI (e.g., indexed sessions, RAG chunks, summaries, tool outputs, sync markers), include lightweight provenance fields.
+  - Suggested minimum set:
+    - `item_kind` (what type of thing this is)
+    - `source_system` (what created it: DB collection, tool, pipeline, backend)
+    - `namespace` and `namespace_source` (how/why it was scoped)
+  - Rationale: this will matter when we add **projection of persisted objects into a virtual part of the Vontology** so the system can do coherent introspection (“what do you have stored and why?”) without confusing chat history, KA sessions, and retrieved RAG content.
+
 ## 9) Jira relationship tidy-up (760 / 836 / 144)
 
 Current state (as observed):
