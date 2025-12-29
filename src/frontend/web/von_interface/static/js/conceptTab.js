@@ -2898,6 +2898,43 @@ export async function loadConceptNames(conceptId, suffix = '') {
 export async function loadConceptAttributes(conceptId, suffix = '') {
   console.log('loadConceptAttributes called with conceptId:', conceptId, 'suffix:', suffix);
 
+  const updateVerticalResizeHandleIfOverflow = (el) => {
+    if (!el) return;
+    try {
+      el.classList.add('von-vertical-resize-if-overflow');
+      const apply = () => {
+        try {
+          const overflowing = el.scrollHeight > el.clientHeight + 1;
+
+          if (overflowing) {
+            el.dataset.vonResizeEnabled = '1';
+          }
+          const resizeEnabled = overflowing || el.dataset.vonResizeEnabled === '1';
+          el.classList.toggle('von-overflowing', resizeEnabled);
+
+          if (resizeEnabled && typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+            const computed = window.getComputedStyle(el);
+            const computedMaxHeight = computed?.maxHeight;
+            const maxHeightIsClamping = !!computedMaxHeight && computedMaxHeight !== 'none' && computedMaxHeight !== '0px';
+
+            if (maxHeightIsClamping) {
+              if (!el.style.height || el.style.height === 'auto') {
+                el.style.height = `${el.clientHeight}px`;
+              }
+              el.style.maxHeight = 'none';
+            }
+          }
+        } catch (_) { /* ignore */ }
+      };
+      if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(apply);
+      }
+      setTimeout(apply, 0);
+    } catch (_) {
+      /* ignore */
+    }
+  };
+
   const getSuffixElement = (baseId) => {
     const id = suffix ? `${baseId}_${suffix}` : baseId;
     return document.getElementById(id);
@@ -2937,6 +2974,43 @@ export async function loadConceptAttributes(conceptId, suffix = '') {
       rel => rel.predicate && rel.predicate !== 'hasName' && rel.predicate !== '#V#hasName'
     );
 
+    // Predicates already shown in specialised sections above the Text Relations list.
+    const recapPredicates = new Set([
+      'hasDescription', '#V#hasDescription',
+      'hasContent', '#V#hasContent',
+      'hasNote', '#V#hasNote'
+    ]);
+
+    const recapAttributes = attributes.filter(a => recapPredicates.has(a.predicate));
+    const otherAttributes = attributes.filter(a => !recapPredicates.has(a.predicate));
+
+    const normalisePredicateLabel = (predicate) => String(predicate || '').replace(/^#V#/, '');
+    const parseTimestamp = (attr) => {
+      const raw = attr?.updated_at || attr?.created_at;
+      if (!raw) return null;
+      const d = new Date(raw);
+      return Number.isNaN(d.getTime()) ? null : d;
+    };
+
+    const formatTimestamp = (d) => {
+      if (!d) return 'N/A';
+      try {
+        // Keep compact but readable; NZ locale if available.
+        return d.toLocaleString('en-NZ');
+      } catch (_) {
+        return d.toISOString();
+      }
+    };
+
+    const normaliseRecapDisplayText = (text) => {
+      const raw = String(text ?? '');
+      // Suppress blank lines (keeps single newlines for readability).
+      return raw
+        .replace(/\r\n/g, '\n')
+        .replace(/\n[\t \u00A0]*\n+/g, '\n')
+        .trim();
+    };
+
     console.log('Filtered attributes (excluding names):', attributes);
 
     if (attributes.length === 0) {
@@ -2949,8 +3023,75 @@ export async function loadConceptAttributes(conceptId, suffix = '') {
       return;
     }
 
-    // Display each attribute
-    attributes.forEach(attr => {
+    // Recap table for attributes that are already shown above (Content/Notes/Description)
+    if (recapAttributes.length) {
+      const recapWrap = document.createElement('div');
+      recapWrap.className = 'attributes-recap-table-wrap';
+
+      const table = document.createElement('table');
+      table.className = 'attributes-recap-table';
+
+      // Sort newest-first to match the typical "latest at top" feel.
+      const sorted = [...recapAttributes].sort((a, b) => {
+        const da = parseTimestamp(a);
+        const db = parseTimestamp(b);
+        const ta = da ? da.getTime() : 0;
+        const tb = db ? db.getTime() : 0;
+        return tb - ta;
+      });
+
+      const showTimestampColumn = sorted.some(attr => parseTimestamp(attr) !== null);
+
+      table.innerHTML = `
+        <thead>
+          <tr>
+            <th>Predicate</th>
+            <th>Object(s)</th>
+            ${showTimestampColumn ? '<th>Timestamp</th>' : ''}
+          </tr>
+        </thead>
+        <tbody></tbody>
+      `;
+
+      const tbodyUpdated = table.querySelector('tbody');
+
+      sorted.forEach(attr => {
+        const tr = document.createElement('tr');
+
+        const tdPred = document.createElement('td');
+        const predPill = document.createElement('span');
+        predPill.className = 'attributes-recap-predicate-pill';
+        predPill.textContent = normalisePredicateLabel(attr.predicate);
+        tdPred.appendChild(predPill);
+
+        const tdObj = document.createElement('td');
+        const objDiv = document.createElement('div');
+        objDiv.className = 'attributes-recap-object von-vertical-resize-if-overflow';
+        const displayText = normaliseRecapDisplayText(attr.text);
+        objDiv.textContent = displayText;
+        objDiv.title = displayText;
+        tdObj.appendChild(objDiv);
+        updateVerticalResizeHandleIfOverflow(objDiv);
+
+        tr.appendChild(tdPred);
+        tr.appendChild(tdObj);
+
+        if (showTimestampColumn) {
+          const tdTs = document.createElement('td');
+          const ts = parseTimestamp(attr);
+          tdTs.textContent = formatTimestamp(ts);
+          tr.appendChild(tdTs);
+        }
+
+        tbodyUpdated.appendChild(tr);
+      });
+
+      recapWrap.appendChild(table);
+      attributesList.appendChild(recapWrap);
+    }
+
+    // Display remaining attributes using the existing cartouche layout
+    otherAttributes.forEach(attr => {
       const cartouche = document.createElement('div');
       cartouche.className = 'attribute-cartouche';
       cartouche.style.display = 'flex';
@@ -2968,7 +3109,7 @@ export async function loadConceptAttributes(conceptId, suffix = '') {
       predicateLabel.style.color = '#374151';
       predicateLabel.style.minWidth = '120px';
       // Remove #V# prefix for display
-      const displayPredicate = attr.predicate.replace(/^#V#/, '');
+      const displayPredicate = normalisePredicateLabel(attr.predicate);
       predicateLabel.textContent = displayPredicate + ':';
 
       // Text value
@@ -2976,8 +3117,14 @@ export async function loadConceptAttributes(conceptId, suffix = '') {
       textValue.className = 'attribute-text';
       textValue.style.flex = '1';
       textValue.style.color = '#1f2937';
+      textValue.style.display = 'block';
+      textValue.style.whiteSpace = 'pre-wrap';
+      textValue.style.maxHeight = '180px';
+      textValue.style.overflow = 'auto';
       textValue.textContent = attr.text || '';
       textValue.title = attr.text || '';
+
+      updateVerticalResizeHandleIfOverflow(textValue);
 
       // Language badge (if not default)
       const langBadge = document.createElement('span');
@@ -2999,6 +3146,17 @@ export async function loadConceptAttributes(conceptId, suffix = '') {
 
       attributesList.appendChild(cartouche);
     });
+
+    // If there are no non-recap attributes, keep the section informative.
+    if (!otherAttributes.length && recapAttributes.length) {
+      const note = document.createElement('div');
+      note.className = 'attributes-empty-state';
+      note.style.color = '#6b7280';
+      note.style.fontStyle = 'italic';
+      note.style.marginTop = '6px';
+      note.textContent = 'No additional text relations beyond the sections shown above.';
+      attributesList.appendChild(note);
+    }
 
   } catch (error) {
     console.error('Error loading concept attributes:', error);

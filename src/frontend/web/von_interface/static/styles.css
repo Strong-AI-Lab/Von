@@ -1583,6 +1583,91 @@ textarea:focus {
     border-color: #888;
 }
 
+/* Resize handle only when content is overflowing */
+.von-vertical-resize-if-overflow {
+    overflow: auto;
+    resize: none;
+}
+
+.von-vertical-resize-if-overflow.von-overflowing {
+    resize: vertical;
+}
+
+/* Text Relations recap table (compact, like predicate/text_relations listing) */
+.attributes-recap-table-wrap {
+    margin: 6px 0 10px 0;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #fff;
+}
+
+.attributes-recap-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: auto;
+}
+
+/* Column sizing: keep predicate as narrow as possible */
+.attributes-recap-table th:first-child,
+.attributes-recap-table td:first-child {
+    width: 1%;
+    white-space: nowrap;
+}
+
+/* If a timestamp column is present, keep it compact too */
+.attributes-recap-table th:last-child,
+.attributes-recap-table td:last-child {
+    white-space: nowrap;
+}
+
+.attributes-recap-table thead th {
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: #374151;
+    background: #f9fafb;
+    padding: 10px 12px;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.attributes-recap-table tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: top;
+    font-size: 0.85rem;
+    color: #111827;
+}
+
+.attributes-recap-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.attributes-recap-predicate-pill {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3730a3;
+    border: 1px solid #c7d2fe;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.attributes-recap-object {
+    line-height: 1.35;
+    max-height: calc(3 * 1.35em);
+    overflow: auto;
+    white-space: pre-wrap;
+    padding-right: 6px;
+}
+
+.attributes-recap-source {
+    color: #1d4ed8;
+    font-style: italic;
+    white-space: nowrap;
+}
+
 /* Ensure the interaction (bottom) notes editor spans full available width */
 #updatedNotesDisplay {
     max-width: 100%;

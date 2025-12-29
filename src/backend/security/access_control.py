@@ -77,6 +77,22 @@ class AccessEvaluator:
         normalised = _normalise_concept_id(concept_id)
         if normalised is None:
             return True
+
+        # Virtual concepts that are registered as code-handled predicates should be
+        # considered visible, even when no MongoDB concept document exists.
+        # This supports UI navigation and text-relations (e.g., adding hasName).
+        try:
+            from ..vontology.code_concepts_registry import (  # local import avoids cycles
+                is_code_concept_id,
+            )
+
+            if is_code_concept_id(normalised):
+                self._cache[normalised] = True
+                return True
+        except Exception:
+            # Best-effort: fall through to Mongo lookup.
+            pass
+
         if normalised == self.user_id:
             self._cache[normalised] = True
             return True
