@@ -76,6 +76,10 @@ from src.backend.services.text_value_service import (
     delete_text_relation,
     delete_text_relation_by_predicate_and_text,
 )
+from src.backend.services.rag_text_relation_change_hook_service import (
+    maybe_delete_text_relation_doc_from_rag,
+    maybe_sync_concept_text_relations_to_rag,
+)
 from src.backend.services.annotation_extraction_service import extract_annotations
 from src.backend.services.concept_merge_service import merge_concepts
 from src.backend.services.settings_service import (
@@ -327,6 +331,10 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace (e.g., #V#user@org). When provided, triggers a best-effort RAG reindex for the concept; otherwise no automatic indexing occurs.",
+                    },
                     "concept_id": {
                         "type": "string",
                         "description": "The concept to attach text to (e.g., '#V#my_concept')",
@@ -385,6 +393,10 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace (e.g., #V#user@org). When provided, triggers a best-effort RAG reindex for the concept; otherwise no automatic indexing occurs.",
+                    },
                     "concept_id": {
                         "type": "string",
                         "description": "The concept owning the text relation",
@@ -411,6 +423,10 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace (e.g., #V#user@org). When provided, triggers a best-effort RAG delete/reindex; otherwise no automatic indexing occurs.",
+                    },
                     "concept_id": {
                         "type": "string",
                         "description": "The concept owning the text relation",
@@ -1552,6 +1568,11 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
 
 async def _handle_upsert_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
     """Handle upsert_text_relation tool call."""
+    namespace = (
+        arguments.get("namespace")
+        if isinstance(arguments.get("namespace"), str)
+        else None
+    )
     concept_id = arguments.get("concept_id")
     predicate = arguments.get("predicate")
     text = arguments.get("text")
@@ -1572,6 +1593,12 @@ async def _handle_upsert_text_relation(arguments: dict[str, Any]) -> list[TextCo
             text=text,
             lang=language,
             context=context,
+        )
+
+        maybe_sync_concept_text_relations_to_rag(
+            namespace=namespace,
+            concept_id=concept_id,
+            predicate=predicate,
         )
 
         text_preview = text[:100] + "..." if len(text) > 100 else text
@@ -1625,6 +1652,11 @@ async def _handle_get_text_relations(arguments: dict[str, Any]) -> list[TextCont
 
 async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
     """Handle update_text_relation tool call."""
+    namespace = (
+        arguments.get("namespace")
+        if isinstance(arguments.get("namespace"), str)
+        else None
+    )
     concept_id = arguments.get("concept_id")
     relation_id = arguments.get("relation_id")
     new_text = arguments.get("new_text")
@@ -1645,6 +1677,11 @@ async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextCo
             lang=language,
         )
 
+        maybe_sync_concept_text_relations_to_rag(
+            namespace=namespace,
+            concept_id=concept_id,
+        )
+
         old_preview = str(result.get("old_text", ""))[:100]
         new_preview = new_text[:100] + "..." if len(new_text) > 100 else new_text
 
@@ -1662,6 +1699,11 @@ async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextCo
 
 async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
     """Handle delete_text_relation tool call."""
+    namespace = (
+        arguments.get("namespace")
+        if isinstance(arguments.get("namespace"), str)
+        else None
+    )
     concept_id = arguments.get("concept_id")
     relation_id = arguments.get("relation_id")
     predicate = arguments.get("predicate")
@@ -1680,6 +1722,12 @@ async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextCo
                 relation_id=relation_id,
                 garbage_collect=garbage_collect,
             )
+
+            maybe_delete_text_relation_doc_from_rag(
+                namespace=namespace,
+                relation_id=relation_id,
+            )
+
             payload = {
                 "success": True,
                 "deleted_relation_id": relation_id,
@@ -1700,6 +1748,12 @@ async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextCo
                 lang=language,
                 garbage_collect=garbage_collect,
             )
+
+            maybe_delete_text_relation_doc_from_rag(
+                namespace=namespace,
+                relation_id=result.get("relation_id"),
+            )
+
             payload = {
                 "success": True,
                 "deleted_relation_id": result.get("relation_id"),
