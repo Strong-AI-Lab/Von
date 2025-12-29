@@ -45,7 +45,6 @@ from ...vontology.utils_vontology import (
     is_type,
     is_predicate,
 )
-from ...db.mongo_client import get_db, CONCEPTS_COLLECTION_NAME
 from ...db.repositories.concepts_repository import ConceptsRepository
 from ...services.settings_service import get_setting
 from ...services.concept_service import (
@@ -58,7 +57,7 @@ from ...services.text_value_service import get_texts_for_concept
 from ...services.concept_search_service import (
     search_concepts as search_concepts_service,
 )
-from ...security.access_control import cache_scope_key
+from ...security.access_control import cache_scope_key, bypass_access_control
 from ...utilities.salient_recompute import recompute_salient_predicates
 
 vontology_bp = Blueprint("vontology", __name__)
@@ -1537,13 +1536,15 @@ def analyze_import_preview(nodes_to_import):
 
     # Get all existing concept IDs for comparison
     try:
-        db = get_db()
-        if db is not None:
-            concepts_collection = db[CONCEPTS_COLLECTION_NAME]
-            existing_concepts = concepts_collection.find({}, {"concept_id": 1})
-            existing_concept_ids = {doc["concept_id"] for doc in existing_concepts}
-        else:
-            existing_concept_ids = set()
+        # Use the repository as the single concept DB access point.
+        # Import preview is an admin-style operation, so explicitly bypass access control.
+        with bypass_access_control():
+            existing_concepts = ConceptsRepository.find({}, {"concept_id": 1})
+            existing_concept_ids = {
+                doc.get("concept_id")
+                for doc in existing_concepts
+                if isinstance(doc, dict) and isinstance(doc.get("concept_id"), str)
+            }
     except Exception as e:
         current_app.logger.error(f"Error fetching existing concepts for preview: {e}")
         existing_concept_ids = set()
@@ -2550,6 +2551,51 @@ def get_node_instances():
             }
             instances.append(instance_data)
 
+        # Virtual fallback: surface code-handled concepts as instances where appropriate.
+        try:
+            from ...vontology.code_concepts_registry import (
+                iter_code_concepts,
+                build_virtual_concept_doc,
+                MENTIONED_IN_VON_CODE_ID,
+                PREDICATE_TYPE_ID,
+            )
+
+            want_virtual = node_id in {MENTIONED_IN_VON_CODE_ID, PREDICATE_TYPE_ID}
+            if want_virtual:
+                existing_ids = {
+                    inst.get("id")
+                    for inst in instances
+                    if isinstance(inst, dict) and isinstance(inst.get("id"), str)
+                }
+                for cc in iter_code_concepts():
+                    if cc.concept_id in existing_ids:
+                        continue
+                    vdoc = build_virtual_concept_doc(cc.concept_id)
+                    if not isinstance(vdoc, dict):
+                        continue
+                    inst_of = (vdoc.get("relationships") or {}).get(
+                        "is_an_instance_of"
+                    ) or []
+                    if isinstance(inst_of, str):
+                        inst_list = [inst_of]
+                    elif isinstance(inst_of, list):
+                        inst_list = [x for x in inst_of if isinstance(x, str)]
+                    else:
+                        inst_list = []
+                    if node_id not in inst_list:
+                        continue
+                    instances.append(
+                        {
+                            "id": cc.concept_id,
+                            "name": cc.display_name,
+                            "notes": "",
+                        }
+                    )
+
+                instances.sort(key=lambda item: (item.get("name") or "").lower())
+        except Exception:
+            pass
+
         current_app.logger.debug(
             f"Found {len(instances)} instances for concept {node_id}"
         )
@@ -2603,6 +2649,18 @@ def get_relationships_route():
             return repo.find_one({"concept_id": ident})
 
         doc = _find_by_identifier(identifier)
+        if not doc:
+            # Some built-in predicate concepts are handled in code only and may not
+            # exist as MongoDB concept documents. Treat those as virtual concepts.
+            try:
+                from ...vontology.code_concepts_registry import (
+                    build_virtual_concept_doc,
+                )
+
+                doc = build_virtual_concept_doc(identifier)
+            except Exception:
+                doc = None
+
         if not doc:
             return (
                 jsonify(

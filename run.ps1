@@ -38,6 +38,10 @@ param(
     [switch]$DisableLogReady,
     [switch]$HealthDebug,
     [switch]$ShowRelationCoverage,
+    # On-demand backups
+    [switch]$BackupDryRun,
+    [string]$BackupTag = 'manual',
+    [string]$BackupOutDir,
     # Auto-update (continuous self-updating runner)
     [int]$UpdateIntervalMinutes = 60,
     [string]$UpdateBranch = 'main',
@@ -58,10 +62,42 @@ $LogsDir = Join-Path $Root 'logs'
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 
-# Preferred backup root: use W:\ drive if present (e.g. larger / external volume) else fall back to repo local 'backups'.
-$BackupRoot = if (Test-Path 'W:\') { 'W:\von_backups' } else { Join-Path $Root 'backups' }
-try { New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null } catch { }
-$env:VON_BACKUP_ROOT = $BackupRoot
+# Backup root resolution:
+# - Prefer explicit VON_BACKUP_ROOT if already present in environment.
+# - Else prefer W:\von_backups if W: exists and is writable.
+# - Else fall back to repo-local 'backups'.
+$BackupRoot = $null
+
+if ($env:VON_BACKUP_ROOT -and $env:VON_BACKUP_ROOT.ToString().Trim()) {
+    $preferred = $env:VON_BACKUP_ROOT.ToString().Trim().Trim('"')
+    try {
+        New-Item -ItemType Directory -Force -Path $preferred | Out-Null
+        $BackupRoot = $preferred
+    }
+    catch {
+        Write-LauncherLog "[backup] WARN: Cannot create/write VON_BACKUP_ROOT='$preferred'; falling back to automatic selection."
+    }
+}
+
+if (-not $BackupRoot -and (Test-Path 'W:\')) {
+    $preferred = 'W:\von_backups'
+    try {
+        New-Item -ItemType Directory -Force -Path $preferred | Out-Null
+        $BackupRoot = $preferred
+    }
+    catch {
+        Write-LauncherLog "[backup] WARN: Cannot create/write $preferred; falling back to repo local backups."
+    }
+}
+
+if (-not $BackupRoot) {
+    $BackupRoot = Join-Path $Root 'backups'
+    try { New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null } catch { }
+}
+
+if (-not $BackupOutDir) {
+    $BackupOutDir = $BackupRoot
+}
 
 # Ensure logging helper is available before any functions that emit log lines.
 if (-not (Get-Command Write-LauncherLog -ErrorAction SilentlyContinue)) {
@@ -223,17 +259,268 @@ function Write-PidFile {
 function Remove-PidFile { if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue } }
 
 # Daily remote backup logic (auto every 24h) ---------------------------------
+
+function Find-NextAllowedValue {
+    param(
+        [Parameter(Mandatory = $true)] [int[]]$AllowedValues,
+        [Parameter(Mandatory = $true)] [int]$Start
+    )
+    foreach ($v in $AllowedValues) {
+        if ($v -ge $Start) { return $v }
+    }
+    return $null
+}
+
+function Convert-CronTokenToInt {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Token,
+        [Parameter(Mandatory = $true)] [int]$Min,
+        [Parameter(Mandatory = $true)] [int]$Max,
+        [Parameter(Mandatory = $false)] [hashtable]$NameMap,
+        [Parameter(Mandatory = $false)] [switch]$IsDayOfWeek
+    )
+    $t = $Token.Trim()
+    if ($t -match '^\d+$') {
+        $v = [int]$t
+        if ($IsDayOfWeek -and $v -eq 7) { $v = 0 }
+        if ($v -lt $Min -or $v -gt $Max) { throw "Cron value '$t' out of bounds [$Min,$Max]." }
+        return $v
+    }
+    if ($NameMap) {
+        $k = $t.ToUpperInvariant()
+        if ($NameMap.ContainsKey($k)) {
+            $v = [int]$NameMap[$k]
+            if ($IsDayOfWeek -and $v -eq 7) { $v = 0 }
+            if ($v -lt $Min -or $v -gt $Max) { throw "Cron value '$t' out of bounds [$Min,$Max]." }
+            return $v
+        }
+    }
+    throw "Unsupported cron token '$t'."
+}
+
+function Parse-CronField {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Field,
+        [Parameter(Mandatory = $true)] [int]$Min,
+        [Parameter(Mandatory = $true)] [int]$Max,
+        [Parameter(Mandatory = $false)] [switch]$IsDayOfWeek,
+        [Parameter(Mandatory = $false)] [hashtable]$NameMap
+    )
+    $fieldTrim = $Field.Trim()
+    if (-not $fieldTrim) { throw "Invalid cron field (empty)." }
+
+    $allowed = New-Object 'System.Boolean[]' ($Max + 1)
+    $isStar = $false
+
+    if ($fieldTrim -eq '*') {
+        $isStar = $true
+        for ($i = $Min; $i -le $Max; $i++) { $allowed[$i] = $true }
+    }
+    else {
+        $parts = $fieldTrim -split ','
+        foreach ($rawPart in $parts) {
+            $part = $rawPart.Trim()
+            if (-not $part) { continue }
+
+            # Supported forms: *, */n, a, a-b, a/n, a-b/n (lists via commas)
+            if (-not ($part -match '^(?<base>[^/]+?)(?:\/(?<step>\d+))?$')) {
+                throw "Unsupported cron token '$part' in field '$Field'."
+            }
+            $base = $Matches['base'].Trim()
+            $step = 1
+            if ($Matches['step']) {
+                $step = [int]$Matches['step']
+                if ($step -lt 1) { throw "Invalid cron step '/$step' in field '$Field'." }
+            }
+
+            $start = $null
+            $end = $null
+            if ($base -eq '*') {
+                $start = $Min
+                $end = $Max
+            }
+            elseif ($base -match '^(?<a>[^-]+)-(?<b>[^-]+)$') {
+                $start = Convert-CronTokenToInt -Token $Matches['a'] -Min $Min -Max $Max -NameMap $NameMap -IsDayOfWeek:$IsDayOfWeek
+                $end = Convert-CronTokenToInt -Token $Matches['b'] -Min $Min -Max $Max -NameMap $NameMap -IsDayOfWeek:$IsDayOfWeek
+            }
+            else {
+                $start = Convert-CronTokenToInt -Token $base -Min $Min -Max $Max -NameMap $NameMap -IsDayOfWeek:$IsDayOfWeek
+                $end = $start
+            }
+
+            if ($start -lt $Min -or $end -gt $Max -or $start -gt $end) {
+                throw "Cron value range '$base' out of bounds [$Min,$Max] in field '$Field'."
+            }
+
+            for ($v = $start; $v -le $end; $v += $step) {
+                $vv = $v
+                if ($IsDayOfWeek -and $vv -eq 7) { $vv = 0 }
+                $allowed[$vv] = $true
+            }
+        }
+    }
+
+    $allowedValues = @()
+    for ($i = $Min; $i -le $Max; $i++) {
+        if ($allowed[$i]) { $allowedValues += $i }
+    }
+    if (-not $allowedValues -or $allowedValues.Count -eq 0) {
+        throw "Cron field '$Field' selects no values."
+    }
+
+    return @{
+        Allowed       = $allowed
+        AllowedValues = [int[]]$allowedValues
+        IsStar        = $isStar
+        Min           = $Min
+        Max           = $Max
+    }
+}
+
+function Parse-CronSchedule {
+    param([Parameter(Mandatory = $true)] [string]$Schedule)
+
+    $tokens = ($Schedule.Trim() -split '\s+')
+    if ($tokens.Count -ne 5) {
+        throw "Cron schedule must have 5 fields: '<minute> <hour> <day-of-month> <month> <day-of-week>'."
+    }
+
+    $monthNames = @{
+        'JAN' = 1; 'FEB' = 2; 'MAR' = 3; 'APR' = 4; 'MAY' = 5; 'JUN' = 6;
+        'JUL' = 7; 'AUG' = 8; 'SEP' = 9; 'OCT' = 10; 'NOV' = 11; 'DEC' = 12
+    }
+    $dowNames = @{
+        'SUN' = 0; 'MON' = 1; 'TUE' = 2; 'WED' = 3; 'THU' = 4; 'FRI' = 5; 'SAT' = 6
+    }
+
+    $minute = Parse-CronField -Field $tokens[0] -Min 0 -Max 59
+    $hour = Parse-CronField -Field $tokens[1] -Min 0 -Max 23
+    $dom = Parse-CronField -Field $tokens[2] -Min 1 -Max 31
+    $month = Parse-CronField -Field $tokens[3] -Min 1 -Max 12 -NameMap $monthNames
+    $dow = Parse-CronField -Field $tokens[4] -Min 0 -Max 7 -IsDayOfWeek -NameMap $dowNames
+
+    return @{
+        Minute     = $minute
+        Hour       = $hour
+        DayOfMonth = $dom
+        Month      = $month
+        DayOfWeek  = $dow
+        Raw        = $Schedule
+    }
+}
+
+function Test-CronDayMatch {
+    param(
+        [Parameter(Mandatory = $true)] $Cron,
+        [Parameter(Mandatory = $true)] [datetime]$UtcDateTime
+    )
+
+    $day = $UtcDateTime.Day
+    $dow = [int]$UtcDateTime.DayOfWeek  # Sunday=0
+    $domOk = $Cron.DayOfMonth.Allowed[$day]
+    $dowOk = $Cron.DayOfWeek.Allowed[$dow]
+
+    # Vixie-style semantics: if both DOM and DOW are restricted (not '*'), match if either matches.
+    if ($Cron.DayOfMonth.IsStar -and $Cron.DayOfWeek.IsStar) { return $true }
+    if ($Cron.DayOfMonth.IsStar) { return $dowOk }
+    if ($Cron.DayOfWeek.IsStar) { return $domOk }
+    return ($domOk -or $dowOk)
+}
+
+function Test-CronMatch {
+    param(
+        [Parameter(Mandatory = $true)] $Cron,
+        [Parameter(Mandatory = $true)] [datetime]$UtcDateTime
+    )
+
+    if (-not $Cron.Month.Allowed[$UtcDateTime.Month]) { return $false }
+    if (-not (Test-CronDayMatch -Cron $Cron -UtcDateTime $UtcDateTime)) { return $false }
+    if (-not $Cron.Hour.Allowed[$UtcDateTime.Hour]) { return $false }
+    if (-not $Cron.Minute.Allowed[$UtcDateTime.Minute]) { return $false }
+    return $true
+}
+
+function Get-NextCronOccurrenceUtc {
+    param(
+        [Parameter(Mandatory = $true)] $Cron,
+        [Parameter(Mandatory = $true)] [datetime]$AfterUtc
+    )
+
+    $after = $AfterUtc
+    if ($after.Kind -ne [DateTimeKind]::Utc) { $after = $after.ToUniversalTime() }
+
+    # Round down to minute, then advance by one minute (cron has minute granularity).
+    $dt = [datetime]::new($after.Year, $after.Month, $after.Day, $after.Hour, $after.Minute, 0, [DateTimeKind]::Utc).AddMinutes(1)
+    $limit = $dt.AddDays(370)
+
+    while ($dt -le $limit) {
+        # Month
+        if (-not $Cron.Month.Allowed[$dt.Month]) {
+            $nextMonth = Find-NextAllowedValue -AllowedValues $Cron.Month.AllowedValues -Start ($dt.Month + 1)
+            $year = $dt.Year
+            if ($null -eq $nextMonth) {
+                $year = $year + 1
+                $nextMonth = $Cron.Month.AllowedValues[0]
+            }
+            $dt = [datetime]::new($year, $nextMonth, 1, 0, 0, 0, [DateTimeKind]::Utc)
+            continue
+        }
+
+        # Day (DOM/DOW)
+        if (-not (Test-CronDayMatch -Cron $Cron -UtcDateTime $dt)) {
+            $dt = [datetime]::new($dt.Year, $dt.Month, $dt.Day, 0, 0, 0, [DateTimeKind]::Utc).AddDays(1)
+            continue
+        }
+
+        # Hour
+        if (-not $Cron.Hour.Allowed[$dt.Hour]) {
+            $nextHour = Find-NextAllowedValue -AllowedValues $Cron.Hour.AllowedValues -Start ($dt.Hour + 1)
+            if ($null -ne $nextHour) {
+                $dt = [datetime]::new($dt.Year, $dt.Month, $dt.Day, $nextHour, 0, 0, [DateTimeKind]::Utc)
+            }
+            else {
+                $dt = [datetime]::new($dt.Year, $dt.Month, $dt.Day, 0, 0, 0, [DateTimeKind]::Utc).AddDays(1)
+            }
+            continue
+        }
+
+        # Minute
+        if (-not $Cron.Minute.Allowed[$dt.Minute]) {
+            $nextMinute = Find-NextAllowedValue -AllowedValues $Cron.Minute.AllowedValues -Start ($dt.Minute + 1)
+            if ($null -ne $nextMinute) {
+                $dt = [datetime]::new($dt.Year, $dt.Month, $dt.Day, $dt.Hour, $nextMinute, 0, [DateTimeKind]::Utc)
+            }
+            else {
+                $dt = [datetime]::new($dt.Year, $dt.Month, $dt.Day, $dt.Hour, 0, 0, [DateTimeKind]::Utc).AddHours(1)
+            }
+            continue
+        }
+
+        if (Test-CronMatch -Cron $Cron -UtcDateTime $dt) { return $dt }
+        $dt = $dt.AddMinutes(1)
+    }
+
+    return $null
+}
+
 function Invoke-DailyBackupIfDue {
     <#
         Performs a non-blocking (background job) backup of the remote DB
         at most once per interval (default 24h) using scripts/backup_von_db.py.
         Skips if VON_DISABLE_DAILY_BACKUP is set to a truthy value.
-        Interval override via VON_BACKUP_INTERVAL_HOURS env.
+        Supports schedule via VON_BACKUP_SCHEDULE (cron-like string) using 5 fields:
+        "<minute> <hour> <day-of-month> <month> <day-of-week>".
+        Falls back to interval-based schedule via VON_BACKUP_INTERVAL_HOURS if the cron
+        string is missing or unsupported.
         Writes ISO8601 UTC timestamp to last_backup_utc.txt sentinel on success.
         Logs are prefixed with [daily-backup].
     #>
     if ($env:VON_DISABLE_DAILY_BACKUP -and $env:VON_DISABLE_DAILY_BACKUP.ToString() -match '^(1|true|yes)$') {
         return
+    }
+    $schedule = $null
+    if ($env:VON_BACKUP_SCHEDULE -and $env:VON_BACKUP_SCHEDULE.ToString().Trim()) {
+        $schedule = $env:VON_BACKUP_SCHEDULE.ToString().Trim().Trim('"')
     }
     $intervalHours = 24
     try { if ($env:VON_BACKUP_INTERVAL_HOURS) { $intervalHours = [int]$env:VON_BACKUP_INTERVAL_HOURS } } catch { }
@@ -245,31 +532,56 @@ function Invoke-DailyBackupIfDue {
     }
     $nowUtc = (Get-Date).ToUniversalTime()
     $due = $true
-    if ($last) {
-        $hours = ($nowUtc - $last).TotalHours
-        if ($hours -lt $intervalHours) { $due = $false }
+    if ($schedule) {
+        try {
+            $cron = Parse-CronSchedule -Schedule $schedule
+            $effectiveLast = if ($last) { $last } else { $nowUtc.AddDays(-370) }
+            $next = Get-NextCronOccurrenceUtc -Cron $cron -AfterUtc $effectiveLast
+            if ($null -eq $next -or $next -gt $nowUtc) { $due = $false }
+        }
+        catch {
+            Write-LauncherLog "[daily-backup] WARN: Unsupported VON_BACKUP_SCHEDULE='$schedule' ($($_.Exception.Message)); falling back to interval ${intervalHours}h."
+            $schedule = $null
+        }
+    }
+    if (-not $schedule) {
+        if ($last) {
+            $hours = ($nowUtc - $last).TotalHours
+            if ($hours -lt $intervalHours) { $due = $false }
+        }
     }
     if (-not $due) { return }
     # Avoid launching duplicate job
     $existingJob = Get-Job -Name 'von_daily_backup' -ErrorAction SilentlyContinue | Where-Object { $_.State -in 'Running', 'NotStarted' }
     if ($existingJob) { return }
+    $backupScript = Join-Path $Root 'scripts/backup_von_db.py'
+    if (-not (Test-Path $backupScript)) {
+        Write-LauncherLog "[daily-backup] WARN: backup script missing: $backupScript (skipping)"
+        return
+    }
     $pdmExe = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
     Write-LauncherLog "[daily-backup] Launching background backup (interval ${intervalHours}h)..."
     Start-Job -Name 'von_daily_backup' -ScriptBlock {
-        param($pdmExe, $root, $runDir, $sentinelPath, $backupRoot)
+        param($pdmExe, $root, $runDir, $sentinelPath, $backupRoot, $backupScript)
         try {
             Set-Location $root
             # Force remote; disable local fallback for this backup invocation
             $env:MONGO_ALLOW_LOCAL_FALLBACK = '0'
-            $env:VON_BACKUP_ROOT = $backupRoot
-            & $pdmExe run python scripts/backup_von_db.py --apply --out-dir $backupRoot --tag auto-daily 2>&1 | ForEach-Object { "[daily-backup] $_" }
+            & $pdmExe run python $backupScript --apply --out-dir $backupRoot --tag auto-daily 2>&1 | ForEach-Object { "[daily-backup] $_" }
+            if ($LASTEXITCODE -ne 0) { throw "backup script failed with exit code $LASTEXITCODE" }
             (Get-Date).ToUniversalTime().ToString('o') | Set-Content $sentinelPath
             Write-Host '[daily-backup] Completed.'
         }
         catch {
             Write-Host ("[daily-backup] ERROR: {0}" -f $_.Exception.Message)
         }
-    } -ArgumentList $pdmExe, $Root, $RunDir, $sentinel, $BackupRoot | Out-Null
+    } -ArgumentList $pdmExe, $Root, $RunDir, $sentinel, $BackupRoot, $backupScript | Out-Null
+}
+
+# Backward-compatible convenience: if called as ".\run.ps1 -BackupDryRun" (no explicit action)
+# then run the backup action, even if the server is already running.
+if ($Action -eq 'start' -and ($BackupDryRun -or $BackupTag -or $BackupOutDir)) {
+    $Action = 'backup'
 }
 
 # Test DB periodic refresh logic (every 4 hours) ------------------------------
@@ -1468,7 +1780,7 @@ function Show-Help {
     @'
 Von Launcher Help
     Usage: .\run.ps1 [action] [options]
-    Actions: start | foreground | stop | status | restart | logs | check | autoupdate | rag-worker | help
+    Actions: start | foreground | stop | status | restart | logs | check | backup | autoupdate | rag-worker | help
     Options:
         -Port <int>            (reserved future multi-instance)
     -NoBrowser             Do not auto open browser
@@ -1484,6 +1796,9 @@ Von Launcher Help
         -ReadyLogPatterns <p>  One or more substrings that indicate readiness (log shortcut)
         -DisableLogReady       Disable log pattern readiness shortcut
         -HealthDebug           Verbose health polling diagnostics
+        -BackupDryRun           For backup action: do not run mongodump (prints what would happen)
+        -BackupTag <tag>        For backup action: tag suffix for backup dir (default manual)
+        -BackupOutDir <path>    For backup action: output root dir (default VON_BACKUP_ROOT)
         -UpdateIntervalMinutes <n>  Minutes between git update checks (autoupdate action; default 60)
         -UpdateBranch <name>        Branch to track (default main)
         -UpdateNoRestartIfRunning   Skip restart if server already running (still pull code)
@@ -1494,6 +1809,9 @@ Von Launcher Help
         .\run.ps1 status
         .\run.ps1 check          # returns exit code (0 healthy, 2 unhealthy, 3 not running)
         .\run.ps1 logs -Tail 200 -Follow
+        .\run.ps1 backup -BackupDryRun
+        .\run.ps1 backup -BackupTag manual
+        .\run.ps1 backup -BackupTag pre-change -BackupOutDir .\backups
         .\run.ps1 stop
     .\run.ps1 stop 12345        # kill specific PID directly
     .\run.ps1 stop force        # detect by port, verify command line, then kill
@@ -1502,6 +1820,39 @@ Von Launcher Help
         .\run.ps1 autoupdate -UpdateIntervalMinutes 30 -UpdateBranch main
 '
 '@ | Write-Host
+}
+
+function Invoke-BackupNow {
+    <#
+        Run an on-demand DB backup without restarting the server.
+        Defaults:
+          - Output directory: VON_BACKUP_ROOT (resolved at launch)
+          - Tag: "manual"
+          - Mode: apply unless -BackupDryRun
+    #>
+    $backupScript = Join-Path $Root 'scripts/backup_von_db.py'
+    if (-not (Test-Path $backupScript)) {
+        Write-LauncherLog "[backup] ERROR: backup script missing: $backupScript"
+        return
+    }
+    $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
+    $tag = if ($BackupTag) { $BackupTag } else { 'manual' }
+    $outDir = if ($BackupOutDir) { $BackupOutDir } else { $BackupRoot }
+    $apply = -not $BackupDryRun
+    $mode = if ($apply) { 'apply' } else { 'dry-run' }
+    Write-LauncherLog "[backup] Starting backup (mode=$mode tag=$tag out=$outDir root=$BackupRoot)"
+
+    $args = @('run', 'python', $backupScript)
+    if ($apply) { $args += '--apply' }
+    $args += @('--out-dir', $outDir, '--tag', $tag)
+    & $pdm @args
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0) {
+        Write-LauncherLog "[backup] OK"
+    }
+    else {
+        Write-LauncherLog "[backup] ERROR exit=$exitCode"
+    }
 }
 
 switch ($Action) {
@@ -1576,6 +1927,7 @@ switch ($Action) {
             else { Write-LauncherLog ("UNHEALTHY PID={0}" -f $proc.Id); exit 2 }
         }
     }
+    'backup' { Invoke-BackupNow }
     'autoupdate' {
         Write-LauncherLog "Starting auto-update loop (branch=$UpdateBranch interval=${UpdateIntervalMinutes}m)... Press Ctrl+C to stop."
         # Ensure git is available

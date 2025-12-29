@@ -60,16 +60,25 @@ def _json_text(payload: Any) -> TextContent:
 
 def _require_namespace(arguments: dict[str, Any]) -> str | None:
     ns = arguments.get("namespace")
-    if not isinstance(ns, str) or not ns.strip():
-        return None
-    return ns.strip()
+    if isinstance(ns, str) and ns.strip():
+        return ns.strip()
+
+    env_ns = os.getenv("VON_DEFAULT_NAMESPACE")
+    if isinstance(env_ns, str) and env_ns.strip():
+        arguments["namespace"] = env_ns.strip()
+        return env_ns.strip()
+
+    return None
 
 
 def _namespace_required_error() -> dict[str, Any]:
     return {
         "success": False,
         "error": "namespace_required",
-        "message": "RAG access requires an explicit namespace (e.g. #V#user@org)",
+        "message": (
+            "RAG access requires a namespace. Provide 'namespace' (e.g. #V#user@org) "
+            "or set VON_DEFAULT_NAMESPACE in .env"
+        ),
     }
 
 
@@ -106,10 +115,10 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "namespace": {
                         "type": "string",
-                        "description": "Required namespace (e.g. #V#user@org)",
+                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
                     }
                 },
-                "required": ["namespace"],
+                "required": [],
             },
         ),
         Tool(
@@ -122,7 +131,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "namespace": {
                         "type": "string",
-                        "description": "Required namespace (e.g. #V#user@org)",
+                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
                     },
                     "detail": {
                         "type": "boolean",
@@ -130,7 +139,7 @@ async def list_tools() -> list[Tool]:
                         "default": False,
                     },
                 },
-                "required": ["namespace"],
+                "required": [],
             },
         ),
         Tool(
@@ -144,11 +153,11 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "namespace": {
                         "type": "string",
-                        "description": "Required namespace (e.g. #V#user@org)",
+                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
                     },
                     "collection": {
                         "type": "string",
-                        "description": "Collection selector (ka_sessions|chat_history_sessions)",
+                        "description": "Collection selector (ka_sessions|chat_history_sessions|vontology_text_relations)",
                         "default": "ka_sessions",
                     },
                     "limit": {
@@ -162,7 +171,7 @@ async def list_tools() -> list[Tool]:
                         "default": 0,
                     },
                 },
-                "required": ["namespace"],
+                "required": [],
             },
         ),
         Tool(
@@ -175,11 +184,11 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "namespace": {
                         "type": "string",
-                        "description": "Required namespace (e.g. #V#user@org)",
+                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
                     },
                     "collection": {
                         "type": "string",
-                        "description": "Collection selector (ka_sessions|chat_history_sessions)",
+                        "description": "Collection selector (ka_sessions|chat_history_sessions|vontology_text_relations)",
                         "default": "ka_sessions",
                     },
                     "session_id": {
@@ -187,7 +196,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Session identifier (Mongo _id for KA sessions, session_id for chat sessions)",
                     },
                 },
-                "required": ["namespace", "session_id"],
+                "required": ["session_id"],
             },
         ),
         Tool(
@@ -201,7 +210,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "namespace": {
                         "type": "string",
-                        "description": "Required namespace (e.g. #V#user@org)",
+                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
                     },
                     "query": {
                         "type": "string",
@@ -213,7 +222,44 @@ async def list_tools() -> list[Tool]:
                         "default": 5,
                     },
                 },
-                "required": ["namespace", "query"],
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="rag_sync_text_relations",
+            description=(
+                "Index Vontology text relations (text_relations + text_values) into the vector-store for the given namespace. "
+                "After syncing, they become discoverable via search_knowledge_base."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
+                    },
+                    "predicates": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional predicate filter (e.g. hasName, hasDescription)",
+                    },
+                    "languages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional language filter (e.g. en-NZ)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max relations to consider",
+                        "default": 5000,
+                    },
+                    "batch_size": {
+                        "type": "integer",
+                        "description": "Upsert batch size",
+                        "default": 200,
+                    },
+                },
+                "required": [],
             },
         ),
     ]
@@ -225,6 +271,9 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "rag_list_indexed": _tool_handler(internal_catalogue._rag_list_indexed),
     "rag_get_item": _tool_handler(internal_catalogue._rag_get_item),
     "search_knowledge_base": _tool_handler(internal_catalogue._search_knowledge_base),
+    "rag_sync_text_relations": _tool_handler(
+        internal_catalogue._rag_sync_text_relations
+    ),
 }
 
 

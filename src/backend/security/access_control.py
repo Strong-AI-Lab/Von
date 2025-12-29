@@ -17,6 +17,7 @@ from ..db.mongo_client import get_concepts_collection
 # Context state
 # ---------------------------------------------------------------------------
 _MANUAL_USER: ContextVar[Optional[str]] = ContextVar("access_manual_user", default=None)
+_MANUAL_ORG: ContextVar[Optional[str]] = ContextVar("access_manual_org", default=None)
 _BYPASS: ContextVar[bool] = ContextVar("access_bypass", default=False)
 _EVALUATOR: ContextVar["AccessEvaluator | None"] = ContextVar(
     "access_evaluator", default=None
@@ -76,6 +77,22 @@ class AccessEvaluator:
         normalised = _normalise_concept_id(concept_id)
         if normalised is None:
             return True
+
+        # Virtual concepts that are registered as code-handled predicates should be
+        # considered visible, even when no MongoDB concept document exists.
+        # This supports UI navigation and text-relations (e.g., adding hasName).
+        try:
+            from ..vontology.code_concepts_registry import (  # local import avoids cycles
+                is_code_concept_id,
+            )
+
+            if is_code_concept_id(normalised):
+                self._cache[normalised] = True
+                return True
+        except Exception:
+            # Best-effort: fall through to Mongo lookup.
+            pass
+
         if normalised == self.user_id:
             self._cache[normalised] = True
             return True
@@ -226,12 +243,13 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
     user_id = get_effective_user_concept_id()
 
     # Get user's current organisation context (Phase 1)
-    user_org_id = None
-    try:
-        if has_request_context():
-            user_org_id = session.get("organisation_concept_id")
-    except Exception:
-        pass
+    user_org_id = _MANUAL_ORG.get()
+    if user_org_id is None:
+        try:
+            if has_request_context():
+                user_org_id = session.get("organisation_concept_id")
+        except Exception:
+            pass
 
     # Get user email for detailed logging
     user_email = "unknown"
@@ -417,6 +435,15 @@ def override_current_user(concept_id: Optional[str]):
     finally:
         _EVALUATOR.reset(eval_token)
         _MANUAL_USER.reset(token)
+
+
+@contextmanager
+def override_current_organisation(concept_id: Optional[str]):
+    token = _MANUAL_ORG.set(_normalise_concept_id(concept_id))
+    try:
+        yield
+    finally:
+        _MANUAL_ORG.reset(token)
 
 
 @contextmanager

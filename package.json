@@ -51,7 +51,7 @@
         "id": "von-private-vontology-provider",
         "path": "./src/backend/mcp_server/vontology_mcp.json",
         "requestHandler": {
-          "url": "http://127.0.0.1:5002",
+          "url": "http://127.0.0.1:5000",
           "command": "von-mcp-server.start"
         }
       }
