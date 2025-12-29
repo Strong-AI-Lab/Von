@@ -11,7 +11,8 @@ import json
 import time
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from ..db.mongo_client import CONCEPTS_COLLECTION_NAME, get_db  # type: ignore
+from ..db.repositories.concepts_repository import ConceptsRepository
+from ..security.access_control import bypass_access_control
 from ..vontology.utils_vontology import (  # type: ignore
     SALIENT_SCOPE_FIELD,
     SALIENT_SCOPE_INSTANCE_KEY,
@@ -29,25 +30,20 @@ UPDATED_LIST_LIMIT = 100
 
 def fetch_type_docs(limit: Optional[int] = None):
     """Fetch all type documents (concept ids beginning with #V#)."""
-    db = get_db()
-    if db is None:
-        raise RuntimeError("Database unavailable (get_db returned None)")
-
-    coll = db[CONCEPTS_COLLECTION_NAME]
-    cursor = coll.find(
-        {"concept_id": {"$regex": "^#V#"}},
-        {
-            "concept_id": 1,
-            "relationships.is_a_type_of": 1,
-            f"relationships.{DIRECT_FIELD}": 1,
-            INHERITED_FIELD: 1,
-            STAMP_FIELD: 1,
-            SALIENT_SCOPE_FIELD: 1,
-        },
-    )
-    if limit:
-        cursor = cursor.limit(int(limit))
-    return list(cursor)
+    with bypass_access_control():
+        docs = ConceptsRepository.find(
+            {"concept_id": {"$regex": "^#V#"}},
+            {
+                "concept_id": 1,
+                "relationships.is_a_type_of": 1,
+                f"relationships.{DIRECT_FIELD}": 1,
+                INHERITED_FIELD: 1,
+                STAMP_FIELD: 1,
+                SALIENT_SCOPE_FIELD: 1,
+            },
+            limit=int(limit) if limit else 0,
+        )
+        return list(docs)
 
 
 def build_graph(
@@ -136,48 +132,47 @@ def recompute_salient_predicates(
             max_len = max(max_len, len(inherited))
 
     # Write / dry-run accounting
-    db = get_db()
-    if db is None:
-        raise RuntimeError(
-            "Database unavailable (get_db returned None) during write phase"
-        )
-    coll = db[CONCEPTS_COLLECTION_NAME]
     now_stamp = int(time.time())
     scope_updates = 0
     updated_ids: List[str] = []
 
     if not dry_run:
-        for cid, inherited_list in inherited_cache.items():
-            doc = doc_by_id[cid]
-            existing = doc.get(INHERITED_FIELD)
-            direct_values = direct_map.get(cid, [])
-            scope_existing = normalise_salient_scope_map(doc.get(SALIENT_SCOPE_FIELD))
-            scope_target = {
-                SALIENT_SCOPE_INSTANCE_KEY: list(
-                    scope_existing.get(SALIENT_SCOPE_INSTANCE_KEY, [])
-                ),
-                SALIENT_SCOPE_TYPE_KEY: ordered_union(direct_values),
-                SALIENT_SCOPE_UNCLASSIFIED_KEY: list(
-                    scope_existing.get(SALIENT_SCOPE_UNCLASSIFIED_KEY, [])
-                ),
-            }
-            scope_changed = scope_target != scope_existing
-            changed = force or existing != inherited_list
-
-            if changed or cycles_detected or scope_changed:
-                update_doc = {
-                    INHERITED_FIELD: inherited_list,
-                    STAMP_FIELD: now_stamp,
-                    ERROR_FIELD: bool(cycles_detected),
+        with bypass_access_control():
+            for cid, inherited_list in inherited_cache.items():
+                doc = doc_by_id[cid]
+                existing = doc.get(INHERITED_FIELD)
+                direct_values = direct_map.get(cid, [])
+                scope_existing = normalise_salient_scope_map(
+                    doc.get(SALIENT_SCOPE_FIELD)
+                )
+                scope_target = {
+                    SALIENT_SCOPE_INSTANCE_KEY: list(
+                        scope_existing.get(SALIENT_SCOPE_INSTANCE_KEY, [])
+                    ),
+                    SALIENT_SCOPE_TYPE_KEY: ordered_union(direct_values),
+                    SALIENT_SCOPE_UNCLASSIFIED_KEY: list(
+                        scope_existing.get(SALIENT_SCOPE_UNCLASSIFIED_KEY, [])
+                    ),
                 }
-                if scope_changed:
-                    update_doc[SALIENT_SCOPE_FIELD] = scope_target
-                coll.update_one({"concept_id": cid}, {"$set": update_doc})
-                updated += 1
-                if len(updated_ids) < UPDATED_LIST_LIMIT:
-                    updated_ids.append(cid)
-                if scope_changed:
-                    scope_updates += 1
+                scope_changed = scope_target != scope_existing
+                changed = force or existing != inherited_list
+
+                if changed or cycles_detected or scope_changed:
+                    update_doc = {
+                        INHERITED_FIELD: inherited_list,
+                        STAMP_FIELD: now_stamp,
+                        ERROR_FIELD: bool(cycles_detected),
+                    }
+                    if scope_changed:
+                        update_doc[SALIENT_SCOPE_FIELD] = scope_target
+                    ConceptsRepository.update_one(
+                        {"concept_id": cid}, {"$set": update_doc}
+                    )
+                    updated += 1
+                    if len(updated_ids) < UPDATED_LIST_LIMIT:
+                        updated_ids.append(cid)
+                    if scope_changed:
+                        scope_updates += 1
     else:
         for cid, inherited_list in inherited_cache.items():
             doc = doc_by_id[cid]

@@ -1893,6 +1893,7 @@ async def _handle_upsert_singleton_text_relation(
 
 async def _handle_concept_exists(arguments: dict[str, Any]) -> list[TextContent]:
     from src.backend.security.access_control import can_access_concept
+    from src.backend.vontology.code_concepts_registry import is_code_concept_id
 
     concept_id = arguments.get("concept_id")
     if not concept_id:
@@ -1903,7 +1904,7 @@ async def _handle_concept_exists(arguments: dict[str, Any]) -> list[TextContent]
         payload = {
             "success": True,
             "concept_id": concept_id,
-            "exists": bool(doc),
+            "exists": bool(doc) or is_code_concept_id(concept_id),
             "accessible": can_access_concept(concept_id),
         }
         return [_json_text(payload)]

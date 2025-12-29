@@ -103,6 +103,43 @@ function injectIconContent(el, key, label) {
 function upgradeActionButtonIcons(scope = document) {
     try { scope.querySelectorAll('.round-icon-button').forEach(btn => injectIconContent(btn)); } catch (_) { }
 }// Utility: Copy text to clipboard with modern API and fallback
+
+function updateVerticalResizeHandleIfOverflow(el) {
+    if (!el || typeof el !== 'object') return;
+    try {
+        el.classList.add('von-vertical-resize-if-overflow');
+        // Defer measurement to allow layout + fonts to settle.
+        const apply = () => {
+            try {
+                const overflowing = el.scrollHeight > el.clientHeight + 1;
+                if (overflowing) {
+                    el.dataset.vonResizeEnabled = '1';
+                }
+                const resizeEnabled = overflowing || el.dataset.vonResizeEnabled === '1';
+                el.classList.toggle('von-overflowing', resizeEnabled);
+
+                if (resizeEnabled && typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+                    const computed = window.getComputedStyle(el);
+                    const computedMaxHeight = computed?.maxHeight;
+                    const maxHeightIsClamping = !!computedMaxHeight && computedMaxHeight !== 'none' && computedMaxHeight !== '0px';
+                    if (maxHeightIsClamping) {
+                        if (!el.style.height || el.style.height === 'auto') {
+                            el.style.height = `${el.clientHeight}px`;
+                        }
+                        el.style.maxHeight = 'none';
+                    }
+                }
+            } catch (_) { /* ignore */ }
+        };
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+            window.requestAnimationFrame(apply);
+        }
+        setTimeout(apply, 0);
+    } catch (_) {
+        /* ignore */
+    }
+}
+
 async function copyToClipboard(text, button) {
     try {
         if (navigator.clipboard && window.isSecureContext) {
@@ -3464,6 +3501,11 @@ async function populateNotesSection(conceptId, suffix) {
                    </div>`;
                 listEl.appendChild(item);
 
+                try {
+                    const viewEl = item.querySelector('.note-view');
+                    updateVerticalResizeHandleIfOverflow(viewEl);
+                } catch (_) { /* ignore */ }
+
                 if (isMarkdown) {
                     const viewEl = item.querySelector('.note-view');
                     if (viewEl) {
@@ -3471,6 +3513,7 @@ async function populateNotesSection(conceptId, suffix) {
                             viewEl.innerHTML = html || '<i>(empty)</i>';
                             // Markdown is injected as HTML; do not preserve whitespace formatting.
                             viewEl.style.whiteSpace = 'normal';
+                            updateVerticalResizeHandleIfOverflow(viewEl);
                         }).catch(() => {
                             // Leave plaintext fallback.
                         });
@@ -3518,16 +3561,22 @@ async function populateNotesSection(conceptId, suffix) {
                         const full = viewEl.getAttribute('data-full') || '';
                         const truncated = full.length > 800;
                         viewEl.innerHTML = truncated ? escapeHtml(full.slice(0, 800)) + '…' : escapeHtml(full);
+                        viewEl.style.removeProperty('height');
                         viewEl.style.maxHeight = '220px';
                         viewEl.style.overflow = 'auto';
+                        updateVerticalResizeHandleIfOverflow(viewEl);
                         expandBtn.dataset.icon = 'expand';
                         expandBtn.title = 'Show more';
                         expandBtn.setAttribute('aria-label', 'Show full note');
                         expandBtn.dataset.expanded = '0';
                     } else {
                         viewEl.innerHTML = escapeHtml(viewEl.getAttribute('data-full') || '');
+                        viewEl.style.removeProperty('height');
                         viewEl.style.maxHeight = 'none';
                         viewEl.style.overflow = 'visible';
+                        delete viewEl.dataset.vonResizeEnabled;
+                        viewEl.classList.remove('von-overflowing');
+                        updateVerticalResizeHandleIfOverflow(viewEl);
                         expandBtn.dataset.icon = 'collapse';
                         expandBtn.title = 'Show less';
                         expandBtn.setAttribute('aria-label', 'Show less of note');
@@ -3587,12 +3636,20 @@ async function populateNotesSection(conceptId, suffix) {
                     viewEl.setAttribute('data-truncated', truncated ? '1' : '0');
                     if (truncated) {
                         viewEl.innerHTML = safeFull.slice(0, 800) + '…';
+                        viewEl.style.removeProperty('height');
                         viewEl.style.maxHeight = '220px';
+                        viewEl.style.overflow = 'auto';
                         if (expandBtn) { expandBtn.style.display = 'flex'; expandBtn.dataset.icon = 'expand'; expandBtn.dataset.expanded = '0'; }
                     } else {
                         viewEl.innerHTML = safeFull;
+                        viewEl.style.removeProperty('height');
+                        viewEl.style.maxHeight = 'none';
+                        viewEl.style.overflow = 'visible';
+                        delete viewEl.dataset.vonResizeEnabled;
+                        viewEl.classList.remove('von-overflowing');
                         if (expandBtn) { expandBtn.style.display = 'none'; }
                     }
+                    updateVerticalResizeHandleIfOverflow(viewEl);
                     status.textContent = 'Saved';
                     editWrap.classList.add('hidden'); viewEl.classList.remove('hidden'); editBtn.disabled = false;
                     if (expandBtn) expandBtn.focus(); else editBtn.focus();
@@ -3745,17 +3802,25 @@ async function populateContentSection(conceptId, suffix) {
         const statusEl = section.querySelector(`#contentStatus_${suffix}`);
         const addBtn = section.querySelector(`#addContentButton_${suffix}`);
 
+        const isContentPredicate = (p) => p === 'hasContent' || p === '#V#hasContent';
+
         const fetchContent = async () => {
             statusEl.textContent = 'Loading content...';
             try {
-                const res = await fetch(`/api/concepts/${encodeURIComponent(currentConceptId)}/texts?predicate=hasContent&limit=200`, {
+                // Fetch all texts then filter by predicate client-side so we include both legacy-style
+                // '#V#hasContent' and canonical 'hasContent'.
+                const res = await fetch(`/api/concepts/${encodeURIComponent(currentConceptId)}/texts?limit=200`, {
                     cache: 'no-store',
                     headers: { 'Cache-Control': 'no-cache' }
                 });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-                renderContent(Array.isArray(data.texts) ? data.texts : []);
-                statusEl.textContent = data.count ? `${data.count} content item${data.count === 1 ? '' : 's'}` : 'No content yet.';
+                const allTexts = Array.isArray(data.texts) ? data.texts : [];
+                const contentTexts = allTexts.filter(t => isContentPredicate(t?.predicate));
+                renderContent(contentTexts);
+                statusEl.textContent = contentTexts.length
+                    ? `${contentTexts.length} content item${contentTexts.length === 1 ? '' : 's'}`
+                    : 'No content yet.';
             } catch (e) {
                 statusEl.textContent = `Failed to load content: ${e.message}`;
             }
@@ -3812,6 +3877,11 @@ async function populateContentSection(conceptId, suffix) {
                    </div>`;
                 listEl.appendChild(item);
 
+                try {
+                    const viewEl = item.querySelector('.content-view');
+                    updateVerticalResizeHandleIfOverflow(viewEl);
+                } catch (_) { /* ignore */ }
+
                 if (isMarkdown) {
                     const viewEl = item.querySelector('.content-view');
                     if (viewEl) {
@@ -3819,6 +3889,7 @@ async function populateContentSection(conceptId, suffix) {
                             viewEl.innerHTML = html || '<i>(empty)</i>';
                             // Markdown is injected as HTML; do not preserve whitespace formatting.
                             viewEl.style.whiteSpace = 'normal';
+                            updateVerticalResizeHandleIfOverflow(viewEl);
                         }).catch(() => {
                             // Leave plaintext fallback.
                         });
@@ -3866,16 +3937,22 @@ async function populateContentSection(conceptId, suffix) {
                         const full = viewEl.getAttribute('data-full') || '';
                         const truncated = full.length > 1000;
                         viewEl.innerHTML = truncated ? escapeHtml(full.slice(0, 1000)) + '…' : escapeHtml(full);
+                        viewEl.style.removeProperty('height');
                         viewEl.style.maxHeight = '250px';
                         viewEl.style.overflow = 'auto';
+                        updateVerticalResizeHandleIfOverflow(viewEl);
                         expandBtn.dataset.icon = 'expand';
                         expandBtn.title = 'Show more';
                         expandBtn.setAttribute('aria-label', 'Show full content');
                         expandBtn.dataset.expanded = '0';
                     } else {
                         viewEl.innerHTML = escapeHtml(viewEl.getAttribute('data-full') || '');
+                        viewEl.style.removeProperty('height');
                         viewEl.style.maxHeight = 'none';
                         viewEl.style.overflow = 'visible';
+                        delete viewEl.dataset.vonResizeEnabled;
+                        viewEl.classList.remove('von-overflowing');
+                        updateVerticalResizeHandleIfOverflow(viewEl);
                         expandBtn.dataset.icon = 'collapse';
                         expandBtn.title = 'Show less';
                         expandBtn.setAttribute('aria-label', 'Show less of content');
@@ -3935,12 +4012,20 @@ async function populateContentSection(conceptId, suffix) {
                     viewEl.setAttribute('data-truncated', truncated ? '1' : '0');
                     if (truncated) {
                         viewEl.innerHTML = safeFull.slice(0, 1000) + '…';
+                        viewEl.style.removeProperty('height');
                         viewEl.style.maxHeight = '250px';
+                        viewEl.style.overflow = 'auto';
                         if (expandBtn) { expandBtn.style.display = 'flex'; expandBtn.dataset.icon = 'expand'; expandBtn.dataset.expanded = '0'; }
                     } else {
                         viewEl.innerHTML = safeFull;
+                        viewEl.style.removeProperty('height');
+                        viewEl.style.maxHeight = 'none';
+                        viewEl.style.overflow = 'visible';
+                        delete viewEl.dataset.vonResizeEnabled;
+                        viewEl.classList.remove('von-overflowing');
                         if (expandBtn) { expandBtn.style.display = 'none'; }
                     }
+                    updateVerticalResizeHandleIfOverflow(viewEl);
                     status.textContent = 'Saved';
                     editWrap.classList.add('hidden'); viewEl.classList.remove('hidden'); editBtn.disabled = false;
                     if (expandBtn) expandBtn.focus(); else editBtn.focus();
