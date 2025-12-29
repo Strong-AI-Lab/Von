@@ -434,6 +434,7 @@ def _upsert_singleton_text_relation(**kwargs):
 def _concept_exists(**kwargs):
     from ...db.repositories.concepts_repository import ConceptsRepository
     from ...security.access_control import can_access_concept
+    from ...vontology.code_concepts_registry import is_code_concept_id
 
     concept_id = kwargs.get("concept_id")
     if not concept_id:
@@ -441,7 +442,7 @@ def _concept_exists(**kwargs):
 
     try:
         doc = ConceptsRepository.find_one({"concept_id": concept_id}, {"_id": 1})
-        exists = bool(doc)
+        exists = bool(doc) or is_code_concept_id(concept_id)
         accessible = can_access_concept(concept_id)
         return {
             "success": True,

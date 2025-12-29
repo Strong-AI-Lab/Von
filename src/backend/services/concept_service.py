@@ -58,10 +58,6 @@ from ..vontology.utils_vontology import (
 from pymongo.database import Database  # For type hinting db
 
 from ..db import mongo_client
-from ..db.mongo_client import (
-    get_concepts_collection,
-    CONCEPTS_COLLECTION_NAME,
-)  # Corrected import
 from ..db.repositories.concepts_repository import ConceptsRepository
 
 # from src.backend.languagemodels.llm_interface import OllamaClient # ADDED: Import OllamaClient
@@ -503,6 +499,24 @@ def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
                 concept_doc["kind"] = "unknown"
 
             return concept_doc
+
+        # Virtual fallback for code-handled concepts (read-only).
+        try:
+            if isinstance(concept_id, str) and concept_id.startswith("#V#"):
+                from ..vontology.code_concepts_registry import build_virtual_concept_doc
+
+                virtual_doc = build_virtual_concept_doc(concept_id)
+                if isinstance(virtual_doc, dict) and virtual_doc.get("concept_id"):
+                    virtual_doc = {**virtual_doc}
+                    virtual_doc.setdefault("id", f"virtual:{concept_id}")
+                    virtual_doc.setdefault(
+                        "kind",
+                        virtual_doc.get("metadata", {}).get("concept_type", "unknown"),
+                    )
+                    return virtual_doc
+        except Exception:
+            pass
+
         raise ConceptNotFoundError(f"concept with concept_id '{concept_id}' not found.")
     except Exception as e:
         if isinstance(e, ConceptNotFoundError):
@@ -1519,20 +1533,6 @@ def get_concept_name_by_id(concept_id: str) -> Optional[str]:
         return None
     except Exception as e:
         logger.warning(f"Error looking up concept name for {concept_id}: {e}")
-        return None
-
-
-def get_concepts_collection_DEPRECATED() -> Optional[Collection]:
-    """DEPRECATED: This was incorrectly returning the 'concepts' collection.
-    Use the correct get_concepts_collection() from mongo_client instead.
-    """
-    try:
-        db = mongo_client.get_db()
-        if db is None:
-            return None
-        return db[CONCEPTS_COLLECTION_NAME]
-    except Exception as e:
-        logger.error(f"Failed to get 'concepts' collection: {e}", exc_info=True)
         return None
 
 
@@ -2836,9 +2836,8 @@ def export_concepts(
         f"Exporting concepts: concept_id={concept_id}, include_descendants={include_descendants}, format={format}"
     )
 
-    # Use direct collection accessor so tests can patch get_concepts_collection
-    concepts_coll = get_concepts_collection()
-    if concepts_coll is None:
+    # Ensure DB is available (repository is the only supported access path)
+    if ConceptsRepository.collection() is None:
         logger.error("concepts collection is not available for export_concepts.")
         raise ConceptServiceError("Database collection 'concepts' not available.")
 

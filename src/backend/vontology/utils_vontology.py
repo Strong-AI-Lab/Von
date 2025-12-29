@@ -1365,7 +1365,22 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
         logger.warning(
             f"Concept '{identifier}' not found in MongoDB (searched by id, path, and potentially name)."
         )
-        return {"error": f"Concept '{identifier}' not found in MongoDB."}
+        # Virtual fallback: some concept-like identifiers are primarily handled in code.
+        # These should still render in the UI (cartouches/tabs/tree) without requiring
+        # database mutation.
+        try:
+            if isinstance(identifier, str) and identifier.startswith("#V#"):
+                from .code_concepts_registry import build_virtual_concept_doc
+
+                virtual_doc = build_virtual_concept_doc(identifier)
+                if isinstance(virtual_doc, dict) and virtual_doc.get("concept_id"):
+                    doc = virtual_doc
+        except Exception:
+            # Fall through to the standard not-found response.
+            doc = None
+
+        if not doc:
+            return {"error": f"Concept '{identifier}' not found in MongoDB."}
 
     # Convert _id to string for JSON serialization before returning
     if "_id" in doc:
@@ -1711,6 +1726,27 @@ def get_vontology_tree(root_concept: str = "Thing"):
                 },
             )
         )
+        # Inject virtual code concepts so they can render in the tree even when not
+        # persisted as concept documents.
+        try:
+            from .code_concepts_registry import (
+                iter_code_concepts,
+                build_virtual_concept_doc,
+            )
+
+            existing_ids = {
+                d.get("concept_id")
+                for d in docs
+                if isinstance(d, dict) and isinstance(d.get("concept_id"), str)
+            }
+            for cc in iter_code_concepts():
+                if cc.concept_id in existing_ids:
+                    continue
+                vdoc = build_virtual_concept_doc(cc.concept_id)
+                if isinstance(vdoc, dict) and vdoc.get("concept_id"):
+                    docs.append(vdoc)
+        except Exception:
+            pass
         total = len(docs)
         if not total:
             return {"tree": []}
@@ -1719,7 +1755,8 @@ def get_vontology_tree(root_concept: str = "Thing"):
         types: list[dict] = []
         skipped = 0
         for d in docs:
-            if is_pure_instance(d):
+            # Keep predicates in the tree even though they are often pure instances.
+            if is_pure_instance(d) and not is_predicate(d):
                 skipped += 1
                 continue
             if not d.get("concept_id"):
@@ -1788,6 +1825,32 @@ def get_vontology_tree(root_concept: str = "Thing"):
                 parent = parents_list[0]
             else:
                 parent = thing_id  # orphan fallback
+
+            # Predicates: prefer attaching under an appropriate predicate type.
+            if is_predicate(d) and not parents_list:
+                inst_raw = rel.get("is_an_instance_of")
+                if isinstance(inst_raw, str):
+                    inst_list = [inst_raw]
+                elif isinstance(inst_raw, list):
+                    inst_list = [
+                        x for x in inst_raw if isinstance(x, str) and x.strip()
+                    ]
+                else:
+                    inst_list = []
+
+                preferred_predicate_parents = [
+                    "#V#predicate",
+                    "#V#relation",
+                    "#V#property",
+                    "#V#binary_predicate",
+                    "#V#unary_predicate",
+                    "#V#n_ary_predicate",
+                    "#V#ternary_predicate",
+                ]
+                for candidate in preferred_predicate_parents + inst_list:
+                    if candidate != cid and candidate in id_to_node:
+                        parent = candidate
+                        break
 
             # Final fallback if chosen parent missing
             if (

@@ -11,6 +11,7 @@ This document provides an overview of key files within the `docs` directory that
 > 3. Never auto-start the server; wait for explicit user instruction.
 > 4. Prefer clarity over clever chaining: separate lines instead of `&&` unless failure short‑circuit is required.
 > 5. Large multi-line Python → use a here-string variable then `python -c $code` (PowerShell) or propose a committed script.
+> 5.1. When providing paste-ready text (e.g., `.env` snippets, JSON tool calls, commands), wrap it in fenced code blocks so Markdown does not reformat or linkify it.
 > 6. If the user pastes Bash that fails, convert it to valid PowerShell rather than trying to “fix” heredocs.
 > 7. Keep changes minimal, well‑scoped, and update related tests/documentation.
 > 8. When uncertain, ask succinctly—do not guess or fabricate behaviour.
@@ -85,6 +86,7 @@ Failure Handling Patterns:
   - If it still fails, re-check the session by calling the accessible-resources tool once; if that also fails, then ask the user to use the provider’s **Restart Server** action (extension-managed MCP providers have a restart command in the MCP Servers UI).
   - If **Restart Server** does not resolve it, ask the user to restart VS Code’s extension host (or run **Developer: Reload Window**) and then retry.
   - Do not loop indefinitely: cap total retries per operation (e.g., 2) and surface the last error with a clear recommended next action.
+  - Do **NOT** “hack around” Atlassian MCP failures by creating ad-hoc scripts (e.g. temporary Python) or by calling Jira REST directly. Fix the MCP session instead (bounded retry → accessible-resources check → MCP server restart → Reload Window). If the cloudId is the blocker, use the documented tenant-info browser fallback.
 - Cache/Data Structure Sensitivity: Never reorder or shrink tuple/dict cache structures relied upon by diagnostics (append only; update summariser accordingly).
 
 Language & Shell Consistency:
