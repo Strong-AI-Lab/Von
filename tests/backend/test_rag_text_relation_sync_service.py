@@ -56,7 +56,7 @@ def test_sync_text_relations_indexes_visible_concepts(monkeypatch):
     # Two relations: one visible, one not.
     monkeypatch.setattr(
         "src.backend.db.repositories.text_value_repository.TextRelationsRepository.find",
-        lambda _filter, limit=0: [
+        lambda _filter, projection=None, sort=None, skip=0, limit=0: [
             {
                 "_id": "r1",
                 "subject_concept_id": "#V#allowed",
@@ -69,7 +69,7 @@ def test_sync_text_relations_indexes_visible_concepts(monkeypatch):
                 "predicate": "hasDescription",
                 "object_text_id": "000000000000000000000002",
             },
-        ],
+        ][skip : (skip + limit) if limit else None],
     )
 
     def _tv_find_one(filter_doc, _projection=None):
@@ -98,11 +98,15 @@ def test_sync_text_relations_indexes_visible_concepts(monkeypatch):
     assert "Hello world" in doc["text"]
 
     meta = doc["metadata"]
+    assert meta["type"] == "text_relation"
     assert meta["source"] == "vontology_text_relation"
+    assert meta["concept_id"] == "#V#allowed"
     assert meta["subject_concept_id"] == "#V#allowed"
     assert meta["predicate"] == "hasDescription"
     assert meta["relation_id"] == "r1"
+    assert meta["language"] == "en-NZ"
 
     # Required for permission filtering.
     assert meta["user_id"] == "#V#user"
     assert meta["organisation_concept_id"] == "#V#org"
+    assert meta["org_id"] == "#V#org"
