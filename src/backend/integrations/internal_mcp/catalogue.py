@@ -1724,10 +1724,15 @@ def _download_paper_output_schema() -> Schema:
             "success": (bool, type(None)),
             "file_path": (str, type(None)),
             "arxiv_id": (str, type(None)),
+            "storage": (dict, type(None)),
             "error": (str, type(None)),
         },
         allow_unknown=True,
-        description="download_paper output: success (bool), file_path (str, location of downloaded PDF), arxiv_id (str), or error (str) if failed",
+        description=(
+            "download_paper output: success (bool), file_path (str, local cache path), "
+            "storage (dict with backend/key/uri for durable blob-store location), arxiv_id (str), "
+            "or error (str) if failed"
+        ),
     )
 
 
@@ -4146,7 +4151,7 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=_download_paper_output_schema(),
             category="write",
             timeout_sec=60.0,
-            description="Download PDF of an arXiv paper to local storage (data/arxiv_papers/). Use when user asks to download/save/fetch a paper. Returns file path where PDF was saved. Accepts optional filename parameter for custom naming (defaults to arxiv_id.pdf).",
+            description="Download PDF of an arXiv paper, then store it in the configured blob store (local or OpenStack Swift). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file_path and a durable storage.uri. Use when user asks to download/save/fetch a paper.",
         ),
         MethodDefinition(
             name="list_papers",
@@ -4155,7 +4160,7 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=_list_papers_output_schema(),
             category="read",
             timeout_sec=15.0,
-            description="List all arXiv papers that have been downloaded to local storage (data/arxiv_papers/). Use when user asks 'what papers do I have?', 'list downloaded papers', or similar. Returns list of all locally stored papers with their metadata (title, authors, summary, links). No parameters required.",
+            description="List arXiv papers available in the local cache directory used by the external arXiv toolchain. This may not reflect all documents stored in the blob store. Use when user asks 'what papers do I have?' or similar.",
         ),
         MethodDefinition(
             name="read_paper",

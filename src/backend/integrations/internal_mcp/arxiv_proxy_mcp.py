@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
+from src.backend.services.blob_store import get_blob_store_from_env
+
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.session import ClientSession
 from mcp import types as mcp_types
@@ -183,7 +185,65 @@ class ArxivMCPProxy:
                 _LOG_TAG,
             )
 
-        return await self._call_tool("download_paper", arguments)
+        result = await self._call_tool("download_paper", arguments)
+        return self._store_downloaded_pdf(result=result, arxiv_id=arxiv_id)
+
+    def _store_downloaded_pdf(self, *, result: Any, arxiv_id: str) -> Dict[str, Any]:
+        if isinstance(result, dict) and "text" in result and isinstance(result["text"], str):
+            # Some versions return a single text payload.
+            try:
+                import json
+
+                parsed = json.loads(result["text"])
+                if isinstance(parsed, dict):
+                    result = parsed
+            except Exception:
+                pass
+
+        if not isinstance(result, dict):
+            raise ArxivProxyError(
+                f"Unexpected download_paper result type: {type(result).__name__}"
+            )
+
+        file_path = _extract_download_file_path(result)
+        if not file_path:
+            raise ArxivProxyError(
+                "arXiv download succeeded but no file path was returned by arxiv-mcp-server"
+            )
+
+        path = Path(file_path)
+        if not path.is_absolute():
+            path = self._config.storage_path / path
+
+        if not path.exists():
+            raise ArxivProxyError(f"Downloaded PDF not found at: {path}")
+
+        blob_store = get_blob_store_from_env()
+        storage_key = _arxiv_pdf_blob_key(arxiv_id)
+
+        try:
+            ref = blob_store.put_bytes(
+                storage_key,
+                path.read_bytes(),
+                content_type="application/pdf",
+                metadata={
+                    "source": "arxiv",
+                    "arxiv_id": _normalise_arxiv_id(arxiv_id),
+                    "original_path": str(path),
+                },
+            )
+        except Exception as exc:
+            raise ArxivProxyError(f"Failed to store PDF in blob store: {exc}") from exc
+
+        stored = dict(result)
+        stored["arxiv_id"] = arxiv_id
+        stored["file_path"] = str(path)
+        stored["storage"] = {
+            "backend": ref.backend,
+            "key": ref.key,
+            "uri": ref.uri,
+        }
+        return stored
 
     async def list_papers(self) -> Dict[str, Any]:
         """List all downloaded papers.
@@ -231,10 +291,13 @@ async def get_arxiv_proxy() -> ArxivMCPProxy:
             import os
 
             workspace_root = Path(__file__).parent.parent.parent.parent.parent
-            storage_path = workspace_root / "data" / "arxiv_papers"
+            # Cache directory for external arxiv-mcp-server. Durable storage is the blob store.
+            storage_path = workspace_root / "data" / "arxiv_cache"
 
             # Allow override via environment variable
-            env_storage = os.environ.get("ARXIV_STORAGE_PATH")
+            env_storage = os.environ.get("ARXIV_CACHE_PATH") or os.environ.get(
+                "ARXIV_STORAGE_PATH"
+            )
             if env_storage:
                 storage_path = Path(env_storage)
 
@@ -245,3 +308,23 @@ async def get_arxiv_proxy() -> ArxivMCPProxy:
             )
 
         return _proxy_instance
+
+
+def _normalise_arxiv_id(arxiv_id: str) -> str:
+    value = arxiv_id.strip()
+    if value.lower().startswith("arxiv:"):
+        value = value.split(":", 1)[1].strip()
+    return value
+
+
+def _arxiv_pdf_blob_key(arxiv_id: str) -> str:
+    safe = _normalise_arxiv_id(arxiv_id).replace("/", "_")
+    return f"arxiv/papers/{safe}.pdf"
+
+
+def _extract_download_file_path(result: Dict[str, Any]) -> str | None:
+    for key in ("file_path", "path", "filepath", "filename"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None

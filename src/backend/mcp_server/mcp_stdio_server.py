@@ -802,7 +802,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="download_paper",
-            description="Download PDF of an arXiv paper to local storage (data/arxiv_papers/). Returns file path where PDF was saved.",
+            description="Download PDF of an arXiv paper and store it in the configured blob store (local or OpenStack Swift). Returns both a local cache file_path and a durable storage URI.",
             inputSchema={
                 "type": "object",
                 "properties": {
