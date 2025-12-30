@@ -90,7 +90,7 @@ The agent receives authentication status in system prompt:
 - Implement audit logging for sensitive tool calls (RAG access, concept mutations)
 - Clearly document which MCP tools are namespace-aware vs global
 
-### 6. Jira (Atlassian) Authentication Diagnostics
+### 5. Jira (Atlassian) Authentication Diagnostics
 
 Von’s internal Jira tools authenticate using Atlassian credentials from environment variables:
 
@@ -111,21 +111,23 @@ Use these tools to confirm what account Von is using and whether Jira auth is ac
 2) `jira_get_myself` (calls Jira `/rest/api/3/myself`)
 - Returns identity details (`displayName`, `emailAddress`, `accountId`, etc.) when auth is valid.
 
-#### Copy/paste-safe tool calls
+#### Running the tools
 
-Put tool calls in fenced code blocks to avoid the UI linkifying them.
+These are internal tools available to Von’s chat/orchestrator. Run them with no arguments.
 
-```json
-{"action":"call_tool","tool":"jira_get_auth_config","payload":{}}
+Examples (paste as plain text in a fenced block so the UI doesn’t mangle it):
+
+```text
+jira_get_auth_config
 ```
 
-```json
-{"action":"call_tool","tool":"jira_get_myself","payload":{}}
+```text
+jira_get_myself
 ```
 
 If `jira_get_myself` returns `401 Unauthorised`, confirm the configured email/base URL with `jira_get_auth_config`, then rotate the API token (Atlassian API tokens are per-account) and restart Von.
 
-### 5. Admin Endpoints
+### 6. Admin Endpoints
 
 **Endpoints**: `/admin/rag_status`, `/admin/rag_integrity`, `/admin/rag_sync`
 
