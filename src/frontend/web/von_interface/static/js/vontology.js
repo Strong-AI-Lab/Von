@@ -1,4 +1,3 @@
-import { postJson } from './apiService.js';
 import { fetchConceptList, resetConceptTab, updateConceptTabUI } from './conceptTab.js';
 import { clearContainer, elements, getCurrentUserConceptId } from './domUtils.js';
 import { handleVontologyNodeSelection } from './dynamicTabs.js';
@@ -43,6 +42,19 @@ function debugLog(...args) {
   } catch (_) {
     // no-op
   }
+}
+
+function vontologyFetch(url, options = {}) {
+  // Keep identity context consistent across Vontology endpoints.
+  // Access control can fall back to X-User-Concept-ID when session state is absent.
+  const userConceptId = getCurrentUserConceptId();
+  if (!userConceptId) {
+    return fetch(url, options);
+  }
+
+  const baseHeaders = (options && typeof options === 'object' ? options.headers : null) || {};
+  const mergedHeaders = { ...baseHeaders, 'X-User-Concept-ID': userConceptId };
+  return fetch(url, { ...options, headers: mergedHeaders });
 }
 
 const RENDER_BATCH_SIZE = 500;
@@ -126,24 +138,22 @@ function initGlobalProgressOverlay() {
 }
 
 // Clear selection if a selected concept is deleted elsewhere (tab or tree)
-if (typeof document !== 'undefined') {
-  document.addEventListener('concept-deleted', (evt) => {
-    try {
-      const deleted = (evt.detail || {}).conceptId;
-      if (!deleted) return;
-      const selectedId = getSelectedVontologyConceptId();
-      if (deleted === selectedId || deleted === currentVontologyNodeId) {
-        setSelectedVontologyConceptId(null);
-        setCurrentVontologyNodeId(null);
-        setCurrentConceptType(null);
-        const span = document.getElementById('selectedNodePath');
-        if (span) span.textContent = 'None';
-      }
-    } catch (e) {
-      console.warn('[vontology] selection cleanup after deletion failed', e);
+document.addEventListener('concept-deleted', (evt) => {
+  try {
+    const deleted = (evt.detail || {}).conceptId;
+    if (!deleted) return;
+    const selectedId = getSelectedVontologyConceptId();
+    if (deleted === selectedId || deleted === currentVontologyNodeId) {
+      setSelectedVontologyConceptId(null);
+      setCurrentVontologyNodeId(null);
+      setCurrentConceptType(null);
+      const span = document.getElementById('selectedNodePath');
+      if (span) span.textContent = 'None';
     }
-  });
-}
+  } catch (e) {
+    console.warn('[vontology] selection cleanup after deletion failed', e);
+  }
+});
 
 // initialize early
 initGlobalProgressOverlay();
@@ -195,6 +205,7 @@ function ensureProgressBarContainer() {
     debugLog('[ensureProgressBarContainer] elements.vontologyTreeContainer missing, re-querying DOM for #vontologyTreeContainer');
     elements.vontologyTreeContainer = document.getElementById('vontologyTreeContainer');
   }
+
   // Deduplicate any existing progress wraps: keep the first, remove extras
   const existingWraps = Array.from(document.querySelectorAll('.vontology-progress-wrap'));
   let wrap = existingWraps.length ? existingWraps[0] : null;
@@ -204,6 +215,7 @@ function ensureProgressBarContainer() {
       try { existingWraps[i].remove(); } catch (_) { }
     }
   }
+
   if (!wrap && elements.vontologyTreeContainer) {
     wrap = elements.vontologyTreeContainer.querySelector('.vontology-progress-wrap');
   }
@@ -272,19 +284,9 @@ function ensureProgressBarContainer() {
     wrap.appendChild(barOuter);
     wrap.appendChild(label);
 
-    // Prefer inserting the progress bar immediately below the top-of-page
-    // search input (if present) so it's visible while the tree area shows the
-    // 'Loading' placeholder. Otherwise fall back to inserting into the
-    // `vontologyTreeContainer` or attaching to document.body.
-    // If a wrap already exists in the document (fallback created earlier),
-    // move it into the preferred insertion point rather than creating a new one.
-    if (wrap && wrap.parentElement && wrap.parentElement !== elements.vontologySearchInput?.parentElement && elements.vontologySearchInput && elements.vontologySearchInput.parentElement) {
-      try { elements.vontologySearchInput.insertAdjacentElement('afterend', wrap); wrap.dataset.vontologyProgressFallback = ''; } catch (e) { /* fall through */ }
-    }
-
-    if (elements.vontologySearchInput && elements.vontologySearchInput.parentElement && (!wrap || !wrap.parentElement || wrap.parentElement === document.body)) {
+    // Prefer inserting the progress bar immediately below the top-of-page search input (if present).
+    if (elements.vontologySearchInput && elements.vontologySearchInput.parentElement) {
       try {
-        // Place after the search input so it appears above the tree box.
         elements.vontologySearchInput.insertAdjacentElement('afterend', wrap);
       } catch (e) {
         // Fallback to tree container insertion if DOM operation fails
@@ -299,17 +301,13 @@ function ensureProgressBarContainer() {
         }
       }
     } else if (elements.vontologyTreeContainer) {
-      // If the top-of-page search input is missing, prefer the container wrapper
-      // so the bar shows above the tree. Look for a logical parent `.vontology-container`.
+      // If the top-of-page search input is missing, prefer the container wrapper so the bar shows above the tree.
       const parentContainer = document.querySelector('.vontology-container');
       if (parentContainer) {
-        // If a global wrap exists (created earlier), move it into the container
         try {
           parentContainer.insertBefore(wrap, elements.vontologyTreeContainer);
-          debugLog('[ensureProgressBarContainer] moved existing progress wrap into .vontology-container before tree');
-          if (wrap.dataset.vontologyProgressFallback) delete wrap.dataset.vontologyProgressFallback;
+          debugLog('[ensureProgressBarContainer] moved progress wrap into .vontology-container before tree');
         } catch (err) {
-          // Fallback to inserting into the tree container
           if (elements.vontologyTreeContainer.firstChild) {
             elements.vontologyTreeContainer.insertBefore(wrap, elements.vontologyTreeContainer.firstChild);
           } else {
@@ -697,7 +695,7 @@ export async function loadKeyConceptsForUser() {
 
     const url = `/vontology/api/vontology/key-concepts?user_concept_id=${encodeURIComponent(userConceptId)}`;
     console.log('[loadKeyConceptsForUser] Fetching from:', url);
-    const response = await fetch(url);
+    const response = await vontologyFetch(url);
     console.log('[loadKeyConceptsForUser] Response status:', response.status, response.statusText);
 
     if (!response.ok) {
@@ -795,7 +793,7 @@ export async function fetchAndRenderVontologyTree() {
       if (decoupleCounts && (!entityCounts || Object.keys(entityCounts).length === 0)) {
         (async () => {
           try {
-            const countsResp = await fetch('/vontology/api/vontology/entity_counts');
+            const countsResp = await vontologyFetch('/vontology/api/vontology/entity_counts');
             if (!countsResp.ok) throw new Error(`HTTP error! status: ${countsResp.status}`);
             const countsJson = await countsResp.json();
             if (countsJson && countsJson.entity_counts) {
@@ -833,19 +831,19 @@ export async function fetchAndRenderVontologyTree() {
       let entityCountsResponseJson = null;
       const decouple = decoupleCounts;
       try {
-        const initResp = await fetch('/vontology/api/vontology/tree_async', { method: 'POST' });
+        const initResp = await vontologyFetch('/vontology/api/vontology/tree_async', { method: 'POST' });
         if (!initResp.ok) throw new Error(`HTTP error! status: ${initResp.status}`);
         const { job_id } = await initResp.json();
 
         let countsPromise = null;
         if (!decouple) {
-          countsPromise = fetch('/vontology/api/vontology/entity_counts')
+          countsPromise = vontologyFetch('/vontology/api/vontology/entity_counts')
             .then(r => r.ok ? r.json() : Promise.reject(`HTTP error! status: ${r.status}`));
         }
 
         let done = false;
         while (!done) {
-          const progResp = await fetch(`/vontology/api/vontology/tree_progress/${job_id}`);
+          const progResp = await vontologyFetch(`/vontology/api/vontology/tree_progress/${job_id}`);
           if (!progResp.ok) throw new Error(`HTTP error! status: ${progResp.status}`);
           const progJson = await progResp.json();
           const pct = (progJson.progress || 0) / 100;
@@ -867,7 +865,7 @@ export async function fetchAndRenderVontologyTree() {
           // Kick off counts fetch asynchronously (do not await here)
           (async () => {
             try {
-              const countsResp = await fetch('/vontology/api/vontology/entity_counts');
+              const countsResp = await vontologyFetch('/vontology/api/vontology/entity_counts');
               if (!countsResp.ok) throw new Error(`HTTP error! status: ${countsResp.status}`);
               const countsJson = await countsResp.json();
               entityCountsResponseJson = countsJson;
@@ -932,7 +930,7 @@ export async function fetchAndRenderVontologyTree() {
         })(treeData);
         const cacheHit = !!(treeData && treeData._cache && treeData._cache.hit); // backend may attach cache metadata later
         const payload = { load_ms: Math.round(elapsed), node_count: nodeCount, cache_hit: cacheHit };
-        fetch('/vontology/api/vontology/record_frontend_tree_load', {
+        vontologyFetch('/vontology/api/vontology/record_frontend_tree_load', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
@@ -970,7 +968,7 @@ export async function fetchAndRenderVontologyTree() {
 
         // Auto-create Thing
         try {
-          const response = await fetch('/vontology/api/vontology/ensure_thing', {
+          const response = await vontologyFetch('/vontology/api/vontology/ensure_thing', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
           });
@@ -1099,7 +1097,7 @@ export async function fetchAndRenderVontologyTree() {
 
           // Auto-create Thing
           try {
-            const response = await fetch('/vontology/api/vontology/ensure_thing', {
+            const response = await vontologyFetch('/vontology/api/vontology/ensure_thing', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' }
             });
@@ -1573,7 +1571,7 @@ async function showVontologyContextMenu(event, node, targetElement = null) {
   // Now check for children asynchronously and update the menu
   try {
     console.log(`[showVontologyContextMenu] Checking children for node: ${node.id}`);
-    const response = await fetch(`/vontology/api/vontology/children?node_id=${encodeURIComponent(node.id)}`);
+    const response = await vontologyFetch(`/vontology/api/vontology/children?node_id=${encodeURIComponent(node.id)}`);
 
     if (response.ok) {
       const data = await response.json();
@@ -1622,7 +1620,7 @@ async function showVontologyContextMenu(event, node, targetElement = null) {
   // Check for parents asynchronously and update the parents menu item
   try {
     console.log(`[showVontologyContextMenu] Checking parents for node: ${node.id}`);
-    const parentsResponse = await fetch(`/vontology/api/vontology/parents?identifier=${encodeURIComponent(node.id)}`);
+    const parentsResponse = await vontologyFetch(`/vontology/api/vontology/parents?identifier=${encodeURIComponent(node.id)}`);
 
     if (parentsResponse.ok) {
       const parentsData = await parentsResponse.json();
@@ -1684,7 +1682,7 @@ async function showVontologyContextMenu(event, node, targetElement = null) {
   // Check for instances asynchronously and update the instances menu item
   try {
     console.log(`[showVontologyContextMenu] Checking instances for node: ${node.id}`);
-    const instancesResponse = await fetch(`/vontology/api/vontology/instances?node_id=${encodeURIComponent(node.id)}&include_subtypes=true`);
+    const instancesResponse = await vontologyFetch(`/vontology/api/vontology/instances?node_id=${encodeURIComponent(node.id)}&include_subtypes=true`);
 
     if (instancesResponse.ok) {
       const instancesData = await instancesResponse.json();
@@ -1757,7 +1755,7 @@ export async function toggleKeyConceptMarking(node, targetElement) {
     console.log(`[toggleKeyConceptMarking] ${action === 'add' ? 'Marking' : 'Unmarking'} ${node.name} (${node.id}) as key concept`);
 
     // Call backend
-    const response = await fetch('/vontology/api/vontology/concept/key-concept', {
+    const response = await vontologyFetch('/vontology/api/vontology/concept/key-concept', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1805,7 +1803,7 @@ async function expandImmediateChildren(node) {
 
   try {
     // Fetch children from the backend
-    const response = await fetch(`/vontology/api/vontology/children?node_id=${encodeURIComponent(node.id)}`);
+    const response = await vontologyFetch(`/vontology/api/vontology/children?node_id=${encodeURIComponent(node.id)}`);
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -1966,7 +1964,7 @@ async function expandImmediateParents(node) {
 
   try {
     // Fetch parents from the backend
-    const response = await fetch(`/vontology/api/vontology/parents?identifier=${encodeURIComponent(node.id)}`);
+    const response = await vontologyFetch(`/vontology/api/vontology/parents?identifier=${encodeURIComponent(node.id)}`);
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -2098,7 +2096,7 @@ async function expandImmediateInstances(node, targetElement = null) {
 
   try {
     // Fetch instances from the backend
-    const response = await fetch(`/vontology/api/vontology/instances?node_id=${encodeURIComponent(node.id)}&include_subtypes=true`);
+    const response = await vontologyFetch(`/vontology/api/vontology/instances?node_id=${encodeURIComponent(node.id)}&include_subtypes=true`);
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -2284,7 +2282,7 @@ async function handleDeleteConcept(node) {
 
   try {
     const url = `/vontology/api/vontology/node?concept_id=${encodeURIComponent(node.id)}&simulate=0`;
-    const response = await fetch(url, { method: 'DELETE' });
+    const response = await vontologyFetch(url, { method: 'DELETE' });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.success) {
       throw new Error(data.error || data.message || `HTTP ${response.status}`);
@@ -2536,10 +2534,16 @@ async function handleSaveDescription() {
   }
 
   try {
-    const response = await postJson('/vontology/api/vontology/update_description', {
-      identifier: identifier,
-      description: newDescription
+    const res = await vontologyFetch('/vontology/api/vontology/update_description', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        identifier: identifier,
+        description: newDescription
+      })
     });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const response = await res.json();
 
     if (response.success) {
       alert("Description updated successfully!");
@@ -2559,7 +2563,7 @@ async function updateParentDisplay(identifier, nodeName = null, nodeId = null) {
   if (!elements.selectedNodePathSpan) return;
 
   try {
-    const response = await fetch(`/vontology/api/vontology/parents?identifier=${encodeURIComponent(identifier)}`);
+    const response = await vontologyFetch(`/vontology/api/vontology/parents?identifier=${encodeURIComponent(identifier)}`);
     if (!response.ok) {
       console.warn(`Could not fetch parents for ${identifier}. Status: ${response.status}`);
       return;
@@ -2605,7 +2609,7 @@ async function fetchVontologyContent(identifier, containerElement) {
   console.log(`[fetchVontologyContent] Fetching from URL: ${url}`);
 
   try {
-    const response = await fetch(url);
+    const response = await vontologyFetch(url);
     console.log(`[fetchVontologyContent] Response status: ${response.status}`);
 
     if (!response.ok) {
@@ -2746,7 +2750,7 @@ export async function selectVontologyNodeByIdentifier(identifier, createConceptT
     console.debug(`selectVontologyNodeByIdentifier: Raw tree fallback failed for ${identifier}. Trying server lookup via node_content.`);
     // Server-side lookup fallback: ask the backend for node content which resolves concept_id/_id/path
     try {
-      const resp = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(identifier)}`);
+      const resp = await vontologyFetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(identifier)}`);
       if (resp.ok) {
         const nodeData = await resp.json();
         if (nodeData && !nodeData.error) {
@@ -2766,7 +2770,7 @@ export async function selectVontologyNodeByIdentifier(identifier, createConceptT
 
             // If no DOM element exists for the resolved node, try to fetch its parents to decide where to insert a temporary node
             try {
-              const parentsResp = await fetch(`/vontology/api/vontology/parents?identifier=${encodeURIComponent(resolvedId)}`);
+              const parentsResp = await vontologyFetch(`/vontology/api/vontology/parents?identifier=${encodeURIComponent(resolvedId)}`);
               if (parentsResp.ok) {
                 const parentsData = await parentsResp.json();
                 const parents = parentsData.parents || [];
@@ -3295,7 +3299,7 @@ export async function performVontologySearch(q) {
   __vontologySearchState.abortController = ac;
   try {
     const url = `/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=20&include_individuals=true`;
-    const res = await fetch(url, { signal: ac.signal });
+    const res = await vontologyFetch(url, { signal: ac.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     let items = Array.isArray(data?.results) ? data.results : [];
@@ -3306,7 +3310,7 @@ export async function performVontologySearch(q) {
       const alreadyPresent = items.some(it => (it.id || '').toLowerCase() === idLower);
       if (!alreadyPresent) {
         try {
-          const nodeRes = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(trimmedQuery)}`, { signal: ac.signal });
+          const nodeRes = await vontologyFetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(trimmedQuery)}`, { signal: ac.signal });
           if (nodeRes.ok) {
             const nodeData = await nodeRes.json();
             if (nodeData && !nodeData.error) {
@@ -3681,7 +3685,13 @@ export async function handleCreateType() {
       requestPayload.parent_id = parentId;
     }
 
-    const response = await postJson('/vontology/api/vontology/create_concept', requestPayload);
+    const res = await vontologyFetch('/vontology/api/vontology/create_concept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestPayload)
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const response = await res.json();
 
     const createdConceptId = response?.concept_id || response?.concept?.concept_id;
     const createdConceptName = response?.concept?.name || newConceptName;
@@ -3772,11 +3782,17 @@ export async function handleCreateInstance() {
       elements.createConceptStatusP.style.color = "black";
     }
 
-    const response = await postJson('/vontology/api/vontology/create_concept', {
-      new_concept_name: newConceptName,
-      parent_id: parentId,
-      create_as_instance: true
+    const res = await vontologyFetch('/vontology/api/vontology/create_concept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        new_concept_name: newConceptName,
+        parent_id: parentId,
+        create_as_instance: true
+      })
     });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const response = await res.json();
 
     const createdConceptId = response?.concept_id || response?.concept?.concept_id;
     const createdConceptName = response?.concept?.name || newConceptName;
