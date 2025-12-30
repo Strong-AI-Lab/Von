@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -39,6 +40,11 @@ class OrchestratorResult:
     extra_messages: Sequence[Mapping[str, Any]]
     tool_invocations: Sequence[Mapping[str, Any]]
     aux_llm_calls: Sequence[Mapping[str, Any]]
+
+    # Optional LLM interaction telemetry (JVNAUTOSCI-877). Append-only for backwards compatibility.
+    llm_calls: Sequence[Mapping[str, Any]] = ()
+    llm_usage: Mapping[str, Any] | None = None
+    orchestrator_duration_ms: float | None = None
 
 
 class _ToolCallRequest(TypedDict):
@@ -1644,6 +1650,43 @@ class InternalMCPChatOrchestrator:
         auxiliary_system_prompt: str | None = None,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
+        llm_calls: list[dict[str, Any]] = []
+        orchestrator_start = time.perf_counter()
+
+        def _record_llm_call(
+            *,
+            call_type: str,
+            model_name: str | None,
+            duration_ms: float | None,
+            usage: Mapping[str, Any] | None = None,
+            note: str | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "type": call_type,
+                "model": model_name,
+                "duration_ms": duration_ms,
+                "usage": dict(usage) if isinstance(usage, Mapping) else None,
+            }
+            if isinstance(note, str) and note.strip():
+                payload["note"] = note.strip()
+            llm_calls.append(payload)
+
+        def _aggregate_usage_total() -> Mapping[str, int] | None:
+            totals: dict[str, int] = {}
+            any_usage = False
+            for call in llm_calls:
+                usage_value = call.get("usage")
+                if not isinstance(usage_value, dict):
+                    continue
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                    val = usage_value.get(key)
+                    if isinstance(val, int):
+                        totals[key] = totals.get(key, 0) + val
+                        any_usage = True
+            return totals if any_usage else None
+
+        def _orchestrator_duration_ms() -> float:
+            return (time.perf_counter() - orchestrator_start) * 1000.0
 
         def _build_tool_call_parse_error_result(
             tool_call_parse_error: ToolCallParsingError,
@@ -1731,7 +1774,15 @@ class InternalMCPChatOrchestrator:
                         "max_tool_invocations": int(self._max_tool_invocations),
                     },
                 )
+            llm_start = time.perf_counter()
             response = llm_client.generate(prompt, context=context, model=model)
+            _record_llm_call(
+                call_type="llm.generate",
+                model_name=model,
+                duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                usage=None,
+                note="Token usage unavailable via legacy generate().",
+            )
             if trace_enabled and trace is not None:
                 llm_step.finish_success(
                     {
@@ -1759,6 +1810,9 @@ class InternalMCPChatOrchestrator:
                         extra_messages=(),
                         tool_invocations=(),
                         aux_llm_calls=(),
+                        llm_calls=tuple(llm_calls),
+                        llm_usage=_aggregate_usage_total(),
+                        orchestrator_duration_ms=_orchestrator_duration_ms(),
                     )
                     _persist_trace(status="completed")
                     return result
@@ -1767,6 +1821,9 @@ class InternalMCPChatOrchestrator:
                 extra_messages=(),
                 tool_invocations=(),
                 aux_llm_calls=tuple(aux_llm_calls),
+                llm_calls=tuple(llm_calls),
+                llm_usage=_aggregate_usage_total(),
+                orchestrator_duration_ms=_orchestrator_duration_ms(),
             )
             _persist_trace(status="completed")
             return result
@@ -1797,12 +1854,27 @@ class InternalMCPChatOrchestrator:
                         },
                     )
                 tool_definitions = self._convert_mcp_tools_to_structured_definitions()
+                llm_start = time.perf_counter()
                 llm_response = llm_client.generate_with_tools(
                     prompt=prompt,
                     available_tools=tool_definitions,
                     context=augmented_context,
                     model=model,
                     system_message=None,  # Already in augmented_context
+                )
+                _record_llm_call(
+                    call_type="llm.generate_with_tools",
+                    model_name=(
+                        llm_response.model
+                        if isinstance(getattr(llm_response, "model", None), str)
+                        else model
+                    ),
+                    duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                    usage=(
+                        llm_response.usage
+                        if isinstance(getattr(llm_response, "usage", None), Mapping)
+                        else None
+                    ),
                 )
 
                 # Convert to legacy format for compatibility
@@ -1862,8 +1934,16 @@ class InternalMCPChatOrchestrator:
                         "context_messages": len(augmented_context),
                     },
                 )
+            llm_start = time.perf_counter()
             response = llm_client.generate(
                 prompt, context=augmented_context, model=model
+            )
+            _record_llm_call(
+                call_type="llm.generate",
+                model_name=model,
+                duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                usage=None,
+                note="Token usage unavailable via legacy generate().",
             )
             tool_calls = None  # Will be extracted below
             has_valid_tool_call = False  # Will be set below
@@ -1968,8 +2048,16 @@ class InternalMCPChatOrchestrator:
                 except Exception:  # pragma: no cover - best effort only
                     pass
 
+                llm_start = time.perf_counter()
                 retry_response = llm_client.generate(
                     retry_prompt, context=augmented_context, model=model
+                )
+                _record_llm_call(
+                    call_type="llm.generate",
+                    model_name=model,
+                    duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                    usage=None,
+                    note="Missing tool call retry prompt.",
                 )
 
                 try:
@@ -2013,6 +2101,9 @@ class InternalMCPChatOrchestrator:
                         extra_messages=(),
                         tool_invocations=(),
                         aux_llm_calls=tuple(aux_llm_calls),
+                        llm_calls=tuple(llm_calls),
+                        llm_usage=_aggregate_usage_total(),
+                        orchestrator_duration_ms=_orchestrator_duration_ms(),
                     )
                     _persist_trace(status="completed")
                     return result
@@ -2022,6 +2113,9 @@ class InternalMCPChatOrchestrator:
                     extra_messages=(),
                     tool_invocations=(),
                     aux_llm_calls=tuple(aux_llm_calls),
+                    llm_calls=tuple(llm_calls),
+                    llm_usage=_aggregate_usage_total(),
+                    orchestrator_duration_ms=_orchestrator_duration_ms(),
                 )
                 _persist_trace(status="completed")
                 return result
@@ -2104,8 +2198,16 @@ class InternalMCPChatOrchestrator:
                         except Exception:  # pragma: no cover
                             pass
 
+                        llm_start = time.perf_counter()
                         retry_response = llm_client.generate(
                             retry_prompt, context=augmented_context, model=model
+                        )
+                        _record_llm_call(
+                            call_type="llm.generate",
+                            model_name=model,
+                            duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                            usage=None,
+                            note="Missing tool call retry prompt (parse-error path).",
                         )
                         try:
                             aux_llm_calls.append(
@@ -2332,8 +2434,16 @@ class InternalMCPChatOrchestrator:
                 "If the tool failed, explain the error. "
                 "If you need to call another tool, you may do so."
             )
+            llm_start = time.perf_counter()
             current_response = llm_client.generate(
                 follow_up_prompt, context=augmented_context, model=model
+            )
+            _record_llm_call(
+                call_type="llm.generate",
+                model_name=model,
+                duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                usage=None,
+                note="Follow-up after tool execution; token usage unavailable via legacy generate().",
             )
 
         # Log if we hit the iteration limit
@@ -2352,6 +2462,9 @@ class InternalMCPChatOrchestrator:
             extra_messages=tuple(tool_messages),
             tool_invocations=tuple(invocations),
             aux_llm_calls=tuple(aux_llm_calls),
+            llm_calls=tuple(llm_calls),
+            llm_usage=_aggregate_usage_total(),
+            orchestrator_duration_ms=_orchestrator_duration_ms(),
         )
         _persist_trace(status="completed")
         return result
