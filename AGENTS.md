@@ -931,6 +931,8 @@ uv tool install arxiv-mcp-server
 
 **Documentation**: See `docs/engineering/arxiv_mcp_integration.md` for detailed setup, usage patterns, and troubleshooting.
 
+For Catalyst Cloud (NZ) Swift configuration, see `docs/engineering/catalyst_cloud_swift_setup.md`.
+
 **Related Issues**:
 - JVNAUTOSCI-654: Plan external MCP integrations (arXiv) - Complete
 - JVNAUTOSCI-655: Implement internal MCP proxy for arXiv tools - Planned
