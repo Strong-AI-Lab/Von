@@ -1672,6 +1672,37 @@ function showLlmDebugPopup(turnId) {
         message_count: debugData.messages?.length || 0
     };
 
+    // LLM interaction telemetry (JVNAUTOSCI-877)
+    const llmInteraction = (debugData && typeof debugData === 'object') ? debugData.llm_interaction : null;
+    if (llmInteraction && typeof llmInteraction === 'object') {
+        const calls = Array.isArray(llmInteraction.calls) ? llmInteraction.calls : [];
+
+        const callTypeCounts = {};
+        const callModels = new Set();
+        for (const call of calls) {
+            if (!call || typeof call !== 'object') {
+                continue;
+            }
+            const t = typeof call.type === 'string' ? call.type : 'unknown';
+            callTypeCounts[t] = (callTypeCounts[t] || 0) + 1;
+
+            if (typeof call.model === 'string' && call.model.trim().length > 0) {
+                callModels.add(call.model.trim());
+            }
+        }
+
+        metadata.llm_interaction = {
+            requested_model: llmInteraction.requested_model ?? null,
+            orchestrator_used: llmInteraction.orchestrator_used ?? null,
+            duration_ms: llmInteraction.duration_ms ?? null,
+            server_elapsed_ms: llmInteraction.server_elapsed_ms ?? null,
+            usage: llmInteraction.usage ?? null,
+            call_count: calls.length,
+            call_type_counts: callTypeCounts,
+            call_models: Array.from(callModels)
+        };
+    }
+
     // Add context statistics if available
     if (debugData.context_stats) {
         const sentStats = debugData.context_stats.sent_to_llm;
