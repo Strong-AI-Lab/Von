@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, render_template, current_app, session
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from workflows.onboarding_workflow import run_onboarding_workflow  # fixed import path
@@ -305,6 +306,8 @@ def generate():
     """Handle text generation requests."""
     data = request.get_json()
     prompt_text = data.get("prompt", "")
+
+    request_start_perf = time.perf_counter()
 
     interaction_timestamp_utc = (
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -688,6 +691,15 @@ def generate():
             llm_debug_info = {
                 "interaction_timestamp_utc": interaction_timestamp_utc,
                 "model": model_name,
+                "llm_interaction": {
+                    "requested_model": model_name,
+                    "orchestrator_used": False,
+                    "duration_ms": None,
+                    "usage": None,
+                    "calls": [],
+                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
+                    * 1000.0,
+                },
                 "messages": current_turn_messages,
                 "response": response_text,
                 "user_prompt": user_prompt_debug,
@@ -756,6 +768,15 @@ def generate():
             llm_debug_info = {
                 "interaction_timestamp_utc": interaction_timestamp_utc,
                 "model": model_name,
+                "llm_interaction": {
+                    "requested_model": model_name,
+                    "orchestrator_used": False,
+                    "duration_ms": None,
+                    "usage": None,
+                    "calls": [],
+                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
+                    * 1000.0,
+                },
                 "messages": current_turn_messages,
                 "response": response_text,
                 "user_prompt": user_prompt_debug,
@@ -927,6 +948,15 @@ def generate():
             llm_debug_info = {
                 "interaction_timestamp_utc": interaction_timestamp_utc,
                 "model": model_name,
+                "llm_interaction": {
+                    "requested_model": model_name,
+                    "orchestrator_used": False,
+                    "duration_ms": None,
+                    "usage": None,
+                    "calls": [],
+                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
+                    * 1000.0,
+                },
                 "messages": current_turn_messages,
                 "response": response_text,
                 "user_prompt": user_prompt_debug,
@@ -1295,6 +1325,15 @@ def generate():
             llm_debug_info = {
                 "interaction_timestamp_utc": interaction_timestamp_utc,
                 "model": model_name,
+                "llm_interaction": {
+                    "requested_model": model_name,
+                    "orchestrator_used": False,
+                    "duration_ms": None,
+                    "usage": None,
+                    "calls": [],
+                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
+                    * 1000.0,
+                },
                 "messages": (
                     [{"role": "user", "content": prompt_text}] + tool_messages
                 ),
@@ -1448,6 +1487,17 @@ def generate():
                     llm_debug_info = {
                         "interaction_timestamp_utc": interaction_timestamp_utc,
                         "model": model_name,
+                        "llm_interaction": {
+                            "requested_model": model_name,
+                            "orchestrator_used": False,
+                            "duration_ms": None,
+                            "usage": None,
+                            "calls": [],
+                            "server_elapsed_ms": (
+                                time.perf_counter() - request_start_perf
+                            )
+                            * 1000.0,
+                        },
                         "messages": current_turn_messages,
                         "response": response_text,
                         "user_prompt": user_prompt_debug,
@@ -1478,10 +1528,29 @@ def generate():
                     )
 
         auxiliary_llm_calls: list[dict] = []
+        llm_interaction: dict = {
+            "requested_model": model_name,
+            "orchestrator_used": orchestrator is not None,
+            "duration_ms": None,
+            "usage": None,
+            "calls": [],
+        }
         if orchestrator is None:
+            llm_start_perf = time.perf_counter()
             response_text = llm_client.generate(
                 prompt_text, context=enhanced_context, model=model_name
             )
+            llm_interaction["duration_ms"] = (
+                time.perf_counter() - llm_start_perf
+            ) * 1000.0
+            llm_interaction["calls"] = [
+                {
+                    "type": "llm.generate",
+                    "model": model_name,
+                    "duration_ms": llm_interaction["duration_ms"],
+                    "usage": None,
+                }
+            ]
             tool_invocations = []
         else:
             try:
@@ -1489,6 +1558,7 @@ def generate():
                     "[NAMESPACE] Calling orchestrator.run() with user_namespace=%s",
                     user_namespace,
                 )
+                orchestrator_start_perf = time.perf_counter()
                 orchestrator_result = orchestrator.run(
                     prompt=prompt_text,
                     context=enhanced_context,
@@ -1497,6 +1567,18 @@ def generate():
                     user_namespace=user_namespace,
                     gmail_profile=request_gmail_profile,
                     auxiliary_system_prompt=auxiliary_system_prompt,
+                )
+                llm_interaction["duration_ms"] = (
+                    time.perf_counter() - orchestrator_start_perf
+                ) * 1000.0
+                llm_interaction["calls"] = list(
+                    getattr(orchestrator_result, "llm_calls", [])
+                )
+                llm_interaction["usage"] = getattr(
+                    orchestrator_result, "llm_usage", None
+                )
+                llm_interaction["orchestrator_duration_ms"] = getattr(
+                    orchestrator_result, "orchestrator_duration_ms", None
                 )
                 response_text = orchestrator_result.response_text
                 tool_messages = [
@@ -1657,6 +1739,11 @@ def generate():
         llm_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
             "model": model_name,
+            "llm_interaction": {
+                **llm_interaction,
+                "server_elapsed_ms": (time.perf_counter() - request_start_perf)
+                * 1000.0,
+            },
             "messages": current_turn_messages,
             "response": response_text,
             "user_prompt": user_prompt_debug,
