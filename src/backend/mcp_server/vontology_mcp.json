@@ -1005,7 +1005,7 @@
         },
         {
             "name": "download_paper",
-            "description": "Download PDF of an arXiv paper to local storage (data/arxiv_papers/). Use when user asks to download/save/fetch a paper. Returns file path where PDF was saved. Accepts optional filename parameter for custom naming (defaults to arxiv_id.pdf).",
+            "description": "Download PDF of an arXiv paper and store it in the configured blob store (local or OpenStack Swift). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file path and a durable storage URI.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
