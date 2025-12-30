@@ -18,7 +18,10 @@ import { makeNonTriggerVontologyId } from './promptCartoucheOverlay.js';
 const TRIGGER_PATTERN = /#[Vv]#/;
 const DEBOUNCE_MS = 200;
 const MAX_RESULTS = 8;
-const SEARCH_API = '/von/api/search'; // Full path including /von prefix for Flask blueprint
+// Use the same search implementation as the global search UI to avoid drift.
+const SEARCH_API = '/vontology/api/vontology/search';
+const SEARCH_PARAM = 'q';
+const MAX_QUERY_CHARS = 80;
 
 let autocompleteState = {
     isOpen: false,
@@ -84,7 +87,7 @@ async function searchConcepts(query) {
         }
 
         const response = await fetch(
-            `${SEARCH_API}?q=${encodeURIComponent(query)}&limit=${MAX_RESULTS}`
+            `${SEARCH_API}?${SEARCH_PARAM}=${encodeURIComponent(query)}&limit=${MAX_RESULTS}`
         );
 
         if (!response.ok) {
@@ -111,6 +114,36 @@ async function searchConcepts(query) {
         console.error('Concept search error:', err);
         closeAutocomplete();
     }
+}
+
+// Export for testing
+export function getTriggerSearchText(text, cursorPos, maxLookback = 200) {
+    const input = String(text ?? '');
+    const pos = typeof cursorPos === 'number' ? cursorPos : 0;
+
+    const safeCursorPos = Math.max(0, Math.min(pos, input.length));
+    const searchStart = Math.max(0, safeCursorPos - Math.max(0, maxLookback));
+    const substring = input.substring(searchStart, safeCursorPos);
+
+    // Find last #V# or #v# before cursor.
+    let lastTriggerIdx = -1;
+    for (let i = substring.length - 3; i >= 0; i--) {
+        if (
+            substring[i] === '#' &&
+            (substring[i + 1] === 'V' || substring[i + 1] === 'v') &&
+            substring[i + 2] === '#'
+        ) {
+            lastTriggerIdx = searchStart + i;
+            break;
+        }
+    }
+
+    if (lastTriggerIdx === -1) {
+        return null;
+    }
+
+    const searchText = input.substring(lastTriggerIdx + 3, safeCursorPos);
+    return { triggerIdx: lastTriggerIdx, searchText };
 }
 
 /**
@@ -333,38 +366,25 @@ function handleInput(event) {
     const text = ta.value;
     const cursorPos = ta.selectionStart;
 
-    // Look for #V# or #v# pattern before cursor
-    let searchStart = Math.max(0, cursorPos - 100);
-    let substring = text.substring(searchStart, cursorPos);
-
-    // Find last #V# or #v# (correct pattern: #V# not V##)
-    let lastTriggerIdx = -1;
-
-    // Search backwards from cursor for the pattern #V# or #v#
-    for (let i = substring.length - 3; i >= 0; i--) {
-        if (
-            substring[i] === '#' &&
-            (substring[i + 1] === 'V' || substring[i + 1] === 'v') &&
-            substring[i + 2] === '#'
-        ) {
-            lastTriggerIdx = searchStart + i;
-            console.log(`[conceptAutocomplete] Found trigger at position ${lastTriggerIdx}`);
-            break;
-        }
-    }
-
-    // If no trigger found, close autocomplete
-    if (lastTriggerIdx === -1) {
+    const trigger = getTriggerSearchText(text, cursorPos);
+    if (!trigger) {
         closeAutocomplete();
         return;
     }
 
-    // Get search text after trigger (after the 3 chars #V#)
-    const searchText = text.substring(lastTriggerIdx + 3, cursorPos);
+    const { triggerIdx: lastTriggerIdx, searchText } = trigger;
+    console.log(`[conceptAutocomplete] Found trigger at position ${lastTriggerIdx}`);
+
     console.log(`[conceptAutocomplete] Search text: "${searchText}"`);
 
-    // Enforce proximity: only keep trigger active if cursor is within 10 chars of the trigger
-    if (searchText.length > 10) {
+    // Stop if the user has moved on to normal text entry.
+    if (/\s/.test(searchText)) {
+        closeAutocomplete();
+        return;
+    }
+
+    // Safety cap: avoid keeping an ancient trigger active.
+    if (searchText.length > MAX_QUERY_CHARS) {
         closeAutocomplete();
         return;
     }

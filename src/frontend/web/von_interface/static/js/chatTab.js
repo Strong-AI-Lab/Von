@@ -254,7 +254,7 @@ async function fetchConceptMetaForChat(fullId) {
         }
 
         // Fallback to search endpoint if node_content is unavailable.
-        const url = `/von/api/search?q=${encodeURIComponent(fullId)}&limit=8`;
+        const url = `/vontology/api/vontology/search?q=${encodeURIComponent(fullId)}&limit=8`;
         const res = await fetch(url, { cache: 'no-store' });
         if (!res.ok) return null;
 
