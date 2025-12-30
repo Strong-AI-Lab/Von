@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request, current_app
+from flask import Blueprint, jsonify, request, current_app, session
 import os
 import tracemalloc
 import json  # Add json import for file parsing
@@ -2971,6 +2971,29 @@ def add_relationship_route():
         if is_text_predicate:
             try:
                 from ...services.text_value_service import upsert_text_for_concept
+                from ...services.rag_text_relation_change_hook_service import (
+                    maybe_sync_concept_text_relations_to_rag,
+                )
+
+                namespace = None
+                try:
+                    session_namespace = session.get("namespace")
+                    if (
+                        isinstance(session_namespace, str)
+                        and session_namespace.strip()
+                        and session_namespace.strip().startswith("#V#")
+                    ):
+                        namespace = session_namespace.strip()
+                    else:
+                        user_concept_id = session.get("user_concept_id")
+                        if (
+                            isinstance(user_concept_id, str)
+                            and user_concept_id.strip()
+                            and user_concept_id.strip().startswith("#V#")
+                        ):
+                            namespace = user_concept_id.strip()
+                except Exception:
+                    namespace = None
 
                 result = upsert_text_for_concept(
                     subject_concept_id=source_id,
@@ -2978,6 +3001,12 @@ def add_relationship_route():
                     text=target_id,  # target_id is actually the text value for text predicates
                     lang="en",
                     provenance={"source": "relationship_add_redirect"},
+                )
+
+                maybe_sync_concept_text_relations_to_rag(
+                    namespace=namespace,
+                    concept_id=source_id,
+                    predicate=kind,
                 )
                 current_app.logger.info(
                     f"Redirected binary text predicate {kind} to text relations API: {result}"
@@ -3701,11 +3730,39 @@ def remove_relationship_route():
                 from ...services.text_value_service import (
                     delete_text_relation_by_predicate_and_text,
                 )
+                from ...services.rag_text_relation_change_hook_service import (
+                    maybe_delete_text_relation_doc_from_rag,
+                )
+
+                namespace = None
+                try:
+                    session_namespace = session.get("namespace")
+                    if (
+                        isinstance(session_namespace, str)
+                        and session_namespace.strip()
+                        and session_namespace.strip().startswith("#V#")
+                    ):
+                        namespace = session_namespace.strip()
+                    else:
+                        user_concept_id = session.get("user_concept_id")
+                        if (
+                            isinstance(user_concept_id, str)
+                            and user_concept_id.strip()
+                            and user_concept_id.strip().startswith("#V#")
+                        ):
+                            namespace = user_concept_id.strip()
+                except Exception:
+                    namespace = None
 
                 result = delete_text_relation_by_predicate_and_text(
                     subject_concept_id=source_id,
                     predicate=kind,
                     text=target_id,  # target_id is actually the text value for text predicates
+                )
+
+                maybe_delete_text_relation_doc_from_rag(
+                    namespace=namespace,
+                    relation_id=result.get("relation_id"),
                 )
                 current_app.logger.info(
                     f"Redirected binary text predicate {kind} removal to text relations API: {result}"

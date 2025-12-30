@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, session
 from flask.typing import ResponseReturnValue
 import json
 from datetime import datetime
@@ -18,6 +18,10 @@ from ...services.text_value_service import (
     delete_text_relation,
     delete_text_relation_by_predicate_and_text,
 )
+from ...services.rag_text_relation_change_hook_service import (
+    maybe_delete_text_relation_doc_from_rag,
+    maybe_sync_concept_text_relations_to_rag,
+)
 from ...vontology.utils_vontology import (
     get_vontology_node_and_descendant_ids,
     get_concept_notes,
@@ -28,6 +32,26 @@ from bson import (
 )  # Required for converting string IDs if necessary, though service should handle
 
 concept_bp = Blueprint("concepts", __name__)  # Define blueprint
+
+
+def _get_request_namespace() -> str | None:
+    session_namespace = session.get("namespace")
+    if (
+        isinstance(session_namespace, str)
+        and session_namespace.strip()
+        and session_namespace.strip().startswith("#V#")
+    ):
+        return session_namespace.strip()
+
+    user_concept_id = session.get("user_concept_id")
+    if (
+        isinstance(user_concept_id, str)
+        and user_concept_id.strip()
+        and user_concept_id.strip().startswith("#V#")
+    ):
+        return user_concept_id.strip()
+
+    return None
 
 
 @concept_bp.route("/", methods=["GET"])
@@ -1054,6 +1078,12 @@ def upsert_concept_text_route(concept_id: str):
             provenance=provenance,
             context=context,
         )
+
+        maybe_sync_concept_text_relations_to_rag(
+            namespace=_get_request_namespace(),
+            concept_id=concept_id,
+            predicate=predicate,
+        )
         status = 201 if result.get("relation_created") else 200
         if result.get("context_updated"):
             status = 200
@@ -1087,6 +1117,11 @@ def update_concept_text_relation_route(concept_id: str, relation_id: str):
             new_text=new_text,
             lang=lang,
             provenance={"source": "update_text_relation"},
+        )
+
+        maybe_sync_concept_text_relations_to_rag(
+            namespace=_get_request_namespace(),
+            concept_id=concept_id,
         )
         return jsonify(result), 200
     except ValueError as ve:
@@ -1130,6 +1165,11 @@ def delete_concept_text_by_predicate_route(concept_id: str):
             lang=lang,
             context=context,
         )
+
+        maybe_delete_text_relation_doc_from_rag(
+            namespace=_get_request_namespace(),
+            relation_id=result.get("relation_id"),
+        )
         return jsonify(result), 200
     except ValueError as ve:
         return jsonify(error=str(ve)), 404
@@ -1146,6 +1186,11 @@ def delete_concept_text_relation_route(concept_id: str, relation_id: str):
     """Delete a specific text relation (e.g., remove a note)."""
     try:
         result = delete_text_relation(concept_id, relation_id)
+
+        maybe_delete_text_relation_doc_from_rag(
+            namespace=_get_request_namespace(),
+            relation_id=relation_id,
+        )
         return jsonify(result), 200
     except ValueError as ve:
         return jsonify(error=str(ve)), 404

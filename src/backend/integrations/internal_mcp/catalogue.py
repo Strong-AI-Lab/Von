@@ -202,12 +202,16 @@ def _search_concepts(**kwargs):
 
 def _upsert_text_relation(**kwargs):
     from ...services.text_value_service import upsert_text_for_concept
+    from ...services.rag_text_relation_change_hook_service import (
+        maybe_sync_concept_text_relations_to_rag,
+    )
 
     concept_id = kwargs.get("concept_id")
     predicate = kwargs.get("predicate")
     text = kwargs.get("text")
     language = kwargs.get("language", "en-NZ")
     context = kwargs.get("context")
+    namespace = kwargs.get("namespace")
 
     if not concept_id:
         return {"error": "Missing 'concept_id' parameter"}
@@ -223,6 +227,14 @@ def _upsert_text_relation(**kwargs):
             text=text,
             lang=language,
             context=context,
+        )
+
+        # Best-effort hook: if the orchestrator provided an authenticated namespace,
+        # keep concept text-relations RAG index fresh.
+        maybe_sync_concept_text_relations_to_rag(
+            namespace=namespace,
+            concept_id=concept_id,
+            predicate=predicate,
         )
 
         text_preview = text[:100] + "..." if len(text) > 100 else text
@@ -275,11 +287,15 @@ def _get_text_relations(**kwargs):
 
 def _update_text_relation(**kwargs):
     from ...services.text_value_service import update_text_relation_text
+    from ...services.rag_text_relation_change_hook_service import (
+        maybe_sync_concept_text_relations_to_rag,
+    )
 
     concept_id = kwargs.get("concept_id")
     relation_id = kwargs.get("relation_id")
     new_text = kwargs.get("new_text")
     language = kwargs.get("language", "en-NZ")
+    namespace = kwargs.get("namespace")
 
     if not concept_id:
         return {"error": "Missing 'concept_id' parameter"}
@@ -294,6 +310,12 @@ def _update_text_relation(**kwargs):
             relation_id=relation_id,
             new_text=new_text,
             lang=language,
+        )
+
+        maybe_sync_concept_text_relations_to_rag(
+            namespace=namespace,
+            concept_id=concept_id,
+            predicate=result.get("predicate"),
         )
 
         old_preview = str(result.get("old_text", ""))[:100]
@@ -315,6 +337,9 @@ def _delete_text_relation(**kwargs):
         delete_text_relation,
         delete_text_relation_by_predicate_and_text,
     )
+    from ...services.rag_text_relation_change_hook_service import (
+        maybe_delete_text_relation_doc_from_rag,
+    )
 
     concept_id = kwargs.get("concept_id")
     relation_id = kwargs.get("relation_id")
@@ -322,6 +347,7 @@ def _delete_text_relation(**kwargs):
     text = kwargs.get("text")
     language = kwargs.get("language")
     garbage_collect = bool(kwargs.get("garbage_collect"))
+    namespace = kwargs.get("namespace")
 
     if not concept_id:
         return {"error": "Missing 'concept_id' parameter"}
@@ -334,6 +360,12 @@ def _delete_text_relation(**kwargs):
                 relation_id=relation_id,
                 garbage_collect=garbage_collect,
             )
+
+            maybe_delete_text_relation_doc_from_rag(
+                namespace=namespace,
+                relation_id=relation_id,
+            )
+
             return {
                 "success": True,
                 "deleted_relation_id": relation_id,
@@ -354,6 +386,12 @@ def _delete_text_relation(**kwargs):
                 lang=language,
                 garbage_collect=garbage_collect,
             )
+
+            maybe_delete_text_relation_doc_from_rag(
+                namespace=namespace,
+                relation_id=result.get("relation_id"),
+            )
+
             return {
                 "success": True,
                 "deleted_relation_id": result.get("relation_id"),
@@ -2106,6 +2144,13 @@ def _search_knowledge_base(**kwargs):
             org_concept_id = kwargs.get("organisation_concept_id")
             if isinstance(org_concept_id, str) and org_concept_id.strip():
                 permissions_context["organisation_concept_id"] = org_concept_id.strip()
+            elif (
+                isinstance(kwargs.get("org_id"), str)
+                and str(kwargs.get("org_id")).strip()
+            ):
+                permissions_context["organisation_concept_id"] = str(
+                    kwargs.get("org_id")
+                ).strip()
 
             # If the namespace is in the user@org form, it contains enough
             # information to derive both IDs without trusting arbitrary inputs.
@@ -2121,6 +2166,23 @@ def _search_knowledge_base(**kwargs):
                     if not org_part_clean.startswith("#V#"):
                         org_part_clean = f"#V#{org_part_clean}"
                     permissions_context["organisation_concept_id"] = org_part_clean
+
+        # Optional semantic filtering (handled by the backend).
+        mode = kwargs.get("mode")
+        if isinstance(mode, str) and mode.strip():
+            permissions_context["mode"] = mode.strip()
+
+        requested_type = kwargs.get("type")
+        if isinstance(requested_type, str) and requested_type.strip():
+            permissions_context["type"] = requested_type.strip()
+
+        predicate = kwargs.get("predicate")
+        if isinstance(predicate, str) and predicate.strip():
+            permissions_context["predicate"] = predicate.strip()
+
+        predicates = kwargs.get("predicates")
+        if isinstance(predicates, list):
+            permissions_context["predicates"] = predicates
 
         start = time.perf_counter()
         results = service.query(
@@ -2174,6 +2236,11 @@ def _search_knowledge_base_input_schema() -> Schema:
         optional={
             "top_k": (int,),
             "namespace": (str, type(None)),
+            "mode": (str,),
+            "type": (str,),
+            "predicate": (str,),
+            "predicates": (list,),
+            "org_id": (str,),
         },
         allow_unknown=True,
         description="search_knowledge_base input: query (str), top_k (int, default 5), namespace (str, optional filter)",
@@ -2191,6 +2258,240 @@ def _search_knowledge_base_output_schema() -> Schema:
         },
         allow_unknown=True,
         description="search_knowledge_base output: results (list of {id, score, text, metadata}), count (int), or error (str)",
+    )
+
+
+def _search_concept_descriptions(**kwargs):
+    """Semantic search over concept descriptions only.
+
+    This is a thin wrapper over search_knowledge_base that applies:
+    - mode=concepts
+    - predicate=hasDescription
+    """
+
+    wrapped = dict(kwargs)
+    wrapped.setdefault("mode", "concepts")
+    wrapped.setdefault("predicate", "hasDescription")
+    return _search_knowledge_base(**wrapped)
+
+
+def _search_concept_descriptions_input_schema() -> Schema:
+    return Schema(
+        required={"query": str},
+        optional={
+            "top_k": (int,),
+            "namespace": (str, type(None)),
+            "org_id": (str,),
+        },
+        allow_unknown=True,
+        description="search_concept_descriptions input: query (str), top_k (int, default 5), namespace (str, required for security)",
+    )
+
+
+def _search_concept_descriptions_output_schema() -> Schema:
+    return _search_knowledge_base_output_schema()
+
+
+def _index_concept_text(**kwargs):
+    """Force reindex for a single concept's text relations within a namespace."""
+
+    concept_id = kwargs.get("concept_id")
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return {"success": False, "error": "Missing required parameter: concept_id"}
+
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns = ns_report.get("namespace")
+    if not ns:
+        return {
+            "error": "namespace_required",
+            "message": "RAG indexing requires authenticated user context (namespace)",
+            **ns_report,
+            "success": False,
+        }
+
+    from ...services.rag_text_relation_sync_service import sync_text_relations_to_rag
+
+    payload = sync_text_relations_to_rag(
+        namespace=ns,
+        concept_ids=[concept_id.strip()],
+        predicates=kwargs.get("predicates"),
+        languages=kwargs.get("languages"),
+        limit=int(kwargs.get("limit", 5000)),
+        batch_size=int(kwargs.get("batch_size", 200)),
+    )
+    return {**payload, **ns_report}
+
+
+def _index_concept_text_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={
+            "namespace": (str, type(None)),
+            "predicates": (list,),
+            "languages": (list,),
+            "limit": (int,),
+            "batch_size": (int,),
+        },
+        allow_unknown=True,
+        description="index_concept_text input: concept_id (str), namespace (str, optional), and optional predicate/language filters",
+    )
+
+
+def _index_concept_text_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "error": (str, type(None)),
+            "namespace": (str, type(None)),
+            "total_candidates": (int, type(None)),
+            "added": (int, type(None)),
+            "failed": (int, type(None)),
+        },
+        allow_unknown=True,
+        description="index_concept_text output: sync report payload",
+    )
+
+
+def _get_related_concepts(**kwargs):
+    """Find concepts with similar descriptions (vector similarity)."""
+
+    concept_id = kwargs.get("concept_id")
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return {"success": False, "error": "Missing required parameter: concept_id"}
+
+    ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
+    ns = ns_report.get("namespace")
+    if not ns:
+        return {
+            "error": "namespace_required",
+            "message": "RAG search requires authenticated user context (namespace)",
+            **ns_report,
+            "success": False,
+        }
+
+    # Attempt to seed the similarity query from the concept description text.
+    # We scope access by (user, org) implied by the namespace to avoid cross-namespace reads.
+    seed_text = kwargs.get("seed_text")
+    if not isinstance(seed_text, str) or not seed_text.strip():
+        try:
+            from ...security.access_control import (
+                override_current_user,
+                override_current_organisation,
+            )
+            from ...services.text_value_service import get_texts_for_concept
+
+            user_part = None
+            org_part = None
+            if isinstance(ns, str) and "@" in ns:
+                user_part, org_part = ns.split("@", 1)
+            user_part = (user_part or "").strip() or None
+            org_part = (org_part or "").strip() or None
+            if org_part and not org_part.startswith("#V#"):
+                org_part = f"#V#{org_part}"
+
+            with (
+                override_current_user(user_part),
+                override_current_organisation(org_part),
+            ):
+                texts = get_texts_for_concept(
+                    concept_id.strip(), predicate="hasDescription", limit=1
+                )
+            if texts and isinstance(texts[0], dict):
+                seed_text = texts[0].get("text")
+        except Exception:
+            seed_text = None
+
+    if not isinstance(seed_text, str) or not seed_text.strip():
+        return {
+            "success": False,
+            "error": "missing_seed_text",
+            "message": "No hasDescription text found for concept; pass seed_text explicitly to proceed",
+            **ns_report,
+        }
+
+    from ...services.rag_service import get_rag_service, RAGBackendUnavailable
+
+    try:
+        service = get_rag_service()
+
+        user_id = None
+        org_id = None
+        if isinstance(ns, str) and "@" in ns:
+            user_id, org_id = ns.split("@", 1)
+            user_id = user_id.strip() or None
+            org_id = org_id.strip() or None
+            if org_id and not org_id.startswith("#V#"):
+                org_id = f"#V#{org_id}"
+
+        permissions_context = {
+            "mode": "concepts",
+            "predicate": "hasDescription",
+        }
+        if user_id:
+            permissions_context["user_id"] = user_id
+        if org_id:
+            permissions_context["organisation_concept_id"] = org_id
+
+        results = service.query(
+            query_text=seed_text.strip(),
+            top_k=int(kwargs.get("top_k", 10)),
+            namespace=ns,
+            permissions_context=permissions_context,
+        )
+    except RAGBackendUnavailable as e:
+        return {"success": False, "error": f"RAG service unavailable: {e}", **ns_report}
+
+    filtered = []
+    for row in results or []:
+        if not isinstance(row, dict):
+            continue
+        meta = row.get("metadata")
+        if not isinstance(meta, dict):
+            continue
+        if (
+            meta.get("concept_id") == concept_id.strip()
+            or meta.get("subject_concept_id") == concept_id.strip()
+        ):
+            continue
+        filtered.append(row)
+
+    return {
+        "success": True,
+        "concept_id": concept_id.strip(),
+        "seed_text": seed_text.strip(),
+        "results": filtered,
+        "count": len(filtered),
+        **ns_report,
+    }
+
+
+def _get_related_concepts_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={
+            "namespace": (str, type(None)),
+            "top_k": (int,),
+            "seed_text": (str,),
+        },
+        allow_unknown=True,
+        description="get_related_concepts input: concept_id (str), namespace (str, required), optional top_k and seed_text",
+    )
+
+
+def _get_related_concepts_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "error": (str, type(None)),
+            "concept_id": (str, type(None)),
+            "seed_text": (str, type(None)),
+            "results": (list, type(None)),
+            "count": (int, type(None)),
+        },
+        allow_unknown=True,
+        description="get_related_concepts output: similar concept description chunks",
     )
 
 
@@ -3994,6 +4295,42 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             timeout_sec=30.0,
             description="Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
+        ),
+        MethodDefinition(
+            name="search_concept_descriptions",
+            handler=_search_concept_descriptions,
+            input_schema=_search_concept_descriptions_input_schema(),
+            output_schema=_search_concept_descriptions_output_schema(),
+            category="read",
+            timeout_sec=30.0,
+            description=(
+                "Semantic search over concept descriptions only (hasDescription text relations) for the current namespace. "
+                "Use when user asks to search the knowledge base but only within concept descriptions."
+            ),
+        ),
+        MethodDefinition(
+            name="get_related_concepts",
+            handler=_get_related_concepts,
+            input_schema=_get_related_concepts_input_schema(),
+            output_schema=_get_related_concepts_output_schema(),
+            category="read",
+            timeout_sec=30.0,
+            description=(
+                "Find concepts with similar descriptions (vector similarity) within the current namespace. "
+                "Returns description chunks and metadata for related concepts."
+            ),
+        ),
+        MethodDefinition(
+            name="index_concept_text",
+            handler=_index_concept_text,
+            input_schema=_index_concept_text_input_schema(),
+            output_schema=_index_concept_text_output_schema(),
+            category="write",
+            timeout_sec=60.0,
+            description=(
+                "Force reindex a specific concept's text relations into RAG for the current namespace. "
+                "Useful after bulk edits or when RAG appears stale."
+            ),
         ),
         # Jira MCP tools
         MethodDefinition(
