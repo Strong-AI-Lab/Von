@@ -189,7 +189,11 @@ class ArxivMCPProxy:
         return self._store_downloaded_pdf(result=result, arxiv_id=arxiv_id)
 
     def _store_downloaded_pdf(self, *, result: Any, arxiv_id: str) -> Dict[str, Any]:
-        if isinstance(result, dict) and "text" in result and isinstance(result["text"], str):
+        if (
+            isinstance(result, dict)
+            and "text" in result
+            and isinstance(result["text"], str)
+        ):
             # Some versions return a single text payload.
             try:
                 import json

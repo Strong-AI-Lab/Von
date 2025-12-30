@@ -220,7 +220,9 @@ class ArxivMCPProxy:
         result = self._send_request("download_paper", arguments)
         return self._store_downloaded_pdf(result=result, arxiv_id=arxiv_id)
 
-    def _store_downloaded_pdf(self, *, result: Dict[str, Any], arxiv_id: str) -> Dict[str, Any]:
+    def _store_downloaded_pdf(
+        self, *, result: Dict[str, Any], arxiv_id: str
+    ) -> Dict[str, Any]:
         file_path = _extract_download_file_path(result)
         if not file_path:
             raise ArxivProxyError(
