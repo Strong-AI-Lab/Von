@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from src.backend.services.blob_store import LocalBlobStore, _normalise_key, get_blob_store_from_env
+from src.backend.services.blob_store import (
+    LocalBlobStore,
+    _normalise_key,
+    get_blob_store_from_env,
+)
 
 
 def test_normalise_key_rejects_empty():
@@ -52,7 +56,9 @@ def test_get_blob_store_from_env_defaults_to_local(monkeypatch: pytest.MonkeyPat
     assert isinstance(store, LocalBlobStore)
 
 
-def test_get_blob_store_from_env_swift_requires_container(monkeypatch: pytest.MonkeyPatch):
+def test_get_blob_store_from_env_swift_requires_container(
+    monkeypatch: pytest.MonkeyPatch,
+):
     monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "swift")
     monkeypatch.delenv("VON_SWIFT_CONTAINER", raising=False)
 
