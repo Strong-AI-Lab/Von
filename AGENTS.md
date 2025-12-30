@@ -897,7 +897,7 @@ Von can integrate with external MCP servers to access external services and data
         "run",
         "arxiv-mcp-server",
         "--storage-path",
-        "${workspaceFolder}/data/arxiv_papers"
+        "${workspaceFolder}/data/arxiv_cache"
       ]
     }
   }
@@ -910,13 +910,13 @@ uv tool install arxiv-mcp-server
 ```
 
 **Storage**:
-- **Current**: Local filesystem at `data/arxiv_papers/`
-- **Future**: OpenStack Swift object store (JVNAUTOSCI-658)
+- **Cache**: Local filesystem cache at `data/arxiv_cache/` (used by the external `arxiv-mcp-server`)
+- **Durable**: Von blob store (a general artefact store capability) — default local `data/blob_store/`, optionally OpenStack Swift (JVNAUTOSCI-878)
 
 **Available Tools**:
 - `search_arxiv`: Query by keywords, authors, categories, date ranges
 - `get_paper_metadata`: Retrieve title, authors, abstract, publication date, DOI
-- `download_paper`: Fetch PDF to local storage (future: remote object store)
+- `download_paper`: Fetch PDF and store it durably via the blob store (with a local cache)
 
 **Usage Example** (IDE/Copilot level):
 ```
@@ -931,12 +931,14 @@ uv tool install arxiv-mcp-server
 
 **Documentation**: See `docs/engineering/arxiv_mcp_integration.md` for detailed setup, usage patterns, and troubleshooting.
 
+For Catalyst Cloud (NZ) Swift configuration, see `docs/engineering/catalyst_cloud_swift_setup.md`.
+
 **Related Issues**:
 - JVNAUTOSCI-654: Plan external MCP integrations (arXiv) - Complete
 - JVNAUTOSCI-655: Implement internal MCP proxy for arXiv tools - Planned
 - JVNAUTOSCI-656: Automated arXiv monitoring for known authors - Planned
 - JVNAUTOSCI-657: Scholarly article concept auto-population - Planned
-- JVNAUTOSCI-658: Migrate arXiv storage to OpenStack Swift - Planned
+- JVNAUTOSCI-878: Migrate arXiv storage to OpenStack Swift object store - Planned
 
 ### Adding New External MCP Servers
 
