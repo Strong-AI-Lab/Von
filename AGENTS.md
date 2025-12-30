@@ -441,11 +441,27 @@ To ensure consistency and maintain a clean history, all agents must follow this 
 5.  **Merge**:
     *   Merge the PR using `gh pr merge --merge --delete-branch`.
     *   **Do not squash** unless specifically requested (preserve commit history for context).
-    *   Transition the JIRA isseue to done, after commenting on the issue documenting the changes
+  *   Transition the JIRA issue to done, after commenting on the issue documenting the changes
 6.  **Cleanup**:
     *   Switch to `main`: `git checkout main`.
     *   Pull latest changes: `git pull`.
     *   Delete local branch: `git branch -d JVNAUTOSCI-XXX-short-description`.
+
+### Jira Linking Policy
+
+Use Jira issue links to make dependencies and provenance visible without overloading comments.
+
+Default policy:
+- Use **Subtasks** for decomposition of a single deliverable (work that should be completed together).
+- Use **Relates to** for follow-on work that builds on a completed task (common case).
+- Use **Blocks / Is blocked by** only when a task must not be considered complete until another task is done.
+- When a PR is merged, link the PR URL in the issue and (where helpful) link the follow-up issues.
+
+When creating follow-up work:
+- Create the follow-up issue (usually a Task) and link it to the completed foundation issue using **Relates to** (unless it is a hard dependency).
+- If a follow-up depends on an existing larger stream (e.g. indexing/retrieval), also add a **Relates to** link to that stream’s issue.
+
+Note: If the current MCP toolset cannot create issue links directly, add a comment that states exactly which links (and link types) should be created, then create the links manually in the Jira UI.
 
 ### Multi-Machine Development: Always Push to Remote
 
