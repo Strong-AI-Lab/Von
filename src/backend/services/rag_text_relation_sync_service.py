@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -296,6 +297,10 @@ def collect_text_relation_docs_for_namespace(
     namespace: str,
     predicates: Optional[Sequence[str]] = None,
     languages: Optional[Sequence[str]] = None,
+    concept_ids: Optional[Sequence[str]] = None,
+    updated_since: Optional[datetime] = None,
+    skip: int = 0,
+    sort: Optional[List] = None,
     limit: int = 5000,
 ) -> List[TextRelationRagDoc]:
     """Collect text-relations as RAG documents for a single namespace.
@@ -308,10 +313,30 @@ def collect_text_relation_docs_for_namespace(
     user_id, org_id = _parse_namespace(namespace)
 
     rel_filter: Dict[str, Any] = {}
+    concept_allow: Optional[set[str]] = None
+    if concept_ids:
+        concept_allow = {c for c in concept_ids if isinstance(c, str) and c.strip()}
+        if concept_allow:
+            rel_filter["subject_concept_id"] = {"$in": sorted(concept_allow)}
+
     if predicates:
         rel_filter["predicate"] = {"$in": list(predicates)}
 
-    relations = list(TextRelationsRepository.find(rel_filter, limit=int(limit)))
+    if updated_since is not None:
+        rel_filter["updated_at"] = {"$gte": updated_since}
+
+    safe_skip = max(int(skip), 0)
+    safe_limit = max(int(limit), 0)
+    safe_sort = sort if sort is not None else [("_id", 1)]
+
+    relations = list(
+        TextRelationsRepository.find(
+            rel_filter,
+            sort=safe_sort,
+            skip=safe_skip,
+            limit=safe_limit,
+        )
+    )
     if not relations:
         return []
 
@@ -335,6 +360,9 @@ def collect_text_relation_docs_for_namespace(
             or not isinstance(subject_concept_id, str)
             or not predicate
         ):
+            continue
+
+        if concept_allow is not None and subject_concept_id not in concept_allow:
             continue
 
         if subject_concept_id not in concept_visibility:
@@ -367,15 +395,22 @@ def collect_text_relation_docs_for_namespace(
         )
 
         metadata = {
+            # Distinguish from chat history docs.
+            "type": "text_relation",
             "source": "vontology_text_relation",
+            # Preferred canonical key for concept.
+            "concept_id": subject_concept_id,
             "subject_concept_id": subject_concept_id,
             "predicate": str(predicate),
             "relation_id": relation_id_str,
             "text_value_id": str(text_value_oid),
             "lang": str(lang),
+            "language": str(lang),
             # Required for query-time filtering.
             "user_id": user_id,
             "organisation_concept_id": org_id,
+            # Alias to match Jira ticket naming.
+            "org_id": org_id,
         }
 
         docs.append(
@@ -394,6 +429,10 @@ def sync_text_relations_to_rag(
     namespace: str,
     predicates: Optional[Sequence[str]] = None,
     languages: Optional[Sequence[str]] = None,
+    concept_ids: Optional[Sequence[str]] = None,
+    updated_since: Optional[datetime] = None,
+    skip: int = 0,
+    sort: Optional[List] = None,
     limit: int = 5000,
     batch_size: int = 200,
 ) -> Dict[str, Any]:
@@ -408,6 +447,10 @@ def sync_text_relations_to_rag(
         namespace=namespace,
         predicates=predicates,
         languages=languages,
+        concept_ids=concept_ids,
+        updated_since=updated_since,
+        skip=skip,
+        sort=sort,
         limit=limit,
     )
 

@@ -257,6 +257,61 @@ class LlamaIndexRAGService(RAGService):
             if not isinstance(metadata, dict):
                 return False
 
+            # Optional semantic filtering.
+            # Backwards compatible: if no filter keys provided, behaviour is unchanged.
+            mode = permissions_context.get("mode")
+            requested_type = permissions_context.get("type")
+            predicate = permissions_context.get("predicate")
+            predicates = permissions_context.get("predicates")
+
+            # Normalise filter inputs.
+            requested_types: List[str] = []
+            if isinstance(requested_type, str) and requested_type.strip():
+                requested_types = [requested_type.strip()]
+
+            if isinstance(mode, str):
+                m = mode.strip().lower()
+                if m == "chat":
+                    requested_types = ["chat_message"]
+                elif m == "concepts":
+                    requested_types = ["text_relation"]
+                elif m == "all" or not m:
+                    pass
+
+            if requested_types:
+                actual_type = metadata.get("type")
+                # Defensive fallback for older indices missing explicit type.
+                if not isinstance(actual_type, str) or not actual_type.strip():
+                    src = metadata.get("source")
+                    doc_id = metadata.get("id")
+                    if src == "vontology_text_relation":
+                        actual_type = "text_relation"
+                    elif src == "chat_history":
+                        actual_type = "chat_message"
+                    elif isinstance(doc_id, str) and doc_id.startswith(
+                        "text_relation:"
+                    ):
+                        actual_type = "text_relation"
+
+                if not isinstance(actual_type, str):
+                    return False
+                if actual_type not in requested_types:
+                    return False
+
+            # Predicate filter (only meaningful for text_relation docs).
+            if isinstance(predicate, str) and predicate.strip():
+                if metadata.get("predicate") != predicate.strip():
+                    return False
+            elif isinstance(predicates, list):
+                allow = {
+                    str(p).strip()
+                    for p in predicates
+                    if isinstance(p, str) and p.strip()
+                }
+                if allow:
+                    if metadata.get("predicate") not in allow:
+                        return False
+
             user_id = permissions_context.get("user_id")
             if user_id:
                 if normalise_concept_id_for_compare(

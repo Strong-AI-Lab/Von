@@ -221,8 +221,121 @@ async def list_tools() -> list[Tool]:
                         "description": "Number of results to return",
                         "default": 5,
                     },
+                    "mode": {
+                        "type": "string",
+                        "description": "Semantic search mode (chat|concepts|all). Default all.",
+                        "default": "all",
+                    },
+                    "type": {
+                        "type": "string",
+                        "description": "Filter by document type (chat_message|text_relation).",
+                    },
+                    "predicate": {
+                        "type": "string",
+                        "description": "Filter by predicate (e.g. hasDescription).",
+                    },
+                    "predicates": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by multiple predicates.",
+                    },
                 },
                 "required": ["query"],
+            },
+        ),
+        Tool(
+            name="search_concept_descriptions",
+            description=(
+                "Semantic search over concept descriptions only (hasDescription text relations) for the given namespace."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
+                    },
+                    "query": {"type": "string", "description": "Search query text"},
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results to return",
+                        "default": 5,
+                    },
+                    "org_id": {
+                        "type": "string",
+                        "description": "Optional organisation concept id (alias for organisation_concept_id).",
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="get_related_concepts",
+            description=(
+                "Find concepts with similar descriptions (vector similarity) within the given namespace."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
+                    },
+                    "concept_id": {
+                        "type": "string",
+                        "description": "Concept ID to find related concepts for (e.g. #V#my_concept).",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of related results to return",
+                        "default": 10,
+                    },
+                    "seed_text": {
+                        "type": "string",
+                        "description": "Optional override for the seed description text.",
+                    },
+                },
+                "required": ["concept_id"],
+            },
+        ),
+        Tool(
+            name="index_concept_text",
+            description=(
+                "Force reindex a single concept's text relations for the given namespace."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
+                    },
+                    "concept_id": {
+                        "type": "string",
+                        "description": "Concept ID to reindex (e.g. #V#my_concept).",
+                    },
+                    "predicates": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional predicate filter (e.g. hasName, hasDescription)",
+                    },
+                    "languages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional language filter (e.g. en-NZ)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max relations to consider",
+                        "default": 5000,
+                    },
+                    "batch_size": {
+                        "type": "integer",
+                        "description": "Upsert batch size",
+                        "default": 200,
+                    },
+                },
+                "required": ["concept_id"],
             },
         ),
         Tool(
@@ -271,6 +384,11 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "rag_list_indexed": _tool_handler(internal_catalogue._rag_list_indexed),
     "rag_get_item": _tool_handler(internal_catalogue._rag_get_item),
     "search_knowledge_base": _tool_handler(internal_catalogue._search_knowledge_base),
+    "search_concept_descriptions": _tool_handler(
+        internal_catalogue._search_concept_descriptions
+    ),
+    "get_related_concepts": _tool_handler(internal_catalogue._get_related_concepts),
+    "index_concept_text": _tool_handler(internal_catalogue._index_concept_text),
     "rag_sync_text_relations": _tool_handler(
         internal_catalogue._rag_sync_text_relations
     ),
