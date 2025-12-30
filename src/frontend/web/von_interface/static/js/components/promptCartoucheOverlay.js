@@ -10,7 +10,8 @@ import { createVontologyCartouche } from '../utils/textDecorator.js';
 
 const ZWSP = '\u200B';
 
-const SEARCH_API = '/von/api/search';
+// Use the same search implementation as the global search UI to avoid drift.
+const SEARCH_API = '/vontology/api/vontology/search';
 
 // Match #V\u200B#<id> and #v\u200B#<id>
 // Mirrors the allowed id character set used elsewhere.
