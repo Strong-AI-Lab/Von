@@ -8,6 +8,7 @@ This document provides an overview of key files within the `docs` directory that
 > 1. Use **New Zealand English** spelling always (behaviour, colour, organisation, realise).
 > 2. **PowerShell is the default shell**. Do **NOT** emit Bash heredocs (`<<EOF`), `export VAR=`, `$(cmd)` substitution, or `source venv/bin/activate` unless the user explicitly asks for a Bash variant. Provide `$env:VAR = 'value'`, here-strings, or `pdm run` patterns.
 - **Pre-commit guardrails**: enable hooks with `git config core.hooksPath .githooks` to block committing runtime data (e.g., `data/rag_storage`, `data/raw`, `logs`).
+> 2.1. **Never clobber `.env`.** Under no circumstances should an agent create or overwrite the repo-root `.env` file. Only apply minimal, targeted edits when explicitly asked, and never print `.env` contents or secrets in chat.
 > 3. Never auto-start the server; wait for explicit user instruction.
 > 4. Prefer clarity over clever chaining: separate lines instead of `&&` unless failure short‑circuit is required.
 > 5. Large multi-line Python → use a here-string variable then `python -c $code` (PowerShell) or propose a committed script.

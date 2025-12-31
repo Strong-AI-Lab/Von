@@ -187,6 +187,9 @@ META_RELATIONS_COLLECTION_NAME = "meta_relations"  # New collection for relation
 # Agent Gmail OAuth token storage (JVNAUTOSCI-801)
 AGENT_GMAIL_TOKENS_COLLECTION_NAME = "agent_gmail_tokens"
 
+# Room device identity (JVNAUTOSCI-884)
+ROOM_DEVICES_COLLECTION_NAME = "room_devices"
+
 # --- Client Initialization ---
 # REFACTORING_NOTE: The global client is being removed in favor of a more robust
 # connection management pattern within get_db(). This avoids issues with
@@ -804,6 +807,42 @@ def get_agent_gmail_tokens_collection() -> Collection | None:
     except Exception as e:
         logger.warning(
             "Index creation skipped for %s: %s", AGENT_GMAIL_TOKENS_COLLECTION_NAME, e
+        )
+
+    return coll
+
+
+def get_room_devices_collection() -> Collection | None:
+    """Returns the room devices collection and ensures indexes.
+
+    Stores provisioned meeting-room devices that can authenticate to the server.
+    """
+
+    db = get_db()
+    if db is None:
+        return None
+
+    coll = db[ROOM_DEVICES_COLLECTION_NAME]
+    try:
+        existing_indexes = [idx["name"] for idx in coll.list_indexes()]
+
+        if "device_id_1_unique" not in existing_indexes:
+            coll.create_index(
+                [("device_id", ASCENDING)], unique=True, name="device_id_1_unique"
+            )
+        if "organisation_id_1" not in existing_indexes:
+            coll.create_index(
+                [("organisation_id", ASCENDING)], name="organisation_id_1"
+            )
+        if "updated_at_-1" not in existing_indexes:
+            coll.create_index([("updated_at", DESCENDING)], name="updated_at_-1")
+    except OperationFailure as e:
+        logger.warning(
+            "Could not create some indexes for %s: %s", ROOM_DEVICES_COLLECTION_NAME, e
+        )
+    except Exception as e:
+        logger.warning(
+            "Index creation skipped for %s: %s", ROOM_DEVICES_COLLECTION_NAME, e
         )
 
     return coll
