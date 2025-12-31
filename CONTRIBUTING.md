@@ -12,7 +12,7 @@ This guide will help you get started with contributing to the project. For an ov
 
 Before you begin, ensure you have the following installed:
 
-- **Python 3.10 or higher** 
+- **Python 3.10 or higher**
 - **Node.js 16+** (for frontend development)
 - **Git** for version control
 
@@ -48,10 +48,10 @@ cd Von
    ```bash
    # Rename the current origin to upstream
    git remote rename origin upstream
-   
+
    # Add your fork as the new origin
    git remote add origin https://github.com/YOUR-USERNAME/Von.git
-   
+
    # Verify remotes
    git remote -v
    ```
@@ -102,6 +102,16 @@ To stop the server:
 ```powershell
 ./run.ps1 stop
 ```
+
+---
+
+## 🔐 Environment Variables and Secrets
+
+Von uses environment variables for configuration (database, API keys, tokens).
+
+- The repo-root `.env` file is for *local secrets* and is intentionally ignored by git (see `.gitignore`). Never commit it.
+- Use `.env.template` as the source of truth for documented configuration options. If your change introduces a new environment variable, add a commented placeholder and brief explanation to `.env.template`.
+- Avoid pasting secrets into issues, pull requests, logs, or screenshots.
 
 ---
 
@@ -264,15 +274,15 @@ When contributing, please follow these guidelines:
 def create_concept(name: str, parent_id: str, description: str = "") -> dict:
     """
     Create a new concept in the Vontology hierarchy.
-    
+
     Args:
         name: The name of the concept
         parent_id: The ID of the parent concept
         description: Optional description of the concept
-        
+
     Returns:
         A dictionary with 'success' boolean and 'concept' data
-        
+
     Raises:
         ValueError: If parent_id is invalid
     """
@@ -331,6 +341,6 @@ If you have questions or need help, don't hesitate to open an issue or reach out
 
 ---
 
-**Strong AI Lab (SAIL)**  
-University of Auckland  
+**Strong AI Lab (SAIL)**
+University of Auckland
 https://github.com/Strong-AI-Lab
