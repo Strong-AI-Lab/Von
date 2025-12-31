@@ -144,6 +144,28 @@ If `jira_get_myself` returns `401 Unauthorised`, confirm the configured email/ba
 - Implement admin role checks via `access_control.py`
 - Consider moving to dedicated admin API with separate authentication
 
+### 7. Room Device Identity (Meeting-Room Voice)
+
+**Purpose**: Support a server-authoritative identity for a shared “room device” (e.g., a meeting-room microphone/speaker) without trusting browser `localStorage`.
+
+**Implementation**:
+- Provisioning endpoint: `POST /admin/room_devices/provision`
+    - Requires header `X-Admin-Token` matching env `VON_ADMIN_TOKEN`
+    - Returns a one-time `device_secret`
+- Device login endpoint: `POST /api/room_devices/login`
+    - Exchanges `device_id` + `device_secret` for a bearer token
+- Introspection endpoint: `GET /api/room_devices/whoami`
+    - Requires `Authorization: Bearer <token>`
+
+**Required configuration**:
+- `VON_ROOM_DEVICE_TOKEN_KEY` (Fernet key) for issuing/verifying device tokens
+- `VON_ADMIN_TOKEN` to protect provisioning operations
+
+**Token rotation and revocation**:
+- If you rotate `VON_ROOM_DEVICE_TOKEN_KEY`, previously issued room-device bearer tokens will no longer verify (global invalidation). This is the simplest “rotate-to-revoke-everything” mechanism.
+- If you need rolling rotation (accept old + new keys during a transition), the token verifier would need to support a key ring (try multiple keys) until the cutover completes.
+- The room-device records include a `token_revoked_before` field; the server can treat any token issued at or before that timestamp as revoked (per-device invalidation). There is no dedicated admin endpoint for this yet.
+
 ## Security Checklist for Production Deployment
 
 - [x] **Remove client-provided user_id fallback** in `von_routes.py` ✅ (Dec 2024)
