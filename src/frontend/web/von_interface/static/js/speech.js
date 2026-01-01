@@ -110,6 +110,30 @@ export function isTextToSpeechSupported() {
     return !!(root && root.speechSynthesis && typeof root.SpeechSynthesisUtterance === 'function');
 }
 
+export function getSpeechSynthesisVoices() {
+    const root = typeof globalThis !== 'undefined' ? globalThis : null;
+    if (!root || !root.speechSynthesis || typeof root.speechSynthesis.getVoices !== 'function') {
+        return [];
+    }
+
+    try {
+        const voices = root.speechSynthesis.getVoices();
+        return Array.isArray(voices) ? voices : [];
+    } catch (_) {
+        return [];
+    }
+}
+
+function findSpeechSynthesisVoiceByUri(voiceUri) {
+    if (!voiceUri) {
+        return null;
+    }
+
+    const uri = String(voiceUri);
+    const voices = getSpeechSynthesisVoices();
+    return voices.find((v) => v && String(v.voiceURI || '') === uri) || null;
+}
+
 export function stopSpeaking() {
     const root = typeof globalThis !== 'undefined' ? globalThis : null;
     if (!root || !root.speechSynthesis) {
@@ -130,6 +154,17 @@ export function speakText(text, options = {}) {
     }
 
     const utterance = new root.SpeechSynthesisUtterance(String(text ?? ''));
+
+    if (options.voiceUri) {
+        const voice = findSpeechSynthesisVoiceByUri(options.voiceUri);
+        if (voice) {
+            try {
+                utterance.voice = voice;
+            } catch (_) {
+                // Ignore: some environments may not allow setting voice.
+            }
+        }
+    }
 
     if (options.language) {
         utterance.lang = String(options.language);

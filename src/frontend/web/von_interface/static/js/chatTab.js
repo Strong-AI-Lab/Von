@@ -5,6 +5,7 @@ import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } fro
 import { elements, renderSpanSuggestions } from './domUtils.js';
 import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
 import {
+    getSpeechSynthesisVoices,
     isSpeechRecognitionSupported,
     isTextToSpeechSupported,
     speakText,
@@ -436,6 +437,16 @@ let activeChatRequest = null;
 
 const CHAT_TTS_STORAGE_KEY = 'chatTtsEnabled';
 
+const CHAT_TTS_VOICE_URI_STORAGE_KEY = 'chatTtsVoiceUri';
+const CHAT_TTS_LANGUAGE_STORAGE_KEY = 'chatTtsLanguage';
+const CHAT_TTS_RATE_STORAGE_KEY = 'chatTtsRate';
+const CHAT_TTS_PITCH_STORAGE_KEY = 'chatTtsPitch';
+const CHAT_TTS_VOLUME_STORAGE_KEY = 'chatTtsVolume';
+
+const CHAT_STT_LANGUAGE_STORAGE_KEY = 'chatSttLanguage';
+const CHAT_STT_CONTINUOUS_STORAGE_KEY = 'chatSttContinuous';
+const CHAT_STT_INTERIM_RESULTS_STORAGE_KEY = 'chatSttInterimResults';
+
 let activeDictation = null;
 let dictationState = null;
 
@@ -468,6 +479,108 @@ function getPreferredChatLanguage() {
     const ctx = getUserContext();
     const lang = (ctx && ctx.language) ? String(ctx.language).trim() : '';
     return lang || 'en-NZ';
+}
+
+function clampNumber(value, minValue, maxValue, fallbackValue) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+        return fallbackValue;
+    }
+    return Math.min(Math.max(num, minValue), maxValue);
+}
+
+function normaliseLanguageSetting(value) {
+    const lang = String(value ?? '').trim();
+    return lang;
+}
+
+function parseBoolSetting(value, fallbackValue) {
+    if (value === null || value === undefined) {
+        return fallbackValue;
+    }
+    return String(value) === 'true';
+}
+
+function getChatSpeechSettings() {
+    const preferredLanguage = getPreferredChatLanguage();
+
+    const ttsVoiceUri = String(safeLocalStorageGet(CHAT_TTS_VOICE_URI_STORAGE_KEY) || '').trim();
+    const ttsLanguageRaw = safeLocalStorageGet(CHAT_TTS_LANGUAGE_STORAGE_KEY);
+    const ttsLanguage = normaliseLanguageSetting(ttsLanguageRaw) || preferredLanguage;
+
+    const ttsRate = clampNumber(safeLocalStorageGet(CHAT_TTS_RATE_STORAGE_KEY), 0.5, 2, 1);
+    const ttsPitch = clampNumber(safeLocalStorageGet(CHAT_TTS_PITCH_STORAGE_KEY), 0, 2, 1);
+    const ttsVolume = clampNumber(safeLocalStorageGet(CHAT_TTS_VOLUME_STORAGE_KEY), 0, 1, 1);
+
+    const sttLanguageRaw = safeLocalStorageGet(CHAT_STT_LANGUAGE_STORAGE_KEY);
+    const sttLanguage = normaliseLanguageSetting(sttLanguageRaw) || preferredLanguage;
+
+    const sttContinuous = parseBoolSetting(
+        safeLocalStorageGet(CHAT_STT_CONTINUOUS_STORAGE_KEY),
+        true
+    );
+    const sttInterimResults = parseBoolSetting(
+        safeLocalStorageGet(CHAT_STT_INTERIM_RESULTS_STORAGE_KEY),
+        true
+    );
+
+    return {
+        tts: {
+            voiceUri: ttsVoiceUri || null,
+            language: ttsLanguage,
+            rate: ttsRate,
+            pitch: ttsPitch,
+            volume: ttsVolume
+        },
+        stt: {
+            language: sttLanguage,
+            continuous: sttContinuous,
+            interimResults: sttInterimResults
+        }
+    };
+}
+
+function formatVoiceOptionLabel(voice) {
+    if (!voice) {
+        return 'Unknown voice';
+    }
+    const name = String(voice.name || 'Unknown');
+    const lang = String(voice.lang || '').trim();
+    return lang ? `${name} (${lang})` : name;
+}
+
+function populateTtsVoiceSelect(selectEl, selectedVoiceUri) {
+    if (!selectEl) {
+        return;
+    }
+
+    const keepFirst = selectEl.querySelector('option[value=""]');
+    selectEl.innerHTML = '';
+    if (keepFirst) {
+        selectEl.appendChild(keepFirst);
+    } else {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'Default';
+        selectEl.appendChild(opt);
+    }
+
+    const voices = getSpeechSynthesisVoices();
+    const sorted = voices
+        .slice()
+        .filter((v) => v && v.voiceURI)
+        .sort((a, b) => formatVoiceOptionLabel(a).localeCompare(formatVoiceOptionLabel(b)));
+
+    for (const voice of sorted) {
+        const opt = document.createElement('option');
+        opt.value = String(voice.voiceURI);
+        opt.textContent = formatVoiceOptionLabel(voice);
+        selectEl.appendChild(opt);
+    }
+
+    if (selectedVoiceUri) {
+        selectEl.value = String(selectedVoiceUri);
+    }
 }
 
 function isChatTtsEnabled() {
@@ -517,7 +630,14 @@ function toggleSpeakTurn(turnId, text, button) {
 
     let utterance = null;
     try {
-        utterance = speakText(text, { language: getPreferredChatLanguage() });
+        const settings = getChatSpeechSettings();
+        utterance = speakText(text, {
+            language: settings.tts.language,
+            rate: settings.tts.rate,
+            pitch: settings.tts.pitch,
+            volume: settings.tts.volume,
+            voiceUri: settings.tts.voiceUri
+        });
     } catch (err) {
         console.warn('[chatTab] TTS failed:', err);
         clearActiveTtsUi();
@@ -1157,10 +1277,11 @@ export function initializeChatTab() {
                 dictateButton.classList.add('active-dictation');
 
                 try {
+                    const settings = getChatSpeechSettings();
                     activeDictation = startSpeechRecognition({
-                        language: getPreferredChatLanguage(),
-                        continuous: true,
-                        interimResults: true,
+                        language: settings.stt.language,
+                        continuous: settings.stt.continuous,
+                        interimResults: settings.stt.interimResults,
                         onResult: ({ finalText, interimText }) => {
                             if (!dictationState) {
                                 return;

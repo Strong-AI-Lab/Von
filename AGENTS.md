@@ -231,6 +231,11 @@ Low-signal tool families for typical Von work (candidates to prune first when cl
 - **Epic** → Story → Task (traditional hierarchy)
 - **Task** → Subtask ✅ **CONFIRMED WORKING**
 
+**Epic parent links for Tasks:**
+- In this Jira project, a **Task can have an Epic as its `parent`**.
+- This is not just UI-only: it can be set via tooling by updating the issue field `parent` to the Epic key (e.g. `{"parent": {"key": "JVNAUTOSCI-885"}}`).
+- Agents should prefer setting `parent` automatically when creating follow-on Tasks under an Epic, rather than leaving manual linkage instructions behind.
+
 **Creating Subtasks under a Task:**
 ```python
 mcp_atlassian_createJiraIssue(
