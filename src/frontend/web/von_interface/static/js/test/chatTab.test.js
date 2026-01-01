@@ -1,4 +1,9 @@
-import { formatChatTimestamp, sendMessage } from '../chatTab';
+import {
+    __testOnly_hydrateChatConceptCartouches,
+    __testOnly_resetChatConceptMetaCaches,
+    formatChatTimestamp,
+    sendMessage
+} from '../chatTab';
 
 // Mock dependencies to avoid import errors
 jest.mock('../apiService.js', () => ({
@@ -139,5 +144,71 @@ describe('chat abort behaviour', () => {
 
         // Ensure the sendMessage promise resolves without throwing
         await expect(sendPromise).resolves.toBeUndefined();
+    });
+});
+
+describe('chat cartouche hydration retries', () => {
+    beforeEach(() => {
+        jest.useFakeTimers();
+        __testOnly_resetChatConceptMetaCaches();
+        document.body.innerHTML = `
+            <div id="root">
+                <button class="vontology-cartouche" data-full-concept-id="#V#literary_work">
+                    <span class="vontology-cartouche-name">#V#literary_work</span>
+                    <span class="vontology-cartouche-id">#V#literary_work</span>
+                    <span class="vontology-cartouche-kind type">Type</span>
+                </button>
+            </div>
+        `;
+    });
+
+    afterEach(() => {
+        jest.useRealTimers();
+        jest.restoreAllMocks();
+        delete global.fetch;
+    });
+
+    async function flushMicrotasks() {
+        await Promise.resolve();
+        await Promise.resolve();
+    }
+
+    test('auto-rehydrates after initial provisional lookup', async () => {
+        const fullId = '#V#literary_work';
+        let nodeContentCalls = 0;
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                nodeContentCalls += 1;
+                if (nodeContentCalls === 1) {
+                    return Promise.resolve({ ok: false, status: 404 });
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ display_name: 'Literary Work', kind: 'type' })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/search')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ results: [{ id: fullId, kind: 'type' }] })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const root = document.getElementById('root');
+        __testOnly_hydrateChatConceptCartouches(root);
+        await flushMicrotasks();
+
+        const nameEl = document.querySelector('.vontology-cartouche-name');
+        expect(nameEl.textContent).toBe(fullId);
+
+        jest.advanceTimersByTime(300);
+        await flushMicrotasks();
+
+        expect(nameEl.textContent).toBe('Literary Work');
     });
 });
