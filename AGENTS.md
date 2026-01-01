@@ -88,6 +88,37 @@ Failure Handling Patterns:
   - If **Restart Server** does not resolve it, ask the user to restart VS Code’s extension host (or run **Developer: Reload Window**) and then retry.
   - Do not loop indefinitely: cap total retries per operation (e.g., 2) and surface the last error with a clear recommended next action.
   - Do **NOT** “hack around” Atlassian MCP failures by creating ad-hoc scripts (e.g. temporary Python) or by calling Jira REST directly. Fix the MCP session instead (bounded retry → accessible-resources check → MCP server restart → Reload Window). If the cloudId is the blocker, use the documented tenant-info browser fallback.
+
+### Atlassian MCP is *bloody* flaky: pause + notify (do not "thrash")
+
+This is not hypothetical. The Atlassian MCP server can and does fail intermittently (timeouts, empty responses, tool list disappearing, 401/403/5xx) even when nothing is wrong with the task or the data. When it goes flaky, the worst thing an agent can do is keep firing off Jira tool calls "to see if it comes back".
+
+**Required behaviour when Atlassian MCP looks unhealthy:**
+1. **Stop.** Do not attempt further Jira writes, searches, edits, or “probe” calls beyond the bounded retries described above.
+2. **Checkpoint what we were doing** in plain language:
+  - what issue(s) we were about to change
+  - what has already succeeded
+  - what remains pending
+  (This avoids duplicate edits when we resume.)
+3. **Tell the user we are pausing because Atlassian MCP is flaky** and ask them to restart it manually.
+4. **Provide the exact restart steps** (VS Code):
+  - Open the Command Palette and run `MCP: Restart Server` (choose Atlassian), OR
+  - Open the MCP Servers UI and restart the Atlassian server from there.
+  - If that doesn’t fix it: run `Developer: Reload Window`.
+5. Once the user confirms the restart is done, **resume from the checkpoint**, re-running only the minimal read to confirm health, then continuing.
+
+**Why we insist on this:**
+- Thrashing produces confusing partial progress (“some issues moved, others not”) and burns time.
+- Repeated retries can amplify rate limits and make failures look like permissions problems.
+- A clean restart usually fixes it faster than any amount of cleverness.
+
+**Anti-patterns (do not do these):**
+- Do not start calling unrelated MCP tools "just in case".
+- Do not change scope (“I’ll do code changes instead”) without explicit user agreement.
+- Do not fabricate a Jira state update (if we didn’t get a success response, assume it did not happen).
+
+**If the failure smells like config rather than flakiness:**
+- If the error is consistently “cloudId missing/invalid”, use the Cloud ID fast path below.
 - Cache/Data Structure Sensitivity: Never reorder or shrink tuple/dict cache structures relied upon by diagnostics (append only; update summariser accordingly).
 
 Language & Shell Consistency:
@@ -168,6 +199,29 @@ Security / Scope:
 - Do not cache credentials or tokens in documentation or code; rely solely on provided tool interfaces.
 
 This section operationalises the expectation that well-understood, low‑risk integrations proceed automatically, further reducing user cognitive load while preserving safety through clearly bounded exception triggers.
+
+### Copilot Tool Selection Hygiene (VS Code / MCP)
+
+Von development can hit VS Code Copilot Chat’s 128-tool selection limit. We prefer keeping a broad, useful set of tools enabled, but pruning obvious low-value tools (for this repo) so we stay under the cap.
+
+**Authoritative script:** `scripts/set_vscode_copilot_selected_tools.ps1`
+
+Rules for agents:
+- If an agent uses a tool (or does work that obviously should be done via a tool), ensure it is represented in the Copilot “selected tools” set. If it is missing, update the script’s presets/allowlist patterns so it stays enabled going forward.
+- Keep the script’s presets aligned with how we actually work: prefer broad MCP capability with a safety cap (default `MaxTools=120`) rather than narrowly whitelisting one-off tools.
+- When a tool is not enabled but would be useful, mention it explicitly (tool ID / family) so the user can add it to the selection.
+
+Likely-useful tool families for this repo (keep enabled unless there is a strong reason not to):
+- Von MCP servers: Vontology and VonRAG (`mcp.config.*` for workspace servers)
+- Atlassian/Jira MCP (issue search/update/worklogs)
+- GitHub (PR workflow and/or GitHub MCP tools)
+- MongoDB MCP (inspection, query, bulk update)
+- Web search (for external docs / troubleshooting)
+- arXiv MCP (optional; keep if doing literature workflows)
+
+Low-signal tool families for typical Von work (candidates to prune first when close to the cap):
+- Azure tooling (unless explicitly doing Azure work)
+- AI Toolkit evaluation helpers (unless explicitly doing evaluations)
 
 ### JIRA Issue Hierarchy (CRITICAL - Verified December 2025)
 
