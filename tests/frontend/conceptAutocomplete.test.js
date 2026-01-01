@@ -163,7 +163,7 @@ describe('conceptAutocomplete', () => {
             first.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
             const ZWSP = '\u200B';
-            expect(textarea.value).toBe(`#V${ZWSP}#person`);
+            expect(textarea.value).toBe(`#V${ZWSP}#person `);
             done();
         }, 300);
     });

@@ -310,10 +310,21 @@ function insertConcept(conceptId) {
     // Replace from trigger to cursor position
     const before = text.substring(0, triggerIdx);
     const after = text.substring(cursorPos);
-    ta.value = before + insertedId + after;
+
+    // Ensure a separator after the inserted concept token, otherwise subsequent typing can
+    // accidentally extend the hidden token (e.g., #V\u200B#personabc), which breaks hydration.
+    let separator = '';
+    const nextChar = after[0] || '';
+    if (!nextChar) {
+        separator = ' ';
+    } else if (!/\s/.test(nextChar) && !/[\.,;:!\?\)\]\}]/.test(nextChar) && nextChar !== '"' && nextChar !== "'" && nextChar !== '`') {
+        separator = ' ';
+    }
+
+    ta.value = before + insertedId + separator + after;
 
     // Move cursor after inserted concept ID
-    const newPos = triggerIdx + insertedId.length;
+    const newPos = triggerIdx + insertedId.length + separator.length;
     ta.selectionStart = newPos;
     ta.selectionEnd = newPos;
     ta.focus();
