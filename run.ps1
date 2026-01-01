@@ -62,6 +62,15 @@ $LogsDir = Join-Path $Root 'logs'
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 New-Item -ItemType Directory -Force -Path $LogsDir | Out-Null
 
+# Ensure logging helper is available before any code path that may emit log lines.
+if (-not (Get-Command Write-LauncherLog -ErrorAction SilentlyContinue)) {
+    function Write-LauncherLog {
+        param([Parameter(Mandatory = $true)][string]$Msg)
+        $ts = (Get-Date).ToString('HH:mm:ss')
+        Write-Host ("[{0}] {1}" -f $ts, $Msg)
+    }
+}
+
 # Backup root resolution:
 # - Prefer explicit VON_BACKUP_ROOT if already present in environment.
 # - Else prefer W:\von_backups if W: exists and is writable.
@@ -99,10 +108,7 @@ if (-not $BackupOutDir) {
     $BackupOutDir = $BackupRoot
 }
 
-# Ensure logging helper is available before any functions that emit log lines.
-if (-not (Get-Command Write-LauncherLog -ErrorAction SilentlyContinue)) {
-    function Write-LauncherLog { param([string]$Msg) Write-Host $Msg }
-}
+
 
 function Invoke-MigrateLocalBackupsToWDrive {
     <#
@@ -298,7 +304,7 @@ function Convert-CronTokenToInt {
     throw "Unsupported cron token '$t'."
 }
 
-function Parse-CronField {
+function ConvertFrom-CronField {
     param(
         [Parameter(Mandatory = $true)] [string]$Field,
         [Parameter(Mandatory = $true)] [int]$Min,
@@ -377,7 +383,7 @@ function Parse-CronField {
     }
 }
 
-function Parse-CronSchedule {
+function ConvertFrom-CronSchedule {
     param([Parameter(Mandatory = $true)] [string]$Schedule)
 
     $tokens = ($Schedule.Trim() -split '\s+')
@@ -393,11 +399,11 @@ function Parse-CronSchedule {
         'SUN' = 0; 'MON' = 1; 'TUE' = 2; 'WED' = 3; 'THU' = 4; 'FRI' = 5; 'SAT' = 6
     }
 
-    $minute = Parse-CronField -Field $tokens[0] -Min 0 -Max 59
-    $hour = Parse-CronField -Field $tokens[1] -Min 0 -Max 23
-    $dom = Parse-CronField -Field $tokens[2] -Min 1 -Max 31
-    $month = Parse-CronField -Field $tokens[3] -Min 1 -Max 12 -NameMap $monthNames
-    $dow = Parse-CronField -Field $tokens[4] -Min 0 -Max 7 -IsDayOfWeek -NameMap $dowNames
+    $minute = ConvertFrom-CronField -Field $tokens[0] -Min 0 -Max 59
+    $hour = ConvertFrom-CronField -Field $tokens[1] -Min 0 -Max 23
+    $dom = ConvertFrom-CronField -Field $tokens[2] -Min 1 -Max 31
+    $month = ConvertFrom-CronField -Field $tokens[3] -Min 1 -Max 12 -NameMap $monthNames
+    $dow = ConvertFrom-CronField -Field $tokens[4] -Min 0 -Max 7 -IsDayOfWeek -NameMap $dowNames
 
     return @{
         Minute     = $minute
@@ -534,7 +540,7 @@ function Invoke-DailyBackupIfDue {
     $due = $true
     if ($schedule) {
         try {
-            $cron = Parse-CronSchedule -Schedule $schedule
+            $cron = ConvertFrom-CronSchedule -Schedule $schedule
             $effectiveLast = if ($last) { $last } else { $nowUtc.AddDays(-370) }
             $next = Get-NextCronOccurrenceUtc -Cron $cron -AfterUtc $effectiveLast
             if ($null -eq $next -or $next -gt $nowUtc) { $due = $false }
@@ -1375,9 +1381,9 @@ if (-not (Get-Command Invoke-RelationCoverageSummary -ErrorAction SilentlyContin
                                                         param($pdmExeInner, $rootInner, $refreshPathInner, $applyFlagInner)
                                                         try {
                                                             Set-Location $rootInner
-                                                            $argsLocal = @('run', 'python', $refreshPathInner, '--drop-target')
-                                                            if ($applyFlagInner) { $argsLocal += '--apply' }
-                                                            & $pdmExeInner @argsLocal 2>&1 | ForEach-Object { "[test-db-refresh] $_" }
+                                                            $refreshInvocation = @('run', 'python', $refreshPathInner, '--drop-target')
+                                                            if ($applyFlagInner) { $refreshInvocation += '--apply' }
+                                                            & $pdmExeInner @refreshInvocation 2>&1 | ForEach-Object { "[test-db-refresh] $_" }
                                                             Write-Host '[test-db-refresh] Completed (on mismatch trigger).'
                                                         }
                                                         catch { Write-Host ("[test-db-refresh] ERROR: {0}" -f $_.Exception.Message) }
@@ -1842,10 +1848,12 @@ function Invoke-BackupNow {
     $mode = if ($apply) { 'apply' } else { 'dry-run' }
     Write-LauncherLog "[backup] Starting backup (mode=$mode tag=$tag out=$outDir root=$BackupRoot)"
 
-    $args = @('run', 'python', $backupScript)
-    if ($apply) { $args += '--apply' }
-    $args += @('--out-dir', $outDir, '--tag', $tag)
-    & $pdm @args
+    if ($apply) {
+        & $pdm run python $backupScript --apply --out-dir $outDir --tag $tag
+    }
+    else {
+        & $pdm run python $backupScript --out-dir $outDir --tag $tag
+    }
     $exitCode = $LASTEXITCODE
     if ($exitCode -eq 0) {
         Write-LauncherLog "[backup] OK"

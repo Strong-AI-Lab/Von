@@ -10,7 +10,9 @@ jest.mock('../domUtils.js', () => ({
     renderSpanSuggestions: jest.fn()
 }));
 jest.mock('../utils/textDecorator.js', () => ({
-    annotateElementText: jest.fn()
+    annotateElementText: jest.fn(),
+    cartouchifyElementText: jest.fn(),
+    cartouchifyVontologyTokensInElement: jest.fn()
 }));
 
 describe('formatChatTimestamp', () => {
