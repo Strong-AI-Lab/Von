@@ -370,7 +370,9 @@ function ConvertFrom-CronField {
     for ($i = $Min; $i -le $Max; $i++) {
         if ($allowed[$i]) { $allowedValues += $i }
     }
-    if (-not $allowedValues -or $allowedValues.Count -eq 0) {
+    # NOTE: Do not use `-not $allowedValues` here; a single value of 0 (e.g. minute=0)
+    # is treated as falsy in PowerShell, which incorrectly rejects valid cron fields.
+    if ($null -eq $allowedValues -or $allowedValues.Count -eq 0) {
         throw "Cron field '$Field' selects no values."
     }
 
