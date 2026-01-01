@@ -1,15 +1,24 @@
-import sys
+#!/usr/bin/env python3
+"""Check that internal MCP input schemas are configured with allow_unknown=True.
+
+This is a developer utility script (not a pytest test).
+"""
+
+from __future__ import annotations
+
 import os
+import sys
+from pathlib import Path
 
-# Add src to path
-sys.path.append(os.path.join(os.getcwd(), "src"))
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
 
-from backend.integrations.internal_mcp.catalogue import (
-    _concept_fetch_input_schema,
-    _annotation_input_schema,
-    _concept_search_input_schema,
+from src.backend.integrations.internal_mcp.catalogue import (  # noqa: E402
     _add_names_input_schema,
     _add_relationship_input_schema,
+    _annotation_input_schema,
+    _concept_fetch_input_schema,
+    _concept_search_input_schema,
     _delete_concept_input_schema,
     _merge_concepts_input_schema,
     _search_knowledge_base_input_schema,
@@ -17,7 +26,7 @@ from backend.integrations.internal_mcp.catalogue import (
 )
 
 
-def test_schemas():
+def main() -> int:
     schemas_to_check = [
         ("fetch_concept", _concept_fetch_input_schema()),
         ("extract_annotations", _annotation_input_schema()),
@@ -37,10 +46,8 @@ def test_schemas():
         else:
             print(f"PASS: {name} schema has allow_unknown=True")
 
-    # Check inline schemas in catalogue
     catalogue = build_default_catalogue()
     inline_tools = ["rag_get_status", "rag_list_indexed", "rag_get_item"]
-
     for tool_name in inline_tools:
         try:
             tool = catalogue.get(tool_name)
@@ -55,9 +62,11 @@ def test_schemas():
 
     if all_passed:
         print("All checked schemas have allow_unknown=True")
-    else:
-        print("Some schemas failed check")
+        return 0
+
+    print("Some schemas failed check")
+    return 1
 
 
 if __name__ == "__main__":
-    test_schemas()
+    raise SystemExit(main())
