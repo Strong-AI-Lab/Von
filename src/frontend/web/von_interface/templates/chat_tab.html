@@ -47,6 +47,9 @@
     <!-- Buttons for sending prompt and resetting context -->
     <div class="button-row">
       <button id="sendButton" class="btn btn-primary">Send Prompt</button>
+      <button id="dictateButton" class="btn btn-secondary" type="button" title="Dictate with your microphone">
+        Dictate
+      </button>
       <button id="resetButton" class="btn btn-secondary" type="button"
         title="Reset Von's context while keeping this conversation view">Reset Context</button>
       <label class="annotation-toggle" title="Enable concept annotations in chat responses">
@@ -59,6 +62,12 @@
           </svg>
         </span>
         <span class="toggle-label">Annotations</span>
+      </label>
+
+      <label class="annotation-toggle" title="Speak Von responses aloud">
+        <input type="checkbox" id="ttsToggle">
+        <span class="eye-icon" aria-hidden="true">TTS</span>
+        <span class="toggle-label">Speech</span>
       </label>
     </div>
   </div>
