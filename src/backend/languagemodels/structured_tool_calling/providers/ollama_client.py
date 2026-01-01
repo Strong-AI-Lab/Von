@@ -90,8 +90,8 @@ class OllamaClient(LLMClient):
             # Collect streamed response
             full_response = ""
             for chunk in stream:
-                if isinstance(chunk, dict) and 'message' in chunk:
-                    full_response += chunk['message'].get('content', '')
+                if isinstance(chunk, dict) and "message" in chunk:
+                    full_response += chunk["message"].get("content", "")
 
             return self._parse_response(full_response, available_tools)
 
@@ -113,10 +113,9 @@ class OllamaClient(LLMClient):
         instructions and examples to elicit proper JSON formatting.
         """
 
-        tool_descriptions = "\n".join([
-            f"- {tool.name}: {tool.description}"
-            for tool in available_tools
-        ])
+        tool_descriptions = "\n".join(
+            [f"- {tool.name}: {tool.description}" for tool in available_tools]
+        )
 
         constraint_prompt = f"""You are a helpful assistant that can invoke tools.
 
@@ -156,10 +155,12 @@ USER REQUEST:
         if context:
             for msg in context:
                 if isinstance(msg, dict) and "role" in msg and "content" in msg:
-                    messages.append({
-                        "role": msg["role"],
-                        "content": msg["content"],
-                    })
+                    messages.append(
+                        {
+                            "role": msg["role"],
+                            "content": msg["content"],
+                        }
+                    )
 
         messages.append({"role": "user", "content": prompt})
 
@@ -186,12 +187,16 @@ USER REQUEST:
                 payload = tool_call.get("payload", {})
 
                 if tool_name in tool_name_map:
-                    tool_calls.append(ToolCall(
-                        tool_name=tool_name,
-                        payload=payload if isinstance(payload, dict) else {},
-                    ))
+                    tool_calls.append(
+                        ToolCall(
+                            tool_name=tool_name,
+                            payload=payload if isinstance(payload, dict) else {},
+                        )
+                    )
                     # Remove JSON from text response
-                    text_response = self._remove_json_from_text(response_text, tool_call)
+                    text_response = self._remove_json_from_text(
+                        response_text, tool_call
+                    )
                 else:
                     self.logger.warning(f"Unknown tool requested: {tool_name}")
 

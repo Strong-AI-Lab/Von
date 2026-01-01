@@ -77,6 +77,25 @@ def _is_external_http_href(href: str | None) -> bool:
     return lower.startswith(("http://", "https://"))
 
 
+def _normalise_bs4_attr_to_str(value: object) -> str | None:
+    """Normalise BeautifulSoup attribute values.
+
+    BeautifulSoup may represent attribute values as a string, list-like, or other
+    scalar types. Our sanitiser only needs a string (or None) for safety checks.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                return item
+        return None
+    return str(value)
+
+
 def sanitise_rendered_html(html: str) -> str:
     """Sanitise rendered HTML using an allow-list.
 
@@ -100,7 +119,7 @@ def sanitise_rendered_html(html: str) -> str:
                 del tag.attrs[attr]
 
         if tag.name == "a":
-            href = tag.get("href")
+            href = _normalise_bs4_attr_to_str(tag.get("href"))
             if not _is_safe_href(href):
                 if "href" in tag.attrs:
                     del tag.attrs["href"]

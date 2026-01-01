@@ -67,7 +67,10 @@ def upsert_agent_gmail_tokens(
                 "scopes": list(scopes or []),
                 "expires_at": expires_at,
                 "token_payload_enc": encrypted,
-                "encryption": {"scheme": "fernet", "env_var": "GMAIL_TOKEN_ENCRYPTION_KEY"},
+                "encryption": {
+                    "scheme": "fernet",
+                    "env_var": "GMAIL_TOKEN_ENCRYPTION_KEY",
+                },
                 "updated_at": now,
             },
             "$setOnInsert": {"created_at": now},
@@ -122,7 +125,11 @@ def get_agent_gmail_token_status(profile_id: str) -> AgentGmailTokenStatus:
     has_tokens = isinstance(token_enc, str) and bool(token_enc)
 
     scopes_raw = doc.get("scopes")
-    scopes = [s for s in scopes_raw if isinstance(s, str)] if isinstance(scopes_raw, list) else []
+    scopes = (
+        [s for s in scopes_raw if isinstance(s, str)]
+        if isinstance(scopes_raw, list)
+        else []
+    )
 
     expires_at = doc.get("expires_at")
     if not isinstance(expires_at, datetime):
@@ -150,5 +157,7 @@ def revoke_agent_gmail_tokens(profile_id: str) -> bool:
     coll = _get_collection()
     result = coll.delete_one({"profile_id": profile_id})
     deleted = bool(result.deleted_count)
-    logger.info("Revoked agent Gmail tokens for profile_id=%s deleted=%s", profile_id, deleted)
+    logger.info(
+        "Revoked agent Gmail tokens for profile_id=%s deleted=%s", profile_id, deleted
+    )
     return deleted

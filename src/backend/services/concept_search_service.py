@@ -969,7 +969,9 @@ def search_concepts(
 
                         sorted_names = sorted(names_list, key=name_type_priority)
                         if sorted_names:
-                            text_relations_names[cid] = sorted_names[0][0]  # Take the best name
+                            text_relations_names[cid] = sorted_names[0][
+                                0
+                            ]  # Take the best name
 
                 logger.info(
                     f"[concept_search] Fetched names from text_relations for {len(text_relations_names)} concepts"

@@ -87,7 +87,9 @@ class OpenAIClient(LLMClient):
         asyncio.set_event_loop(loop)
         try:
             return loop.run_until_complete(
-                self.generate_with_tools(prompt, available_tools, context, system_message, **kwargs)
+                self.generate_with_tools(
+                    prompt, available_tools, context, system_message, **kwargs
+                )
             )
         finally:
             loop.close()
@@ -107,10 +109,12 @@ class OpenAIClient(LLMClient):
         if context:
             for msg in context:
                 if isinstance(msg, dict) and "role" in msg and "content" in msg:
-                    messages.append({
-                        "role": msg["role"],
-                        "content": msg["content"],
-                    })
+                    messages.append(
+                        {
+                            "role": msg["role"],
+                            "content": msg["content"],
+                        }
+                    )
 
         messages.append({"role": "user", "content": prompt})
 
@@ -143,18 +147,28 @@ class OpenAIClient(LLMClient):
                         # Parse OpenAI function call format
                         tool_name = tc.function.name
                         payload_str = tc.function.arguments
-                        payload = json.loads(payload_str) if isinstance(payload_str, str) else payload_str
+                        payload = (
+                            json.loads(payload_str)
+                            if isinstance(payload_str, str)
+                            else payload_str
+                        )
 
                         # Validate tool exists
                         if tool_name not in tool_name_map:
                             self.logger.warning(f"Unknown tool requested: {tool_name}")
                             continue
 
-                        tool_calls.append(ToolCall(
-                            tool_name=tool_name,
-                            payload=payload,
-                            call_id=tc.id if hasattr(tc, 'id') and tc.id else str(uuid.uuid4()),
-                        ))
+                        tool_calls.append(
+                            ToolCall(
+                                tool_name=tool_name,
+                                payload=payload,
+                                call_id=(
+                                    tc.id
+                                    if hasattr(tc, "id") and tc.id
+                                    else str(uuid.uuid4())
+                                ),
+                            )
+                        )
 
                     except (json.JSONDecodeError, AttributeError) as exc:
                         self.logger.error(f"Failed to parse tool call: {exc}")
@@ -172,7 +186,9 @@ class OpenAIClient(LLMClient):
         return LLMResponse(
             text_response=text_response,
             tool_calls=tool_calls,
-            raw_response=response.model_dump() if hasattr(response, 'model_dump') else None,
+            raw_response=(
+                response.model_dump() if hasattr(response, "model_dump") else None
+            ),
             model=response.model,
             usage=usage,
         )

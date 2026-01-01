@@ -25,9 +25,11 @@ UUID_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+
 def is_uuid(text: str) -> bool:
     """Check if text is a UUID."""
     return UUID_PATTERN.match(text) is not None
+
 
 def fix_guid_name_types():
     """Fix GUID name types in text_relations."""
@@ -38,10 +40,7 @@ def fix_guid_name_types():
         text_relations = db["text_relations"]
 
         # Query for CODE names with en-NZ language that look like GUIDs
-        query = {
-            "name_type": "CODE",
-            "language": "en-NZ"
-        }
+        query = {"name_type": "CODE", "language": "en-NZ"}
 
         # Fetch all matching documents to check for UUIDs
         docs = list(text_relations.find(query))
@@ -63,16 +62,8 @@ def fix_guid_name_types():
         # Update all matching documents
         guid_texts = [doc["text"] for doc in guid_docs]
         result = text_relations.update_many(
-            {
-                "name_type": "CODE",
-                "language": "en-NZ",
-                "text": {"$in": guid_texts}
-            },
-            {
-                "$set": {
-                    "language": "vonGUID"
-                }
-            }
+            {"name_type": "CODE", "language": "en-NZ", "text": {"$in": guid_texts}},
+            {"$set": {"language": "vonGUID"}},
         )
 
         print(f"\nUpdate result:")
@@ -80,7 +71,9 @@ def fix_guid_name_types():
         print(f"  Modified: {result.modified_count}")
 
         if result.modified_count > 0:
-            print(f"\n✅ Successfully migrated {result.modified_count} GUID names from en-NZ to vonGUID")
+            print(
+                f"\n✅ Successfully migrated {result.modified_count} GUID names from en-NZ to vonGUID"
+            )
         else:
             print("\n⚠️  No documents were updated")
 
@@ -93,6 +86,7 @@ def fix_guid_name_types():
     except Exception as e:
         print(f"❌ Error: {e}", file=sys.stderr)
         return False
+
 
 if __name__ == "__main__":
     success = fix_guid_name_types()

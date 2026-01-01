@@ -35,10 +35,14 @@ def get_llm_client(config: LLMClientConfig) -> LLMClient:
         return GeminiClient(config)
 
     # Ollama models (default for local/self-hosted)
-    elif any(x in model_lower for x in ["ollama", "llama", "mistral", "neural", "local"]):
+    elif any(
+        x in model_lower for x in ["ollama", "llama", "mistral", "neural", "local"]
+    ):
         return OllamaClient(config)
 
     # Fallback: try Ollama (most common for local models)
     else:
-        logger.info(f"Model '{config.model}' not explicitly matched; attempting Ollama client")
+        logger.info(
+            f"Model '{config.model}' not explicitly matched; attempting Ollama client"
+        )
         return OllamaClient(config)

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 class ToolCallError(Exception):
     """Raised when a tool call fails or is invalid."""
+
     pass
 
 
@@ -25,6 +26,7 @@ class ToolDefinition:
         output_schema: Optional JSON Schema describing output structure
                       (used by workflows for validation)
     """
+
     name: str
     description: str
     input_schema: Dict[str, Any]
@@ -52,6 +54,7 @@ class ToolCall:
         call_id: Unique identifier for execution tracing. Generated if not provided.
         timestamp: When the tool call was created (UTC)
     """
+
     tool_name: str
     payload: Dict[str, Any]
     call_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -80,11 +83,14 @@ class LLMResponse:
         model: Model identifier used for this response
         usage: Token usage info (if available from provider)
     """
+
     text_response: str
     tool_calls: List[ToolCall] = field(default_factory=list)
     raw_response: Optional[Dict[str, Any]] = None
     model: Optional[str] = None
-    usage: Optional[Dict[str, Any]] = None  # e.g., {"prompt_tokens": 100, "completion_tokens": 50}
+    usage: Optional[Dict[str, Any]] = (
+        None  # e.g., {"prompt_tokens": 100, "completion_tokens": 50}
+    )
 
     def has_tool_calls(self) -> bool:
         """Return True if this response contains tool calls."""

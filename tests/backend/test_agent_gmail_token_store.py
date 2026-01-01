@@ -11,7 +11,9 @@ def mock_db_env(monkeypatch):
     # Provide a stable test encryption key
     from cryptography.fernet import Fernet
 
-    monkeypatch.setenv("GMAIL_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode("utf-8"))
+    monkeypatch.setenv(
+        "GMAIL_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode("utf-8")
+    )
 
     # Ensure fresh module state after env var changes
     import backend.db.mongo_client as mongo_client
@@ -57,7 +59,9 @@ def test_revoke_deletes_tokens(mock_db_env):
     importlib.reload(store)
 
     profile_id = "zhan-gmail"
-    store.upsert_agent_gmail_tokens(profile_id=profile_id, token_payload={"access_token": "x"})
+    store.upsert_agent_gmail_tokens(
+        profile_id=profile_id, token_payload={"access_token": "x"}
+    )
 
     assert store.get_agent_gmail_token_payload(profile_id) == {"access_token": "x"}
 
@@ -79,7 +83,9 @@ def test_missing_key_raises(monkeypatch):
     monkeypatch.delenv("GMAIL_TOKEN_ENCRYPTION_KEY", raising=False)
 
     with pytest.raises(Exception) as exc:
-        store.upsert_agent_gmail_tokens(profile_id="p", token_payload={"access_token": "x"})
+        store.upsert_agent_gmail_tokens(
+            profile_id="p", token_payload={"access_token": "x"}
+        )
 
     # Avoid asserting exact message, but ensure it's key-related.
     assert "GMAIL_TOKEN_ENCRYPTION_KEY" in str(exc.value)

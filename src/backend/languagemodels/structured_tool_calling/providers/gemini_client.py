@@ -31,7 +31,7 @@ class GeminiClient(LLMClient):
         # Create client with API key if provided
         client_kwargs = {}
         if config.api_key:
-            client_kwargs['api_key'] = config.api_key
+            client_kwargs["api_key"] = config.api_key
 
         self._client = genai.Client(**client_kwargs)  # type: ignore[attr-defined]
         self._model_name = config.model
@@ -120,7 +120,9 @@ class GeminiClient(LLMClient):
                             type=self._genai.types.Type.OBJECT,  # type: ignore[attr-defined]
                             properties={
                                 prop: self._schema_property_to_gemini(prop_schema)
-                                for prop, prop_schema in tool.input_schema.get("properties", {}).items()
+                                for prop, prop_schema in tool.input_schema.get(
+                                    "properties", {}
+                                ).items()
                             },
                             required=tool.input_schema.get("required", []),
                         ),
@@ -169,10 +171,12 @@ class GeminiClient(LLMClient):
                 if isinstance(msg, dict) and "role" in msg and "content" in msg:
                     # Normalise role for Gemini (uses 'user' and 'model')
                     role = "model" if msg["role"] == "assistant" else msg["role"]
-                    messages.append({
-                        "role": role,
-                        "content": msg["content"],
-                    })
+                    messages.append(
+                        {
+                            "role": role,
+                            "content": msg["content"],
+                        }
+                    )
 
         messages.append({"role": "user", "content": prompt})
 
@@ -192,10 +196,10 @@ class GeminiClient(LLMClient):
 
         try:
             # Extract text and function calls from response
-            if hasattr(response, 'text'):
+            if hasattr(response, "text"):
                 text_response = response.text
 
-            if hasattr(response, 'function_calls') and response.function_calls:
+            if hasattr(response, "function_calls") and response.function_calls:
                 for fc in response.function_calls():
                     try:
                         tool_name = fc.name
@@ -206,15 +210,19 @@ class GeminiClient(LLMClient):
                             continue
 
                         # Get arguments dict
-                        payload = dict(fc.args) if hasattr(fc, 'args') else {}
+                        payload = dict(fc.args) if hasattr(fc, "args") else {}
 
-                        tool_calls.append(ToolCall(
-                            tool_name=tool_name,
-                            payload=payload,
-                        ))
+                        tool_calls.append(
+                            ToolCall(
+                                tool_name=tool_name,
+                                payload=payload,
+                            )
+                        )
 
                     except Exception as exc:
-                        self.logger.error(f"Failed to parse Gemini function call: {exc}")
+                        self.logger.error(
+                            f"Failed to parse Gemini function call: {exc}"
+                        )
                         continue
 
         except Exception as exc:

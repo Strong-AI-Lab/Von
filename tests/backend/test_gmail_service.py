@@ -173,13 +173,17 @@ def test_modify_labels_guard(monkeypatch):
         svc.users.return_value.messages.return_value.modify.assert_called_once()
 
 
-@patch("src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file")
+@patch(
+    "src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file"
+)
 @patch("src.backend.integrations.google.gmail_service.os.path.exists")
 @patch("src.backend.integrations.google.gmail_service._get_agent_gmail_token_payload")
 def test_ensure_credentials_prefers_db_tokens(
     mock_get_payload, mock_exists, mock_file_loader
 ):
-    mock_exists.side_effect = AssertionError("Should not check token file when DB tokens exist")
+    mock_exists.side_effect = AssertionError(
+        "Should not check token file when DB tokens exist"
+    )
     mock_file_loader.side_effect = AssertionError(
         "Should not load token file when DB tokens exist"
     )
@@ -194,17 +198,23 @@ def test_ensure_credentials_prefers_db_tokens(
         "expiry": "2099-01-01T00:00:00Z",
     }
 
-    profile = gs.GmailProfile(profile_id="p", token_path="", scopes=list(gs.DEFAULT_SCOPES))
+    profile = gs.GmailProfile(
+        profile_id="p", token_path="", scopes=list(gs.DEFAULT_SCOPES)
+    )
     creds = profile.ensure_credentials()
 
     assert creds.token == "access-token"
 
 
-@patch("src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file")
+@patch(
+    "src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_file"
+)
 @patch("src.backend.integrations.google.gmail_service._upsert_agent_gmail_tokens")
 @patch("src.backend.integrations.google.gmail_service._get_agent_gmail_token_status")
 @patch("src.backend.integrations.google.gmail_service._get_agent_gmail_token_payload")
-@patch("src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_info")
+@patch(
+    "src.backend.integrations.google.gmail_service.Credentials.from_authorized_user_info"
+)
 def test_ensure_credentials_refreshes_db_tokens_and_persists(
     mock_info_loader,
     mock_get_payload,

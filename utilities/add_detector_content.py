@@ -23,7 +23,7 @@ result = upsert_text_for_concept(
     predicate="hasContent",
     text=prompt_text,
     lang="en-NZ",
-    context={"text_type": "NL"}
+    context={"text_type": "NL"},
 )
 
 print(f"Result: {result}")

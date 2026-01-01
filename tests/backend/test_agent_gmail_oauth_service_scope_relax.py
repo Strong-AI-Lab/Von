@@ -18,7 +18,9 @@ def test_oauthlib_scope_change_is_warning_exception() -> None:
     )
 
     with pytest.raises(Warning):
-        parse_token_response(body, scope="https://www.googleapis.com/auth/gmail.readonly")
+        parse_token_response(
+            body, scope="https://www.googleapis.com/auth/gmail.readonly"
+        )
 
 
 def test_agent_gmail_oauth_relaxes_token_scope(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -41,7 +43,9 @@ def test_agent_gmail_oauth_relaxes_token_scope(monkeypatch: pytest.MonkeyPatch) 
                     "scope": "openid https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email",
                 }
             )
-            parse_token_response(body, scope="https://www.googleapis.com/auth/gmail.readonly")
+            parse_token_response(
+                body, scope="https://www.googleapis.com/auth/gmail.readonly"
+            )
 
     class DummyProfile:
         scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
