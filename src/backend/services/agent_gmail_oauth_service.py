@@ -30,7 +30,9 @@ DEFAULT_AGENT_GMAIL_OAUTH_REDIRECT_URI = (
 )
 
 AGENT_GMAIL_OAUTH_REDIRECT_URI_ENV_VAR = "VON_AGENT_GMAIL_OAUTH_REDIRECT_URI"
-AGENT_GMAIL_OAUTH_CLIENT_SECRET_PATH_ENV_VAR = "VON_AGENT_GMAIL_OAUTH_CLIENT_SECRET_PATH"
+AGENT_GMAIL_OAUTH_CLIENT_SECRET_PATH_ENV_VAR = (
+    "VON_AGENT_GMAIL_OAUTH_CLIENT_SECRET_PATH"
+)
 AGENT_GMAIL_OAUTH_PROMPT_ENV_VAR = "VON_AGENT_GMAIL_OAUTH_PROMPT"
 
 
@@ -59,7 +61,10 @@ class AgentGmailOAuthService:
         return get_profile(profile_id, self._profiles or load_profiles_from_env())
 
     def _get_redirect_uri(self) -> str:
-        return os.getenv(AGENT_GMAIL_OAUTH_REDIRECT_URI_ENV_VAR) or DEFAULT_AGENT_GMAIL_OAUTH_REDIRECT_URI
+        return (
+            os.getenv(AGENT_GMAIL_OAUTH_REDIRECT_URI_ENV_VAR)
+            or DEFAULT_AGENT_GMAIL_OAUTH_REDIRECT_URI
+        )
 
     def _get_client_secret_path(self, *, profile_id: str) -> str:
         override = os.getenv(AGENT_GMAIL_OAUTH_CLIENT_SECRET_PATH_ENV_VAR)
@@ -93,7 +98,9 @@ class AgentGmailOAuthService:
 
     def get_authorisation_url(self, *, profile_id: str) -> tuple[str, str]:
         flow = self._build_flow(profile_id=profile_id)
-        prompt = os.getenv(AGENT_GMAIL_OAUTH_PROMPT_ENV_VAR, "consent").strip() or "consent"
+        prompt = (
+            os.getenv(AGENT_GMAIL_OAUTH_PROMPT_ENV_VAR, "consent").strip() or "consent"
+        )
 
         authorisation_url, state = flow.authorization_url(
             access_type="offline",
@@ -135,7 +142,9 @@ class AgentGmailOAuthService:
         try:
             token_payload = json.loads(creds.to_json())
         except Exception as exc:
-            raise AgentGmailOAuthError(f"Failed to serialise OAuth credentials: {exc}") from exc
+            raise AgentGmailOAuthError(
+                f"Failed to serialise OAuth credentials: {exc}"
+            ) from exc
 
         authorised_email = self._get_authorised_email(creds)
         expires_at = getattr(creds, "expiry", None)

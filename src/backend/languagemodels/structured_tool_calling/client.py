@@ -27,6 +27,7 @@ class LLMClientConfig:
         enable_structured_calling: Use provider-native structured calling (default True)
         fallback_to_json_text: Allow JSON-in-text parsing if structured calling fails (default True)
     """
+
     model: str
     api_key: Optional[str] = None
     base_url: Optional[str] = None

@@ -59,12 +59,14 @@ def agent_gmail_oauth_callback():
     service = _get_service()
     received_state = request.args.get("state")
 
-    def _render_popup_error(*, title: str, message: str, detail: str | None = None, status_code: int = 400):
+    def _render_popup_error(
+        *, title: str, message: str, detail: str | None = None, status_code: int = 400
+    ):
         from flask import make_response
 
-        safe_title = title.replace("\"", "&quot;")
-        safe_message = message.replace("\"", "&quot;")
-        safe_detail = (detail or "").replace("\"", "&quot;")
+        safe_title = title.replace('"', "&quot;")
+        safe_message = message.replace('"', "&quot;")
+        safe_detail = (detail or "").replace('"', "&quot;")
 
         response = f"""
         <!DOCTYPE html>
@@ -112,7 +114,9 @@ def agent_gmail_oauth_callback():
 
     provider_error = (request.args.get("error") or "").strip()
     if provider_error:
-        provider_error_description = (request.args.get("error_description") or "").strip()
+        provider_error_description = (
+            request.args.get("error_description") or ""
+        ).strip()
         return _render_popup_error(
             title="Agent Gmail authorisation failed",
             message="Google returned an error during authorisation.",

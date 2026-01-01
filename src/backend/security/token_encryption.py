@@ -33,7 +33,9 @@ def get_fernet(*, env_var: str = DEFAULT_GMAIL_TOKEN_KEY_ENV_VAR) -> Fernet:
     return Fernet(_load_fernet_key(env_var=env_var))
 
 
-def encrypt_json(payload: Mapping[str, Any], *, env_var: str = DEFAULT_GMAIL_TOKEN_KEY_ENV_VAR) -> str:
+def encrypt_json(
+    payload: Mapping[str, Any], *, env_var: str = DEFAULT_GMAIL_TOKEN_KEY_ENV_VAR
+) -> str:
     """Encrypt a JSON-serialisable mapping and return a string token."""
 
     try:
@@ -47,7 +49,9 @@ def encrypt_json(payload: Mapping[str, Any], *, env_var: str = DEFAULT_GMAIL_TOK
     return token.decode("utf-8")
 
 
-def decrypt_json(token: str, *, env_var: str = DEFAULT_GMAIL_TOKEN_KEY_ENV_VAR) -> dict[str, Any]:
+def decrypt_json(
+    token: str, *, env_var: str = DEFAULT_GMAIL_TOKEN_KEY_ENV_VAR
+) -> dict[str, Any]:
     """Decrypt a token into a dict.
 
     Raises TokenEncryptionError on any failure.

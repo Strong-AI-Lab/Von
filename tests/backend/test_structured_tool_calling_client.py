@@ -46,7 +46,9 @@ class TestGetLLMClient:
 
     def test_openai_client_creation(self):
         """Test factory creates OpenAIClient for OpenAI models."""
-        from src.backend.languagemodels.structured_tool_calling.providers import OpenAIClient
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
 
         config = LLMClientConfig(model="gpt-4")
         client = get_llm_client(config)
@@ -55,7 +57,9 @@ class TestGetLLMClient:
 
     def test_gemini_client_creation(self, monkeypatch):
         """Test factory creates GeminiClient for Gemini models."""
-        from src.backend.languagemodels.structured_tool_calling.providers import GeminiClient
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            GeminiClient,
+        )
 
         # Mock the google.genai.Client to avoid requiring an actual API key
         import sys
@@ -83,7 +87,9 @@ class TestGetLLMClient:
 
     def test_ollama_client_creation(self):
         """Test factory creates OllamaClient for Ollama models."""
-        from src.backend.languagemodels.structured_tool_calling.providers import OllamaClient
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OllamaClient,
+        )
 
         config = LLMClientConfig(model="llama2")
         client = get_llm_client(config)
@@ -92,7 +98,9 @@ class TestGetLLMClient:
 
     def test_unknown_model_defaults_to_ollama(self):
         """Test that unknown models default to Ollama."""
-        from src.backend.languagemodels.structured_tool_calling.providers import OllamaClient
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OllamaClient,
+        )
 
         config = LLMClientConfig(model="unknown-model-v1")
         client = get_llm_client(config)
@@ -108,45 +116,60 @@ class TestLLMClientBaseValidation:
         config = LLMClientConfig(model="gpt-4")
 
         # Use OpenAIClient as concrete implementation
-        from src.backend.languagemodels.structured_tool_calling.providers import OpenAIClient
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
         client = OpenAIClient(config)
 
         # Valid schema with 'type'
         schema_with_type = {"type": "object", "properties": {}}
-        client._validate_input_schema(ToolDefinition(
-            name="test",
-            description="Test",
-            input_schema=schema_with_type,
-        ))  # Should not raise
+        client._validate_input_schema(
+            ToolDefinition(
+                name="test",
+                description="Test",
+                input_schema=schema_with_type,
+            )
+        )  # Should not raise
 
     def test_validate_input_schema_with_properties(self):
         """Test that schema with 'properties' passes validation."""
         config = LLMClientConfig(model="gpt-4")
-        from src.backend.languagemodels.structured_tool_calling.providers import OpenAIClient
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
         client = OpenAIClient(config)
 
         # Valid schema with 'properties'
         schema_with_props = {
             "properties": {"arg": {"type": "string"}},
         }
-        client._validate_input_schema(ToolDefinition(
-            name="test",
-            description="Test",
-            input_schema=schema_with_props,
-        ))  # Should not raise
+        client._validate_input_schema(
+            ToolDefinition(
+                name="test",
+                description="Test",
+                input_schema=schema_with_props,
+            )
+        )  # Should not raise
 
     def test_validate_input_schema_invalid(self):
         """Test that invalid schemas raise ValueError."""
         config = LLMClientConfig(model="gpt-4")
-        from src.backend.languagemodels.structured_tool_calling.providers import OpenAIClient
+        from src.backend.languagemodels.structured_tool_calling.providers import (
+            OpenAIClient,
+        )
+
         client = OpenAIClient(config)
 
         # Invalid schema (neither 'type' nor 'properties')
         invalid_schema = {"description": "No type or properties"}
 
         with pytest.raises(ValueError, match="must have 'type' or 'properties'"):
-            client._validate_input_schema(ToolDefinition(
-                name="test",
-                description="Test",
-                input_schema=invalid_schema,
-            ))
+            client._validate_input_schema(
+                ToolDefinition(
+                    name="test",
+                    description="Test",
+                    input_schema=invalid_schema,
+                )
+            )
