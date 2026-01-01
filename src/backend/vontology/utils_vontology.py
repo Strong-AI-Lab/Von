@@ -3723,7 +3723,10 @@ def _ensure_import_description_relation(
     if not isinstance(description_text, str):
         return
 
-    normalised = " ".join(description_text.split()).strip()
+    # Preserve formatting (newlines/indentation) for Markdown, but use a
+    # whitespace-collapsed comparison to avoid creating duplicates.
+    stored_text = description_text.replace("\r\n", "\n").strip()
+    normalised = re.sub(r"\s+", " ", stored_text).strip().lower()
     if not normalised:
         return
 
@@ -3735,13 +3738,16 @@ def _ensure_import_description_relation(
         )
         for relation in existing:
             text = relation.get("text")
-            if isinstance(text, str) and " ".join(text.split()).strip() == normalised:
+            if (
+                isinstance(text, str)
+                and re.sub(r"\s+", " ", text.strip()).strip().lower() == normalised
+            ):
                 return  # Already present, nothing to do
 
         text_service.upsert_text_for_concept(
             subject_concept_id=concept_id,
             predicate="hasDescription",
-            text=normalised,
+            text=stored_text,
             lang="en-NZ",
         )
     except Exception as exc:  # pragma: no cover - guard import path during import jobs
