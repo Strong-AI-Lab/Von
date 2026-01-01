@@ -30,8 +30,20 @@ def _now() -> datetime:
 
 
 def _normalize_text(raw: str) -> str:
-    """Collapse whitespace for fingerprint/dedup purposes (preserves none of the original formatting)."""
-    return re.sub(r"\s+", " ", raw.strip())
+    """Normalise text for fingerprint/dedup purposes.
+
+    This is deliberately *less* aggressive than a full whitespace collapse.
+    Newlines are meaningful for Markdown and other formatted text, so we preserve
+    them in the fingerprint and only normalise intra-line whitespace.
+    """
+    text = raw.strip()
+    # Normalise line endings so equivalent text across platforms dedups.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Collapse runs of non-newline whitespace within lines.
+    text = re.sub(r"[\t\f\v ]+", " ", text)
+    # Strip incidental spaces around newlines (does not remove the newlines).
+    text = re.sub(r" *\n *", "\n", text)
+    return text
 
 
 def _prepare_persisted_text(raw: str) -> str:

@@ -757,6 +757,15 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
             f"Removed concept_id from update payload to prevent duplicate key error"
         )
 
+    # Prevent reintroducing legacy storage for descriptions.
+    # Canonical descriptive text must be stored via text relations (predicate hasDescription).
+    if "description" in update_data:
+        logger.warning(
+            "update_concept: Ignoring legacy 'description' field update for %s; use hasDescription text relations instead",
+            concept_id,
+        )
+        del update_data["description"]
+
     # Prepare the update document for MongoDB
     # We will use $set to update specified fields and also set the new updated_at timestamp.
     update_payload = {"$set": {}}
