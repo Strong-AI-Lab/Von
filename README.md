@@ -275,7 +275,6 @@ This means you can:
 - ✅ Use Von commercially
 - ✅ Modify and distribute
 - ✅ Use Von in proprietary software
-- ✅ Grant patent rights
 
 With the requirement to:
 - 📝 Include copyright notice
