@@ -202,6 +202,89 @@
             </div>
         </section>
 
+        <section id="speech-settings">
+            <h2>Speech</h2>
+            <p class="settings-note">These preferences are stored in this browser and used by the Chat tab for
+                text-to-speech and dictation.</p>
+
+            <div class="speech-settings-panel">
+                <div class="speech-settings-grid">
+                    <section class="speech-settings-section" aria-label="Text-to-speech settings">
+                        <h3 class="speech-settings-title">Text-to-speech</h3>
+
+                        <div class="speech-settings-row">
+                            <label class="speech-settings-label" for="settingsTtsVoiceSelect">Voice</label>
+                            <select id="settingsTtsVoiceSelect" class="speech-settings-select">
+                                <option value="">Default</option>
+                            </select>
+                        </div>
+
+                        <div class="speech-settings-row">
+                            <label class="speech-settings-label" for="settingsTtsLanguageInput">Language</label>
+                            <input id="settingsTtsLanguageInput" class="speech-settings-input" type="text"
+                                inputmode="text" placeholder="e.g., en-NZ" />
+                        </div>
+
+                        <div class="speech-settings-row">
+                            <label class="speech-settings-label" for="settingsTtsRateRange">Rate</label>
+                            <input id="settingsTtsRateRange" class="speech-settings-range" type="range" min="0.5"
+                                max="2" step="0.1" />
+                            <span id="settingsTtsRateValue" class="speech-settings-value"
+                                aria-label="Text-to-speech rate"></span>
+                        </div>
+
+                        <div class="speech-settings-row">
+                            <label class="speech-settings-label" for="settingsTtsPitchRange">Pitch</label>
+                            <input id="settingsTtsPitchRange" class="speech-settings-range" type="range" min="0" max="2"
+                                step="0.1" />
+                            <span id="settingsTtsPitchValue" class="speech-settings-value"
+                                aria-label="Text-to-speech pitch"></span>
+                        </div>
+
+                        <div class="speech-settings-row">
+                            <label class="speech-settings-label" for="settingsTtsVolumeRange">Volume</label>
+                            <input id="settingsTtsVolumeRange" class="speech-settings-range" type="range" min="0"
+                                max="1" step="0.05" />
+                            <span id="settingsTtsVolumeValue" class="speech-settings-value"
+                                aria-label="Text-to-speech volume"></span>
+                        </div>
+
+                        <div class="speech-settings-actions">
+                            <button id="settingsTtsPreviewButton" class="btn btn-secondary" type="button"
+                                title="Preview the current voice settings">
+                                Preview voice
+                            </button>
+                        </div>
+                    </section>
+
+                    <section class="speech-settings-section" aria-label="Dictation settings">
+                        <h3 class="speech-settings-title">Dictation</h3>
+
+                        <div class="speech-settings-row">
+                            <label class="speech-settings-label" for="settingsSttLanguageInput">Language</label>
+                            <input id="settingsSttLanguageInput" class="speech-settings-input" type="text"
+                                inputmode="text" placeholder="e.g., en-NZ" />
+                        </div>
+
+                        <div class="speech-settings-row">
+                            <label class="speech-settings-checkbox">
+                                <input id="settingsSttContinuousToggle" type="checkbox" />
+                                Continuous
+                            </label>
+                            <label class="speech-settings-checkbox">
+                                <input id="settingsSttInterimToggle" type="checkbox" />
+                                Interim results
+                            </label>
+                        </div>
+
+                        <p id="settingsSpeechSupportNote" class="speech-settings-note">
+                            Availability depends on your browser.
+                        </p>
+                    </section>
+                </div>
+            </div>
+        </section>
+
         <section id="database-info">
             <h2>Database</h2>
             <div id="dbInfoContent">
