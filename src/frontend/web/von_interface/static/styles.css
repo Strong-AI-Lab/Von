@@ -1741,6 +1741,19 @@ button:hover {
     background: #f1f5f9;
 }
 
+/* Chat speech controls */
+.btn-mini.chat-tts-button.active {
+    background: #0f172a;
+    color: #fff;
+    border-color: #0f172a;
+}
+
+.btn.active-dictation {
+    background: #0f172a;
+    color: #fff;
+    border-color: #0f172a;
+}
+
 /* Secondary variant (for non-primary actions like Reset) */
 /* Delete exchange button styling */
 .btn-delete-exchange {
