@@ -174,10 +174,14 @@ class SwiftBlobStore:
         self._conn = self._create_connection()
 
     def _create_connection(self):
+        # Import lazily via importlib so type-checking doesn't require
+        # openstacksdk unless Swift support is actually used.
         try:
-            import openstack
-            from openstack import connection
-        except Exception as exc:  # pragma: no cover
+            import importlib
+
+            openstack = importlib.import_module("openstack")
+            connection_mod = importlib.import_module("openstack.connection")
+        except ModuleNotFoundError as exc:  # pragma: no cover
             raise RuntimeError(
                 "OpenStack Swift backend requires 'openstacksdk'. Add it via PDM."
             ) from exc
@@ -201,7 +205,7 @@ class SwiftBlobStore:
         project_domain_name = os.environ.get("OS_PROJECT_DOMAIN_NAME", "Default")
         region_name = os.environ.get("OS_REGION_NAME")
 
-        return connection.Connection(
+        return connection_mod.Connection(
             auth_url=auth_url,
             username=username,
             password=password,
