@@ -27,6 +27,33 @@ const promptConceptMetaCache = new Map();
 // Map<fullId, Promise<meta|null>>
 const promptConceptMetaPending = new Map();
 
+function computeEffectiveOverlayScrollTop(textarea, overlayInner) {
+    if (!textarea || !overlayInner) {
+        return 0;
+    }
+
+    const scrollTop = Math.max(0, Number(textarea.scrollTop) || 0);
+    const clientHeight = Math.max(0, Number(textarea.clientHeight) || 0);
+    const textareaScrollHeight = Math.max(0, Number(textarea.scrollHeight) || 0);
+    const overlayScrollHeight = Math.max(0, Number(overlayInner.scrollHeight) || 0);
+
+    const textareaMaxScroll = Math.max(0, textareaScrollHeight - clientHeight);
+    const overlayMaxScroll = Math.max(0, overlayScrollHeight - clientHeight);
+
+    // If the overlay isn't taller than the textarea scroll range, use the native scrollTop.
+    if (overlayMaxScroll <= textareaMaxScroll + 0.5) {
+        return scrollTop;
+    }
+
+    // If the textarea can't scroll at all, we have no input range to map.
+    if (textareaMaxScroll <= 0.5) {
+        return 0;
+    }
+
+    const ratio = Math.max(0, Math.min(1, scrollTop / textareaMaxScroll));
+    return ratio * overlayMaxScroll;
+}
+
 export function makeNonTriggerVontologyId(fullId) {
     const raw = String(fullId ?? '');
     return raw.replace(/^#([Vv])#/, (_, v) => `#${v}${ZWSP}#`);
@@ -527,6 +554,8 @@ export function initializePromptCartoucheOverlay(textarea) {
     let scheduledId = null;
     let scheduledVia = null;
 
+    let scrollSyncTimer = null;
+
     const schedule = (fn) => {
         if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
             scheduledVia = 'raf';
@@ -550,6 +579,27 @@ export function initializePromptCartoucheOverlay(textarea) {
         scheduledVia = null;
     };
 
+    const syncScrollTransforms = () => {
+        const effectiveScrollTop = computeEffectiveOverlayScrollTop(textarea, parts.inner);
+        try {
+            parts.inner.style.transform = `translateY(-${effectiveScrollTop}px)`;
+        } catch (_) {
+            // Ignore.
+        }
+    };
+
+    const scheduleScrollSync = () => {
+        if (scrollSyncTimer != null) {
+            return;
+        }
+
+        // Use setTimeout so Jest fake timers can deterministically flush it.
+        scrollSyncTimer = window.setTimeout(() => {
+            scrollSyncTimer = null;
+            syncScrollTransforms();
+        }, 0);
+    };
+
     const updateOverlayCaret = () => {
         cancelSchedule();
 
@@ -566,6 +616,10 @@ export function initializePromptCartoucheOverlay(textarea) {
             return;
         }
 
+        // Cartouche hydration can change wrapping/height without changing textarea.scrollTop.
+        // Keep the overlay scroll translation in sync before measuring caret position.
+        syncScrollTransforms();
+
         // If the real textarea caret ended up inside a token (common after a click, because the
         // hidden token text length differs from the rendered cartouche width), snap it out before
         // measuring and before the next keystroke mutates the token.
@@ -579,7 +633,8 @@ export function initializePromptCartoucheOverlay(textarea) {
 
         // Mirror the scroll translation so measurements match visible overlay.
         try {
-            parts.mirror.style.transform = `translateY(-${textarea.scrollTop}px)`;
+            const effectiveScrollTop = computeEffectiveOverlayScrollTop(textarea, parts.inner);
+            parts.mirror.style.transform = `translateY(-${effectiveScrollTop}px)`;
         } catch (_) {
             // Ignore.
         }
@@ -607,7 +662,11 @@ export function initializePromptCartoucheOverlay(textarea) {
     // Keep overlay updated.
     const rerender = () => {
         renderOverlay(textarea, parts.content);
-        hydratePromptCartouches(parts.content, scheduleCaretUpdate);
+        hydratePromptCartouches(parts.content, () => {
+            scheduleScrollSync();
+            scheduleCaretUpdate();
+        });
+        scheduleScrollSync();
         scheduleCaretUpdate();
     };
 
@@ -619,15 +678,12 @@ export function initializePromptCartoucheOverlay(textarea) {
     textarea.addEventListener('focus', scheduleCaretUpdate);
     textarea.addEventListener('blur', scheduleCaretUpdate);
     textarea.addEventListener('scroll', () => {
-        try {
-            parts.inner.style.transform = `translateY(-${textarea.scrollTop}px)`;
-        } catch (_) {
-            // Ignore.
-        }
+        syncScrollTransforms();
         scheduleCaretUpdate();
     });
     window.addEventListener('resize', () => {
         syncOverlayStyles(textarea, parts.overlay, parts.inner, parts.mirror);
+        scheduleScrollSync();
         scheduleCaretUpdate();
     });
 
