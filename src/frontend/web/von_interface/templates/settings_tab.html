@@ -197,6 +197,14 @@
             <p class="settings-note">Select your active organisation context. This determines which organisation-scoped
                 content you can access in RAG queries and chat.</p>
 
+            <div class="inline-form inline-form-tight mt-2">
+                <span class="settings-note"><strong>Active namespace:</strong></span>
+                <button id="settingsActiveNamespaceValue" class="runtime-copy-button ml-2" type="button"
+                    title="Copy active namespace">—</button>
+            </div>
+            <small id="settingsActiveNamespaceHint" class="settings-note">Used to scope RAG, chat history, and knowledge
+                acquisition sessions.</small>
+
             <div id="currentOrganisationStatusMessage" class="status-message" role="alert">
                 <!-- Messages will appear here -->
             </div>

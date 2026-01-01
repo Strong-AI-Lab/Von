@@ -366,33 +366,122 @@ function renderRagSummary(ragData, pendingFallback) {
   const ragHintEl = document.getElementById('settingsRagHint');
   if (!ragSummaryEl) return;
 
+  const { summaryText, hintText, titleText } = formatRagSummaryForSettings(ragData, pendingFallback);
+  ragSummaryEl.textContent = summaryText;
+  ragSummaryEl.title = titleText;
+  if (ragHintEl) ragHintEl.textContent = hintText;
+}
+
+function formatRagSummaryForSettings(ragData, pendingFallback) {
   const pending = typeof pendingFallback === 'number' ? pendingFallback : null;
   if (!ragData) {
     if (pending === null || pending < 0) {
-      ragSummaryEl.textContent = 'Unknown';
-      if (ragHintEl) ragHintEl.textContent = 'RAG status unavailable';
-    } else if (pending === 0) {
-      ragSummaryEl.textContent = 'Idle';
-      if (ragHintEl) ragHintEl.textContent = 'No pending items to index';
-    } else {
-      ragSummaryEl.textContent = `${pending} pending`;
-      if (ragHintEl) ragHintEl.textContent = 'Pending items waiting for indexing';
+      return { summaryText: 'Unknown', hintText: 'RAG status unavailable', titleText: 'RAG status unavailable' };
     }
-    return;
+    if (pending === 0) {
+      return { summaryText: 'Idle', hintText: 'No pending items to index', titleText: 'No pending items to index' };
+    }
+    return {
+      summaryText: `${pending} pending`,
+      hintText: 'Pending items waiting for indexing',
+      titleText: `${pending} items waiting for indexing`
+    };
   }
 
-  const { indexed = 0, pending: pendingCount = 0, failed = 0, skipped = 0 } = ragData;
+  const indexed = (typeof ragData.indexed === 'number') ? ragData.indexed : 0;
+  const pendingCount = (typeof ragData.pending === 'number') ? ragData.pending : 0;
+  const failed = (typeof ragData.failed === 'number') ? ragData.failed : 0;
+  const skipped = (typeof ragData.skipped === 'number') ? ragData.skipped : 0;
+
+  const sessNs = ragData.session_namespace || null;
+  const chSessions = (typeof ragData.chat_history_sessions === 'number') ? ragData.chat_history_sessions : 0;
+  const chMessages = (typeof ragData.chat_history_messages === 'number') ? ragData.chat_history_messages : 0;
+  const chOk = (typeof ragData.chat_history_rag_success === 'number') ? ragData.chat_history_rag_success : 0;
+  const chFail = (typeof ragData.chat_history_rag_failed === 'number') ? ragData.chat_history_rag_failed : 0;
+  const hasChatCounts = Boolean(chSessions || chMessages || chOk || chFail);
+
+  const hintParts = [
+    `KA indexed=${indexed}`,
+    `pending=${pendingCount}`,
+    `failed=${failed}`,
+    `skipped=${skipped}`
+  ];
+  if (hasChatCounts) {
+    hintParts.push(`Chat indexed=${chOk}`);
+    hintParts.push(`Chat failed=${chFail}`);
+  }
+
+  const titleParts = [];
+  titleParts.push(...hintParts);
+  if (sessNs) {
+    titleParts.push(`session_ns=${sessNs}`);
+  }
+  if (hasChatCounts) {
+    titleParts.push(`Chat sessions=${chSessions}`);
+    titleParts.push(`messages=${chMessages}`);
+  }
+  const titleText = titleParts.join(' • ');
+
   if (pendingCount === 0) {
-    ragSummaryEl.textContent = `Indexed ${indexed}`;
-    if (ragHintEl) ragHintEl.textContent = `Indexed=${indexed} • Failed=${failed} • Skipped=${skipped}`;
-  } else {
-    ragSummaryEl.textContent = `Indexed ${indexed} • ${pendingCount} pending`;
-    if (ragHintEl) ragHintEl.textContent = `Indexed=${indexed} • Pending=${pendingCount} • Failed=${failed} • Skipped=${skipped}`;
+    if (hasChatCounts) {
+      if (chFail > 0) {
+        return {
+          summaryText: `KA ${indexed} • Chat ${chOk}/${chFail} failed`,
+          hintText: hintParts.join(' • '),
+          titleText
+        };
+      }
+      return {
+        summaryText: `KA ${indexed} • Chat ${chOk}`,
+        hintText: hintParts.join(' • '),
+        titleText
+      };
+    }
+    return {
+      summaryText: `KA ${indexed}`,
+      hintText: hintParts.join(' • '),
+      titleText
+    };
+  }
+
+  if (chFail > 0) {
+    return {
+      summaryText: `KA ${indexed} • ${pendingCount} pending • Chat ${chFail} failed`,
+      hintText: hintParts.join(' • '),
+      titleText
+    };
+  }
+  return {
+    summaryText: `KA ${indexed} • ${pendingCount} pending`,
+    hintText: hintParts.join(' • '),
+    titleText
+  };
+}
+
+function getPreferredRagNamespace() {
+  return (
+    safeLocalStorageGet('current_user_namespace') ||
+    safeLocalStorageGet('von_namespace') ||
+    ''
+  );
+}
+
+function renderActiveNamespace() {
+  const nsEl = document.getElementById('settingsActiveNamespaceValue');
+  const hintEl = document.getElementById('settingsActiveNamespaceHint');
+  if (!nsEl) return;
+
+  const ns = getPreferredRagNamespace();
+  nsEl.textContent = ns || '—';
+  if (hintEl) {
+    hintEl.textContent = ns
+      ? 'Used to scope RAG, chat history, and knowledge acquisition sessions.'
+      : 'No active namespace is set yet.';
   }
 }
 
 async function loadRagStatus(pendingFallback) {
-  const ns = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
+  const ns = getPreferredRagNamespace();
   const url = ns ? `/admin/rag_status?namespace=${encodeURIComponent(ns)}` : '/admin/rag_status';
   try {
     const controller = new AbortController();
@@ -406,6 +495,16 @@ async function loadRagStatus(pendingFallback) {
     console.warn('Failed to load RAG status (settings)', err);
     renderRagSummary(null, pendingFallback);
   }
+}
+
+// Export for testing
+export function __testOnly_formatRagSummaryForSettings(ragData, pendingFallback) {
+  return formatRagSummaryForSettings(ragData, pendingFallback);
+}
+
+// Export for testing
+export function __testOnly_getPreferredRagNamespace() {
+  return getPreferredRagNamespace();
 }
 
 async function loadRuntimeStatus(manualRefresh = false) {
@@ -445,6 +544,7 @@ async function loadRuntimeStatus(manualRefresh = false) {
       }
     }
 
+    renderActiveNamespace();
     await loadRagStatus(ragPending);
   } catch (err) {
     if (err && err.name === 'AbortError') {
@@ -469,6 +569,7 @@ function setupRuntimeSection() {
   wireCopyButton(document.getElementById('settingsLocalIpValue'));
   wireCopyButton(document.getElementById('settingsPublicIpValue'));
   wireCopyButton(document.getElementById('settingsPidValue'));
+  wireCopyButton(document.getElementById('settingsActiveNamespaceValue'));
 
   const refreshBtn = document.getElementById('refreshRuntimeButton');
   if (refreshBtn) {
@@ -794,7 +895,13 @@ async function loadAndDisplaySettings() {
       // Set up listener for org switches (triggers RAG namespace update)
       setupOrgSwitchListener((orgId, namespace) => {
         console.log(`Organisation switched: ${orgId || 'personal'}, namespace: ${namespace}`);
-        // TODO: Trigger RAG namespace update when org switches
+        try {
+          if (namespace) {
+            localStorage.setItem('current_user_namespace', namespace);
+          }
+        } catch { }
+        renderActiveNamespace();
+        void loadRagStatus(null);
       });
     } catch (error) {
       console.error('Error initializing organisation selector:', error);
