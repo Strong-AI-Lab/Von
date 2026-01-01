@@ -2628,6 +2628,33 @@ async function fetchVontologyContent(identifier, containerElement) {
     const data = await response.json();
     console.log(`[fetchVontologyContent] Response data:`, data);
 
+    // Helper: load raw hasDescription text (authoritative, newline-preserving)
+    const loadDescriptionIntoTextarea = async (conceptId) => {
+      try {
+        if (!(elements && elements.descriptionTextarea)) return;
+        if (!conceptId) {
+          elements.descriptionTextarea.value = '';
+          return;
+        }
+        const encodedId = encodeURIComponent(conceptId);
+        const descResp = await vontologyFetch(`/api/concepts/${encodedId}/texts?predicate=hasDescription&limit=1`);
+        if (!descResp.ok) {
+          // Do not overwrite with lossy fallbacks.
+          elements.descriptionTextarea.value = '';
+          return;
+        }
+        const descData = await descResp.json().catch(() => ({}));
+        const text = (descData && Array.isArray(descData.texts) && descData.texts.length)
+          ? (descData.texts[0]?.text || '')
+          : '';
+        elements.descriptionTextarea.value = text;
+      } catch (e) {
+        try {
+          if (elements && elements.descriptionTextarea) elements.descriptionTextarea.value = '';
+        } catch (_) { }
+      }
+    };
+
     if (data.error) {
       console.log(`[fetchVontologyContent] API returned error: ${data.error}`);
       containerElement.innerHTML = `<p style="color: red;">Error: ${data.error}</p>`;
@@ -2667,7 +2694,9 @@ async function fetchVontologyContent(identifier, containerElement) {
       // Safely set the description textarea if it exists (placeholder/tab may not be mounted yet)
       try {
         if (elements && elements.descriptionTextarea) {
-          elements.descriptionTextarea.value = data.description || '';
+          // node_content intentionally suppresses top-level `description`; fetch raw text separately.
+          const conceptId = data.concept_id || (data.raw_doc && data.raw_doc.concept_id) || identifier;
+          await loadDescriptionIntoTextarea(conceptId);
         } else {
           console.log('[fetchVontologyContent] descriptionTextarea not available yet; skipping setting its value.');
         }

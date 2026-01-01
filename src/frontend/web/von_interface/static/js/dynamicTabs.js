@@ -104,6 +104,22 @@ function upgradeActionButtonIcons(scope = document) {
     try { scope.querySelectorAll('.round-icon-button').forEach(btn => injectIconContent(btn)); } catch (_) { }
 }// Utility: Copy text to clipboard with modern API and fallback
 
+// Fetch wrapper for concept APIs: preserves user context via X-User-Concept-ID header.
+// Without this, some endpoints can return HTML (e.g., login/session pages) which then triggers
+// lossy fallbacks (and can clobber whitespace/newlines on reload).
+function conceptApiFetch(url, options = {}) {
+    try {
+        const userConceptId = getCurrentUserConceptId();
+        if (!userConceptId) return fetch(url, options);
+
+        const baseHeaders = (options && typeof options === 'object' ? options.headers : null) || {};
+        const mergedHeaders = { ...baseHeaders, 'X-User-Concept-ID': userConceptId };
+        return fetch(url, { ...options, headers: mergedHeaders });
+    } catch (_) {
+        return fetch(url, options);
+    }
+}
+
 function updateVerticalResizeHandleIfOverflow(el) {
     if (!el || typeof el !== 'object') return;
     try {
@@ -2015,7 +2031,7 @@ export async function updateConceptDescription(conceptId, description) {
     try {
         if (!conceptId || typeof description !== 'string') return false;
         const encodedId = encodeURIComponent(conceptId);
-        const resp = await fetch(`/api/concepts/${encodedId}/description`, {
+        const resp = await conceptApiFetch(`/api/concepts/${encodedId}/description`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ description })
@@ -3178,7 +3194,7 @@ async function populateTypeDescription(conceptId, suffix) {
             };
             try {
                 const primaryUrl = `/api/concepts/${encodedId}/texts?predicate=hasDescription&limit=1`;
-                let res = await fetch(primaryUrl);
+                let res = await conceptApiFetch(primaryUrl);
                 let data = await res.json().catch(() => ({}));
                 if (res.ok && Array.isArray(data.texts) && data.texts.length) {
                     const desc = data.texts[0];
@@ -3188,28 +3204,9 @@ async function populateTypeDescription(conceptId, suffix) {
                     console.debug('[dynamicTabs] Description loaded (primary API)', { conceptId, relationId });
                     return;
                 }
-                console.debug('[dynamicTabs] Primary description API returned no data – attempting legacy fallback', { status: res.status, bodyKeys: Object.keys(data || {}) });
-                const legacyUrl = `/vontology/api/vontology/node_content?identifier=${encodedId}`;
-                res = await fetch(legacyUrl);
-                if (res.ok) {
-                    data = await res.json().catch(() => ({}));
-                    const legacyDesc = data.description || data.content_html;
-                    if (legacyDesc) {
-                        // If only HTML (legacy) provided, preserve a text-only raw variant for editing
-                        if (data.content_html && !data.description) {
-                            // Strip tags for the raw editable form
-                            const plain = legacyDesc.replace(/<[^>]+>/g, '');
-                            applyRawDescription(plain);
-                            textarea.value = plain;
-                        } else {
-                            applyRawDescription(legacyDesc);
-                            textarea.value = legacyDesc || '';
-                        }
-                        relationId = null;
-                        console.debug('[dynamicTabs] Description loaded (legacy node_content)', { conceptId });
-                        return;
-                    }
-                }
+                console.debug('[dynamicTabs] Primary description API returned no data – attempting legacy fallbacks', { status: res.status, bodyKeys: Object.keys(data || {}) });
+
+                // Prefer raw text-relations fallback before node_content (node_content may only have rendered HTML).
                 const relUrl = `/vontology/api/vontology/text_relations?concept_id=${encodedId}&limit=500`;
                 res = await fetch(relUrl);
                 if (res.ok) {
@@ -3221,6 +3218,34 @@ async function populateTypeDescription(conceptId, suffix) {
                         applyRawDescription(found.text || '');
                         textarea.value = found.text || '';
                         console.debug('[dynamicTabs] Description loaded (relations list fallback)', { conceptId, relationId });
+                        return;
+                    }
+                }
+
+                // Final fallback: node_content (may provide md_content; if only HTML, convert carefully).
+                const legacyUrl = `/vontology/api/vontology/node_content?identifier=${encodedId}`;
+                res = await fetch(legacyUrl);
+                if (res.ok) {
+                    data = await res.json().catch(() => ({}));
+                    const legacyRaw = data.description || data.md_content || null;
+                    if (legacyRaw !== null) {
+                        applyRawDescription(legacyRaw);
+                        textarea.value = legacyRaw || '';
+                        relationId = null;
+                        console.debug('[dynamicTabs] Description loaded (legacy node_content raw text)', { conceptId });
+                        return;
+                    }
+
+                    // Last-resort: if the backend only provided rendered HTML, derive a paragraph-preserving
+                    // editable representation using DOM parsing.
+                    if (data.content_html) {
+                        const tmp = document.createElement('div');
+                        tmp.innerHTML = data.content_html;
+                        const plain = extractDescriptionPlainText(tmp);
+                        applyRawDescription(plain);
+                        textarea.value = plain;
+                        relationId = null;
+                        console.debug('[dynamicTabs] Description loaded (legacy node_content html->plain)', { conceptId });
                         return;
                     }
                 }
@@ -3308,18 +3333,18 @@ async function populateTypeDescription(conceptId, suffix) {
             });
         }
         newSave.addEventListener('click', async () => {
-            const newText = textarea.value.trim();
-            if (!newText) {
+            const rawText = typeof textarea.value === 'string' ? textarea.value : '';
+            if (!rawText.trim()) {
                 statusEl.textContent = 'Cannot save empty description.';
                 return;
             }
             statusEl.textContent = 'Saving...';
             try {
                 // JVNAUTOSCI-570 regression fix: use dedicated dual-write description endpoint
-                const ok = await updateConceptDescription(conceptId, newText);
+                const ok = await updateConceptDescription(conceptId, rawText);
                 if (!ok) throw new Error('Failed to persist description');
 
-                applyRawDescription(newText);
+                applyRawDescription(rawText);
                 statusEl.textContent = 'Saved';
                 textarea.classList.add('hidden');
                 display.classList.remove('hidden');
@@ -3370,7 +3395,7 @@ async function populateTypeDescription(conceptId, suffix) {
                 statusEl.textContent = 'Deleting...'; newDel.disabled = true;
                 try {
                     if (relationId) {
-                        const resp = await fetch(`/api/concepts/${encodedId}/texts/${encodeURIComponent(relationId)}`, { method: 'DELETE' });
+                        const resp = await conceptApiFetch(`/api/concepts/${encodedId}/texts/${encodeURIComponent(relationId)}`, { method: 'DELETE' });
                         const data = await resp.json().catch(() => ({}));
                         if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
                     }
