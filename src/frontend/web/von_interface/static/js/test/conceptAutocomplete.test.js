@@ -1,4 +1,4 @@
-import { getTriggerSearchText } from '../components/conceptAutocomplete.js';
+import { buildConceptSearchUrl, getTriggerSearchText } from '../components/conceptAutocomplete.js';
 
 describe('conceptAutocomplete trigger parsing', () => {
     test('returns null when no trigger present', () => {
@@ -28,5 +28,15 @@ describe('conceptAutocomplete trigger parsing', () => {
         const result = getTriggerSearchText(text, cursorPos);
         expect(result).not.toBeNull();
         expect(result.searchText).toBe('organisational_role');
+    });
+});
+
+describe('conceptAutocomplete search URL building', () => {
+    test('includes individuals and substring fallback (aligns with global search)', () => {
+        const url = buildConceptSearchUrl('ger');
+        expect(url).toContain('/vontology/api/vontology/search?');
+        expect(url).toContain('q=ger');
+        expect(url).toContain('include_individuals=true');
+        expect(url).toContain('fallback_substring=true');
     });
 });

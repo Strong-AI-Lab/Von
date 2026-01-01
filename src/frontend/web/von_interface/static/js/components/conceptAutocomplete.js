@@ -22,6 +22,8 @@ const MAX_RESULTS = 8;
 const SEARCH_API = '/vontology/api/vontology/search';
 const SEARCH_PARAM = 'q';
 const MAX_QUERY_CHARS = 80;
+const INCLUDE_INDIVIDUALS = true;
+const FALLBACK_SUBSTRING = true;
 
 let autocompleteState = {
     isOpen: false,
@@ -76,6 +78,17 @@ export function closeAutocomplete() {
     autocompleteState.results = [];
 }
 
+// Export for testing
+export function buildConceptSearchUrl(query) {
+    const q = String(query ?? '').trim();
+    const params = new URLSearchParams();
+    params.set(SEARCH_PARAM, q);
+    params.set('limit', String(MAX_RESULTS));
+    if (INCLUDE_INDIVIDUALS) params.set('include_individuals', 'true');
+    if (FALLBACK_SUBSTRING) params.set('fallback_substring', 'true');
+    return `${SEARCH_API}?${params.toString()}`;
+}
+
 /**
  * Search for concepts matching the query
  */
@@ -86,9 +99,7 @@ async function searchConcepts(query) {
             return;
         }
 
-        const response = await fetch(
-            `${SEARCH_API}?${SEARCH_PARAM}=${encodeURIComponent(query)}&limit=${MAX_RESULTS}`
-        );
+        const response = await fetch(buildConceptSearchUrl(query));
 
         if (!response.ok) {
             console.warn('Concept search failed:', response.status);
