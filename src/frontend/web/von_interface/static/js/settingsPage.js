@@ -12,6 +12,12 @@ import {
   showStatusMessage,
   verifyOllamaHost
 } from './settings.js';
+import {
+  getSpeechSynthesisVoices,
+  isSpeechRecognitionSupported,
+  isTextToSpeechSupported,
+  speakText
+} from './speech.js';
 
 // LocalStorage keys for client-side persistence (no DB storage)
 const LS_USER_KEY = 'von_current_user';
@@ -19,6 +25,14 @@ const LS_ORG_KEY = 'von_current_org';
 const LS_LANG_KEY = 'von_preferred_language';
 const LS_AUTO_RELOAD = 'von:autoReloadOnRestart';
 const LS_GMAIL_PROFILE = 'von_gmail_profile';
+const LS_TTS_VOICE_URI = 'chatTtsVoiceUri';
+const LS_TTS_LANGUAGE = 'chatTtsLanguage';
+const LS_TTS_RATE = 'chatTtsRate';
+const LS_TTS_PITCH = 'chatTtsPitch';
+const LS_TTS_VOLUME = 'chatTtsVolume';
+const LS_STT_LANGUAGE = 'chatSttLanguage';
+const LS_STT_CONTINUOUS = 'chatSttContinuous';
+const LS_STT_INTERIM_RESULTS = 'chatSttInterimResults';
 const RUNTIME_REFRESH_MS = 12000;
 
 let runtimeIntervalId = null;
@@ -54,6 +68,297 @@ function wireCopyButton(btn) {
       console.warn('Copy failed', err);
     }
   });
+}
+
+function safeLocalStorageGet(key) {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeLocalStorageSet(key, value) {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(key, value);
+  } catch {
+    // Ignore.
+  }
+}
+
+function clampNumber(value, minValue, maxValue, fallbackValue) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return fallbackValue;
+  }
+  return Math.min(Math.max(num, minValue), maxValue);
+}
+
+function normaliseLanguageSetting(value) {
+  return String(value ?? '').trim();
+}
+
+function parseBoolSetting(value, fallbackValue) {
+  if (value === null || value === undefined) {
+    return fallbackValue;
+  }
+  return String(value) === 'true';
+}
+
+function getPreferredLanguage() {
+  const lang = String(safeLocalStorageGet(LS_LANG_KEY) || '').trim();
+  return lang || 'en-NZ';
+}
+
+function getSpeechSettingsFromStorage() {
+  const preferredLanguage = getPreferredLanguage();
+  const ttsVoiceUri = String(safeLocalStorageGet(LS_TTS_VOICE_URI) || '').trim();
+  const ttsLanguage = normaliseLanguageSetting(safeLocalStorageGet(LS_TTS_LANGUAGE)) || preferredLanguage;
+  const ttsRate = clampNumber(safeLocalStorageGet(LS_TTS_RATE), 0.5, 2, 1);
+  const ttsPitch = clampNumber(safeLocalStorageGet(LS_TTS_PITCH), 0, 2, 1);
+  const ttsVolume = clampNumber(safeLocalStorageGet(LS_TTS_VOLUME), 0, 1, 1);
+
+  const sttLanguage = normaliseLanguageSetting(safeLocalStorageGet(LS_STT_LANGUAGE)) || preferredLanguage;
+  const sttContinuous = parseBoolSetting(safeLocalStorageGet(LS_STT_CONTINUOUS), true);
+  const sttInterimResults = parseBoolSetting(safeLocalStorageGet(LS_STT_INTERIM_RESULTS), true);
+
+  return {
+    tts: {
+      voiceUri: ttsVoiceUri || null,
+      language: ttsLanguage,
+      rate: ttsRate,
+      pitch: ttsPitch,
+      volume: ttsVolume
+    },
+    stt: {
+      language: sttLanguage,
+      continuous: sttContinuous,
+      interimResults: sttInterimResults
+    }
+  };
+}
+
+function formatVoiceOptionLabel(voice) {
+  if (!voice) {
+    return 'Unknown voice';
+  }
+  const name = String(voice.name || 'Unknown');
+  const lang = String(voice.lang || '').trim();
+  return lang ? `${name} (${lang})` : name;
+}
+
+function populateTtsVoiceSelect(selectEl, selectedVoiceUri) {
+  if (!selectEl) return;
+
+  const keepFirst = selectEl.querySelector('option[value=""]');
+  selectEl.innerHTML = '';
+  if (keepFirst) {
+    selectEl.appendChild(keepFirst);
+  } else {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'Default';
+    selectEl.appendChild(opt);
+  }
+
+  const voices = getSpeechSynthesisVoices();
+  const sorted = voices
+    .slice()
+    .filter((v) => v && v.voiceURI)
+    .sort((a, b) => formatVoiceOptionLabel(a).localeCompare(formatVoiceOptionLabel(b)));
+
+  for (const voice of sorted) {
+    const opt = document.createElement('option');
+    opt.value = String(voice.voiceURI);
+    opt.textContent = formatVoiceOptionLabel(voice);
+    selectEl.appendChild(opt);
+  }
+
+  if (selectedVoiceUri) {
+    selectEl.value = String(selectedVoiceUri);
+  }
+}
+
+function setupSpeechSettingsSection() {
+  const ttsVoiceSelect = document.getElementById('settingsTtsVoiceSelect');
+  const ttsLanguageInput = document.getElementById('settingsTtsLanguageInput');
+  const ttsRateRange = document.getElementById('settingsTtsRateRange');
+  const ttsPitchRange = document.getElementById('settingsTtsPitchRange');
+  const ttsVolumeRange = document.getElementById('settingsTtsVolumeRange');
+  const ttsRateValue = document.getElementById('settingsTtsRateValue');
+  const ttsPitchValue = document.getElementById('settingsTtsPitchValue');
+  const ttsVolumeValue = document.getElementById('settingsTtsVolumeValue');
+  const ttsPreviewButton = document.getElementById('settingsTtsPreviewButton');
+
+  const sttLanguageInput = document.getElementById('settingsSttLanguageInput');
+  const sttContinuousToggle = document.getElementById('settingsSttContinuousToggle');
+  const sttInterimToggle = document.getElementById('settingsSttInterimToggle');
+  const supportNote = document.getElementById('settingsSpeechSupportNote');
+
+  const anyUiExists = !!(
+    ttsVoiceSelect || ttsLanguageInput || ttsRateRange || ttsPitchRange || ttsVolumeRange ||
+    sttLanguageInput || sttContinuousToggle || sttInterimToggle
+  );
+  if (!anyUiExists) {
+    return;
+  }
+
+  const refreshUiFromSettings = () => {
+    const settings = getSpeechSettingsFromStorage();
+
+    if (ttsLanguageInput) {
+      ttsLanguageInput.value = settings.tts.language || '';
+    }
+    if (ttsRateRange) {
+      ttsRateRange.value = String(settings.tts.rate);
+    }
+    if (ttsPitchRange) {
+      ttsPitchRange.value = String(settings.tts.pitch);
+    }
+    if (ttsVolumeRange) {
+      ttsVolumeRange.value = String(settings.tts.volume);
+    }
+    if (ttsRateValue) {
+      ttsRateValue.textContent = String(settings.tts.rate.toFixed(1));
+    }
+    if (ttsPitchValue) {
+      ttsPitchValue.textContent = String(settings.tts.pitch.toFixed(1));
+    }
+    if (ttsVolumeValue) {
+      ttsVolumeValue.textContent = String(settings.tts.volume.toFixed(2));
+    }
+    if (ttsVoiceSelect) {
+      populateTtsVoiceSelect(ttsVoiceSelect, settings.tts.voiceUri);
+    }
+
+    if (sttLanguageInput) {
+      sttLanguageInput.value = settings.stt.language || '';
+    }
+    if (sttContinuousToggle) {
+      sttContinuousToggle.checked = !!settings.stt.continuous;
+    }
+    if (sttInterimToggle) {
+      sttInterimToggle.checked = !!settings.stt.interimResults;
+    }
+  };
+
+  refreshUiFromSettings();
+
+  const ttsSupported = isTextToSpeechSupported();
+  const sttSupported = isSpeechRecognitionSupported();
+
+  if (supportNote) {
+    if (ttsSupported && sttSupported) {
+      supportNote.textContent = 'Text-to-speech and dictation are available in this browser.';
+    } else if (ttsSupported) {
+      supportNote.textContent = 'Dictation is not supported in this browser.';
+    } else if (sttSupported) {
+      supportNote.textContent = 'Text-to-speech is not supported in this browser.';
+    } else {
+      supportNote.textContent = 'Speech is not supported in this browser.';
+    }
+  }
+
+  if (!ttsSupported) {
+    if (ttsVoiceSelect) ttsVoiceSelect.disabled = true;
+    if (ttsLanguageInput) ttsLanguageInput.disabled = true;
+    if (ttsRateRange) ttsRateRange.disabled = true;
+    if (ttsPitchRange) ttsPitchRange.disabled = true;
+    if (ttsVolumeRange) ttsVolumeRange.disabled = true;
+    if (ttsPreviewButton) {
+      ttsPreviewButton.disabled = true;
+      ttsPreviewButton.title = 'Text-to-speech is not supported in this browser.';
+    }
+  }
+
+  if (!sttSupported) {
+    if (sttLanguageInput) sttLanguageInput.disabled = true;
+    if (sttContinuousToggle) sttContinuousToggle.disabled = true;
+    if (sttInterimToggle) sttInterimToggle.disabled = true;
+  }
+
+  if (ttsVoiceSelect) {
+    ttsVoiceSelect.addEventListener('change', (e) => {
+      safeLocalStorageSet(LS_TTS_VOICE_URI, String(e.target.value || ''));
+    });
+
+    // Voices can load asynchronously.
+    try {
+      const root = typeof globalThis !== 'undefined' ? globalThis : null;
+      if (root && root.speechSynthesis) {
+        const previousHandler = root.speechSynthesis.onvoiceschanged;
+        root.speechSynthesis.onvoiceschanged = () => {
+          try { if (typeof previousHandler === 'function') previousHandler(); } catch { }
+          refreshUiFromSettings();
+        };
+      }
+    } catch {
+      // Ignore.
+    }
+  }
+
+  if (ttsLanguageInput) {
+    ttsLanguageInput.addEventListener('change', (e) => {
+      safeLocalStorageSet(LS_TTS_LANGUAGE, normaliseLanguageSetting(e.target.value));
+    });
+  }
+  if (ttsRateRange) {
+    ttsRateRange.addEventListener('input', (e) => {
+      const value = clampNumber(e.target.value, 0.5, 2, 1);
+      safeLocalStorageSet(LS_TTS_RATE, String(value));
+      if (ttsRateValue) ttsRateValue.textContent = String(value.toFixed(1));
+    });
+  }
+  if (ttsPitchRange) {
+    ttsPitchRange.addEventListener('input', (e) => {
+      const value = clampNumber(e.target.value, 0, 2, 1);
+      safeLocalStorageSet(LS_TTS_PITCH, String(value));
+      if (ttsPitchValue) ttsPitchValue.textContent = String(value.toFixed(1));
+    });
+  }
+  if (ttsVolumeRange) {
+    ttsVolumeRange.addEventListener('input', (e) => {
+      const value = clampNumber(e.target.value, 0, 1, 1);
+      safeLocalStorageSet(LS_TTS_VOLUME, String(value));
+      if (ttsVolumeValue) ttsVolumeValue.textContent = String(value.toFixed(2));
+    });
+  }
+
+  if (ttsPreviewButton) {
+    ttsPreviewButton.addEventListener('click', () => {
+      if (!ttsSupported) return;
+      const settings = getSpeechSettingsFromStorage();
+      try {
+        speakText('Kia ora. This is Von speaking.', {
+          language: settings.tts.language,
+          rate: settings.tts.rate,
+          pitch: settings.tts.pitch,
+          volume: settings.tts.volume,
+          voiceUri: settings.tts.voiceUri
+        });
+      } catch (err) {
+        console.warn('[settingsPage] TTS preview failed:', err);
+      }
+    });
+  }
+
+  if (sttLanguageInput) {
+    sttLanguageInput.addEventListener('change', (e) => {
+      safeLocalStorageSet(LS_STT_LANGUAGE, normaliseLanguageSetting(e.target.value));
+    });
+  }
+  if (sttContinuousToggle) {
+    sttContinuousToggle.addEventListener('change', (e) => {
+      safeLocalStorageSet(LS_STT_CONTINUOUS, e.target.checked ? 'true' : 'false');
+    });
+  }
+  if (sttInterimToggle) {
+    sttInterimToggle.addEventListener('change', (e) => {
+      safeLocalStorageSet(LS_STT_INTERIM_RESULTS, e.target.checked ? 'true' : 'false');
+    });
+  }
 }
 
 function renderRagSummary(ragData, pendingFallback) {
@@ -226,6 +531,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupRuntimeSection();
   // Initialize all settings sections
   await loadAndDisplaySettings();
+  setupSpeechSettingsSection();
   // Load DB info
   try { await loadAndDisplayDbInfo(); } catch { }
   // Load deprecation metrics

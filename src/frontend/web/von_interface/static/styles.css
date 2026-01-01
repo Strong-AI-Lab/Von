@@ -1754,6 +1754,106 @@ button:hover {
     border-color: #0f172a;
 }
 
+.speech-settings-panel {
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    background: #ffffff;
+    padding: 10px 12px;
+    margin-top: 6px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+}
+
+.speech-settings-panel.hidden {
+    display: none;
+}
+
+.speech-settings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+@media (max-width: 900px) {
+    .speech-settings-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.speech-settings-section {
+    border: 1px solid #f1f5f9;
+    border-radius: 10px;
+    padding: 10px 10px;
+    background: #fafafa;
+}
+
+.speech-settings-title {
+    margin: 0 0 10px 0;
+    font-size: 0.95rem;
+    color: #0f172a;
+}
+
+.speech-settings-row {
+    display: grid;
+    grid-template-columns: 110px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+@media (max-width: 520px) {
+    .speech-settings-row {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+    }
+}
+
+.speech-settings-label {
+    font-size: 0.9rem;
+    color: #334155;
+}
+
+.speech-settings-input,
+.speech-settings-select {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #fff;
+    font-size: 0.9rem;
+}
+
+.speech-settings-range {
+    width: 100%;
+}
+
+.speech-settings-value {
+    min-width: 44px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: #334155;
+    font-size: 0.9rem;
+}
+
+.speech-settings-checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.9rem;
+    color: #334155;
+}
+
+.speech-settings-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.speech-settings-note {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #64748b;
+}
+
 /* Secondary variant (for non-primary actions like Reset) */
 /* Delete exchange button styling */
 .btn-delete-exchange {
