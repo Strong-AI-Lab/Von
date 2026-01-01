@@ -1,473 +1,675 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-SCRIPT_DIR_ABS="$(cd "$(dirname "$0")" && pwd)" # Absolute path of the script's directory
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "[Debug run.sh] Script started."
+log() {
+    # Match run.ps1: lightweight timestamped console logs.
+    local ts
+    ts="$(date +%H:%M:%S 2>/dev/null || true)"
+    echo "[${ts}] $*"
+}
 
-# Set PYTHONPATH to the script's directory (project root)
-export PYTHONPATH="$SCRIPT_DIR_ABS"
-echo "[Debug run.sh] PYTHONPATH set to: $PYTHONPATH"
-# Portable helpers: convert ISO timestamp to epoch seconds and get epoch ms.
-# Tries GNU date (date -d), then python3, then gdate (coreutils). Falls back
-# to a best-effort seconds timestamp when millisecond precision isn't available.
-iso_to_epoch() {
-    iso="$1"
-    # Try GNU date first (Linux)
-    if epoch=$(date -d "$iso" +%s 2>/dev/null); then
-        echo "$epoch"
+RUN_DIR="${ROOT}/.run"
+LOGS_DIR="${ROOT}/logs"
+mkdir -p "${RUN_DIR}" "${LOGS_DIR}" 2>/dev/null || true
+
+ACTION="${1:-start}"
+ACTION="$(printf '%s' "$ACTION" | tr '[:upper:]' '[:lower:]')"
+if [[ "$ACTION" == "--help" || "$ACTION" == "-h" || "$ACTION" == "/?" ]]; then
+    ACTION="help"
+fi
+shift 1 || true
+
+# Defaults (match run.ps1)
+PORT=5000
+NO_BROWSER=0
+FORCE_BROWSER=0
+TAIL=100
+FOLLOW=0
+LOG_RETENTION=20
+ADMIN_TOKEN=""
+SKIP_HEALTH=0
+HEALTH_TIMEOUT_SEC=60
+HEALTH_GRACE_SEC=45
+BACKUP_DRY_RUN=0
+BACKUP_TAG="manual"
+BACKUP_OUT_DIR=""
+UPDATE_INTERVAL_MINUTES=60
+UPDATE_BRANCH="main"
+UPDATE_NO_RESTART_IF_RUNNING=0
+NO_BACKUP_MIGRATE=0
+
+EXTRA_ARGS=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -Port) PORT="$2"; shift 2 ;;
+        --port) PORT="$2"; shift 2 ;;
+        -NoBrowser) NO_BROWSER=1; shift ;;
+        --no-browser|-n) NO_BROWSER=1; shift ;;
+        -ForceBrowser) FORCE_BROWSER=1; shift ;;
+        --force-browser|-f) FORCE_BROWSER=1; shift ;;
+        -Tail) TAIL="$2"; shift 2 ;;
+        --tail) TAIL="$2"; shift 2 ;;
+        -Follow) FOLLOW=1; shift ;;
+        --follow) FOLLOW=1; shift ;;
+        -LogRetention) LOG_RETENTION="$2"; shift 2 ;;
+        -AdminToken) ADMIN_TOKEN="$2"; shift 2 ;;
+        -SkipHealth) SKIP_HEALTH=1; shift ;;
+        --skip-health) SKIP_HEALTH=1; shift ;;
+        -HealthTimeoutSec) HEALTH_TIMEOUT_SEC="$2"; shift 2 ;;
+        -HealthGraceSec) HEALTH_GRACE_SEC="$2"; shift 2 ;;
+        -BackupDryRun) BACKUP_DRY_RUN=1; shift ;;
+        -BackupTag) BACKUP_TAG="$2"; shift 2 ;;
+        -BackupOutDir) BACKUP_OUT_DIR="$2"; shift 2 ;;
+        -UpdateIntervalMinutes) UPDATE_INTERVAL_MINUTES="$2"; shift 2 ;;
+        -UpdateBranch) UPDATE_BRANCH="$2"; shift 2 ;;
+        -UpdateNoRestartIfRunning) UPDATE_NO_RESTART_IF_RUNNING=1; shift ;;
+        -NoBackupMigrate) NO_BACKUP_MIGRATE=1; shift ;;
+        *)
+            # Keep parity with run.ps1's 'ExtraArgs' behaviour: stash unrecognised args.
+            EXTRA_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+PID_FILE="${RUN_DIR}/von_${PORT}.pid"
+CURRENT_LOG="${LOGS_DIR}/von_${PORT}_current.log"
+TS="$(date +%Y%m%d_%H%M%S 2>/dev/null || date +%Y%m%d_%H%M%S)"
+NEW_LOG="${LOGS_DIR}/von_${PORT}_${TS}.log"
+RAG_PID_FILE="${RUN_DIR}/rag_worker.pid"
+RAG_LOG_FILE="${LOGS_DIR}/rag_worker_${TS}.log"
+TOKEN_FILE="${RUN_DIR}/admin_token.txt"
+SENTINEL_BROWSER="${RUN_DIR}/browser_opened_once"
+
+rotate_logs() {
+    # Keep last N logs per port; ignore failures.
+    local n="$1"
+    if ! printf '%s' "$n" | grep -qE '^[0-9]+$'; then
         return 0
     fi
-    # Try python3
-    if command -v python3 >/dev/null 2>&1; then
-        epoch=$(python3 - <<PY
-import sys,datetime
-s=sys.argv[1]
-try:
-    if s.endswith('Z'):
-        s=s[:-1]+'+00:00'
-    dt=datetime.datetime.fromisoformat(s)
-    print(int(dt.timestamp()))
-except Exception:
-    sys.exit(2)
-PY
-"$iso" 2>/dev/null)
-        if [ $? -eq 0 ] && [ -n "$epoch" ]; then
-            echo "$epoch"
-            return 0
-        fi
+    if [ "$n" -lt 1 ]; then
+        return 0
     fi
-    # Try gdate (GNU coreutils on macOS via brew)
-    if command -v gdate >/dev/null 2>&1; then
-        if epoch=$(gdate -d "$iso" +%s 2>/dev/null); then
-            echo "$epoch"
-            return 0
-        fi
+    # shellcheck disable=SC2012
+    local files
+    files=( $(ls -1t "${LOGS_DIR}/von_${PORT}_"*.log 2>/dev/null || true) )
+    local count=${#files[@]}
+    if [ "$count" -le "$n" ]; then
+        return 0
+    fi
+    local i
+    for ((i=n; i<count; i++)); do
+        rm -f "${files[$i]}" 2>/dev/null || true
+    done
+}
+
+export PYTHONPATH="${ROOT}"
+export PYTHONUNBUFFERED=1
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
+export VON_SKIP_BROWSER_LAUNCH=1
+
+get_pid() {
+    if [ ! -f "$PID_FILE" ]; then
+        return 0
+    fi
+    # PID file format matches run.ps1: first line contains PID=nnn.
+    local pid_line
+    pid_line="$(head -n 1 "$PID_FILE" 2>/dev/null || true)"
+    if [[ "$pid_line" =~ ^PID=([0-9]+)$ ]]; then
+        echo "${BASH_REMATCH[1]}"
+    fi
+}
+
+write_pidfile() {
+    local pid="$1"
+    local start
+    start="$(date -Iseconds 2>/dev/null || date)"
+    printf 'PID=%s\nPORT=%s\nSTART=%s\n' "$pid" "$PORT" "$start" > "$PID_FILE"
+}
+
+remove_pidfile() {
+    [ -f "$PID_FILE" ] && rm -f "$PID_FILE" || true
+}
+
+read_admin_token() {
+    if [ -f "$TOKEN_FILE" ]; then
+        tr -d '\r\n' < "$TOKEN_FILE" 2>/dev/null || true
+        return 0
+    fi
+    local tok=""
+    if command -v uuidgen >/dev/null 2>&1; then
+        tok="$(uuidgen | tr -d '-')"
+    elif command -v python3 >/dev/null 2>&1; then
+        tok="$(python3 - <<'PY'
+import uuid
+print(uuid.uuid4().hex)
+PY
+)"
+    else
+        tok="$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    fi
+    printf '%s\n' "$tok" > "$TOKEN_FILE" 2>/dev/null || true
+    chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+    echo "$tok"
+}
+
+set_admin_token_env() {
+    # Mirrors run.ps1: allow supplying a stable admin token via -AdminToken.
+    local tok=""
+    if [ -n "$ADMIN_TOKEN" ]; then
+        tok="$ADMIN_TOKEN"
+        printf '%s\n' "$tok" > "$TOKEN_FILE" 2>/dev/null || true
+        chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+    else
+        tok="$(read_admin_token)"
+    fi
+    export VON_ADMIN_TOKEN="$tok"
+}
+
+pdm_cmd() {
+    if [ -x "${ROOT}/.venv/bin/pdm" ]; then
+        echo "${ROOT}/.venv/bin/pdm"
+    elif [ -x "${ROOT}/.venv/Scripts/pdm.exe" ]; then
+        echo "${ROOT}/.venv/Scripts/pdm.exe"
+    else
+        echo "pdm"
+    fi
+}
+
+health_ok() {
+    local url="http://localhost:${PORT}/health"
+    if command -v curl >/dev/null 2>&1; then
+        curl -sS --max-time 5 --fail "$url" >/dev/null 2>&1
+        return $?
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -T 5 -O /dev/null "$url" >/dev/null 2>&1
+        return $?
     fi
     return 1
 }
 
-epoch_ms() {
-    # Try GNU date with milliseconds and ensure it's numeric (Linux). On
-    # macOS the format may produce non-digit tokens; validate before using.
-    if val=$(date +%s%3N 2>/dev/null); then
-        if printf '%s' "$val" | grep -qE '^[0-9]+$'; then
-            echo "$val"
-            return 0
-        fi
+open_browser() {
+    local url="http://localhost:${PORT}/"
+    # Prefer Chrome if available.
+    if command -v google-chrome >/dev/null 2>&1; then
+        google-chrome "$url" >/dev/null 2>&1 || true
+        return 0
     fi
-    # Python fallback (reliable across platforms)
-    if command -v python3 >/dev/null 2>&1; then
-        ms=$(python3 - <<'PY'
-import time
-print(int(time.time()*1000))
-PY
-)
-        if printf '%s' "$ms" | grep -qE '^[0-9]+$'; then
-            echo "$ms"
-            return 0
-        fi
+    if command -v chromium >/dev/null 2>&1; then
+        chromium "$url" >/dev/null 2>&1 || true
+        return 0
     fi
-    # Last-resort: seconds * 1000
-    echo "$(( $(date +%s) * 1000 ))"
+    if command -v chromium-browser >/dev/null 2>&1; then
+        chromium-browser "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+    if command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+    if command -v open >/dev/null 2>&1; then
+        open -a "Google Chrome" "$url" >/dev/null 2>&1 || open "$url" >/dev/null 2>&1 || true
+        return 0
+    fi
+    log "Browser open skipped (no opener found). URL: $url"
 }
 
-# Governance daily scan function
-run_governance_scan() {
-    if [ "${VON_GOV_SCAN_DISABLE}" = "1" ]; then
+get_listening_pid_by_port() {
+    # Best-effort listener PID detection across Linux/macOS.
+    local port="$1"
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -n 1
         return 0
     fi
-    local interval_hours=${VON_GOV_SCAN_INTERVAL_HOURS:-24}
-    local force=${VON_GOV_SCAN_FORCE:-0}
-    local sentinel_dir="${SCRIPT_DIR_ABS}/.run"
-    local sentinel_file="${sentinel_dir}/last_governance_scan.txt"
-    mkdir -p "${sentinel_dir}" 2>/dev/null || true
-    local now_epoch
-    now_epoch=$(date +%s)
-    local should_run=1
-    if [ "$force" != "1" ] && [ -f "$sentinel_file" ]; then
-        last_iso=$(cat "$sentinel_file" 2>/dev/null || true)
-        if last_epoch=$(iso_to_epoch "$last_iso" 2>/dev/null); then
-            elapsed=$(( (now_epoch - last_epoch) / 3600 ))
-            if [ "$elapsed" -lt "$interval_hours" ]; then
-                should_run=0
-            fi
-        fi
-    fi
-    if [ "$should_run" -eq 0 ] && [ "$force" != "1" ]; then
+    if command -v ss >/dev/null 2>&1; then
+        # Linux (iproute2)
+        ss -lptn "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -n 1
         return 0
     fi
-    echo "[governance-scan] Running governance concept tag scan (interval ${interval_hours}h; force=${force})"
-    local allow_local_flag=""
-    if [ "${VON_GOV_SCAN_ALLOW_LOCAL}" = "1" ]; then
-        allow_local_flag="--allow-local"
-    fi
-    local start_epoch
-    start_epoch=$(epoch_ms)
-    # Run quietly (no progress) to keep logs clean
-    if output=$(pdm run python scripts/mark_code_referenced_concepts.py --execute ${allow_local_flag} 2>&1); then
-        # Attempt to parse JSON tail - removed unused 'added' variable
-        # Fallback simple parse by counting occurrences inside JSON arrays is imprecise; we keep summary generic
-        echo "$now_epoch" > "$sentinel_file" 2>/dev/null || true
-        end_epoch=$(epoch_ms)
-        elapsed_ms=$(( end_epoch - start_epoch ))
-        echo "[governance-scan] success elapsed=${elapsed_ms}ms"
-    else
-        end_epoch=$(epoch_ms)
-        elapsed_ms=$(( end_epoch - start_epoch ))
-        echo "[governance-scan] FAILED elapsed=${elapsed_ms}ms"
-        if [ "${VON_GOV_SCAN_DEBUG}" = "1" ]; then
-            echo "$output" | sed 's/^/[governance-scan][debug] /'
-        fi
-    fi
-}
-
-# Create run dir and log layout
-RUN_DIR="$SCRIPT_DIR_ABS/.run"
-LOGS_DIR="$SCRIPT_DIR_ABS/logs"
-mkdir -p "$RUN_DIR" "$LOGS_DIR" 2>/dev/null || true
-PID_FILE="$RUN_DIR/von.pid"
-CURRENT_LOG="$LOGS_DIR/von_current.log"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S 2>/dev/null || date +%Y%m%d_%H%M%S)
-NEW_LOG="$LOGS_DIR/von_${TIMESTAMP}.log"
-RAG_LOG="$LOGS_DIR/rag_worker_${TIMESTAMP}.log"
-RAG_PID_FILE="$RUN_DIR/rag_worker.pid"
-
-# Defaults
-ACTION=${1:-start}
-shift 1 || true
-PORT=${PORT:-5000}
-NO_BROWSER=0
-FORCE_BROWSER=0
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --no-browser|-n) NO_BROWSER=1; shift ;;
-        --force-browser|-f) FORCE_BROWSER=1; shift ;;
-        --port) PORT="$2"; shift 2 ;;
-        --help|-h) echo "Usage: $0 [start|foreground|stop|status|restart|logs|check] [--no-browser|--force-browser] [--port N]"; exit 0 ;;
-        *) echo "Unknown option: $1"; shift ;;
-    esac
-done
-
-write_pid() { echo "$1" > "$PID_FILE"; }
-remove_pid() { [ -f "$PID_FILE" ] && rm -f "$PID_FILE"; }
-get_pid() { [ -f "$PID_FILE" ] && cat "$PID_FILE" || echo ""; }
-
-# Read or generate an admin token persisted in $RUN_DIR/admin_token.txt
-read_admin_token() {
-    token_file="$RUN_DIR/admin_token.txt"
-    if [ -f "$token_file" ]; then
-        cat "$token_file" 2>/dev/null || echo ""
+    if command -v netstat >/dev/null 2>&1; then
+        # Fallback: netstat output parsing is messy; keep minimal.
+        netstat -anp 2>/dev/null | grep -E "[:\.]$port\s" | grep LISTEN 2>/dev/null | sed -n 's#.*/\([0-9][0-9]*\)$#\1#p' | head -n 1
         return 0
     fi
-    # Try uuidgen, else python3 fallback
-    if command -v uuidgen >/dev/null 2>&1; then
-        tok=$(uuidgen | tr -d '-')
-    elif command -v python3 >/dev/null 2>&1; then
-        tok=$(python3 - <<'PY'
-import uuid
-print(uuid.uuid4().hex)
-PY
-)
-    else
-        # Fallback to random hex from /dev/urandom
-        tok=$(dd if=/dev/urandom bs=16 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')
-    fi
-    # Persist token (best-effort)
-    echo "$tok" > "$token_file" 2>/dev/null || true
-    chmod 600 "$token_file" 2>/dev/null || true
-    echo "$tok"
+    return 0
 }
 
 start_rag_worker_bg() {
-    echo "Starting RAG Indexing Worker in background..."
-    PDM_CMD="pdm"
-    if [ -x "$SCRIPT_DIR_ABS/.venv/bin/pdm" ]; then
-        PDM_CMD="$SCRIPT_DIR_ABS/.venv/bin/pdm"
+    # Mirrors run.ps1 best-effort background worker.
+    if [ -f "$RAG_PID_FILE" ]; then
+        local old
+        old="$(sed -n 's/^PID=//p' "$RAG_PID_FILE" 2>/dev/null | head -n 1 || true)"
+        if [ -n "$old" ] && kill -0 "$old" >/dev/null 2>&1; then
+            log "RAG Worker already running (PID=$old)."
+            return 0
+        fi
+        rm -f "$RAG_PID_FILE" 2>/dev/null || true
     fi
-    nohup "$PDM_CMD" run python -u "$SCRIPT_DIR_ABS/src/backend/utilities/rag_indexing_worker.py" > "$RAG_LOG" 2>&1 &
-    rag_pid=$!
-    echo "$rag_pid" > "$RAG_PID_FILE"
-    echo "RAG Worker started (PID=$rag_pid). Log: $RAG_LOG"
+    log "Starting RAG Indexing Worker..."
+    local pdm
+    pdm="$(pdm_cmd)"
+    nohup "$pdm" run python -u "${ROOT}/src/backend/utilities/rag_indexing_worker.py" >> "$RAG_LOG_FILE" 2>&1 &
+    local pid=$!
+    printf 'PID=%s\nSTART=%s\n' "$pid" "$(date -Iseconds 2>/dev/null || date)" > "$RAG_PID_FILE"
+    log "RAG Worker started (PID=$pid). Log: $RAG_LOG_FILE"
 }
 
 stop_rag_worker() {
-    if [ -f "$RAG_PID_FILE" ]; then
-        rpid=$(cat "$RAG_PID_FILE")
-        if [ -n "$rpid" ]; then
-            echo "Stopping RAG Worker PID=$rpid..."
-            kill "$rpid" 2>/dev/null || true
-            rm -f "$RAG_PID_FILE"
-        fi
+    if [ ! -f "$RAG_PID_FILE" ]; then
+        return 0
     fi
+    local pid
+    pid="$(sed -n 's/^PID=//p' "$RAG_PID_FILE" 2>/dev/null | head -n 1 || true)"
+    if [ -n "$pid" ]; then
+        log "Stopping RAG Worker (PID=$pid)..."
+        kill "$pid" >/dev/null 2>&1 || true
+    fi
+    rm -f "$RAG_PID_FILE" 2>/dev/null || true
 }
 
-start_bg() {
-    # Safety check: prevent running server with test database
-    if [ "$VON_DB_NAME" = "test_von_db" ]; then
+start_server() {
+    # Match run.ps1: default to production DB unless explicitly set.
+    if [ -z "${VON_DB_NAME:-}" ] || [ "${VON_DB_NAME:-}" = "test_von_db" ]; then
+        export VON_DB_NAME=von_db
+    fi
+    if [ "${VON_DB_NAME:-}" = "test_von_db" ]; then
         echo "ERROR: Cannot start server with test database (VON_DB_NAME=test_von_db)." >&2
-        echo "This prevents accidental data corruption from running production server against test data." >&2
         echo "To fix: export VON_DB_NAME='von_db'" >&2
         return 1
     fi
 
-    if [ -n "$(get_pid)" ] && ps -p "$(get_pid)" > /dev/null 2>&1; then
-        echo "Already running (PID=$(get_pid))."; return 0
+    local existing
+    existing="$(get_pid || true)"
+    if [ -n "$existing" ] && kill -0 "$existing" >/dev/null 2>&1; then
+        log "Already running (PID=$existing). Use ./run.sh stop or restart."
+        return 0
     fi
-    # Run governance scan first (best-effort)
-    run_governance_scan || true
-    echo "Starting Von application in background (port $PORT)..."
-    if [ "$NO_BROWSER" -eq 1 ]; then
-        export VON_SKIP_BROWSER_LAUNCH=1
+
+    # If PID file stale but port has a listener, assume running and sync PID file.
+    local listener
+    listener="$(get_listening_pid_by_port "$PORT" || true)"
+    if [ -n "$listener" ]; then
+        log "Port $PORT already in use by PID=$listener; assuming server already running (untracked)."
+        write_pidfile "$listener"
+        return 0
+    fi
+
+    set_admin_token_env
+
+    local pdm
+    pdm="$(pdm_cmd)"
+    log "Starting Von server on port $PORT ..."
+    : > "$NEW_LOG" || true
+    nohup "$pdm" run python -u "${ROOT}/src/workflows/von/main.py" --port "$PORT" >> "$NEW_LOG" 2>&1 &
+    local pid=$!
+    write_pidfile "$pid"
+
+    # Current log pointer (symlink preferred; copy fallback)
+    rm -f "$CURRENT_LOG" 2>/dev/null || true
+    ln -sf "$NEW_LOG" "$CURRENT_LOG" 2>/dev/null || cp -f "$NEW_LOG" "$CURRENT_LOG" 2>/dev/null || true
+
+    rotate_logs "$LOG_RETENTION" || true
+
+    if [ "$SKIP_HEALTH" -eq 1 ]; then
+        log "Skipping health wait (use ./run.sh status to check)."
     else
-        export VON_SKIP_BROWSER_LAUNCH=0
-    fi
-        # Start RAG worker
-        start_rag_worker_bg
-
-
-    if [ "$FORCE_BROWSER" -eq 1 ]; then
-        export VON_FORCE_BROWSER=1
-    else
-        export VON_FORCE_BROWSER=0
-    fi
-    # Ensure admin token is present for graceful shutdown
-    ADM_TOKEN=$(read_admin_token)
-    export VON_ADMIN_TOKEN="$ADM_TOKEN"
-    PDM_CMD="pdm"
-    if [ -x "$SCRIPT_DIR_ABS/.venv/bin/pdm" ]; then
-        PDM_CMD="$SCRIPT_DIR_ABS/.venv/bin/pdm"
-    fi
-    # Start in background via nohup so it detaches; write pid
-    nohup $PDM_CMD run python -u "$SCRIPT_DIR_ABS/src/workflows/von/main.py" --port "$PORT" > "$NEW_LOG" 2>&1 &
-    child=$!
-
-    # Start RAG worker
-    WORKER_LOG="$LOGS_DIR/von_rag_worker.log"
-    nohup $PDM_CMD run python -u "$SCRIPT_DIR_ABS/src/backend/utilities/rag_indexing_worker.py" > "$WORKER_LOG" 2>&1 &
-    worker_pid=$!
-    echo "$worker_pid" > "$RUN_DIR/von_worker.pid"
-    echo "Started RAG Worker (PID=$worker_pid). Log: $WORKER_LOG"
-
-    # Give short time for process to start
-    sleep 0.4
-    if ps -p $child > /dev/null 2>&1; then
-        write_pid $child
-        # Update current log pointer
-        ln -f "$NEW_LOG" "$CURRENT_LOG" 2>/dev/null || cp -f "$NEW_LOG" "$CURRENT_LOG" 2>/dev/null || true
-        echo "Started (PID=$child). Log: $NEW_LOG"
-        # If force-browser requested, wait for /health then open browser
-        if [ "$FORCE_BROWSER" -eq 1 ]; then
-            url="http://localhost:$PORT/"
-            echo "Force browser requested: waiting for $url to become available..."
-            # prefer curl, fallback to wget, else skip
-            checker=""
-            if command -v curl >/dev/null 2>&1; then
-                checker="curl -sS --max-time 1 --fail"
-            elif command -v wget >/dev/null 2>&1; then
-                checker="wget -q -T 1 -O -"
+        local deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SEC ))
+        local listening_logged=0
+        local healthy=0
+        while [ $(date +%s) -lt $deadline ]; do
+            if health_ok; then
+                healthy=1
+                break
             fi
-            attempts=0
-            while [ $attempts -lt 60 ]; do
-                if [ -n "$checker" ]; then
-                    if $checker "$url" >/dev/null 2>&1; then
-                        echo "Service ready; opening browser: $url"
-                        # Try Chrome-specific commands first
-                        if command -v google-chrome >/dev/null 2>&1; then
-                            google-chrome "$url" || true
-                        elif command -v chromium >/dev/null 2>&1; then
-                            chromium "$url" || true
-                        elif command -v chromium-browser >/dev/null 2>&1; then
-                            chromium-browser "$url" || true
-                        elif command -v open >/dev/null 2>&1; then
-                            # macOS: try to open with Chrome explicitly
-                            open -a "Google Chrome" "$url" 2>/dev/null || open "$url" || true
-                        elif [ -f "/c/Program Files/Google/Chrome/Application/chrome.exe" ]; then
-                            # Windows Git Bash
-                            "/c/Program Files/Google/Chrome/Application/chrome.exe" "$url" || true
-                        elif command -v xdg-open >/dev/null 2>&1; then
-                            xdg-open "$url" || true
-                        fi
-                        break
-                    fi
-                fi
-                attempts=$((attempts+1))
-                sleep 0.5
-            done
-            if [ $attempts -ge 60 ]; then
-                echo "Warning: service did not become ready within timeout; browser not opened."
+            if [ $listening_logged -eq 0 ]; then
+                # We don't have a cheap cross-platform 'listening' check; log once after a brief delay.
+                listening_logged=1
+                log "Waiting for /health..."
             fi
-        fi
-    else
-        echo "Failed to start process; see $NEW_LOG"
-    fi
-}
-
-start_foreground() {
-    # Safety check: prevent running server with test database
-    if [ "$VON_DB_NAME" = "test_von_db" ]; then
-        echo "ERROR: Cannot start server with test database (VON_DB_NAME=test_von_db)." >&2
-        echo "This prevents accidental data corruption from running production server against test data." >&2
-        echo "To fix: export VON_DB_NAME='von_db'" >&2
-        return 1
-    fi
-
-    run_governance_scan || true
-    echo "Running in foreground (port $PORT)... Ctrl+C to stop"
-    if [ "$NO_BROWSER" -eq 1 ]; then
-        export VON_SKIP_BROWSER_LAUNCH=1
-    else
-        export VON_SKIP_BROWSER_LAUNCH=0
-    fi
-    if [ "$FORCE_BROWSER" -eq 1 ]; then
-        export VON_FORCE_BROWSER=1
-    else
-        export VON_FORCE_BROWSER=0
-    fi
-    ADM_TOKEN=$(read_admin_token)
-    export VON_ADMIN_TOKEN="$ADM_TOKEN"
-
-    # Start RAG worker
-    WORKER_LOG="$LOGS_DIR/von_rag_worker.log"
-    "$PDM_CMD" run python -u "$SCRIPT_DIR_ABS/src/backend/utilities/rag_indexing_worker.py" > "$WORKER_LOG" 2>&1 &
-    worker_child=$!
-    echo "$worker_child" > "$RUN_DIR/von_worker.pid"
-
-    PDM_CMD="pdm"
-    if [ -x "$SCRIPT_DIR_ABS/.venv/bin/pdm" ]; then
-        PDM_CMD="$SCRIPT_DIR_ABS/.venv/bin/pdm"
-    fi
-    # Start the server as a child process, write logs to NEW_LOG, and tail it to the console
-    "$PDM_CMD" run python -u "$SCRIPT_DIR_ABS/src/workflows/von/main.py" --port "$PORT" > "$NEW_LOG" 2>&1 &
-    child=$!
-    write_pid $child
-    # If force-browser requested, wait for localhost readiness then open
-    if [ "$FORCE_BROWSER" -eq 1 ]; then
-        url="http://localhost:$PORT/"
-        echo "Force browser requested: waiting for $url to become available..."
-        checker=""
-        if command -v curl >/dev/null 2>&1; then
-            checker="curl -sS --max-time 1 --fail"
-        elif command -v wget >/dev/null 2>&1; then
-            checker="wget -q -T 1 -O -"
-        fi
-        attempts=0
-        while [ $attempts -lt 60 ]; do
-            if [ -n "$checker" ]; then
-                if $checker "$url" >/dev/null 2>&1; then
-                    echo "Service ready; opening browser: $url"
-                    # Try Chrome-specific commands first
-                    if command -v google-chrome >/dev/null 2>&1; then
-                        google-chrome "$url" || true
-                    elif command -v chromium >/dev/null 2>&1; then
-                        chromium "$url" || true
-                    elif command -v chromium-browser >/dev/null 2>&1; then
-                        chromium-browser "$url" || true
-                    elif command -v open >/dev/null 2>&1; then
-                        # macOS: try to open with Chrome explicitly
-                        open -a "Google Chrome" "$url" 2>/dev/null || open "$url" || true
-                    elif [ -f "/c/Program Files/Google/Chrome/Application/chrome.exe" ]; then
-                        # Windows Git Bash
-                        "/c/Program Files/Google/Chrome/Application/chrome.exe" "$url" || true
-                    elif command -v xdg-open >/dev/null 2>&1; then
-                        xdg-open "$url" || true
-                    fi
-                    break
-                fi
-            fi
-            attempts=$((attempts+1))
             sleep 0.5
         done
-        if [ $attempts -ge 60 ]; then
-            kill -TERM $worker_child 2>/dev/null || true;
-            echo "Warning: service did not become ready within timeout; browser not opened."
+
+        if [ $healthy -ne 1 ] && [ "$HEALTH_GRACE_SEC" -gt 0 ]; then
+            log "Extending wait up to ${HEALTH_GRACE_SEC}s for /health (phase 2)..."
+            local grace_deadline=$(( $(date +%s) + HEALTH_GRACE_SEC ))
+            while [ $(date +%s) -lt $grace_deadline ]; do
+                if health_ok; then
+                    healthy=1
+                    break
+                fi
+                sleep 0.5
+            done
+        fi
+
+        if [ $healthy -eq 1 ]; then
+            log "Server healthy (http://localhost:$PORT)"
+            if [ $NO_BROWSER -eq 0 ]; then
+                local should_open=0
+                if [ $FORCE_BROWSER -eq 1 ]; then
+                    should_open=1
+                elif [ ! -f "$SENTINEL_BROWSER" ]; then
+                    should_open=1
+                fi
+                if [ $should_open -eq 1 ]; then
+                    open_browser
+                    date -Iseconds 2>/dev/null > "$SENTINEL_BROWSER" || true
+                    if [ $FORCE_BROWSER -eq 1 ]; then
+                        log "Opened browser (forced)."
+                    else
+                        log "Opened browser (first launch)."
+                    fi
+                else
+                    log "Browser already opened previously (use -ForceBrowser to open again)."
+                fi
+            fi
+        else
+            log "WARNING: Server not healthy after ${HEALTH_TIMEOUT_SEC}s (+${HEALTH_GRACE_SEC}s grace); check logs: $CURRENT_LOG"
         fi
     fi
 
-    # Tail the log and forward signals so Ctrl+C stops the child
-    ln -f "$NEW_LOG" "$CURRENT_LOG" 2>/dev/null || cp -f "$NEW_LOG" "$CURRENT_LOG" 2>/dev/null || true
-    trap 'echo "Stopping child..."; kill -TERM $child 2>/dev/null || true; wait $child; exit' INT TERM
-    tail -n +1 -f "$CURRENT_LOG" &
-    tailpid=$!
-    # Wait for child to exit
-    wait $child
-    # Cleanup tail
-    kill $tailpid 2>/dev/null || true
-    remove_pid
+    # Start RAG worker best-effort (mirrors run.ps1)
+    start_rag_worker_bg || true
+    log "Admin token file: $TOKEN_FILE"
 }
 
 stop_server() {
-    pid=$(get_pid)
-    if [ -z "$pid" ]; then
-        echo "Not running (no PID file)."
-        return 0
-    fi
-    if ! ps -p "$pid" > /dev/null 2>&1; then
-        echo "Stale PID file found; removing."; remove_pid; return 0
-    fi
-    echo "Stopping PID=$pid..."
-    # Attempt graceful shutdown via admin endpoint
-    token_file="$RUN_DIR/admin_token.txt"
-    if [ -f "$token_file" ]; then
-        token=$(cat "$token_file" 2>/dev/null || echo "")
-        if [ -n "$token" ]; then
-            echo "Attempting graceful shutdown via /admin/shutdown..."
-            if command -v curl >/dev/null 2>&1; then
-                curl -sS -X POST "http://localhost:$PORT/admin/shutdown" -H "X-Admin-Token: $token" --max-time 5 >/dev/null 2>&1 || true
+    local pid=""
+    # Match run.ps1: stop supports extra args like: stop <pid> | stop force | stop force-any
+    if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
+        local arg="${EXTRA_ARGS[0]}"
+        if printf '%s' "$arg" | grep -qE '^[0-9]+$'; then
+            pid="$arg"
+            log "Stopping specific PID=$pid (direct)"
+        elif [ "$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')" = "force" ]; then
+            pid="$(get_listening_pid_by_port "$PORT" || true)"
+            if [ -z "$pid" ]; then
+                log "Not running"
+                remove_pidfile
+                stop_rag_worker || true
+                return 0
             fi
-            # Give it a short grace period to exit
-            sleep 2
-            if ! ps -p "$pid" > /dev/null 2>&1; then
-                echo "Graceful shutdown succeeded."; remove_pid; return 0
+            # Verify command line looks like Von (best-effort)
+            local cmdline=""
+            if command -v ps >/dev/null 2>&1; then
+                cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
             fi
-            echo "Graceful attempt did not stop process; escalating to kill.";
+            if ! printf '%s' "$cmdline" | grep -q "src/workflows/von/main.py"; then
+                log "ABORT: Detected PID $pid command line does not look like Von server. Use 'stop force-any' to override."
+                return 0
+            fi
+            log "Force stop requested: attempting graceful+fallback with command line verification."
+        elif [ "$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')" = "force-any" ]; then
+            pid="$(get_listening_pid_by_port "$PORT" || true)"
+            log "Force-any stop requested: bypassing command line verification."
         fi
     fi
-    kill "$pid" 2>/dev/null || true
-    sleep 1
-    if ps -p "$pid" > /dev/null 2>&1; then
-        echo "Process still running; force killing..."
-        kill -9 "$pid" 2>/dev/null || true
+
+    if [ -z "$pid" ]; then
+        pid="$(get_pid || true)"
     fi
-    stop_rag_worker
-    remove_pid
-    echo "Stopped."
+    if [ -z "$pid" ]; then
+        log "Not running"
+        remove_pidfile
+        stop_rag_worker || true
+        return 0
+    fi
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+        log "STALE: PID file exists but process missing."
+        remove_pidfile
+        stop_rag_worker || true
+        return 0
+    fi
+
+    local token=""
+    if [ -f "$TOKEN_FILE" ]; then
+        token="$(tr -d '\r\n' < "$TOKEN_FILE" 2>/dev/null || true)"
+    fi
+    if [ -n "$token" ] && command -v curl >/dev/null 2>&1; then
+        log "Attempting graceful shutdown (PID=$pid)..."
+        curl -sS -X POST "http://localhost:${PORT}/admin/shutdown" -H "X-Admin-Token: ${token}" --max-time 5 >/dev/null 2>&1 || true
+    else
+        log "No admin token available or curl missing; skipping graceful attempt."
+    fi
+
+    local waited=0
+    while [ $waited -lt 10 ]; do
+        if ! kill -0 "$pid" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+        waited=$((waited+1))
+    done
+    if kill -0 "$pid" >/dev/null 2>&1; then
+        log "Process PID=$pid still running; issuing force kill..."
+        kill -9 "$pid" >/dev/null 2>&1 || true
+    else
+        log "Process exited."
+    fi
+
+    remove_pidfile
+    stop_rag_worker || true
 }
 
 status_server() {
-    pid=$(get_pid)
-    if [ -n "$pid" ] && ps -p "$pid" > /dev/null 2>&1; then
-        echo "RUNNING PID=$pid"
+    # Match run.ps1: if PID file stale, try to sync from current listener.
+    if [ -f "$PID_FILE" ]; then
+        local pid_in_file
+        pid_in_file="$(get_pid || true)"
+        if [ -n "$pid_in_file" ] && ! kill -0 "$pid_in_file" >/dev/null 2>&1; then
+            local listener
+            listener="$(get_listening_pid_by_port "$PORT" || true)"
+            if [ -n "$listener" ]; then
+                write_pidfile "$listener"
+            fi
+        fi
+    fi
+    local pid
+    pid="$(get_pid || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+        if health_ok; then
+            log "RUNNING PID=$pid Healthy=true"
+        else
+            log "RUNNING PID=$pid Healthy=false"
+        fi
+        log "Log: $CURRENT_LOG"
     else
-        echo "STOPPED"
+        if [ -f "$PID_FILE" ]; then
+            log "STALE: PID file exists but process missing."
+        else
+            log "STOPPED"
+        fi
     fi
 }
 
 show_logs() {
-    if [ -f "$CURRENT_LOG" ]; then
-        tail -n 200 -f "$CURRENT_LOG"
+    if [ ! -f "$CURRENT_LOG" ]; then
+        log "No log file yet."
+        return 0
+    fi
+    if [ "$FOLLOW" -eq 1 ]; then
+        tail -n "$TAIL" -f "$CURRENT_LOG"
     else
-        echo "No log file yet: $CURRENT_LOG"
+        tail -n "$TAIL" "$CURRENT_LOG"
     fi
 }
 
-start_rag_worker() {
-    echo "Starting RAG Indexing Worker..."
-    export PYTHONUNBUFFERED=1
-    export PYTHONPATH="$SCRIPT_DIR_ABS"
-    PDM_CMD="pdm"
-    if [ -x "$SCRIPT_DIR_ABS/.venv/bin/pdm" ]; then
-        PDM_CMD="$SCRIPT_DIR_ABS/.venv/bin/pdm"
+check_health() {
+    local pid="$(get_pid || true)"
+    if [ -z "$pid" ] || ! kill -0 "$pid" >/dev/null 2>&1; then
+        # Mirror run.ps1: if PID missing but port has a listener, treat as running (untracked)
+        local listener
+        listener="$(get_listening_pid_by_port "$PORT" || true)"
+        if [ -n "$listener" ]; then
+            if health_ok; then
+                log "HEALTHY (listener PID=$listener no PID file)"
+                exit 0
+            fi
+            log "UNHEALTHY (listener PID=$listener no PID file)"
+            exit 2
+        fi
+        log "NOT RUNNING"
+        exit 3
     fi
-    "$PDM_CMD" run python -u "$SCRIPT_DIR_ABS/src/backend/utilities/rag_indexing_worker.py"
+    if health_ok; then
+        log "HEALTHY PID=$pid"
+        exit 0
+    fi
+    log "UNHEALTHY PID=$pid"
+    exit 2
+}
+
+run_rag_worker_foreground() {
+    log "Starting RAG Indexing Worker..."
+    local pdm
+    pdm="$(pdm_cmd)"
+    "$pdm" run python -u "${ROOT}/src/backend/utilities/rag_indexing_worker.py"
+}
+
+run_backup() {
+    local backup_script="${ROOT}/scripts/backup_von_db.py"
+    if [ ! -f "$backup_script" ]; then
+        log "[backup] ERROR: backup script missing: $backup_script"
+        return 1
+    fi
+    local pdm
+    pdm="$(pdm_cmd)"
+    local out_dir="$BACKUP_OUT_DIR"
+    if [ -z "$out_dir" ]; then
+        out_dir="${VON_BACKUP_ROOT:-}"
+    fi
+    if [ -z "$out_dir" ]; then
+        # Platform-friendly analogue of run.ps1's W: preference.
+        if [ -d "/Volumes/von_backups" ] && [ -w "/Volumes/von_backups" ]; then
+            out_dir="/Volumes/von_backups"
+        elif [ -d "/mnt/von_backups" ] && [ -w "/mnt/von_backups" ]; then
+            out_dir="/mnt/von_backups"
+        else
+            out_dir="${ROOT}/backups"
+        fi
+    fi
+    mkdir -p "$out_dir" 2>/dev/null || true
+    local mode="apply"
+    if [ "$BACKUP_DRY_RUN" -eq 1 ]; then
+        mode="dry-run"
+    fi
+    log "[backup] Starting backup (mode=$mode tag=$BACKUP_TAG out=$out_dir)"
+    if [ "$BACKUP_DRY_RUN" -eq 1 ]; then
+        "$pdm" run python "$backup_script" --out-dir "$out_dir" --tag "$BACKUP_TAG"
+    else
+        "$pdm" run python "$backup_script" --apply --out-dir "$out_dir" --tag "$BACKUP_TAG"
+    fi
+}
+
+run_autoupdate() {
+    log "Starting auto-update loop (branch=$UPDATE_BRANCH interval=${UPDATE_INTERVAL_MINUTES}m)... Press Ctrl+C to stop."
+    if ! command -v git >/dev/null 2>&1; then
+        log "ERROR: git not found on PATH."
+        return 1
+    fi
+    while true; do
+        (cd "$ROOT" || exit 1
+            local running_pid
+            running_pid="$(get_pid || true)"
+            if [ -z "$running_pid" ] || ! kill -0 "$running_pid" >/dev/null 2>&1; then
+                start_server || true
+            fi
+
+            git fetch origin "$UPDATE_BRANCH" >/dev/null 2>&1 || true
+            local local_sha
+            local remote_sha
+            local base_sha
+            local_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+            remote_sha="$(git rev-parse "origin/${UPDATE_BRANCH}" 2>/dev/null || true)"
+            if [ -n "$local_sha" ] && [ -n "$remote_sha" ] && [ "$local_sha" != "$remote_sha" ]; then
+                base_sha="$(git merge-base HEAD "origin/${UPDATE_BRANCH}" 2>/dev/null || true)"
+                if [ "$base_sha" = "$local_sha" ]; then
+                    if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then
+                        log "Update available ($local_sha -> $remote_sha) but local uncommitted changes present; skipping pull."
+                    else
+                        log "Applying update ($local_sha -> $remote_sha)..."
+                        if [ "$UPDATE_NO_RESTART_IF_RUNNING" -eq 0 ]; then
+                            stop_server || true
+                        fi
+                        git pull --ff-only origin "$UPDATE_BRANCH" 2>&1 | while IFS= read -r line; do log "$line"; done
+                        if [ "$UPDATE_NO_RESTART_IF_RUNNING" -eq 0 ]; then
+                            log "Restarting server after update..."
+                            start_server || true
+                        else
+                            log "Pulled updates without restart (UpdateNoRestartIfRunning set)."
+                        fi
+                    fi
+                else
+                    log "Local branch diverged from remote (local=$local_sha remote=$remote_sha base=$base_sha); manual merge required."
+                fi
+            else
+                if [ -n "$local_sha" ]; then
+                    log "No updates (HEAD=$local_sha)."
+                else
+                    log "No updates (unable to resolve HEAD)."
+                fi
+            fi
+        )
+
+        local m
+        m=0
+        while [ $m -lt "$UPDATE_INTERVAL_MINUTES" ]; do
+            sleep 60
+            m=$((m+1))
+        done
+    done
+}
+
+show_help() {
+    cat <<'TXT'
+Von Launcher Help
+    Usage: ./run.sh [action] [options]
+    Actions: start | foreground | stop | status | restart | logs | check | backup | autoupdate | rag-worker | help
+    Options:
+        -Port <int>
+        -NoBrowser
+        -ForceBrowser
+        -Tail <n>
+        -Follow
+        -LogRetention <n>
+        -AdminToken <token>
+        -SkipHealth
+        -HealthTimeoutSec <n>
+        -HealthGraceSec <n>
+
+    Backup options:
+        -BackupDryRun
+        -BackupTag <tag>
+        -BackupOutDir <path>
+
+    Autoupdate options:
+        -UpdateIntervalMinutes <n>
+        -UpdateBranch <name>
+        -UpdateNoRestartIfRunning
+
+    Examples:
+        ./run.sh start
+        ./run.sh restart -ForceBrowser
+        ./run.sh logs -Tail 200 -Follow
+        ./run.sh backup -BackupDryRun
+        ./run.sh autoupdate -UpdateIntervalMinutes 30 -UpdateBranch main
+TXT
 }
 
 case "$ACTION" in
     start)
-        start_bg
+        start_server
         ;;
     foreground)
-        start_foreground
+        log "Running in foreground... (Ctrl+C to stop)"
+        set_admin_token_env
+        # Foreground still suppresses auto browser (launcher opens if requested)
+        export VON_SKIP_BROWSER_LAUNCH=1
+        "$(pdm_cmd)" run python -u "${ROOT}/src/workflows/von/main.py" --port "$PORT"
         ;;
     stop)
         stop_server
@@ -477,26 +679,29 @@ case "$ACTION" in
         ;;
     restart)
         stop_server
-        start_bg
+        start_server
         ;;
     logs)
         show_logs
         ;;
-    rag-worker)
-        start_rag_worker
-        ;;
     check)
-        # Simple health check: run_governance_scan is separate; check PID and exit code 0 if running
-        if [ -n "$(get_pid)" ] && ps -p "$(get_pid)" > /dev/null 2>&1; then
-            echo "HEALTHY"; exit 0
-        else
-            echo "NOT RUNNING"; exit 3
-        fi
+        check_health
+        ;;
+    backup)
+        run_backup
+        ;;
+    autoupdate)
+        run_autoupdate
+        ;;
+    rag-worker)
+        run_rag_worker_foreground
+        ;;
+    help)
+        show_help
         ;;
     *)
-        echo "Unknown action: $ACTION"; exit 2
+        log "Unknown action '$ACTION'"
+        show_help
+        exit 2
         ;;
 esac
-
-echo "[run.sh] Finished."
-exit 0
