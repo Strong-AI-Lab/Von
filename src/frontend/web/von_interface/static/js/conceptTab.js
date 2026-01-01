@@ -1048,6 +1048,87 @@ export async function handleSaveConceptOrNotes(suffix = '') {
 let deleteConfirmationPending = false;
 let deleteConfirmationTimeout = null;
 
+function getActiveConceptTabSuffix() {
+  try {
+    const active = document.querySelector('.tab-content.active');
+    if (active && typeof active.id === 'string' && active.id.startsWith('conceptTab_')) {
+      return active.id.replace('conceptTab_', '');
+    }
+  } catch (_) {
+    // ignore
+  }
+  return '';
+}
+
+function getElementForSuffix(baseId, suffix) {
+  if (suffix) {
+    return document.getElementById(`${baseId}_${suffix}`) || document.getElementById(baseId);
+  }
+  return document.getElementById(baseId);
+}
+
+function isMissingInteractionSessionMessage(message) {
+  const msg = String(message || '').toLowerCase();
+  return msg.includes('interaction session not found') ||
+    msg.includes('no active interaction session') ||
+    (msg.includes('interaction') && msg.includes('session') && msg.includes('not found')) ||
+    (msg.includes('interaction') && msg.includes('session') && msg.includes('expired'));
+}
+
+function resetInteractionUiToStep1(statusMessage, suffix = '') {
+  try {
+    currentInteractionId = null;
+  } catch (_) {
+    // ignore
+  }
+
+  const step1 = getElementForSuffix('conceptStep1', suffix);
+  const step2 = getElementForSuffix('conceptStep2', suffix);
+  const step3 = getElementForSuffix('conceptStep3', suffix);
+  const step1Status = getElementForSuffix('conceptStep1Status', suffix);
+  const step2Status = getElementForSuffix('conceptStep2Status', suffix);
+  const questionEl = getElementForSuffix('followUpQuestion', suffix);
+  const answerEl = getElementForSuffix('conceptAnswer', suffix);
+  const submitBtn = getElementForSuffix('submitAnswerButton', suffix);
+
+  if (step3) step3.style.display = 'none';
+  if (step2) step2.style.display = 'none';
+  if (step1) step1.style.display = 'block';
+
+  if (questionEl) {
+    try {
+      annotateElementText(questionEl, '');
+    } catch (_) {
+      questionEl.textContent = '';
+    }
+  }
+
+  if (answerEl) {
+    answerEl.value = '';
+    answerEl.disabled = true;
+  }
+  if (submitBtn) {
+    submitBtn.disabled = true;
+  }
+
+  const msg = statusMessage || 'Interaction session expired. Please start a new interaction.';
+  if (step1Status) {
+    step1Status.textContent = msg;
+    step1Status.style.color = 'orange';
+  }
+  if (step2Status) {
+    step2Status.textContent = msg;
+    step2Status.style.color = 'orange';
+  }
+
+  // Defensive: re-enable any list radios
+  try {
+    document.querySelectorAll('input[type="radio"][name^="selectedconcept"]').forEach(r => r.disabled = false);
+  } catch (_) {
+    // ignore
+  }
+}
+
 export async function handleDeleteConcept() {
   const currentlySelectedconceptId = getCurrentlySelectedConceptId();
   if (!currentlySelectedconceptId || currentlySelectedconceptId === 'undefined') {
@@ -1456,7 +1537,7 @@ async function handleSubmitAnswer() {
   const currentQuestion = elements.followUpQuestionP ? elements.followUpQuestionP.textContent : "";
 
   if (!currentInteractionId) {
-    alert("No active interaction session.");
+    resetInteractionUiToStep1('No active interaction session. Please start a new interaction.', getActiveConceptTabSuffix());
     return;
   }
   if (!answer) {
@@ -1491,7 +1572,12 @@ async function handleSubmitAnswer() {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: "Failed to submit answer. Server returned an error." }));
-      throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+      const msg = errorData.error || `HTTP error! status: ${response.status}`;
+      if (isMissingInteractionSessionMessage(msg)) {
+        resetInteractionUiToStep1('Interaction session expired. Please start a new interaction.', getActiveConceptTabSuffix());
+        return;
+      }
+      throw new Error(msg);
     }
 
     const data = await response.json();
@@ -1592,6 +1678,10 @@ async function handleSubmitAnswer() {
 
   } catch (error) {
     console.error("Error in handleSubmitAnswer:", error);
+    if (isMissingInteractionSessionMessage(error?.message)) {
+      resetInteractionUiToStep1('Interaction session expired. Please start a new interaction.', getActiveConceptTabSuffix());
+      return;
+    }
     elements.conceptStep2Status.textContent = `Error: ${error.message}`;
     elements.conceptStep2Status.style.color = "red";
   }
