@@ -33,10 +33,14 @@ function escapeHtml(value) {
 }
 
 // Cache concept metadata used for cartouches in chat transcript.
-// Map<fullId, { name: string, kind: string } | null>
+// Map<fullId, { name: string, kind: string, source?: string, provisional?: boolean }>
 const chatConceptMetaCache = new Map();
 // Map<fullId, Promise<meta|null>> for in-flight lookups.
 const chatConceptMetaPending = new Map();
+
+const CHAT_CONCEPT_META_MAX_RETRIES = 3;
+const chatConceptMetaRetryCounts = new Map();
+const chatConceptMetaRetryTimers = new Map();
 
 function isMarkdownProducingModel(model) {
     if (!model) {
@@ -258,7 +262,7 @@ async function fetchConceptMetaForChat(fullId) {
                 node?.node?.name ||
                 fullId;
             const kind = node?.kind || node?.node?.kind || 'type';
-            return { name: String(name), kind: String(kind) };
+            return { name: String(name), kind: String(kind), source: 'node_content' };
         }
 
         // Fallback to search endpoint if node_content is unavailable.
@@ -273,12 +277,125 @@ async function fetchConceptMetaForChat(fullId) {
 
         return {
             name: match.name || match.id,
-            kind: match.kind || 'type'
+            kind: match.kind || 'type',
+            source: 'search',
+            provisional: true
         };
     } catch (err) {
         console.debug('[chatTab] fetchConceptMetaForChat failed', err);
         return null;
     }
+}
+
+async function fetchConceptMetaForChatNodeOnly(fullId) {
+    try {
+        const nodeUrl = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(fullId)}&raw_only=1&soft=1`;
+        const nodeRes = await fetch(nodeUrl, { cache: 'no-store' });
+        if (!nodeRes.ok) {
+            return null;
+        }
+
+        const node = await nodeRes.json();
+        const looksMissing =
+            node &&
+            node.concept_id == null &&
+            node.raw_doc == null &&
+            node.display_name == null &&
+            node.kind == null;
+
+        if (node && (node.not_found || node.error || looksMissing)) {
+            return null;
+        }
+
+        const preferredLanguage = getUserContext()?.language || 'en-NZ';
+        const rawNames =
+            node?.raw_doc?.names ||
+            node?.node?.raw_doc?.names ||
+            node?.names ||
+            node?.node?.names ||
+            null;
+        const bestName = selectBestNameForContext(rawNames, preferredLanguage);
+        const name =
+            bestName ||
+            node?.display_name ||
+            node?.name ||
+            node?.node?.display_name ||
+            node?.node?.name ||
+            fullId;
+        const kind = node?.kind || node?.node?.kind || 'type';
+
+        return { name: String(name), kind: String(kind), source: 'node_content' };
+    } catch (err) {
+        console.debug('[chatTab] fetchConceptMetaForChatNodeOnly failed', err);
+        return null;
+    }
+}
+
+function shouldRetryChatConceptMeta(fullId, meta) {
+    if (!fullId) {
+        return false;
+    }
+
+    if (!meta) {
+        return true;
+    }
+
+    if (meta.provisional === true) {
+        return true;
+    }
+
+    const name = typeof meta.name === 'string' ? meta.name : '';
+    if (name === fullId) {
+        return true;
+    }
+
+    return false;
+}
+
+function scheduleChatConceptMetaRetry(fullId) {
+    if (!fullId) {
+        return;
+    }
+
+    const retries = chatConceptMetaRetryCounts.get(fullId) || 0;
+    if (retries >= CHAT_CONCEPT_META_MAX_RETRIES) {
+        return;
+    }
+
+    if (chatConceptMetaRetryTimers.has(fullId)) {
+        return;
+    }
+
+    const delayMs = retries === 0 ? 250 : retries === 1 ? 1000 : 2500;
+    const timerId = setTimeout(() => {
+        chatConceptMetaRetryTimers.delete(fullId);
+        chatConceptMetaRetryCounts.set(fullId, retries + 1);
+
+        if (chatConceptMetaPending.has(fullId)) {
+            scheduleChatConceptMetaRetry(fullId);
+            return;
+        }
+
+        const p = fetchConceptMetaForChatNodeOnly(fullId).then((meta) => {
+            chatConceptMetaPending.delete(fullId);
+
+            if (meta) {
+                chatConceptMetaCache.set(fullId, meta);
+                const els = Array.from(document.querySelectorAll('.vontology-cartouche[data-full-concept-id]'));
+                els
+                    .filter(el => el.dataset.fullConceptId === fullId)
+                    .forEach(el => updateCartoucheElement(el, meta));
+            } else {
+                scheduleChatConceptMetaRetry(fullId);
+            }
+
+            return meta;
+        });
+
+        chatConceptMetaPending.set(fullId, p);
+    }, delayMs);
+
+    chatConceptMetaRetryTimers.set(fullId, timerId);
 }
 
 function updateCartoucheElement(cartoucheEl, meta) {
@@ -325,13 +442,26 @@ function hydrateChatConceptCartouches(root) {
             cartouches
                 .filter(el => el.dataset.fullConceptId === fullId)
                 .forEach(el => updateCartoucheElement(el, cached));
+
+            if (shouldRetryChatConceptMeta(fullId, cached)) {
+                scheduleChatConceptMetaRetry(fullId);
+            }
             continue;
         }
 
         if (!chatConceptMetaPending.has(fullId)) {
             const p = fetchConceptMetaForChat(fullId).then((meta) => {
-                chatConceptMetaCache.set(fullId, meta);
                 chatConceptMetaPending.delete(fullId);
+
+                // Avoid caching null or provisional results indefinitely; newly-created concepts can
+                // race indexing, and we want a short retry window to auto-hydrate.
+                if (meta) {
+                    chatConceptMetaCache.set(fullId, meta);
+                }
+
+                if (shouldRetryChatConceptMeta(fullId, meta)) {
+                    scheduleChatConceptMetaRetry(fullId);
+                }
                 return meta;
             });
             chatConceptMetaPending.set(fullId, p);
@@ -342,11 +472,36 @@ function hydrateChatConceptCartouches(root) {
                 cartouches
                     .filter(el => el.dataset.fullConceptId === fullId)
                     .forEach(el => updateCartoucheElement(el, meta));
+
+                if (shouldRetryChatConceptMeta(fullId, meta)) {
+                    scheduleChatConceptMetaRetry(fullId);
+                }
             })
             .catch(() => {
                 // Ignore lookup failures; leave placeholders.
+                scheduleChatConceptMetaRetry(fullId);
             });
     }
+}
+
+// Export for testing.
+export function __testOnly_resetChatConceptMetaCaches() {
+    chatConceptMetaCache.clear();
+    chatConceptMetaPending.clear();
+    chatConceptMetaRetryCounts.clear();
+    for (const timerId of chatConceptMetaRetryTimers.values()) {
+        try {
+            clearTimeout(timerId);
+        } catch (_) {
+            // Ignore.
+        }
+    }
+    chatConceptMetaRetryTimers.clear();
+}
+
+// Export for testing.
+export function __testOnly_hydrateChatConceptCartouches(root) {
+    hydrateChatConceptCartouches(root);
 }
 
 function deriveLlmDebugWarnings(debugData) {
