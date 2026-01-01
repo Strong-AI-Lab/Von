@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-# Allow running as a script from the repo root.
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
@@ -59,9 +58,6 @@ def _utc_now_iso() -> str:
 
 
 async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
-    # We want a person instance to be an instance of a *type* concept.
-    # In some developer DBs (e.g., test_von_db) the canonical #V#person may not exist,
-    # so we create a minimal #V#person type under a known root type.
     person_type_id = "#V#person"
     created_person_type = False
 
@@ -75,7 +71,10 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
                 person_type_id=None,
                 top_urls=[],
                 primary_extract=None,
-                error="No suitable root type found to create #V#person (tried #V#type_root, #V#thing, #V#one)",
+                error=(
+                    "No suitable root type found to create #V#person "
+                    "(tried #V#type_root, #V#thing, #V#one)"
+                ),
             )
 
         if write:
@@ -84,7 +83,9 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
                 new_concept_name="person",
                 create_as_instance=False,
                 description="A person (type) created by the academic background smoke test.",
-                notes=f"Auto-created for smoke test at {_utc_now_iso()} under parent {type_root}",
+                notes=(
+                    f"Auto-created for smoke test at {_utc_now_iso()} under parent {type_root}"
+                ),
             )
             if not created.get("success"):
                 return RunResult(
@@ -98,7 +99,6 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
                 )
             created_person_type = True
         else:
-            # Dry-run mode: we can still proceed, but we cannot create the parent type.
             return RunResult(
                 success=False,
                 concept_id=None,
@@ -106,7 +106,10 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
                 person_type_id=None,
                 top_urls=[],
                 primary_extract=None,
-                error="Dry-run cannot proceed because #V#person type does not exist. Re-run with --write to allow creating the parent type.",
+                error=(
+                    "Dry-run cannot proceed because #V#person type does not exist. "
+                    "Re-run with --write to allow creating the parent type."
+                ),
             )
 
     proxy = await get_search_proxy()
@@ -151,14 +154,13 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
             error=f"Extract failed: {extract.get('error')}",
         )
 
-    extracted_text = extract.get("content") or ""
-    extracted_text = extracted_text[:12000]
+    extracted_text = (extract.get("content") or "")[:12000]
 
     llm = get_llm_client("openai")
     summary_prompt = (
         "Write a concise academic background summary (6-10 sentences) for the person below. "
-        "Include education (degrees + institutions if present), current roles, affiliations, and 1-2 major contributions. "
-        "Do not invent details; if not in the source, say 'not specified'.\n\n"
+        "Include education (degrees + institutions if present), current roles, affiliations, "
+        "and 1-2 major contributions. Do not invent details; if not in the source, say 'not specified'.\n\n"
         f"Person: {person_name}\n"
         f"Source URL: {primary_url}\n\n"
         "SOURCE TEXT (may be truncated):\n"
@@ -225,8 +227,6 @@ async def run(*, person_name: str, write: bool, cleanup: bool) -> RunResult:
 
     concept = create_result.get("concept") or {}
     concept_id = concept.get("concept_id")
-
-    # Type guard: concept_id must be a string to proceed with names
     if not isinstance(concept_id, str):
         return RunResult(
             success=False,
