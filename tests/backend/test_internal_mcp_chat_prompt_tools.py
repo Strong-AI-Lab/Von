@@ -36,14 +36,24 @@ def test_chat_get_prompt_context_returns_prompt_metadata(monkeypatch):
     # Patch service imports used inside handler
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _namespace: [
-            {"concept_id": "#V#prompt_a", "content": "Alpha"},
-            {"concept_id": "#V#prompt_b", "content": "Beta"},
-        ],
+        lambda _namespace, **kwargs: (
+            [
+                {"concept_id": "#V#prompt_a", "content": "Alpha"},
+                {"concept_id": "#V#prompt_b", "content": "Beta"},
+            ]
+            if kwargs.get("prompt_types")
+            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            else []
+        ),
     )
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.build_user_specific_system_prompt",
-        lambda _namespace: "Alpha\n\nBeta",
+        lambda _namespace, **kwargs: (
+            "Alpha\n\nBeta"
+            if kwargs.get("prompt_types")
+            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            else ""
+        ),
     )
 
     result = _chat_get_prompt_context(
@@ -65,13 +75,21 @@ def test_chat_get_prompt_context_returns_prompt_metadata(monkeypatch):
 def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _namespace: [
-            {"concept_id": "#V#prompt_a", "content": "Alpha"},
-        ],
+        lambda _namespace, **kwargs: (
+            [{"concept_id": "#V#prompt_a", "content": "Alpha"}]
+            if kwargs.get("prompt_types")
+            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            else []
+        ),
     )
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.build_user_specific_system_prompt",
-        lambda _namespace: "Alpha",
+        lambda _namespace, **kwargs: (
+            "Alpha"
+            if kwargs.get("prompt_types")
+            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            else ""
+        ),
     )
 
     result = _chat_get_prompt_context(
@@ -86,11 +104,21 @@ def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
 def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _namespace: [{"concept_id": "#V#prompt_a", "content": "Alpha"}],
+        lambda _namespace, **kwargs: (
+            [{"concept_id": "#V#prompt_a", "content": "Alpha"}]
+            if kwargs.get("prompt_types")
+            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            else []
+        ),
     )
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.build_user_specific_system_prompt",
-        lambda _namespace: "Alpha",
+        lambda _namespace, **kwargs: (
+            "Alpha"
+            if kwargs.get("prompt_types")
+            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            else ""
+        ),
     )
     monkeypatch.setattr(
         "src.backend.languagemodels.llm_interface.get_active_model_name",

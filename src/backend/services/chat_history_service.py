@@ -137,6 +137,47 @@ def _split_history_into_segments(
     return segments
 
 
+def _split_history_into_segments_with_locations(
+    history: List[Dict[str, Any]],
+    *,
+    session_id: str,
+) -> List[List[Dict[str, Any]]]:
+    """Split history into segments, attaching stable location metadata.
+
+    The `history_index` refers to the index in the raw stored `history` array,
+    including reset markers. This allows later targeted updates via
+    `history.<index>` without ambiguity.
+    """
+
+    segments: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+
+    if not isinstance(session_id, str) or not session_id:
+        session_id = ""
+
+    for idx, entry in enumerate(history):
+        if not isinstance(entry, dict):
+            continue
+        if _is_reset_marker(entry):
+            if current:
+                segments.append(current)
+            current = []
+            continue
+
+        # Copy to avoid mutating the stored dict.
+        copied = dict(entry)
+        copied["history_location"] = {
+            "session_id": session_id,
+            "history_index": idx,
+        }
+        current.append(copied)
+
+    if current:
+        segments.append(current)
+
+    return segments
+
+
 def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
     """
     Retrieves the chat history for a specific user and session.
@@ -167,7 +208,10 @@ def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
 
 
 def get_chat_history_segments(
-    user_id: str, session_id: str
+    user_id: str,
+    session_id: str,
+    *,
+    include_locations: bool = False,
 ) -> List[List[Dict[str, Any]]]:
     """
     Return chat history split into segments separated by reset markers.
@@ -198,13 +242,104 @@ def get_chat_history_segments(
             history = doc.get("history") or []
             if not isinstance(history, list) or not history:
                 continue
-            all_segments.extend(_split_history_into_segments(history))
+
+            sid = doc.get("session_id")
+            sid = sid if isinstance(sid, str) else ""
+
+            if include_locations:
+                all_segments.extend(
+                    _split_history_into_segments_with_locations(history, session_id=sid)
+                )
+            else:
+                all_segments.extend(_split_history_into_segments(history))
 
         return all_segments
     except PyMongoError as e:
         logger.error(f"Error retrieving segmented chat history: {e}", exc_info=True)
         raise ChatHistoryServiceError(
             f"Could not retrieve segmented chat history: {e}"
+        ) from e
+
+
+def upsert_presenter_channels_for_history_message(
+    *,
+    user_id: str,
+    session_id: str,
+    history_index: int,
+    presenter_channels: Dict[str, Any],
+    generated_at: Optional[datetime] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Persist presenter channels onto a stored history message.
+
+    Safety properties:
+    - Does NOT touch the session document's `updated_at` (avoids breaking recency ordering).
+    - By default, does not overwrite an existing `presenter_channels.spoken`.
+
+    Returns a dict describing whether an update occurred.
+    """
+
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required")
+    if not isinstance(history_index, int) or history_index < 0:
+        raise ChatHistoryServiceError("history_index must be a non-negative integer")
+    if not isinstance(presenter_channels, dict) or not presenter_channels:
+        raise ChatHistoryServiceError("presenter_channels must be a non-empty dict")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    try:
+        doc = chat_history_coll.find_one(
+            {"user_id": user_id, "session_id": session_id}, {"history": 1}
+        )
+        history = (doc or {}).get("history") or []
+        if not isinstance(history, list) or history_index >= len(history):
+            return {"updated": False, "reason": "index_out_of_range"}
+
+        entry = history[history_index]
+        if not isinstance(entry, dict):
+            return {"updated": False, "reason": "entry_not_dict"}
+        if entry.get("role") != "assistant":
+            return {"updated": False, "reason": "not_assistant"}
+
+        existing_debug = entry.get("llm_debug_data")
+        existing_channels = None
+        if isinstance(existing_debug, dict):
+            existing_channels = existing_debug.get("presenter_channels")
+
+        if not force and isinstance(existing_channels, dict):
+            existing_spoken = existing_channels.get("spoken")
+            if isinstance(existing_spoken, str) and existing_spoken.strip():
+                return {"updated": False, "reason": "spoken_already_present"}
+
+        if generated_at is None:
+            generated_at = datetime.now(timezone.utc)
+
+        set_fields: Dict[str, Any] = {
+            f"history.{history_index}.llm_debug_data.presenter_channels": presenter_channels,
+            f"history.{history_index}.llm_debug_data.presenter_channels_generated_at": generated_at,
+        }
+
+        result = chat_history_coll.update_one(
+            {"user_id": user_id, "session_id": session_id}, {"$set": set_fields}
+        )
+
+        return {
+            "updated": bool(getattr(result, "modified_count", 0) > 0),
+            "matched": bool(getattr(result, "matched_count", 0) > 0),
+        }
+    except PyMongoError as e:
+        logger.error(
+            "Error upserting presenter channels for history message: %s",
+            e,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not update history message presenter channels: {e}"
         ) from e
 
 

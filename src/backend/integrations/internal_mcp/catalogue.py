@@ -615,6 +615,36 @@ def _add_relationship(**kwargs):
                 "error": f"Source concept '{source_id}' not found",
             }
 
+        # Common text predicates are frequently provided either as plain predicate IDs
+        # (e.g. 'hasContent') or V-prefixed IDs (e.g. '#V#hasContent'). Treat these
+        # as text relations without requiring a predicate concept to exist.
+        predicate_str = (
+            predicate.strip() if isinstance(predicate, str) else str(predicate)
+        )
+        predicate_normalised = (
+            predicate_str[3:] if predicate_str.startswith("#V#") else predicate_str
+        )
+        well_known_text_predicates = {"hasContent", "hasDescription", "hasName"}
+        if predicate_normalised in well_known_text_predicates:
+            target_text = target if isinstance(target, str) else str(target)
+            result = upsert_text_for_concept(
+                subject_concept_id=source_id,
+                predicate=predicate_normalised,
+                text=target_text,
+                lang="en",
+                provenance={"source": "add_relationship"},
+            )
+            return {
+                "success": True,
+                "relationship_type": "text_relation",
+                "source_id": source_id,
+                "predicate": predicate_normalised,
+                "predicate_input": predicate,
+                "target": target_text,
+                "text_value_id": str(result.get("text_value_id")),
+                "relation_id": str(result.get("relation_id")),
+            }
+
         # Determine if this is a text predicate (binary_text_predicate instance)
         is_text_predicate = False
         if predicate.startswith("#V#"):
@@ -3532,9 +3562,12 @@ def _chat_get_prompt_context(
 ):
     """Return user-specific prompt context that affects chat.
 
-    This is intended for debugging/inspection: which `#V#von_llm_prompt` concepts
-    are linked to the authenticated user (namespace) and what content they
-    contribute.
+    This is intended for debugging/inspection: which prompt concepts are linked
+    to the authenticated user (namespace) and what content they contribute.
+
+    Prompts are purpose-specific types:
+    - `#V#von_chat_behaviour_prompt` (system behaviour)
+    - `#V#von_chat_narration_prompt` (TTS / presenter narration)
     """
 
     if not namespace or not isinstance(namespace, str) or not namespace.strip():
@@ -3557,12 +3590,36 @@ def _chat_get_prompt_context(
         get_user_specific_prompt_fragments,
     )
 
-    fragments = get_user_specific_prompt_fragments(namespace)
-    prompt_concept_ids = [
-        f.get("concept_id") for f in fragments if isinstance(f.get("concept_id"), str)
+    behaviour_fragments = get_user_specific_prompt_fragments(
+        namespace,
+        prompt_types=(
+            "#V#von_chat_behaviour_prompt",
+            "#V#von_chat_behavior_prompt",
+        ),
+    )
+    narration_fragments = get_user_specific_prompt_fragments(
+        namespace,
+        prompt_types=("#V#von_chat_narration_prompt",),
+    )
+
+    behaviour_prompt_concept_ids = [
+        f.get("concept_id")
+        for f in behaviour_fragments
+        if isinstance(f.get("concept_id"), str)
+    ]
+    narration_prompt_concept_ids = [
+        f.get("concept_id")
+        for f in narration_fragments
+        if isinstance(f.get("concept_id"), str)
     ]
 
-    prompt_text = build_user_specific_system_prompt(namespace)
+    prompt_text = build_user_specific_system_prompt(
+        namespace,
+        prompt_types=(
+            "#V#von_chat_behaviour_prompt",
+            "#V#von_chat_behavior_prompt",
+        ),
+    )
     if (
         isinstance(prompt_text, str)
         and max_chars_int
@@ -3573,24 +3630,35 @@ def _chat_get_prompt_context(
             + f"\n... [truncated {len(prompt_text) - max_chars_int} chars]"
         )
 
-    prompt_concepts = []
-    for fragment in fragments:
-        concept_id = fragment.get("concept_id")
-        if not isinstance(concept_id, str):
-            continue
-        item = {"concept_id": concept_id}
-        if include_content:
-            content = fragment.get("content")
-            item["content"] = content if isinstance(content, str) else ""
-        prompt_concepts.append(item)
+    def _format_fragments(fragments_list):
+        prompt_concepts_local = []
+        for fragment in fragments_list:
+            concept_id = fragment.get("concept_id")
+            if not isinstance(concept_id, str):
+                continue
+            item = {"concept_id": concept_id}
+            if include_content:
+                content = fragment.get("content")
+                item["content"] = content if isinstance(content, str) else ""
+            prompt_concepts_local.append(item)
+        return prompt_concepts_local
+
+    behaviour_prompt_concepts = _format_fragments(behaviour_fragments)
+    narration_prompt_concepts = _format_fragments(narration_fragments)
 
     return {
         "success": True,
         "namespace": namespace,
-        "prompt_concept_ids": prompt_concept_ids,
-        "prompt_concepts": prompt_concepts,
+        # Backwards-compatible fields expected by some callers.
+        "prompt_concept_ids": list(behaviour_prompt_concept_ids),
+        "prompt_concepts": behaviour_prompt_concepts,
+        # Purpose-specific fields.
+        "behaviour_prompt_concept_ids": behaviour_prompt_concept_ids,
+        "behaviour_prompt_concepts": behaviour_prompt_concepts,
+        "narration_prompt_concept_ids": narration_prompt_concept_ids,
+        "narration_prompt_concepts": narration_prompt_concepts,
         "prompt_text": prompt_text or "",
-        "prompt_count": len(prompt_concept_ids),
+        "prompt_count": len(behaviour_prompt_concept_ids),
     }
 
 
@@ -3669,14 +3737,42 @@ def _chat_introspect(
         get_user_specific_prompt_fragments,
     )
 
-    fragments = get_user_specific_prompt_fragments(namespace)
-    prompt_concept_ids = [
-        f.get("concept_id") for f in fragments if isinstance(f.get("concept_id"), str)
+    behaviour_fragments = get_user_specific_prompt_fragments(
+        namespace,
+        prompt_types=(
+            "#V#von_chat_behaviour_prompt",
+            "#V#von_chat_behavior_prompt",
+        ),
+    )
+    narration_fragments = get_user_specific_prompt_fragments(
+        namespace,
+        prompt_types=("#V#von_chat_narration_prompt",),
+    )
+
+    behaviour_prompt_concept_ids = [
+        f.get("concept_id")
+        for f in behaviour_fragments
+        if isinstance(f.get("concept_id"), str)
     ]
-    auxiliary_prompt_text = build_user_specific_system_prompt(namespace) or ""
+    narration_prompt_concept_ids = [
+        f.get("concept_id")
+        for f in narration_fragments
+        if isinstance(f.get("concept_id"), str)
+    ]
+
+    auxiliary_prompt_text = (
+        build_user_specific_system_prompt(
+            namespace,
+            prompt_types=(
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+            ),
+        )
+        or ""
+    )
 
     prompt_concepts: list[dict] = []
-    for fragment in fragments:
+    for fragment in behaviour_fragments:
         concept_id = fragment.get("concept_id")
         if not isinstance(concept_id, str):
             continue
@@ -3685,6 +3781,17 @@ def _chat_introspect(
             content = fragment.get("content")
             item["content"] = content if isinstance(content, str) else ""
         prompt_concepts.append(item)
+
+    narration_prompt_concepts: list[dict] = []
+    for fragment in narration_fragments:
+        concept_id = fragment.get("concept_id")
+        if not isinstance(concept_id, str):
+            continue
+        item = {"concept_id": concept_id}
+        if include_prompt_content:
+            content = fragment.get("content")
+            item["content"] = content if isinstance(content, str) else ""
+        narration_prompt_concepts.append(item)
 
     # Model / provider information
     try:
@@ -3769,9 +3876,14 @@ def _chat_introspect(
         "active_model_name": active_model_name,
         "active_llm": active_llm,
         "resolved_llm": resolved_llm,
-        "prompt_concept_ids": prompt_concept_ids,
+        # Backwards-compatible fields.
+        "prompt_concept_ids": list(behaviour_prompt_concept_ids),
         "prompt_concepts": prompt_concepts,
-        "prompt_count": len(prompt_concept_ids),
+        "prompt_count": len(behaviour_prompt_concept_ids),
+        # Purpose-specific fields.
+        "behaviour_prompt_concept_ids": behaviour_prompt_concept_ids,
+        "narration_prompt_concept_ids": narration_prompt_concept_ids,
+        "narration_prompt_concepts": narration_prompt_concepts,
         "tool_guidance_hash": tool_guidance_hash,
         "tool_guidance_preview": tool_guidance_preview,
         "gateway_enabled": gateway_enabled,
