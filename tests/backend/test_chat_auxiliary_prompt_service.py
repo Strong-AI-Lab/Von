@@ -129,8 +129,11 @@ def test_get_user_specific_prompt_fragments_queries_multiple_scoping_predicates(
     assert isinstance(filter_doc, dict)
     type_filter = filter_doc.get("relationships.is_an_instance_of")
     assert isinstance(type_filter, dict)
+    # Default prompt type scoping includes the NZ spelling plus a legacy US-spelling
+    # concept ID that has been observed in stored data.
     assert type_filter.get("$in") == [
         "#V#von_chat_behaviour_prompt",
+        "#V#von_chat_behavior_prompt",
         "#V#von_llm_prompt",
     ]
 

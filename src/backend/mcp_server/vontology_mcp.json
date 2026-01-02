@@ -93,6 +93,10 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace (e.g., #V#user@org). When provided, triggers a best-effort RAG reindex for the concept; otherwise no automatic indexing occurs."
+                    },
                     "concept_id": {
                         "type": "string",
                         "description": "The concept to attach text to (e.g., '#V#my_concept')"
@@ -111,7 +115,10 @@
                         "description": "Language code (ISO 639-1/BCP 47): en-NZ (default), en-US, fr, de, mi, zh, etc."
                     },
                     "context": {
-                        "type": "object",
+                        "type": [
+                            "object",
+                            "null"
+                        ],
                         "description": "Optional metadata (e.g., {'text_type': 'NL', 'author': 'system'})"
                     }
                 },

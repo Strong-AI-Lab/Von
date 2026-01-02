@@ -1,5 +1,6 @@
 import pytest
 
+from bson import ObjectId
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.db.repositories.text_value_repository import (
     TextRelationsRepository,
@@ -67,6 +68,6 @@ def test_upsert_does_not_dedup_away_newlines():
 
     assert first["text_value_id"] != second["text_value_id"]
 
-    tv = TextValuesRepository.find_one({"_id": second["text_value_id"]})
+    tv = TextValuesRepository.find_one({"_id": ObjectId(second["text_value_id"])})
     assert tv is not None
     assert tv.get("text") == "Hello\nworld"
