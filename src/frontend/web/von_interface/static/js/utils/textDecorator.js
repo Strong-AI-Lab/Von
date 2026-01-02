@@ -10,7 +10,7 @@ export function parseVontologyTokens(text) {
 	const input = String(text);
 	const segments = [];
 	// Regex: start marker #V#, then one or more of allowed id chars, stop at space, quote, backtick, or end
-	// Allow alphanumerics, underscores, hyphens (including en-dash –), periods, slashes, colons, parentheses
+	// Allow alphanumerics, underscores, hyphens (including en-dash – and em dash —), periods, slashes, colons, parentheses
 	// Spaces in concept names are normalized to underscores during ID generation, so no spaces in IDs
 	// Quotes and backticks are forbidden in concept names and serve as text boundaries
 	// Using space/quote/backtick as terminators eliminates ambiguity and runaway link concerns
@@ -18,7 +18,7 @@ export function parseVontologyTokens(text) {
 	// NOTE: Parentheses are not allowed in concept IDs
 	// Also treat common punctuation as a valid token boundary so we can cartouchify IDs
 	// at sentence boundaries (e.g., "#V#foo.", "(#V#bar)").
-	const tokenRe = /#V#([A-Za-z0-9_\./:–\-]+?)(?=[\s"'`\.,:;!?\)\]\}…]|$)/g;
+	const tokenRe = /#V#([A-Za-z0-9_\./:–—\-]+?)(?=[\s"'`\.,:;!?\)\]\}…]|$)/g;
 
 	let lastIndex = 0;
 	let match;
@@ -327,7 +327,7 @@ function normaliseVontologyTokensForDisplay(text) {
 	// "V#person" -> "#V#person" (but do NOT rewrite "#V#person").
 	// Prefix capture avoids lookbehind to keep browser support broad.
 	output = output.replace(
-		/(^|[^#])([Vv])#([A-Za-z0-9_\./:–\-]+?)(?=[\s"'`\.,:;!?\)\]\}…]|$)/g,
+		/(^|[^#])([Vv])#([A-Za-z0-9_\./:–—\-]+?)(?=[\s"'`\.,:;!?\)\]\}…]|$)/g,
 		(_, prefix, _v, conceptId) => `${prefix}#V#${conceptId}`
 	);
 
@@ -337,7 +337,7 @@ function normaliseVontologyTokensForDisplay(text) {
 function extractStandaloneVontologyToken(text) {
 	const normalised = normaliseVontologyTokensForDisplay(String(text ?? '')).trim();
 	if (!normalised) return null;
-	const m = normalised.match(/^#V#([A-Za-z0-9_\./:–\-]+)$/);
+	const m = normalised.match(/^#V#([A-Za-z0-9_\./:–—\-]+)$/);
 	return m ? m[1] : null;
 }
 

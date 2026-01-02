@@ -307,6 +307,8 @@ def generate():
     data = request.get_json()
     prompt_text = data.get("prompt", "")
 
+    presenter_mode_requested = bool(data.get("presenter_mode"))
+
     request_start_perf = time.perf_counter()
 
     interaction_timestamp_utc = (
@@ -352,7 +354,7 @@ def generate():
             import re
 
             def _find_block(tag: str) -> str | None:
-                pattern = rf"<{tag}>\\s*(.*?)\\s*</{tag}>"
+                pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
                 m = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
                 if not m:
                     return None
@@ -368,9 +370,14 @@ def generate():
             if spoken is None and screen is None:
                 return None
 
-            # Backwards-compatible defaults.
-            screen_text = screen if screen is not None else text.strip()
-            spoken_text = spoken if spoken is not None else screen_text
+            # Defaults:
+            # - If only <spoken> is provided, display it on-screen too (otherwise we'd render the raw tags).
+            # - If only <screen> is provided, do NOT fabricate spoken from screen; let the client fall back.
+            screen_text = screen if screen is not None else spoken
+            spoken_text = spoken
+
+            if screen_text is None:
+                screen_text = text.strip()
 
             return {
                 "format": "tagged_blocks_v1",
@@ -423,11 +430,14 @@ def generate():
         # JVNAUTOSCI-797: user-specific system prompt from Vontology
         # ---------------------------------------------------------
         auxiliary_system_prompt = None
+        narration_prompt_text = None
         user_prompt_debug = {
             "effective_user_concept_id": user_concept_id,
             "loaded": False,
             "chars": 0,
             "prompt_concept_ids": [],
+            "behaviour_prompt_concept_ids": [],
+            "narration_prompt_concept_ids": [],
         }
         if user_concept_id:
             try:
@@ -435,15 +445,37 @@ def generate():
                     get_user_specific_prompt_fragments,
                 )
 
-                prompt_fragments = get_user_specific_prompt_fragments(user_concept_id)
-                user_prompt_debug["prompt_concept_ids"] = [
+                behaviour_prompt_fragments = get_user_specific_prompt_fragments(
+                    user_concept_id,
+                    prompt_types=(
+                        "#V#von_chat_behaviour_prompt",
+                        "#V#von_chat_behavior_prompt",
+                    ),
+                )
+                narration_prompt_fragments = get_user_specific_prompt_fragments(
+                    user_concept_id,
+                    prompt_types=("#V#von_chat_narration_prompt",),
+                )
+
+                user_prompt_debug["behaviour_prompt_concept_ids"] = [
                     frag.get("concept_id")
-                    for frag in prompt_fragments
+                    for frag in behaviour_prompt_fragments
                     if isinstance(frag, dict)
                     and isinstance(frag.get("concept_id"), str)
                 ]
+                user_prompt_debug["narration_prompt_concept_ids"] = [
+                    frag.get("concept_id")
+                    for frag in narration_prompt_fragments
+                    if isinstance(frag, dict)
+                    and isinstance(frag.get("concept_id"), str)
+                ]
+                # Backwards-compatible field name used by the UI/debug tools.
+                user_prompt_debug["prompt_concept_ids"] = list(
+                    user_prompt_debug["behaviour_prompt_concept_ids"]
+                )
+
                 prompt_texts = []
-                for frag in prompt_fragments:
+                for frag in behaviour_prompt_fragments:
                     if not isinstance(frag, dict):
                         continue
                     content = frag.get("content")
@@ -457,6 +489,23 @@ def generate():
                 )
                 auxiliary_system_prompt = (
                     auxiliary_system_prompt.strip() if auxiliary_system_prompt else None
+                )
+
+                narration_texts = []
+                for frag in narration_prompt_fragments:
+                    if not isinstance(frag, dict):
+                        continue
+                    content = frag.get("content")
+                    if not isinstance(content, str):
+                        continue
+                    if not content.strip():
+                        continue
+                    narration_texts.append(content)
+                narration_prompt_text = "\n\n".join(
+                    text.strip() for text in narration_texts if text and text.strip()
+                )
+                narration_prompt_text = (
+                    narration_prompt_text.strip() if narration_prompt_text else None
                 )
 
                 if auxiliary_system_prompt:
@@ -1114,6 +1163,31 @@ def generate():
             else:
                 enhanced_context.insert(1, user_prompt_message)
 
+        # ---------------------------------------------------------
+        # JVNAUTOSCI-894: Presenter-mode response protocol
+        # ---------------------------------------------------------
+        if presenter_mode_requested:
+            presenter_protocol_message = {
+                "role": "system",
+                "content": (
+                    "PRESENTER MODE PROTOCOL:\n"
+                    "- Output EXACTLY TWO tagged blocks and nothing else:\n"
+                    "  <spoken>...brief talk track...</spoken>\n"
+                    "  <screen>...full on-screen content...</screen>\n"
+                    "- <spoken> is what will be read aloud (TTS). Keep it short (1–4 sentences), conversational, and focused on the user's intent and what you did / what to do next. Do not read long lists, code blocks, or raw markdown.\n"
+                    "- <screen> is what will be shown. It may include structured markdown, code blocks, and full details.\n"
+                    "- Do not include <spoken>/<screen> tags inside code blocks.\n"
+                    "- Use New Zealand English spelling."
+                    + (
+                        "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
+                        + narration_prompt_text
+                        if narration_prompt_text
+                        else ""
+                    )
+                ),
+            }
+            enhanced_context.insert(0, presenter_protocol_message)
+
         # Log the enhanced context being sent to the model for debugging
         current_app.logger.info(
             f"Enhanced context being sent to model: {len(enhanced_context)} messages"
@@ -1680,6 +1754,104 @@ def generate():
                 ]
 
         presenter_channels = _extract_presenter_channels(response_text)
+
+        def _extract_spoken_only(text: str) -> str | None:
+            if not isinstance(text, str) or not text:
+                return None
+            import re
+
+            m = re.search(
+                r"<spoken>\s*(.*?)\s*</spoken>", text, flags=re.DOTALL | re.IGNORECASE
+            )
+            if not m:
+                return None
+            value = m.group(1)
+            if not isinstance(value, str):
+                return None
+            cleaned = value.strip()
+            return cleaned or None
+
+        spoken_backfill_second_pass_attempted = False
+        spoken_backfill_second_pass_reason = None
+
+        # If presenter mode was requested but the model didn't produce a usable
+        # <spoken> channel, generate it in a second pass for reliability.
+        #
+        # Note: The model may emit only <screen>...</screen>. In that case,
+        # we still generate <spoken> using the narration prompt rather than
+        # falling back to reading the screen/markdown verbatim.
+        needs_spoken_backfill = False
+        if presenter_mode_requested:
+            if presenter_channels is None:
+                needs_spoken_backfill = True
+                spoken_backfill_second_pass_reason = "missing_presenter_channels"
+            elif isinstance(presenter_channels, dict):
+                spoken_value = presenter_channels.get("spoken")
+                if not isinstance(spoken_value, str) or not spoken_value.strip():
+                    needs_spoken_backfill = True
+                    spoken_backfill_second_pass_reason = "missing_spoken"
+            else:
+                needs_spoken_backfill = True
+                spoken_backfill_second_pass_reason = "missing_presenter_channels"
+
+        if needs_spoken_backfill:
+            try:
+                spoken_backfill_second_pass_attempted = True
+                if isinstance(presenter_channels, dict) and isinstance(
+                    presenter_channels.get("screen"), str
+                ):
+                    screen_text = str(presenter_channels.get("screen") or "").strip()
+                else:
+                    screen_text = (
+                        response_text.strip()
+                        if isinstance(response_text, str)
+                        else str(response_text)
+                    )
+
+                narration_system = (
+                    "You are Von. Produce a short talk track for text-to-speech. "
+                    "Return ONLY one block: <spoken>...</spoken>. "
+                    "Do not include <screen>. Do not include code blocks. "
+                    "Use New Zealand English spelling."
+                    + (
+                        "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
+                        + narration_prompt_text
+                        if narration_prompt_text
+                        else ""
+                    )
+                )
+
+                narration_user = (
+                    "User message:\n"
+                    f"{prompt_text}\n\n"
+                    "On-screen content (do not read verbatim if long; summarise):\n"
+                    f"{screen_text}\n"
+                )
+
+                narration_response = llm_client.generate(
+                    prompt="Generate <spoken> talk track",
+                    context=[
+                        {"role": "system", "content": narration_system},
+                        {"role": "user", "content": narration_user},
+                    ],
+                    model=model_name,
+                )
+
+                spoken_fallback = _extract_spoken_only(str(narration_response))
+                if spoken_fallback:
+                    base_channels = (
+                        dict(presenter_channels)
+                        if isinstance(presenter_channels, dict)
+                        else {}
+                    )
+                    base_channels["screen"] = screen_text
+                    base_channels["spoken"] = spoken_fallback
+                    base_channels["format"] = "narration_fallback_v1"
+                    presenter_channels = base_channels
+            except Exception:
+                # Defensive: never fail the request just because narration generation failed.
+                presenter_channels = presenter_channels
+
         if presenter_channels is not None:
             # Screen channel becomes the stored/displayed response.
             screen_text_value = presenter_channels.get("screen")
@@ -1798,6 +1970,8 @@ def generate():
             "messages": current_turn_messages,
             "response": response_text,
             "presenter_channels": presenter_channels,
+            "spoken_backfill_second_pass_attempted": spoken_backfill_second_pass_attempted,
+            "spoken_backfill_second_pass_reason": spoken_backfill_second_pass_reason,
             "user_prompt": user_prompt_debug,
             "namespace_report": namespace_report,
             "internal_mcp": {
@@ -1947,7 +2121,7 @@ def history():
 
     try:
         segments = chat_history_service.get_chat_history_segments(
-            user_concept_id, session_id
+            user_concept_id, session_id, include_locations=True
         )
         total_segments = len(segments)
 
@@ -1978,6 +2152,216 @@ def history():
     except Exception as e:
         print(f"Error retrieving history: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/history/backfill_spoken", methods=["POST"])
+def history_backfill_spoken():
+    """Generate and persist missing <spoken> talk track for a stored assistant turn.
+
+    This is intended for legacy history turns where presenter channels were not
+    generated or persisted at the time. The backfill:
+    - requires authentication
+    - does not touch session `updated_at` (so it won't reorder session recency)
+    """
+
+    from ...security.access_control import get_effective_user_concept_id
+
+    user_concept_id = get_effective_user_concept_id()
+    if not user_concept_id:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    data = request.get_json(silent=True) or {}
+    history_location = data.get("history_location")
+    if not isinstance(history_location, dict):
+        history_location = {}
+
+    target_session_id = history_location.get("session_id") or data.get("session_id")
+    history_index = history_location.get("history_index")
+    if history_index is None:
+        history_index = data.get("history_index")
+
+    if not isinstance(target_session_id, str) or not target_session_id.strip():
+        return jsonify({"error": "session_id is required"}), 400
+    if not isinstance(history_index, int) or history_index < 0:
+        return jsonify({"error": "history_index must be a non-negative integer"}), 400
+
+    force = bool(data.get("force"))
+
+    # Fetch the stored assistant message and associated previous user prompt.
+    try:
+        chat_history_coll = chat_history_service.get_chat_history_collection_service()
+        if chat_history_coll is None:
+            return (
+                jsonify({"error": "Could not connect to chat history collection."}),
+                500,
+            )
+
+        doc = chat_history_coll.find_one(
+            {"user_id": user_concept_id, "session_id": target_session_id},
+            {"history": 1},
+        )
+        history = (doc or {}).get("history") or []
+        if not isinstance(history, list) or history_index >= len(history):
+            return jsonify({"error": "History entry not found"}), 404
+
+        entry = history[history_index]
+        if not isinstance(entry, dict) or entry.get("role") != "assistant":
+            return (
+                jsonify({"error": "Target history entry is not an assistant message"}),
+                400,
+            )
+
+        screen_text = entry.get("content")
+        if not isinstance(screen_text, str) or not screen_text.strip():
+            return jsonify({"error": "Assistant message has no content"}), 400
+        screen_text = screen_text.strip()
+
+        existing_debug = entry.get("llm_debug_data")
+        existing_channels = None
+        if isinstance(existing_debug, dict):
+            existing_channels = existing_debug.get("presenter_channels")
+        if not force and isinstance(existing_channels, dict):
+            spoken_existing = existing_channels.get("spoken")
+            if isinstance(spoken_existing, str) and spoken_existing.strip():
+                return jsonify(
+                    {
+                        "status": "already_present",
+                        "presenter_channels": existing_channels,
+                        "updated": False,
+                    }
+                )
+
+        prompt_text = ""
+        for i in range(history_index - 1, -1, -1):
+            msg = history[i]
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") == "system" and msg.get("content") == "__RESET__":
+                # Stop at reset boundary.
+                break
+            if msg.get("role") == "user":
+                candidate = msg.get("content")
+                if isinstance(candidate, str) and candidate.strip():
+                    prompt_text = candidate.strip()
+                break
+
+    except Exception as e:
+        return jsonify({"error": f"Failed reading history: {e}"}), 500
+
+    # Load narration prompt fragments (best-effort).
+    narration_prompt_text = None
+    try:
+        from ...services.chat_auxiliary_prompt_service import (
+            get_user_specific_prompt_fragments,
+        )
+
+        narration_prompt_fragments = get_user_specific_prompt_fragments(
+            user_concept_id,
+            prompt_types=("#V#von_chat_narration_prompt",),
+        )
+        narration_texts = []
+        for frag in narration_prompt_fragments:
+            if not isinstance(frag, dict):
+                continue
+            content = frag.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            narration_texts.append(content)
+        narration_prompt_text = "\n\n".join(
+            text.strip() for text in narration_texts if text and text.strip()
+        )
+        narration_prompt_text = (
+            narration_prompt_text.strip() if narration_prompt_text else None
+        )
+    except Exception:
+        narration_prompt_text = None
+
+    # Generate spoken talk track.
+    try:
+        org_concept_id = session.get("organisation_concept_id") if session else None
+        llm_client = get_llm_client(
+            user_concept_id=user_concept_id, org_concept_id=org_concept_id
+        )
+        model_name = get_active_model_name()
+
+        def _extract_spoken_only(text: str) -> str | None:
+            if not isinstance(text, str) or not text:
+                return None
+            import re
+
+            m = re.search(
+                r"<spoken>\s*(.*?)\s*</spoken>",
+                text,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            if not m:
+                return None
+            value = m.group(1)
+            if not isinstance(value, str):
+                return None
+            cleaned = value.strip()
+            return cleaned or None
+
+        narration_system = (
+            "You are Von. Produce a short talk track for text-to-speech. "
+            "Return ONLY one block: <spoken>...</spoken>. "
+            "Do not include <screen>. Do not include code blocks. "
+            "Use New Zealand English spelling."
+            + (
+                "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
+                + narration_prompt_text
+                if narration_prompt_text
+                else ""
+            )
+        )
+
+        narration_user = (
+            "User message:\n"
+            f"{prompt_text}\n\n"
+            "On-screen content (do not read verbatim if long; summarise):\n"
+            f"{screen_text}\n"
+        )
+
+        narration_response = llm_client.generate(
+            prompt="Generate <spoken> talk track",
+            context=[
+                {"role": "system", "content": narration_system},
+                {"role": "user", "content": narration_user},
+            ],
+            model=model_name,
+        )
+
+        spoken = _extract_spoken_only(str(narration_response))
+        if not spoken:
+            return jsonify({"status": "no_spoken_generated", "updated": False}), 200
+
+        presenter_channels = {
+            "screen": screen_text,
+            "spoken": spoken,
+            "format": "narration_fallback_v1",
+        }
+
+        update_result = (
+            chat_history_service.upsert_presenter_channels_for_history_message(
+                user_id=user_concept_id,
+                session_id=target_session_id,
+                history_index=history_index,
+                presenter_channels=presenter_channels,
+                generated_at=datetime.now(timezone.utc),
+                force=force,
+            )
+        )
+
+        return jsonify(
+            {
+                "status": "ok",
+                "presenter_channels": presenter_channels,
+                "updated": bool(update_result.get("updated")),
+                "matched": bool(update_result.get("matched")),
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": f"Failed generating spoken talk track: {e}"}), 500
 
 
 @von_bp.route("/history/length", methods=["GET"])

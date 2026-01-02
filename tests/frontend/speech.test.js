@@ -15,7 +15,7 @@ describe('speech TTS utilities', () => {
         expect(getSpeechSynthesisVoices()).toEqual([]);
     });
 
-    test('speakText applies voiceUri when available', () => {
+    test('speakText applies voiceUri when available', async () => {
         const voice = { voiceURI: 'voice-1', name: 'Test voice', lang: 'en-NZ' };
 
         global.speechSynthesis = {
@@ -42,6 +42,10 @@ describe('speech TTS utilities', () => {
         });
 
         expect(global.speechSynthesis.cancel).toHaveBeenCalled();
+
+        // speech.js intentionally delays speak() briefly after cancel() to avoid
+        // first-words clipping in some browsers.
+        await new Promise((resolve) => setTimeout(resolve, 150));
         expect(global.speechSynthesis.speak).toHaveBeenCalledWith(utterance);
         expect(utterance.lang).toBe('en-NZ');
         expect(utterance.rate).toBe(1.2);

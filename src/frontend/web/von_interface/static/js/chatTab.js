@@ -22,6 +22,75 @@ const transcriptTurns = [];
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 
+// Cool-down for failed history talk-track backfills so we do not spam the server.
+// Map<turnId, { at: number, error: string }>
+const historySpokenBackfillFailures = new Map();
+const HISTORY_SPOKEN_BACKFILL_FAILURE_COOLDOWN_MS = 30_000;
+
+function stripMarkdownForSpeech(text) {
+    const input = String(text ?? '');
+    if (!input.trim()) {
+        return '';
+    }
+
+    let value = input;
+
+    // Remove fenced code blocks entirely.
+    value = value.replace(/```[\s\S]*?```/g, ' ');
+
+    // Replace inline code with its content.
+    value = value.replace(/`([^`]+)`/g, '$1');
+
+    // Replace markdown links [text](url) -> text.
+    value = value.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+
+    // Remove images ![alt](url) -> alt.
+    value = value.replace(/!\[([^\]]*)\]\([^\)]+\)/g, '$1');
+
+    // Remove headings/bullets/quotes markers.
+    value = value
+        .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+        .replace(/^\s{0,3}>\s?/gm, '')
+        .replace(/^\s*[-*+]\s+/gm, '')
+        .replace(/^\s*\d+\.[\s]+/gm, '');
+
+    // Remove emphasis markers.
+    value = value.replace(/\*\*([^*]+)\*\*/g, '$1');
+    value = value.replace(/\*([^*]+)\*/g, '$1');
+    value = value.replace(/__([^_]+)__/g, '$1');
+    value = value.replace(/_([^_]+)_/g, '$1');
+
+    // Remove horizontal rules.
+    value = value.replace(/^\s*---+\s*$/gm, ' ');
+
+    // Collapse whitespace.
+    value = value.replace(/[ \t]+/g, ' ');
+    value = value.replace(/\n{3,}/g, '\n\n');
+    value = value.trim();
+
+    return value;
+}
+
+function deriveNarrationFromScreenText(screenText, options = {}) {
+    const cleaned = stripMarkdownForSpeech(screenText);
+    if (!cleaned) {
+        return '';
+    }
+
+    const maxChars = Number.isFinite(options.maxChars) ? options.maxChars : 900;
+    if (cleaned.length <= maxChars) {
+        return cleaned;
+    }
+
+    // Prefer not to cut mid-sentence if possible.
+    const slice = cleaned.slice(0, maxChars);
+    const lastBreak = Math.max(slice.lastIndexOf('. '), slice.lastIndexOf('? '), slice.lastIndexOf('! '));
+    if (lastBreak > 200) {
+        return slice.slice(0, lastBreak + 1).trim() + '…';
+    }
+    return slice.trim() + '…';
+}
+
 function normalisePresenterChannels(value) {
     if (!value || typeof value !== 'object') {
         return null;
@@ -977,6 +1046,11 @@ function toggleSpeakTurn(turnId, text, button) {
         return;
     }
 
+    const trimmed = String(text ?? '').trim();
+    if (!trimmed) {
+        return;
+    }
+
     const isAlreadyActive = activeTtsTurnId === turnId;
     if (isAlreadyActive) {
         stopSpeaking();
@@ -998,7 +1072,7 @@ function toggleSpeakTurn(turnId, text, button) {
     let utterance = null;
     try {
         const settings = getChatSpeechSettings();
-        utterance = speakText(text, {
+        utterance = speakText(trimmed, {
             language: settings.tts.language,
             rate: settings.tts.rate,
             pitch: settings.tts.pitch,
@@ -1488,8 +1562,12 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
 
             // Restore debug data before rendering so markdown gating can see model info.
             const hasDebugData = msg.role === 'assistant' && !!msg.llm_debug_data;
-            if (hasDebugData) {
-                llmDebugData.set(turnId, msg.llm_debug_data);
+            if (msg.role === 'assistant') {
+                const merged = {
+                    ...(msg.llm_debug_data && typeof msg.llm_debug_data === 'object' ? msg.llm_debug_data : {}),
+                    history_location: msg.history_location || null
+                };
+                llmDebugData.set(turnId, merged);
             }
 
             appendMessage(label, msg.content, turnId, hasDebugData, true, msg.timestamp);
@@ -1864,6 +1942,10 @@ async function handleSendPrompt() {
 
         // Get user context from localStorage to send to backend
         const userContext = getUserContext();
+        // Presenter-mode controls whether the backend produces two-channel output
+        // (screen + spoken). This should be enabled regardless of whether auto-TTS
+        // is enabled, so clicking Speak later never needs to read raw markdown.
+        const presenterMode = true;
 
         const response = await fetch('/von/generate', {
             method: 'POST',
@@ -1876,7 +1958,8 @@ async function handleSendPrompt() {
                 user_id: userContext.user_id,
                 org_id: userContext.org_id,
                 language: userContext.language,
-                gmail_profile: userContext.gmail_profile
+                gmail_profile: userContext.gmail_profile,
+                presenter_mode: presenterMode
             })
         });
 
@@ -1899,7 +1982,8 @@ async function handleSendPrompt() {
         if (response.ok) {
             // Store LLM debug data if available
             if (data.llm_debug) {
-                const responseChannels = normalisePresenterChannels(data.response_channels);
+                const presenterChannelsRaw = data.presenter_channels || data.response_channels || data?.metadata?.presenter_channels;
+                const responseChannels = normalisePresenterChannels(presenterChannelsRaw);
                 const screenText = responseChannels?.screen ? responseChannels.screen : String(data.response ?? '');
                 const spokenText = responseChannels?.spoken ? responseChannels.spoken : null;
                 const enriched = enrichDebugDataWithSpeechPlanning(data.llm_debug, {
@@ -1913,7 +1997,8 @@ async function handleSendPrompt() {
 
             const fastpathMeta = data.fastpath || (data.llm_debug && data.llm_debug.fastpath) || null;
 
-            const responseChannels = normalisePresenterChannels(data.response_channels);
+            const presenterChannelsRaw = data.presenter_channels || data.response_channels || data?.metadata?.presenter_channels;
+            const responseChannels = normalisePresenterChannels(presenterChannelsRaw);
             const screenText = responseChannels?.screen ? responseChannels.screen : String(data.response ?? '');
             const spokenText = responseChannels?.spoken ? responseChannels.spoken : null;
 
@@ -2059,27 +2144,88 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             // Add message content
             const messageContent = document.createElement('div');
-            messageContent.style.cssText = 'flex: 1; line-height: 1.5;';
+            // IMPORTANT: in a flex row, children default to min-width:auto, which can
+            // force horizontal overflow and clip the header control buttons when the
+            // left header text is long. min-width:0 allows proper wrapping/shrinking.
+            messageContent.style.cssText = 'flex: 1; min-width: 0; line-height: 1.5;';
 
             const rawText = String(message ?? '');
 
-            let ttsTextForTurn = (typeof ttsText === 'string' && ttsText.trim()) ? ttsText : null;
-            if (!ttsTextForTurn && turnId) {
+            const screenTextForTurn = rawText;
+            let spokenTextForTurn = (typeof ttsText === 'string' && ttsText.trim()) ? ttsText : null;
+            if (!spokenTextForTurn && turnId) {
                 const debugDataForTurn = llmDebugData.get(turnId);
                 const channels = normalisePresenterChannels(debugDataForTurn?.presenter_channels);
-                if (channels?.spoken) {
-                    ttsTextForTurn = channels.spoken;
+                if (channels?.spoken && channels.spoken.trim()) {
+                    spokenTextForTurn = channels.spoken;
                 }
             }
-            if (!ttsTextForTurn) {
-                ttsTextForTurn = rawText;
+
+            async function ensureHistorySpokenTalkTrack() {
+                if (!isHistory || !turnId) {
+                    return null;
+                }
+
+                const recentFailure = historySpokenBackfillFailures.get(turnId);
+                if (recentFailure && (Date.now() - recentFailure.at) < HISTORY_SPOKEN_BACKFILL_FAILURE_COOLDOWN_MS) {
+                    return null;
+                }
+
+                const debugDataForTurn = llmDebugData.get(turnId);
+                const historyLocation = debugDataForTurn?.history_location;
+                if (!historyLocation || typeof historyLocation !== 'object') {
+                    return null;
+                }
+
+                try {
+                    const resp = await fetch('/von/history/backfill_spoken', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ history_location: historyLocation })
+                    });
+
+                    const data = await resp.json().catch(() => ({}));
+                    if (!resp.ok) {
+                        const errMsg = (data && typeof data.error === 'string' && data.error.trim())
+                            ? data.error.trim()
+                            : `HTTP ${resp.status}`;
+                        historySpokenBackfillFailures.set(turnId, { at: Date.now(), error: errMsg, shownAt: null });
+                        console.warn('[chatTab] backfill_spoken failed:', data);
+                        return null;
+                    }
+
+                    const channels = normalisePresenterChannels(data?.presenter_channels);
+                    if (!channels?.spoken || !channels.spoken.trim()) {
+                        return null;
+                    }
+
+                    // Cache the generated channels in-memory so subsequent clicks work.
+                    const existing = llmDebugData.get(turnId);
+                    llmDebugData.set(turnId, {
+                        ...(existing && typeof existing === 'object' ? existing : {}),
+                        presenter_channels: channels
+                    });
+
+                    // Clear any previous failure cool-down.
+                    historySpokenBackfillFailures.delete(turnId);
+
+                    return channels.spoken;
+                } catch (err) {
+                    console.warn('[chatTab] backfill_spoken request failed:', err);
+                    const errMsg = err && typeof err.message === 'string' && err.message.trim()
+                        ? err.message.trim()
+                        : 'Request failed';
+                    historySpokenBackfillFailures.set(turnId, { at: Date.now(), error: errMsg, shownAt: null });
+                    return null;
+                }
             }
 
             const messageHeader = document.createElement('div');
-            messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; align-items: center; gap: 8px;';
+            messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;';
 
             const headerText = document.createElement('span');
             headerText.textContent = `Von • ${displayTimestamp}${historySuffix}`;
+            headerText.style.minWidth = '0';
             messageHeader.appendChild(headerText);
 
             // Add fast-path indicator if the server bypassed the LLM.
@@ -2170,7 +2316,50 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             const rightControls = document.createElement('span');
             rightControls.className = 'chat-message-controls';
-            rightControls.style.cssText = 'margin-left: auto; display: inline-flex; align-items: center; gap: 6px;';
+            rightControls.style.cssText = 'margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;';
+
+            const showTtsNotice = (text, options = {}) => {
+                const msg = String(text ?? '').trim();
+                if (!msg) {
+                    return;
+                }
+
+                const existing = rightControls.querySelector('.chat-tts-notice');
+                if (existing) {
+                    try { existing.remove(); } catch (_) { /* ignore */ }
+                }
+
+                const notice = document.createElement('span');
+                notice.className = 'chat-tts-notice';
+                notice.textContent = msg;
+                notice.title = msg;
+                notice.setAttribute('role', 'status');
+                notice.setAttribute('aria-live', 'polite');
+                notice.style.cssText = [
+                    'display: inline-flex',
+                    'align-items: center',
+                    'max-width: 320px',
+                    'padding: 1px 6px',
+                    'border-radius: 10px',
+                    'font-size: 0.78em',
+                    'line-height: 1.2',
+                    'background: #fff3cd',
+                    'border: 1px solid #ffeeba',
+                    'color: #856404',
+                    'white-space: nowrap',
+                    'overflow: hidden',
+                    'text-overflow: ellipsis'
+                ].join(';');
+
+                rightControls.insertBefore(notice, rightControls.firstChild);
+
+                const durationMs = Number.isFinite(options.durationMs) ? options.durationMs : 4500;
+                if (durationMs > 0) {
+                    setTimeout(() => {
+                        try { notice.remove(); } catch (_) { /* ignore */ }
+                    }, durationMs);
+                }
+            };
 
             // Render-mode badge: shows whether this message is in Rendered/Text mode.
             const renderModeBadge = document.createElement('span');
@@ -2183,20 +2372,78 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             speakButton.className = 'btn-mini chat-tts-button';
             speakButton.type = 'button';
             speakButton.textContent = 'Speak';
-            speakButton.title = 'Speak this response aloud';
+            speakButton.title = 'Speak the talk track aloud (Shift+click to speak the on-screen text)';
             if (!ttsSupported) {
                 speakButton.disabled = true;
                 speakButton.title = 'Text-to-speech is not supported in this browser.';
             }
-            speakButton.addEventListener('click', (e) => {
+            speakButton.addEventListener('click', async (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                toggleSpeakTurn(turnId, ttsTextForTurn, speakButton);
+
+                const wantsScreen = !!(e && e.shiftKey);
+                const getScreenTextForSpeech = () => {
+                    const displayed = (messageText && (messageText.innerText || messageText.textContent))
+                        ? (messageText.innerText || messageText.textContent)
+                        : screenTextForTurn;
+                    return stripMarkdownForSpeech(displayed);
+                };
+
+                let desiredText = wantsScreen ? getScreenTextForSpeech() : (spokenTextForTurn || '');
+                if (!wantsScreen && !String(desiredText ?? '').trim() && isHistory) {
+                    // For legacy history turns, try to backfill a talk track on-demand.
+                    const originalLabel = speakButton.textContent;
+                    const originalTitle = speakButton.title;
+                    const originalDisabled = speakButton.disabled;
+                    try {
+                        speakButton.disabled = true;
+                        speakButton.textContent = 'Generating…';
+                        speakButton.title = 'Generating talk track…';
+
+                        const backfilled = await ensureHistorySpokenTalkTrack();
+                        if (typeof backfilled === 'string' && backfilled.trim()) {
+                            spokenTextForTurn = backfilled;
+                            desiredText = backfilled;
+                        }
+                    } finally {
+                        speakButton.disabled = originalDisabled;
+                        speakButton.textContent = originalLabel;
+                        speakButton.title = originalTitle;
+                    }
+                }
+
+                // If no talk track is available, derive a plain narration from the screen text.
+                // Never speak raw markdown.
+                if (!String(desiredText ?? '').trim() && !wantsScreen) {
+                    const failure = turnId ? historySpokenBackfillFailures.get(turnId) : null;
+                    const reason = failure?.error ? ` (talk track unavailable: ${failure.error})` : '';
+                    desiredText = deriveNarrationFromScreenText(screenTextForTurn);
+                    speakButton.title = `Speaking a derived narration${reason}. Shift+click speaks the on-screen text.`;
+
+                    if (failure && typeof failure === 'object') {
+                        const shouldShow = !failure.shownAt || (typeof failure.at === 'number' && failure.shownAt < failure.at);
+                        if (shouldShow) {
+                            const errShort = typeof failure.error === 'string' ? failure.error.trim() : '';
+                            const msg = errShort
+                                ? `Talk track unavailable — speaking on-screen text (${errShort})`
+                                : 'Talk track unavailable — speaking on-screen text';
+                            showTtsNotice(msg);
+                            historySpokenBackfillFailures.set(turnId, { ...failure, shownAt: Date.now() });
+                        }
+                    }
+                }
+
+                if (!String(desiredText ?? '').trim()) {
+                    speakButton.title = 'Nothing to speak.';
+                    return;
+                }
+
+                toggleSpeakTurn(turnId, desiredText, speakButton);
             });
             rightControls.appendChild(speakButton);
 
             const messageText = document.createElement('div');
-            messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400;';
+            messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400; overflow-wrap: anywhere; word-break: break-word;';
             try {
                 const debugData = turnId ? llmDebugData.get(turnId) : null;
                 const canRenderMarkdown = shouldRenderMarkdownForAssistant(rawText, debugData);
@@ -2250,8 +2497,10 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
                 // Auto-speak new assistant responses when enabled.
                 if (!isHistory && turnId && ttsSupported && isChatTtsEnabled()) {
-                    // Ensure we speak the original model output (not rendered HTML).
-                    toggleSpeakTurn(turnId, ttsTextForTurn, speakButton);
+                    // Auto-speak uses the talk track only (never the screen channel).
+                    if (spokenTextForTurn && spokenTextForTurn.trim()) {
+                        toggleSpeakTurn(turnId, spokenTextForTurn, speakButton);
+                    }
                 }
             } catch (e) {
                 console.error('[chatTab] Failed to render Von message:', e);
@@ -2773,5 +3022,26 @@ export const exportConversationMarkdown = handleExportConversationMarkdown;
 export const setLlmDebugDataForTurn = (turnId, debugData) => {
     llmDebugData.set(turnId, debugData);
 };
+// Export for testing
+export const __test_only__rehydrateHistory = rehydrateHistory;
+
+// Export for testing.
+export function __testOnly_resetChatTtsState() {
+    try {
+        stopSpeaking();
+    } catch (_) {
+        // Ignore.
+    }
+    try {
+        clearActiveTtsUi();
+    } catch (_) {
+        // Ignore.
+    }
+    try {
+        historySpokenBackfillFailures.clear();
+    } catch (_) {
+        // Ignore.
+    }
+}
 export { formatChatTimestamp, showLlmDebugPopup, updateHistoryLength };
 

@@ -4,6 +4,24 @@
 //
 // Keep this module safe to import in test environments (no top-level browser-only refs).
 
+const DEFAULT_CANCEL_SETTLE_MS = 120;
+
+let pendingSpeakTimerId = null;
+
+function clearPendingSpeakTimer(root) {
+    if (!pendingSpeakTimerId) {
+        return;
+    }
+
+    try {
+        root?.clearTimeout?.(pendingSpeakTimerId);
+    } catch (_) {
+        // Ignore.
+    }
+
+    pendingSpeakTimerId = null;
+}
+
 function getSpeechRecognitionCtor() {
     const root = typeof globalThis !== 'undefined' ? globalThis : null;
     if (!root) {
@@ -140,6 +158,8 @@ export function stopSpeaking() {
         return;
     }
 
+    clearPendingSpeakTimer(root);
+
     try {
         root.speechSynthesis.cancel();
     } catch (_) {
@@ -151,6 +171,15 @@ export function speakText(text, options = {}) {
     const root = typeof globalThis !== 'undefined' ? globalThis : null;
     if (!root || !root.speechSynthesis || typeof root.SpeechSynthesisUtterance !== 'function') {
         throw new Error('Text-to-speech is not supported in this browser.');
+    }
+
+    clearPendingSpeakTimer(root);
+
+    // Prompt browsers (notably Chrome) to load voices early.
+    try {
+        root.speechSynthesis.getVoices?.();
+    } catch (_) {
+        // Ignore.
     }
 
     const utterance = new root.SpeechSynthesisUtterance(String(text ?? ''));
@@ -186,6 +215,26 @@ export function speakText(text, options = {}) {
         // Ignore.
     }
 
-    root.speechSynthesis.speak(utterance);
+    // Workaround for Web Speech quirks where calling speak() immediately after cancel()
+    // can clip the first words of an utterance.
+    const settleMs =
+        typeof options.cancelSettleMs === 'number'
+            ? options.cancelSettleMs
+            : DEFAULT_CANCEL_SETTLE_MS;
+
+    const doSpeak = () => {
+        pendingSpeakTimerId = null;
+        try {
+            root.speechSynthesis.speak(utterance);
+        } catch (_) {
+            // Ignore.
+        }
+    };
+
+    if (settleMs > 0 && typeof root.setTimeout === 'function') {
+        pendingSpeakTimerId = root.setTimeout(doSpeak, settleMs);
+    } else {
+        doSpeak();
+    }
     return utterance;
 }
