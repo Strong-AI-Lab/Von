@@ -5684,6 +5684,37 @@ body.settings-body {
     margin: 0.8em 0;
 }
 
+.chat-markdown.markdown-rendered .chat-insert-prompt-wrapper {
+    margin: 0.8em 0;
+}
+
+.chat-markdown.markdown-rendered .chat-insert-prompt-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    color: #0f172a;
+    font: inherit;
+    cursor: pointer;
+}
+
+.chat-markdown.markdown-rendered .chat-insert-prompt-button:hover {
+    background: #eef2ff;
+    border-color: #a5b4fc;
+}
+
+.chat-markdown.markdown-rendered .chat-insert-prompt-button:active {
+    background: #e0e7ff;
+}
+
+/* Standalone fenced code blocks containing exactly one #V#... token become a block cartouche. */
+.chat-markdown.markdown-rendered .vontology-cartouche-block {
+    margin: 0.8em 0;
+}
+
 /* Heading styles for markdown */
 .markdown-rendered h1,
 .markdown-rendered h2,
@@ -5755,6 +5786,16 @@ body.settings-body {
     font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
     font-size: 0.85em;
     line-height: 1.45;
+}
+
+.markdown-rendered .vontology-cartouche-block {
+    display: flex;
+    align-items: flex-start;
+    margin: 1em 0;
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    padding: 12px 16px;
 }
 
 .markdown-rendered pre code {

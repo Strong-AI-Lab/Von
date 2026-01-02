@@ -43,12 +43,48 @@ describe('handleSelectConceptByIdDetail', () => {
             { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn }
         );
 
+        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#person', 'Loading…', false);
         expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#person', 'Person', false);
         // Should not try to create.
         expect(fetchFn).toHaveBeenCalledTimes(2);
 
         expect(cartouche.querySelector('.vontology-cartouche-name').textContent).toBe('Person');
         expect(cartouche.querySelector('.vontology-cartouche-kind').textContent).toBe('Type');
+    });
+
+    test('shift-click activates the concept tab', async () => {
+        const { handleSelectConceptByIdDetail } = require(handlerPath);
+        const { createVontologyCartouche } = require(decoratorPath);
+
+        const cartouche = createVontologyCartouche('person');
+        document.body.appendChild(cartouche);
+
+        const createOrActivateConceptTab = jest.fn();
+        const activateTab = jest.fn();
+        const selectVontologyNodeByIdentifier = jest.fn();
+
+        const fetchFn = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                if (url.includes('raw_only=1')) {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ display_name: 'Person', kind: 'type', concept_id: '#V#person' })
+                    });
+                }
+                // existence check
+                return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+            }
+            return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+        });
+
+        await handleSelectConceptByIdDetail(
+            { conceptId: 'person', createConceptTab: true, kind: 'type', modifierKeys: { shiftKey: true } },
+            { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn }
+        );
+
+        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#person', 'Loading…', true);
+        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#person', 'Person', true);
     });
 
     test('missing concept prompts and creates then opens', async () => {
@@ -96,6 +132,7 @@ describe('handleSelectConceptByIdDetail', () => {
         );
 
         expect(chooseCreateOptionsFn).toHaveBeenCalled();
+        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#disambiguation_result', 'Loading…', false);
         expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#disambiguation_result', 'Disambiguation result', false);
         // Existence check + create + metadata fetch.
         expect(fetchFn).toHaveBeenCalledTimes(3);

@@ -371,28 +371,63 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
         return;
     }
 
+    // Normal click: open in background.
+    // Shift-click: open and switch to it.
+    const shouldActivate = !!modifierKeys.shiftKey;
+
+    // Open the tab immediately (optimistic) so the UI responds even if the backend
+    // is busy (e.g., single-threaded server while chat generation is in flight).
+    // Metadata will be hydrated below when available.
+    try {
+        deps.createOrActivateConceptTab(id, 'Loading…', shouldActivate);
+    } catch (_) {
+        // Best-effort; keep going.
+    }
+
     let exists = false;
     try {
         exists = await conceptExists(id, fetchFn);
     } catch (err) {
         console.warn('[selectConceptById] existence check failed', err);
-        // Fall back to existing behaviour: open tab anyway.
-        deps.createOrActivateConceptTab(id, id, false);
+        // Fall back to existing behaviour: ensure the tab exists.
+        deps.createOrActivateConceptTab(id, 'Loading…', shouldActivate);
         return;
     }
 
     if (exists) {
         const metadata = await fetchConceptMetadata(id, fetchFn);
         updateCartouchesForConcept(id, metadata);
-        deps.createOrActivateConceptTab(id, metadata?.displayName || id, false);
+        deps.createOrActivateConceptTab(id, metadata?.displayName || id, shouldActivate);
         return;
+    }
+
+    // Concept does not exist: remove the optimistic tab rather than leaving a
+    // dead "Loading…" tab around.
+    try {
+        deps?.closeDynamicConceptTab?.(id);
+    } catch (_) {
+        // Best-effort; keep going.
     }
 
     const chooseCreateOptionsFn = deps?.chooseCreateOptionsFn;
     const createOpts = chooseCreateOptionsFn
         ? await chooseCreateOptionsFn({ conceptId: id, kind, modifierKeys })
         : await openCreateConceptModal(id, kind);
-    if (!createOpts) return;
+    if (!createOpts) {
+        try {
+            deps?.closeDynamicConceptTab?.(id);
+        } catch (_) {
+            // Best-effort; keep going.
+        }
+        return;
+    }
+
+    // Re-open a loading tab now that the user has confirmed creation.
+    try {
+        deps.createOrActivateConceptTab(id, 'Loading…', shouldActivate);
+    } catch (_) {
+        // Best-effort; keep going.
+    }
 
     try {
         const chosenKind = deriveKindFromCreateOptions(createOpts, kind);
@@ -400,7 +435,7 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
         await createConceptForId(id, createOpts, fetchFn);
         const metadata = await fetchConceptMetadata(id, fetchFn);
         updateCartouchesForConcept(id, metadata);
-        deps.createOrActivateConceptTab(id, metadata?.displayName || id, false);
+        deps.createOrActivateConceptTab(id, metadata?.displayName || id, shouldActivate);
         showToast('Concept created.', 'info');
     } catch (err) {
         console.warn('[selectConceptById] create failed', err);

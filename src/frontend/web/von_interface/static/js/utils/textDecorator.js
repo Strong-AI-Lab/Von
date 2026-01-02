@@ -341,6 +341,40 @@ function extractStandaloneVontologyToken(text) {
 	return m ? m[1] : null;
 }
 
+function cartouchifyStandaloneVontologyCodeBlocks(root, options = {}) {
+	if (!root || !root.querySelectorAll) return;
+
+	const codeNodes = Array.from(root.querySelectorAll('pre > code'));
+	for (const codeEl of codeNodes) {
+		try {
+			const preEl = codeEl.parentElement;
+			if (!preEl || preEl.tagName.toLowerCase() !== 'pre') continue;
+
+			// Avoid replacing within links or existing cartouches.
+			if (preEl.closest('a')) continue;
+			if (preEl.closest('.vontology-cartouche')) continue;
+
+			// Only when the <code> node is purely text and the <pre> contains nothing else.
+			if (codeEl.childElementCount !== 0) continue;
+			if (preEl.childElementCount !== 1) continue;
+
+			const token = extractStandaloneVontologyToken(codeEl.textContent);
+			if (!token) continue;
+
+			const cartouche = createVontologyCartouche(`#V#${token}`, { variant: 'code-block' });
+			cartouche.classList.add('vontology-cartouche-code-block');
+
+			const wrapper = document.createElement('div');
+			wrapper.className = 'vontology-cartouche-block';
+			wrapper.appendChild(cartouche);
+
+			preEl.replaceWith(wrapper);
+		} catch (_) {
+			// Ignore detached nodes or DOM mutation races.
+		}
+	}
+}
+
 function cartouchifyStandaloneVontologyCodeSpans(root, options = {}) {
 	if (!root || !root.querySelectorAll) return;
 
@@ -465,6 +499,10 @@ export function cartouchifyVontologyTokensInElement(root, options = {}) {
 
 	if (options && options.allowStandaloneCodeTokens) {
 		cartouchifyStandaloneVontologyCodeSpans(root, options);
+	}
+
+	if (options && options.allowStandaloneCodeBlockTokens) {
+		cartouchifyStandaloneVontologyCodeBlocks(root, options);
 	}
 }
 
