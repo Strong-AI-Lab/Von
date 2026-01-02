@@ -17,6 +17,78 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+_DETERMINISTIC_RAG_DOC_NAMESPACE = uuid.UUID("8c5a7fa9-9a7c-4f0f-8c1f-f4ad7f9f6fd7")
+
+
+def _derive_rag_namespace(
+    *, session_context: Dict[str, Any], user_id: str
+) -> Optional[str]:
+    ns = session_context.get("namespace")
+    if isinstance(ns, str) and ns.strip():
+        return ns.strip()
+
+    org_id = session_context.get("organisation_concept_id") or session_context.get(
+        "org_id"
+    )
+    if isinstance(org_id, str) and org_id.strip():
+        try:
+            from src.backend.services.namespace_service import derive_namespace
+
+            user_slug = user_id[3:] if user_id.startswith("#V#") else user_id
+            org_slug = org_id[3:] if org_id.startswith("#V#") else org_id
+            return derive_namespace(user_slug, org_slug)
+        except Exception:
+            return None
+
+    return None
+
+
+def _build_rag_metadata(
+    *,
+    session_context: Dict[str, Any],
+    user_id: str,
+    session_id: str,
+    role: str,
+    channel: Optional[str] = None,
+    history_index: Optional[int] = None,
+    generated_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "user_id": user_id,
+        "session_id": session_id,
+        "role": role,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "type": "chat_message",
+    }
+    if isinstance(channel, str) and channel.strip():
+        metadata["channel"] = channel.strip()
+    if isinstance(history_index, int) and history_index >= 0:
+        metadata["history_index"] = history_index
+    if isinstance(generated_at, datetime):
+        metadata["generated_at"] = generated_at.isoformat()
+
+    org_concept_id = session_context.get("organisation_concept_id")
+    if org_concept_id:
+        from ..utils.concept_id_utils import ensure_v_concept_prefix
+
+        metadata["organisation_concept_id"] = (
+            ensure_v_concept_prefix(org_concept_id) or org_concept_id
+        )
+    if session_context.get("role_in_org"):
+        metadata["role_in_org"] = session_context["role_in_org"]
+
+    return metadata
+
+
+def _truncate_for_rag(text: str, *, max_chars: int = 5000) -> str:
+    if not isinstance(text, str):
+        return ""
+    txt = text
+    if len(txt) > max_chars:
+        txt = txt[:max_chars]
+    return txt
+
+
 def get_session_context() -> Dict[str, Any]:
     """
     Get organisation and role context from Flask session.
@@ -137,6 +209,47 @@ def _split_history_into_segments(
     return segments
 
 
+def _split_history_into_segments_with_locations(
+    history: List[Dict[str, Any]],
+    *,
+    session_id: str,
+) -> List[List[Dict[str, Any]]]:
+    """Split history into segments, attaching stable location metadata.
+
+    The `history_index` refers to the index in the raw stored `history` array,
+    including reset markers. This allows later targeted updates via
+    `history.<index>` without ambiguity.
+    """
+
+    segments: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+
+    if not isinstance(session_id, str) or not session_id:
+        session_id = ""
+
+    for idx, entry in enumerate(history):
+        if not isinstance(entry, dict):
+            continue
+        if _is_reset_marker(entry):
+            if current:
+                segments.append(current)
+            current = []
+            continue
+
+        # Copy to avoid mutating the stored dict.
+        copied = dict(entry)
+        copied["history_location"] = {
+            "session_id": session_id,
+            "history_index": idx,
+        }
+        current.append(copied)
+
+    if current:
+        segments.append(current)
+
+    return segments
+
+
 def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
     """
     Retrieves the chat history for a specific user and session.
@@ -167,7 +280,10 @@ def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
 
 
 def get_chat_history_segments(
-    user_id: str, session_id: str
+    user_id: str,
+    session_id: str,
+    *,
+    include_locations: bool = False,
 ) -> List[List[Dict[str, Any]]]:
     """
     Return chat history split into segments separated by reset markers.
@@ -198,13 +314,145 @@ def get_chat_history_segments(
             history = doc.get("history") or []
             if not isinstance(history, list) or not history:
                 continue
-            all_segments.extend(_split_history_into_segments(history))
+
+            sid = doc.get("session_id")
+            sid = sid if isinstance(sid, str) else ""
+
+            if include_locations:
+                all_segments.extend(
+                    _split_history_into_segments_with_locations(history, session_id=sid)
+                )
+            else:
+                all_segments.extend(_split_history_into_segments(history))
 
         return all_segments
     except PyMongoError as e:
         logger.error(f"Error retrieving segmented chat history: {e}", exc_info=True)
         raise ChatHistoryServiceError(
             f"Could not retrieve segmented chat history: {e}"
+        ) from e
+
+
+def upsert_presenter_channels_for_history_message(
+    *,
+    user_id: str,
+    session_id: str,
+    history_index: int,
+    presenter_channels: Dict[str, Any],
+    generated_at: Optional[datetime] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Persist presenter channels onto a stored history message.
+
+    Safety properties:
+    - Does NOT touch the session document's `updated_at` (avoids breaking recency ordering).
+    - By default, does not overwrite an existing `presenter_channels.spoken`.
+
+    Returns a dict describing whether an update occurred.
+    """
+
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required")
+    if not isinstance(history_index, int) or history_index < 0:
+        raise ChatHistoryServiceError("history_index must be a non-negative integer")
+    if not isinstance(presenter_channels, dict) or not presenter_channels:
+        raise ChatHistoryServiceError("presenter_channels must be a non-empty dict")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    try:
+        doc = chat_history_coll.find_one(
+            {"user_id": user_id, "session_id": session_id}, {"history": 1}
+        )
+        history = (doc or {}).get("history") or []
+        if not isinstance(history, list) or history_index >= len(history):
+            return {"updated": False, "reason": "index_out_of_range"}
+
+        entry = history[history_index]
+        if not isinstance(entry, dict):
+            return {"updated": False, "reason": "entry_not_dict"}
+        if entry.get("role") != "assistant":
+            return {"updated": False, "reason": "not_assistant"}
+
+        existing_debug = entry.get("llm_debug_data")
+        existing_channels = None
+        if isinstance(existing_debug, dict):
+            existing_channels = existing_debug.get("presenter_channels")
+
+        if not force and isinstance(existing_channels, dict):
+            existing_spoken = existing_channels.get("spoken")
+            if isinstance(existing_spoken, str) and existing_spoken.strip():
+                return {"updated": False, "reason": "spoken_already_present"}
+
+        if generated_at is None:
+            generated_at = datetime.now(timezone.utc)
+
+        set_fields: Dict[str, Any] = {
+            f"history.{history_index}.llm_debug_data.presenter_channels": presenter_channels,
+            f"history.{history_index}.llm_debug_data.presenter_channels_generated_at": generated_at,
+        }
+
+        result = chat_history_coll.update_one(
+            {"user_id": user_id, "session_id": session_id}, {"$set": set_fields}
+        )
+
+        updated = bool(getattr(result, "modified_count", 0) > 0)
+
+        # If we generated spoken narration for an existing stored message, index it to RAG
+        # so it is retrievable later.
+        if updated and get_rag_service:
+            try:
+                rag = get_rag_service()
+                spoken = presenter_channels.get("spoken")
+                if isinstance(spoken, str) and spoken.strip():
+                    session_context = get_session_context()
+                    ns = _derive_rag_namespace(
+                        session_context=session_context, user_id=user_id
+                    )
+                    if not isinstance(ns, str) or not ns.strip():
+                        ns = "chat_history"
+
+                    doc_id = str(
+                        uuid.uuid5(
+                            _DETERMINISTIC_RAG_DOC_NAMESPACE,
+                            f"{user_id}|{session_id}|{history_index}|spoken",
+                        )
+                    )
+                    doc = {
+                        "id": doc_id,
+                        "text": _truncate_for_rag(spoken.strip()),
+                        "metadata": _build_rag_metadata(
+                            session_context=session_context,
+                            user_id=user_id,
+                            session_id=session_id,
+                            role="assistant",
+                            channel="spoken",
+                            history_index=history_index,
+                            generated_at=generated_at,
+                        ),
+                    }
+                    rag.upsert_documents([doc], namespace=ns)
+            except Exception as e:
+                logger.warning(
+                    "Failed to index backfilled spoken narration to RAG: %s", e
+                )
+
+        return {
+            "updated": updated,
+            "matched": bool(getattr(result, "matched_count", 0) > 0),
+        }
+    except PyMongoError as e:
+        logger.error(
+            "Error upserting presenter channels for history message: %s",
+            e,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not update history message presenter channels: {e}"
         ) from e
 
 
@@ -238,21 +486,7 @@ def add_message_to_history(
         session_context = get_session_context()
 
         # Determine namespace used for both persistence and RAG indexing.
-        # Prefer an explicit session namespace, else derive one from user/org when possible.
-        ns = session_context.get("namespace")
-        if not isinstance(ns, str) or not ns.strip():
-            org_id = session_context.get(
-                "organisation_concept_id"
-            ) or session_context.get("org_id")
-            if isinstance(org_id, str) and org_id.strip():
-                try:
-                    from src.backend.services.namespace_service import derive_namespace
-
-                    user_slug = user_id[3:] if user_id.startswith("#V#") else user_id
-                    org_slug = org_id[3:] if org_id.startswith("#V#") else org_id
-                    ns = derive_namespace(user_slug, org_slug)
-                except Exception:
-                    ns = None
+        ns = _derive_rag_namespace(session_context=session_context, user_id=user_id)
 
         # Add timestamp to message (and llm_debug_data if present)
         message_with_timestamp = {**message, "timestamp": datetime.now(timezone.utc)}
@@ -286,34 +520,45 @@ def add_message_to_history(
                 # Only index string content that isn't empty
                 if isinstance(content, str) and content.strip():
                     # Skip indexing tool outputs that are just "truncated" markers or very small
-                    if len(content) > 5000:  # Truncate for indexing if huge
-                        content = content[:5000]
+                    content = _truncate_for_rag(content)
 
                     # Get session context for organisation and role
-                    doc_id = str(uuid.uuid4())
-                    metadata = {
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "role": message.get("role", "unknown"),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "type": "chat_message",
+                    role = message.get("role", "unknown")
+                    doc = {
+                        "id": str(uuid.uuid4()),
+                        "text": content,
+                        "metadata": _build_rag_metadata(
+                            session_context=session_context,
+                            user_id=user_id,
+                            session_id=session_id,
+                            role=role,
+                            channel=None,
+                        ),
                     }
-
-                    # Include organisation and role metadata if available
-                    org_concept_id = session_context.get("organisation_concept_id")
-                    if org_concept_id:
-                        from ..utils.concept_id_utils import ensure_v_concept_prefix
-
-                        metadata["organisation_concept_id"] = (
-                            ensure_v_concept_prefix(org_concept_id) or org_concept_id
-                        )
-                    if session_context.get("role_in_org"):
-                        metadata["role_in_org"] = session_context["role_in_org"]
-
-                    doc = {"id": doc_id, "text": content, "metadata": metadata}
                     if not isinstance(ns, str) or not ns.strip():
                         ns = "chat_history"
                     rag.upsert_documents([doc], namespace=ns)
+
+                    # If this is an assistant message in presenter mode, also index the spoken talk track.
+                    if role == "assistant" and isinstance(llm_debug_data, dict):
+                        presenter_channels = llm_debug_data.get("presenter_channels")
+                        if isinstance(presenter_channels, dict):
+                            spoken = presenter_channels.get("spoken")
+                            if isinstance(spoken, str) and spoken.strip():
+                                spoken_txt = spoken.strip()
+                                if spoken_txt != content.strip():
+                                    spoken_doc = {
+                                        "id": str(uuid.uuid4()),
+                                        "text": _truncate_for_rag(spoken_txt),
+                                        "metadata": _build_rag_metadata(
+                                            session_context=session_context,
+                                            user_id=user_id,
+                                            session_id=session_id,
+                                            role=role,
+                                            channel="spoken",
+                                        ),
+                                    }
+                                    rag.upsert_documents([spoken_doc], namespace=ns)
 
                     # Track indexing progress per chat session for status UI.
                     try:

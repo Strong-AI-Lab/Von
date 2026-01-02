@@ -35,10 +35,15 @@ def app(monkeypatch):
 
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _user_id: [
-            {"concept_id": "#V#prompt1", "content": "First prompt."},
-            {"concept_id": "#V#prompt2", "content": "Second prompt."},
-        ],
+        lambda _user_id, **kwargs: (
+            [
+                {"concept_id": "#V#prompt1", "content": "First prompt."},
+                {"concept_id": "#V#prompt2", "content": "Second prompt."},
+            ]
+            if kwargs.get("prompt_types")
+            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            else []
+        ),
     )
 
     flask_app = Flask(__name__)

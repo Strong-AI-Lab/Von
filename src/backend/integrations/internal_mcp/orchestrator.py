@@ -1455,10 +1455,31 @@ class InternalMCPChatOrchestrator:
             for msg in context:
                 if isinstance(msg, Mapping):
                     base.append(dict(msg))
+
+        # Preserve presenter-mode protocol messages even when context trimming
+        # would otherwise drop them (system message at index 0 is always kept).
+        presenter_protocol: str | None = None
+        filtered: list[Mapping[str, Any]] = []
+        for msg in base:
+            role = msg.get("role") if isinstance(msg, Mapping) else None
+            content = msg.get("content") if isinstance(msg, Mapping) else None
+            if (
+                role == "system"
+                and isinstance(content, str)
+                and content.lstrip().startswith("PRESENTER MODE PROTOCOL:")
+            ):
+                presenter_protocol = content.strip()
+                continue
+            filtered.append(msg)
+        base = [dict(m) if isinstance(m, Mapping) else m for m in filtered]
+
         instruction_msg = self._instruction_message(
             user_namespace=user_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
         )
+
+        if presenter_protocol:
+            instruction_msg = f"{instruction_msg}\n\n{presenter_protocol}\n"
 
         # Log the size of the instruction message for diagnostics
         instruction_chars = len(instruction_msg)

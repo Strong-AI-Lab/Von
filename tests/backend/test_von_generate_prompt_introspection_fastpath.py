@@ -55,12 +55,17 @@ def app(monkeypatch):
     # Keep user prompt loader stable.
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _user_id: [
-            {
-                "concept_id": "#V#general_von_chat_prompt_for_witbrock",
-                "content": "Please be terse.",
-            }
-        ],
+        lambda _user_id, **kwargs: (
+            [
+                {
+                    "concept_id": "#V#general_von_chat_prompt_for_witbrock",
+                    "content": "Please be terse.",
+                }
+            ]
+            if kwargs.get("prompt_types")
+            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            else []
+        ),
     )
 
     llm = _FailingLLM()
@@ -218,12 +223,17 @@ def test_prompt_introspection_fastpath_disabled_by_default_does_not_trigger(
     # Keep user prompt loader stable.
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _user_id: [
-            {
-                "concept_id": "#V#general_von_chat_prompt_for_witbrock",
-                "content": "Please be terse.",
-            }
-        ],
+        lambda _user_id, **kwargs: (
+            [
+                {
+                    "concept_id": "#V#general_von_chat_prompt_for_witbrock",
+                    "content": "Please be terse.",
+                }
+            ]
+            if kwargs.get("prompt_types")
+            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            else []
+        ),
     )
 
     class _NonFailingLLM:

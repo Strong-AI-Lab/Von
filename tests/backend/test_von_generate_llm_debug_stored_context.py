@@ -46,7 +46,7 @@ def app(monkeypatch):
 
     monkeypatch.setattr(
         "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _user_id: [],
+        lambda _user_id, **_kwargs: [],
     )
 
     flask_app = Flask(__name__)
