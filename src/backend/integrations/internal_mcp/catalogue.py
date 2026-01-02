@@ -214,11 +214,11 @@ def _upsert_text_relation(**kwargs):
     namespace = kwargs.get("namespace")
 
     if not concept_id:
-        return {"error": "Missing 'concept_id' parameter"}
+        return {"success": False, "error": "Missing 'concept_id' parameter"}
     if not predicate:
-        return {"error": "Missing 'predicate' parameter"}
+        return {"success": False, "error": "Missing 'predicate' parameter"}
     if not text:
-        return {"error": "Missing 'text' parameter"}
+        return {"success": False, "error": "Missing 'text' parameter"}
 
     try:
         result = upsert_text_for_concept(
@@ -248,7 +248,7 @@ def _upsert_text_relation(**kwargs):
             "language": language,
         }
     except Exception as exc:
-        return {"error": f"Failed to upsert text relation: {exc}"}
+        return {"success": False, "error": f"Failed to upsert text relation: {exc}"}
 
 
 def _get_text_relations(**kwargs):
@@ -1386,11 +1386,12 @@ def _upsert_text_relation_input_schema() -> Schema:
             "text": str,
         },
         optional={
+            "namespace": (str, type(None)),
             "language": str,
             "context": (dict, type(None)),
         },
         allow_unknown=True,
-        description="upsert_text_relation input: concept_id (str), predicate (str, e.g., 'hasContent', 'hasDescription'), text (str), language (str, optional, default 'en-NZ'), context (dict, optional metadata)",
+        description="upsert_text_relation input: concept_id (str), predicate (str, e.g., 'hasContent', 'hasDescription'), text (str), namespace (str, optional), language (str, optional, default 'en-NZ'), context (dict, optional metadata)",
     )
 
 
