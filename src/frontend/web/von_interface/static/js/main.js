@@ -1,5 +1,5 @@
 import { initializeDomElements, initializeInfoPopup, loadAndDisplayGlobalModelInFooter } from './domUtils.js';
-import { createOrActivateConceptTab } from './dynamicTabs.js';
+import { closeDynamicConceptTab, createOrActivateConceptTab } from './dynamicTabs.js';
 import { getLanguageDisplayName } from './languageConfig.js';
 import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
@@ -56,6 +56,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Async handler (do not block UI thread).
       void handleSelectConceptByIdDetail(e?.detail, {
         createOrActivateConceptTab,
+        closeDynamicConceptTab,
         activateTab,
         selectVontologyNodeByIdentifier
       });
