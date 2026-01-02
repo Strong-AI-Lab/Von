@@ -1771,6 +1771,50 @@ def generate():
             cleaned = value.strip()
             return cleaned or None
 
+        def _coerce_spoken_text(text: object) -> str | None:
+            """Best-effort normalisation for narration responses.
+
+            The narration second-pass *should* return <spoken>...</spoken>, but in
+            practice models sometimes return plain text. Accept either format.
+            """
+
+            if text is None:
+                return None
+
+            raw = str(text).strip()
+            if not raw:
+                return None
+
+            tagged = _extract_spoken_only(raw)
+            if tagged:
+                return tagged
+
+            import re
+
+            # Strip any accidental tagged blocks and code fences.
+            raw = re.sub(r"</?spoken>", "", raw, flags=re.IGNORECASE)
+            raw = re.sub(r"</?screen>", "", raw, flags=re.IGNORECASE)
+            raw = re.sub(r"```.*?```", "", raw, flags=re.DOTALL)
+            raw = raw.replace("`", "")
+            raw = raw.strip()
+
+            if not raw:
+                return None
+
+            # Keep it short for TTS.
+            max_chars = 800
+            if len(raw) > max_chars:
+                clipped = raw[:max_chars].rstrip()
+                # Prefer clipping at a sentence boundary.
+                for sep in (". ", "! ", "? "):
+                    cut = clipped.rfind(sep)
+                    if cut > 200:
+                        clipped = clipped[: cut + 1]
+                        break
+                raw = clipped.strip()
+
+            return raw or None
+
         spoken_backfill_second_pass_attempted = False
         spoken_backfill_second_pass_reason = None
 
@@ -1837,7 +1881,11 @@ def generate():
                     model=model_name,
                 )
 
-                spoken_fallback = _extract_spoken_only(str(narration_response))
+                spoken_fallback = _coerce_spoken_text(narration_response)
+                if not spoken_fallback:
+                    # Last resort: derive a short talk track from the screen text.
+                    spoken_fallback = _coerce_spoken_text(screen_text)
+
                 if spoken_fallback:
                     base_channels = (
                         dict(presenter_channels)

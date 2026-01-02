@@ -160,3 +160,39 @@ def test_generate_presenter_mode_falls_back_to_second_pass_spoken(monkeypatch):
 
     assert len(llm.calls) == 2
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
+
+
+def test_generate_accepts_plain_text_from_narration_second_pass(monkeypatch):
+    llm = _StubLLMSequence(
+        [
+            "This is the full on-screen answer with **markdown** and details.",
+            "Short summary for TTS.",
+        ]
+    )
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Hello", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    assert body["response"] == "This is the full on-screen answer with **markdown** and details."
+    assert body["response_channels"] == {
+        "screen": "This is the full on-screen answer with **markdown** and details.",
+        "spoken": "Short summary for TTS.",
+        "format": "narration_fallback_v1",
+    }
+
+    llm_debug = body["llm_debug"]
+    assert llm_debug.get("spoken_backfill_second_pass_attempted") is True
+    assert (
+        llm_debug.get("spoken_backfill_second_pass_reason")
+        == "missing_presenter_channels"
+    )
+
+    assert len(llm.calls) == 2
+    assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
