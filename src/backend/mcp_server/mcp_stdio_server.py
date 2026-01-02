@@ -353,7 +353,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Language code (ISO 639-1/BCP 47): en-NZ (default), en-US, fr, de, mi, zh, etc.",
                     },
                     "context": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "description": "Optional metadata (e.g., {'text_type': 'NL', 'author': 'system'})",
                     },
                 },
@@ -1580,11 +1580,11 @@ async def _handle_upsert_text_relation(arguments: dict[str, Any]) -> list[TextCo
     context = arguments.get("context")
 
     if not concept_id:
-        return [_json_error("Missing concept_id parameter")]
+        return [_json_text({"success": False, "error": "Missing concept_id parameter"})]
     if not predicate:
-        return [_json_error("Missing predicate parameter")]
+        return [_json_text({"success": False, "error": "Missing predicate parameter"})]
     if not text:
-        return [_json_error("Missing text parameter")]
+        return [_json_text({"success": False, "error": "Missing text parameter"})]
 
     try:
         result = upsert_text_for_concept(
@@ -1613,7 +1613,11 @@ async def _handle_upsert_text_relation(arguments: dict[str, Any]) -> list[TextCo
         }
         return [_json_text(payload)]
     except Exception as exc:
-        return [_json_error(f"Failed to upsert text relation: {exc}")]
+        return [
+            _json_text(
+                {"success": False, "error": f"Failed to upsert text relation: {exc}"}
+            )
+        ]
 
 
 async def _handle_get_text_relations(arguments: dict[str, Any]) -> list[TextContent]:
