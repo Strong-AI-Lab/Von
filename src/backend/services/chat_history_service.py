@@ -17,6 +17,78 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+_DETERMINISTIC_RAG_DOC_NAMESPACE = uuid.UUID("8c5a7fa9-9a7c-4f0f-8c1f-f4ad7f9f6fd7")
+
+
+def _derive_rag_namespace(
+    *, session_context: Dict[str, Any], user_id: str
+) -> Optional[str]:
+    ns = session_context.get("namespace")
+    if isinstance(ns, str) and ns.strip():
+        return ns.strip()
+
+    org_id = session_context.get("organisation_concept_id") or session_context.get(
+        "org_id"
+    )
+    if isinstance(org_id, str) and org_id.strip():
+        try:
+            from src.backend.services.namespace_service import derive_namespace
+
+            user_slug = user_id[3:] if user_id.startswith("#V#") else user_id
+            org_slug = org_id[3:] if org_id.startswith("#V#") else org_id
+            return derive_namespace(user_slug, org_slug)
+        except Exception:
+            return None
+
+    return None
+
+
+def _build_rag_metadata(
+    *,
+    session_context: Dict[str, Any],
+    user_id: str,
+    session_id: str,
+    role: str,
+    channel: Optional[str] = None,
+    history_index: Optional[int] = None,
+    generated_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "user_id": user_id,
+        "session_id": session_id,
+        "role": role,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "type": "chat_message",
+    }
+    if isinstance(channel, str) and channel.strip():
+        metadata["channel"] = channel.strip()
+    if isinstance(history_index, int) and history_index >= 0:
+        metadata["history_index"] = history_index
+    if isinstance(generated_at, datetime):
+        metadata["generated_at"] = generated_at.isoformat()
+
+    org_concept_id = session_context.get("organisation_concept_id")
+    if org_concept_id:
+        from ..utils.concept_id_utils import ensure_v_concept_prefix
+
+        metadata["organisation_concept_id"] = (
+            ensure_v_concept_prefix(org_concept_id) or org_concept_id
+        )
+    if session_context.get("role_in_org"):
+        metadata["role_in_org"] = session_context["role_in_org"]
+
+    return metadata
+
+
+def _truncate_for_rag(text: str, *, max_chars: int = 5000) -> str:
+    if not isinstance(text, str):
+        return ""
+    txt = text
+    if len(txt) > max_chars:
+        txt = txt[:max_chars]
+    return txt
+
+
 def get_session_context() -> Dict[str, Any]:
     """
     Get organisation and role context from Flask session.
@@ -328,8 +400,49 @@ def upsert_presenter_channels_for_history_message(
             {"user_id": user_id, "session_id": session_id}, {"$set": set_fields}
         )
 
+        updated = bool(getattr(result, "modified_count", 0) > 0)
+
+        # If we generated spoken narration for an existing stored message, index it to RAG
+        # so it is retrievable later.
+        if updated and get_rag_service:
+            try:
+                rag = get_rag_service()
+                spoken = presenter_channels.get("spoken")
+                if isinstance(spoken, str) and spoken.strip():
+                    session_context = get_session_context()
+                    ns = _derive_rag_namespace(
+                        session_context=session_context, user_id=user_id
+                    )
+                    if not isinstance(ns, str) or not ns.strip():
+                        ns = "chat_history"
+
+                    doc_id = str(
+                        uuid.uuid5(
+                            _DETERMINISTIC_RAG_DOC_NAMESPACE,
+                            f"{user_id}|{session_id}|{history_index}|spoken",
+                        )
+                    )
+                    doc = {
+                        "id": doc_id,
+                        "text": _truncate_for_rag(spoken.strip()),
+                        "metadata": _build_rag_metadata(
+                            session_context=session_context,
+                            user_id=user_id,
+                            session_id=session_id,
+                            role="assistant",
+                            channel="spoken",
+                            history_index=history_index,
+                            generated_at=generated_at,
+                        ),
+                    }
+                    rag.upsert_documents([doc], namespace=ns)
+            except Exception as e:
+                logger.warning(
+                    "Failed to index backfilled spoken narration to RAG: %s", e
+                )
+
         return {
-            "updated": bool(getattr(result, "modified_count", 0) > 0),
+            "updated": updated,
             "matched": bool(getattr(result, "matched_count", 0) > 0),
         }
     except PyMongoError as e:
@@ -373,21 +486,7 @@ def add_message_to_history(
         session_context = get_session_context()
 
         # Determine namespace used for both persistence and RAG indexing.
-        # Prefer an explicit session namespace, else derive one from user/org when possible.
-        ns = session_context.get("namespace")
-        if not isinstance(ns, str) or not ns.strip():
-            org_id = session_context.get(
-                "organisation_concept_id"
-            ) or session_context.get("org_id")
-            if isinstance(org_id, str) and org_id.strip():
-                try:
-                    from src.backend.services.namespace_service import derive_namespace
-
-                    user_slug = user_id[3:] if user_id.startswith("#V#") else user_id
-                    org_slug = org_id[3:] if org_id.startswith("#V#") else org_id
-                    ns = derive_namespace(user_slug, org_slug)
-                except Exception:
-                    ns = None
+        ns = _derive_rag_namespace(session_context=session_context, user_id=user_id)
 
         # Add timestamp to message (and llm_debug_data if present)
         message_with_timestamp = {**message, "timestamp": datetime.now(timezone.utc)}
@@ -421,34 +520,45 @@ def add_message_to_history(
                 # Only index string content that isn't empty
                 if isinstance(content, str) and content.strip():
                     # Skip indexing tool outputs that are just "truncated" markers or very small
-                    if len(content) > 5000:  # Truncate for indexing if huge
-                        content = content[:5000]
+                    content = _truncate_for_rag(content)
 
                     # Get session context for organisation and role
-                    doc_id = str(uuid.uuid4())
-                    metadata = {
-                        "user_id": user_id,
-                        "session_id": session_id,
-                        "role": message.get("role", "unknown"),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "type": "chat_message",
+                    role = message.get("role", "unknown")
+                    doc = {
+                        "id": str(uuid.uuid4()),
+                        "text": content,
+                        "metadata": _build_rag_metadata(
+                            session_context=session_context,
+                            user_id=user_id,
+                            session_id=session_id,
+                            role=role,
+                            channel=None,
+                        ),
                     }
-
-                    # Include organisation and role metadata if available
-                    org_concept_id = session_context.get("organisation_concept_id")
-                    if org_concept_id:
-                        from ..utils.concept_id_utils import ensure_v_concept_prefix
-
-                        metadata["organisation_concept_id"] = (
-                            ensure_v_concept_prefix(org_concept_id) or org_concept_id
-                        )
-                    if session_context.get("role_in_org"):
-                        metadata["role_in_org"] = session_context["role_in_org"]
-
-                    doc = {"id": doc_id, "text": content, "metadata": metadata}
                     if not isinstance(ns, str) or not ns.strip():
                         ns = "chat_history"
                     rag.upsert_documents([doc], namespace=ns)
+
+                    # If this is an assistant message in presenter mode, also index the spoken talk track.
+                    if role == "assistant" and isinstance(llm_debug_data, dict):
+                        presenter_channels = llm_debug_data.get("presenter_channels")
+                        if isinstance(presenter_channels, dict):
+                            spoken = presenter_channels.get("spoken")
+                            if isinstance(spoken, str) and spoken.strip():
+                                spoken_txt = spoken.strip()
+                                if spoken_txt != content.strip():
+                                    spoken_doc = {
+                                        "id": str(uuid.uuid4()),
+                                        "text": _truncate_for_rag(spoken_txt),
+                                        "metadata": _build_rag_metadata(
+                                            session_context=session_context,
+                                            user_id=user_id,
+                                            session_id=session_id,
+                                            role=role,
+                                            channel="spoken",
+                                        ),
+                                    }
+                                    rag.upsert_documents([spoken_doc], namespace=ns)
 
                     # Track indexing progress per chat session for status UI.
                     try:

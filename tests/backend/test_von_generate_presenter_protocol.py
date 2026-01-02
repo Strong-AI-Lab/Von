@@ -180,7 +180,10 @@ def test_generate_accepts_plain_text_from_narration_second_pass(monkeypatch):
     assert resp.status_code == 200
     body = resp.get_json()
 
-    assert body["response"] == "This is the full on-screen answer with **markdown** and details."
+    assert (
+        body["response"]
+        == "This is the full on-screen answer with **markdown** and details."
+    )
     assert body["response_channels"] == {
         "screen": "This is the full on-screen answer with **markdown** and details.",
         "spoken": "Short summary for TTS.",
