@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import types
+import uuid
 
 import pytest
 
@@ -151,6 +152,24 @@ def test_backfill_spoken_generates_and_persists_presenter_channels(
         lambda *_args, **_kwargs: [],
     )
 
+    mock_rag = types.SimpleNamespace()
+    mock_rag.calls = []
+
+    def _upsert_documents(docs, namespace=None):
+        mock_rag.calls.append({"docs": docs, "namespace": namespace})
+        return (len(docs), 0)
+
+    mock_rag.upsert_documents = _upsert_documents
+
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_rag_service",
+        lambda: mock_rag,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_history_service.get_session_context",
+        lambda: {"namespace": "#V#tester@university_of_auckland_strong_ai_lab"},
+    )
+
     resp = client.post(
         "/von/history/backfill_spoken",
         json={"history_location": {"session_id": session_id, "history_index": 1}},
@@ -180,3 +199,22 @@ def test_backfill_spoken_generates_and_persists_presenter_channels(
         stored_history[1]["llm_debug_data"]["presenter_channels"]["spoken"]
         == "Short talk track."
     )
+
+    # Verify the spoken narration was also indexed into RAG.
+    assert len(mock_rag.calls) == 1
+    assert (
+        mock_rag.calls[0]["namespace"]
+        == "#V#tester@university_of_auckland_strong_ai_lab"
+    )
+    docs = mock_rag.calls[0]["docs"]
+    assert len(docs) == 1
+    assert docs[0]["text"] == "Short talk track."
+    assert docs[0]["metadata"]["channel"] == "spoken"
+
+    expected_id = str(
+        uuid.uuid5(
+            uuid.UUID("8c5a7fa9-9a7c-4f0f-8c1f-f4ad7f9f6fd7"),
+            f"{user_id}|{session_id}|1|spoken",
+        )
+    )
+    assert docs[0]["id"] == expected_id
