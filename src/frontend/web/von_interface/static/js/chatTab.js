@@ -22,6 +22,65 @@ const transcriptTurns = [];
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 
+function normalisePresenterChannels(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    const screen = typeof value.screen === 'string' ? value.screen : null;
+    const spoken = typeof value.spoken === 'string' ? value.spoken : null;
+    const format = typeof value.format === 'string' ? value.format : null;
+
+    const hasAny = (screen && screen.trim()) || (spoken && spoken.trim());
+    if (!hasAny) {
+        return null;
+    }
+
+    return {
+        screen: screen && screen.trim() ? screen : null,
+        spoken: spoken && spoken.trim() ? spoken : null,
+        format
+    };
+}
+
+function enrichDebugDataWithSpeechPlanning(debugData, options = {}) {
+    if (!debugData || typeof debugData !== 'object') {
+        return debugData;
+    }
+
+    const presenterChannels = normalisePresenterChannels(
+        options.presenterChannels || debugData.presenter_channels
+    );
+
+    const screenText =
+        (typeof options.screenText === 'string' && options.screenText.trim())
+            ? options.screenText
+            : (presenterChannels?.screen || (typeof debugData.response === 'string' ? debugData.response : ''));
+
+    const spokenText =
+        (typeof options.spokenText === 'string' && options.spokenText.trim())
+            ? options.spokenText
+            : (presenterChannels?.spoken || '');
+
+    const ttsText = (spokenText && spokenText.trim()) ? spokenText : screenText;
+    const ttsSource = (spokenText && spokenText.trim()) ? 'spoken' : 'screen';
+
+    const speechPlanning = {
+        enabled_by_protocol: !!presenterChannels,
+        presenter_format: presenterChannels?.format || null,
+        tts_source: ttsSource,
+        screen_chars: typeof screenText === 'string' ? screenText.length : 0,
+        spoken_chars: typeof spokenText === 'string' ? spokenText.length : 0,
+        tts_chars: typeof ttsText === 'string' ? ttsText.length : 0
+    };
+
+    return {
+        ...debugData,
+        presenter_channels: presenterChannels || debugData.presenter_channels || null,
+        speech_planning: speechPlanning
+    };
+}
+
 function escapeHtml(value) {
     const text = String(value ?? '');
     return text
@@ -1840,14 +1899,26 @@ async function handleSendPrompt() {
         if (response.ok) {
             // Store LLM debug data if available
             if (data.llm_debug) {
-                llmDebugData.set(assistantTurnId, data.llm_debug);
+                const responseChannels = normalisePresenterChannels(data.response_channels);
+                const screenText = responseChannels?.screen ? responseChannels.screen : String(data.response ?? '');
+                const spokenText = responseChannels?.spoken ? responseChannels.spoken : null;
+                const enriched = enrichDebugDataWithSpeechPlanning(data.llm_debug, {
+                    presenterChannels: responseChannels,
+                    screenText,
+                    spokenText
+                });
+                llmDebugData.set(assistantTurnId, enriched);
                 console.log('[chatTab] Stored LLM debug data for turn:', assistantTurnId);
             }
 
             const fastpathMeta = data.fastpath || (data.llm_debug && data.llm_debug.fastpath) || null;
 
+            const responseChannels = normalisePresenterChannels(data.response_channels);
+            const screenText = responseChannels?.screen ? responseChannels.screen : String(data.response ?? '');
+            const spokenText = responseChannels?.spoken ? responseChannels.spoken : null;
+
             // Append assistant message with turnId and llm_debug flag
-            appendMessage('Von', data.response, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta);
+            appendMessage('Von', screenText, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta, spokenText);
             // Annotate assistant turn and render suggestions when returned - only if toggle is enabled
             const annotationToggle = document.getElementById('annotationToggle');
             if (annotationToggle && annotationToggle.checked) {
@@ -1856,7 +1927,7 @@ async function handleSendPrompt() {
                         conversation_id: elements.conversationId || 'local',
                         turn_id: assistantTurnId,
                         speaker: 'assistant',
-                        text: data.response
+                        text: screenText
                     }).then((resp) => {
                         console.info('[annotations] annotateTurn response (chatTab)', resp);
                         if (resp && resp.suggestions) {
@@ -1964,7 +2035,7 @@ function formatChatTimestamp(isoString) {
     }
 }
 
-function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null, fastpathMeta = null) {
+function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null, fastpathMeta = null, ttsText = null) {
     const scrollableField = document.getElementById('scrollableField');
     if (!scrollableField) {
         console.error('[chatTab] appendMessage: scrollableField not found!');
@@ -1991,6 +2062,18 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageContent.style.cssText = 'flex: 1; line-height: 1.5;';
 
             const rawText = String(message ?? '');
+
+            let ttsTextForTurn = (typeof ttsText === 'string' && ttsText.trim()) ? ttsText : null;
+            if (!ttsTextForTurn && turnId) {
+                const debugDataForTurn = llmDebugData.get(turnId);
+                const channels = normalisePresenterChannels(debugDataForTurn?.presenter_channels);
+                if (channels?.spoken) {
+                    ttsTextForTurn = channels.spoken;
+                }
+            }
+            if (!ttsTextForTurn) {
+                ttsTextForTurn = rawText;
+            }
 
             const messageHeader = document.createElement('div');
             messageHeader.style.cssText = 'font-weight: bold; color: #007bff; margin-bottom: 5px; font-size: 0.9em; display: flex; align-items: center; gap: 8px;';
@@ -2108,7 +2191,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             speakButton.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                toggleSpeakTurn(turnId, rawText, speakButton);
+                toggleSpeakTurn(turnId, ttsTextForTurn, speakButton);
             });
             rightControls.appendChild(speakButton);
 
@@ -2168,7 +2251,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 // Auto-speak new assistant responses when enabled.
                 if (!isHistory && turnId && ttsSupported && isChatTtsEnabled()) {
                     // Ensure we speak the original model output (not rendered HTML).
-                    toggleSpeakTurn(turnId, rawText, speakButton);
+                    toggleSpeakTurn(turnId, ttsTextForTurn, speakButton);
                 }
             } catch (e) {
                 console.error('[chatTab] Failed to render Von message:', e);
@@ -2326,7 +2409,8 @@ function initializeLlmDebugPopup() {
 
 // Show LLM debug popup for a specific turn
 function showLlmDebugPopup(turnId) {
-    const debugData = llmDebugData.get(turnId);
+    const debugDataRaw = llmDebugData.get(turnId);
+    const debugData = enrichDebugDataWithSpeechPlanning(debugDataRaw, { turnId });
     if (!debugData) {
         console.warn('[chatTab] No debug data for turn:', turnId);
         return;
@@ -2354,6 +2438,11 @@ function showLlmDebugPopup(turnId) {
         model: debugData.model || 'Unknown',
         message_count: debugData.messages?.length || 0
     };
+
+    if (debugData.presenter_channels || debugData.speech_planning) {
+        metadata.speech_planning = debugData.speech_planning || null;
+        metadata.presenter_channels = debugData.presenter_channels || null;
+    }
 
     // LLM interaction telemetry (JVNAUTOSCI-877)
     const llmInteraction = (debugData && typeof debugData === 'object') ? debugData.llm_interaction : null;
@@ -2544,7 +2633,7 @@ function handleExportConversationJson() {
         metadata: {
             exported_at: new Date().toISOString(),
             total_turns: llmDebugData.size,
-            format_version: '1.0'
+            format_version: '1.1'
         },
         turns: []
     };
@@ -2561,10 +2650,11 @@ function handleExportConversationJson() {
 
     // Build conversation data
     for (const [turnId, debugData] of sortedEntries) {
+        const enrichedDebugData = enrichDebugDataWithSpeechPlanning(debugData, { turnId });
         conversationData.turns.push({
             turn_id: turnId,
-            timestamp: new Date(debugData.timestamp || Date.now()).toISOString(),
-            debug_data: debugData
+            timestamp: new Date((debugData && debugData.timestamp) || Date.now()).toISOString(),
+            debug_data: enrichedDebugData
         });
     }
 

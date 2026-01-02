@@ -335,6 +335,50 @@ def generate():
     # REFACTORING_NOTE: Use the new factory to get the correct client and model
     # Get user and org context for per-user/org LLM settings
     try:
+
+        def _extract_presenter_channels(text: str) -> dict[str, object] | None:
+            """Extract presenter-style output blocks.
+
+            Expected format (v1):
+              <spoken>...talk track...</spoken>
+              <screen>...what to display...</screen>
+
+            Returns None when no tags are present.
+            """
+
+            if not isinstance(text, str) or not text:
+                return None
+
+            import re
+
+            def _find_block(tag: str) -> str | None:
+                pattern = rf"<{tag}>\\s*(.*?)\\s*</{tag}>"
+                m = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+                if not m:
+                    return None
+                value = m.group(1)
+                if not isinstance(value, str):
+                    return None
+                value = value.strip()
+                return value if value else None
+
+            spoken = _find_block("spoken")
+            screen = _find_block("screen")
+
+            if spoken is None and screen is None:
+                return None
+
+            # Backwards-compatible defaults.
+            screen_text = screen if screen is not None else text.strip()
+            spoken_text = spoken if spoken is not None else screen_text
+
+            return {
+                "format": "tagged_blocks_v1",
+                "extracted": True,
+                "screen": screen_text,
+                "spoken": spoken_text,
+            }
+
         from ...security.access_control import get_effective_user_concept_id
 
         user_concept_id = get_effective_user_concept_id()
@@ -1635,6 +1679,13 @@ def generate():
                     }
                 ]
 
+        presenter_channels = _extract_presenter_channels(response_text)
+        if presenter_channels is not None:
+            # Screen channel becomes the stored/displayed response.
+            screen_text_value = presenter_channels.get("screen")
+            if isinstance(screen_text_value, str) and screen_text_value.strip():
+                response_text = screen_text_value.strip()
+
         if tool_invocations:
             current_app.logger.info(
                 "[mcp_orchestrator] Tool invocations: %s", tool_invocations
@@ -1746,6 +1797,7 @@ def generate():
             },
             "messages": current_turn_messages,
             "response": response_text,
+            "presenter_channels": presenter_channels,
             "user_prompt": user_prompt_debug,
             "namespace_report": namespace_report,
             "internal_mcp": {
@@ -1820,6 +1872,15 @@ def generate():
         return jsonify(
             {
                 "response": response_text,
+                "response_channels": (
+                    {
+                        "screen": presenter_channels.get("screen"),
+                        "spoken": presenter_channels.get("spoken"),
+                        "format": presenter_channels.get("format"),
+                    }
+                    if isinstance(presenter_channels, dict)
+                    else None
+                ),
                 "llm_debug": llm_debug_info,
                 "rag_trace": rag_trace,
             }
