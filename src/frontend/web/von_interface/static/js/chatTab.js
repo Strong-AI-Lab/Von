@@ -32,6 +32,157 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
+function extractBoldQuotedInstruction(text) {
+    const value = String(text ?? '').trim();
+    if (!value) return null;
+
+    // Match either curly quotes or straight quotes.
+    // Example: “Apply the hierarchy fix.” or "Apply the hierarchy fix.".
+    const m = value.match(/^(?:“|")(.+?)(?:”|")\s*$/);
+    if (!m) return null;
+
+    const instruction = String(m[1] ?? '').trim();
+    if (!instruction) return null;
+    return instruction;
+}
+
+function extractBoldQuotedInstructionFromStrong(strongEl) {
+    if (!strongEl) return null;
+
+    // Reconstruct text while preserving inline-code intent by re-adding backticks.
+    // This keeps the inserted prompt closer to the original markdown source.
+    const parts = [];
+    const nodes = Array.from(strongEl.childNodes ?? []);
+    for (const node of nodes) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            parts.push(String(node.textContent ?? ''));
+            continue;
+        }
+
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return null;
+        }
+
+        const el = node;
+        if (el.tagName === 'CODE') {
+            // Disallow nested markup inside <code> for this transform.
+            if (el.querySelector && el.querySelector('*')) return null;
+            const codeText = String(el.textContent ?? '');
+            parts.push('`' + codeText + '`');
+            continue;
+        }
+
+        // Any other tag means it is no longer the exact **"..."** pattern.
+        return null;
+    }
+
+    return extractBoldQuotedInstruction(parts.join(''));
+}
+
+function insertTextIntoChatPrompt(text) {
+    const promptInput = document.getElementById('promptInput');
+    if (!promptInput) return;
+
+    const insertRaw = String(text ?? '').trim();
+    if (!insertRaw) return;
+
+    try {
+        promptInput.focus();
+    } catch (_) {
+        // Ignore.
+    }
+
+    const base = String(promptInput.value ?? '');
+    const hasSelection =
+        typeof promptInput.selectionStart === 'number' &&
+        typeof promptInput.selectionEnd === 'number';
+
+    const start = hasSelection ? promptInput.selectionStart : base.length;
+    const end = hasSelection ? promptInput.selectionEnd : base.length;
+
+    const atEnd = start === base.length && end === base.length;
+    const prefix = atEnd && base.trim() && !base.endsWith('\n') ? '\n' : '';
+    const insertText = `${prefix}${insertRaw}`;
+
+    if (typeof promptInput.setRangeText === 'function') {
+        promptInput.setRangeText(insertText, start, end, 'end');
+    } else {
+        const before = base.slice(0, start);
+        const after = base.slice(end);
+        promptInput.value = `${before}${insertText}${after}`;
+    }
+
+    try {
+        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    } catch (_) {
+        // Ignore.
+    }
+}
+
+function convertQuotedInstructionBlockquotesToButtons(root) {
+    if (!root || !root.querySelectorAll) return;
+
+    const blocks = Array.from(root.querySelectorAll('blockquote'));
+    for (const block of blocks) {
+        try {
+            // Match the exact pattern (as rendered HTML):
+            // <blockquote><p><strong>"..."</strong></p></blockquote>
+            // i.e., one direct <p>, containing only one direct <strong>, whose content is fully quoted.
+            const elementChildren = Array.from(block.children ?? []);
+            if (elementChildren.length !== 1) continue;
+            const p = elementChildren[0];
+            if (!p || p.tagName !== 'P') continue;
+
+            // No non-whitespace text nodes at the blockquote level.
+            const blockNodes = Array.from(block.childNodes ?? []);
+            if (blockNodes.some((n) => n.nodeType === Node.TEXT_NODE && String(n.textContent ?? '').trim())) {
+                continue;
+            }
+
+            const pElementChildren = Array.from(p.children ?? []);
+            if (pElementChildren.length !== 1) continue;
+            const strong = pElementChildren[0];
+            if (!strong || strong.tagName !== 'STRONG') continue;
+
+            // No non-whitespace text nodes inside the paragraph.
+            const pNodes = Array.from(p.childNodes ?? []);
+            if (pNodes.some((n) => n.nodeType === Node.TEXT_NODE && String(n.textContent ?? '').trim())) {
+                continue;
+            }
+
+            const instruction = extractBoldQuotedInstructionFromStrong(strong);
+            if (!instruction) continue;
+
+            // Ensure the blockquote text is exactly the quoted strong text (no extra content).
+            const normalise = (s) => String(s ?? '').trim().replace(/\s+/g, ' ');
+            if (normalise(block.textContent) !== normalise(strong.textContent)) continue;
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'chat-insert-prompt-button';
+            btn.textContent = instruction;
+            btn.title = 'Insert into chat prompt';
+            btn.setAttribute('aria-label', `Insert into chat prompt: ${instruction}`);
+            btn.addEventListener('click', (e) => {
+                try {
+                    e.preventDefault();
+                    e.stopPropagation();
+                } catch (_) {
+                    // Ignore.
+                }
+                insertTextIntoChatPrompt(instruction);
+            });
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'chat-insert-prompt-wrapper';
+            wrapper.appendChild(btn);
+            block.replaceWith(wrapper);
+        } catch (_) {
+            // Ignore detached nodes or DOM mutation races.
+        }
+    }
+}
+
 // Cache concept metadata used for cartouches in chat transcript.
 // Map<fullId, { name: string, kind: string, source?: string, provisional?: boolean }>
 const chatConceptMetaCache = new Map();
@@ -112,6 +263,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
     }
 
     container.innerHTML = html;
+    convertQuotedInstructionBlockquotesToButtons(container);
     try {
         container.dataset.renderMode = 'rendered';
     } catch (_) {
@@ -119,7 +271,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
     }
 
     // Preserve clickable #V# tokens, but never inside code blocks.
-    cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true });
+    cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
     hydrateChatConceptCartouches(container);
 }
 
@@ -158,7 +310,8 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
     const cachedHtml = messageTextEl?.dataset?.renderedHtml;
     if (cachedHtml) {
         messageTextEl.innerHTML = cachedHtml;
-        cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true });
+        convertQuotedInstructionBlockquotesToButtons(messageTextEl);
+        cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
         hydrateChatConceptCartouches(messageTextEl);
         return;
     }
