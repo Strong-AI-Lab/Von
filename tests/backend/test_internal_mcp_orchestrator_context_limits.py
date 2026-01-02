@@ -169,6 +169,40 @@ def test_orchestrator_limits_context_by_chars():
     assert first_idx > 0
 
 
+def test_orchestrator_preserves_presenter_protocol_when_trimming_context():
+    gateway = cast(Any, _StubGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,
+        max_tool_invocations=1,
+        max_context_chars=8_000,
+    )
+
+    presenter_protocol = {
+        "role": "system",
+        "content": (
+            "PRESENTER MODE PROTOCOL:\n"
+            "- Output EXACTLY TWO tagged blocks and nothing else:\n"
+            "  <spoken>...brief talk track...</spoken>\n"
+            "  <screen>...full on-screen content...</screen>\n"
+        ),
+    }
+
+    # Force trimming with many large messages; presenter protocol would normally
+    # be at risk of being dropped if it were not merged into the retained system
+    # instruction message.
+    context = [presenter_protocol] + [
+        {"role": "user", "content": f"msg-{i}:" + ("a" * 2_000)} for i in range(30)
+    ]
+
+    llm = _CapturingLLM(["ok"])
+    result = orchestrator.run(prompt="hi", context=context, llm_client=llm, model=None)
+
+    assert result.response_text == "ok"
+    sent_context = llm.calls[0]["context"]
+    assert sent_context and sent_context[0]["role"] == "system"
+    assert "PRESENTER MODE PROTOCOL:" in sent_context[0]["content"]
+
+
 def test_orchestrator_truncates_tool_payload_in_context():
     gateway = cast(Any, _StubGateway())
     orchestrator = InternalMCPChatOrchestrator(

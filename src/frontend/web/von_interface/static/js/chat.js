@@ -1,5 +1,5 @@
-import { elements, addMessageToChat, renderSpanSuggestions } from './domUtils.js';
-import { postJson, annotateTurn } from './apiService.js';
+import { annotateTurn, postJson } from './apiService.js';
+import { addMessageToChat, elements, renderSpanSuggestions } from './domUtils.js';
 
 export async function sendMessageToServer() {
   const prompt = elements.promptInput.value.trim();
@@ -7,13 +7,13 @@ export async function sendMessageToServer() {
   if (elements.loadingIndicator) elements.loadingIndicator.style.display = 'block';
   if (elements.vonIntro) elements.vonIntro.style.display = 'none';
   const userTurnId = `u-${Date.now()}`;
-  addMessageToChat('user', prompt, {turnId: userTurnId});
+  addMessageToChat('user', prompt, { turnId: userTurnId });
   elements.promptInput.value = '';
   try {
-    const data = await postJson('/von/generate', { prompt });
+    const data = await postJson('/von/generate', { prompt, presenter_mode: true });
     const assistantText = data.response || data.message || 'No response';
     const assistantTurnId = `a-${Date.now()}`;
-    addMessageToChat('assistant', assistantText, {turnId: assistantTurnId});
+    addMessageToChat('assistant', assistantText, { turnId: assistantTurnId });
 
     // Send annotations for both turns (user and assistant). For now we send minimal payloads.
     try {
@@ -23,7 +23,7 @@ export async function sendMessageToServer() {
         turn_id: userTurnId,
         speaker: 'user',
         text: prompt
-      }).then(() => {}).catch((e) => console.debug('Annotation user failed', e));
+      }).then(() => { }).catch((e) => console.debug('Annotation user failed', e));
 
       // Annotate assistant turn and render suggestions inline when available
       annotateTurn({
@@ -68,7 +68,7 @@ document.addEventListener('annotation:candidateSelected', (ev) => {
   try {
     // optimistic UI update: show immediate timing placeholder
     import('./domUtils.js').then(mod => mod.setAnnotationTiming(turnId, '…'));
-  } catch (_) {}
+  } catch (_) { }
 
   // POST acceptance to backend
   (async () => {
@@ -79,17 +79,17 @@ document.addEventListener('annotation:candidateSelected', (ev) => {
         body: JSON.stringify({ turn_id: turnId, span: span, candidate: candidate, user_id: getCurrentUser().id })
       });
       const elapsed = Date.now() - start;
-      try { import('./domUtils.js').then(mod => mod.setAnnotationTiming(turnId, elapsed)); } catch(_){}
+      try { import('./domUtils.js').then(mod => mod.setAnnotationTiming(turnId, elapsed)); } catch (_) { }
       if (!resp.ok) {
         console.warn('Annotation accept failed', resp.status);
       } else {
         console.debug('Annotation accepted persisted', await resp.json());
         // Optimistic UI: mark candidate as accepted and show undo
-        try { import('./domUtils.js').then(mod => mod.markCandidateAccepted(turnId, candidate.id || candidate.concept_id || candidate.conceptId || candidate.name, candidate.name || candidate.id)); } catch(_){}
+        try { import('./domUtils.js').then(mod => mod.markCandidateAccepted(turnId, candidate.id || candidate.concept_id || candidate.conceptId || candidate.name, candidate.name || candidate.id)); } catch (_) { }
       }
     } catch (e) {
       const elapsed = Date.now() - start;
-      try { import('./domUtils.js').then(mod => mod.setAnnotationTiming(turnId, elapsed)); } catch(_){}
+      try { import('./domUtils.js').then(mod => mod.setAnnotationTiming(turnId, elapsed)); } catch (_) { }
       console.error('Error sending accept', e);
     }
   })();

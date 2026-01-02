@@ -102,9 +102,52 @@ def test_get_user_specific_prompt_fragments_falls_back_to_text_relations(monkeyp
         "get_texts_for_concept",
         lambda _cid: [
             {"predicate": "hasName", "text": "Ignored"},
-            {"predicate": "hasContent", "lang": "en-NZ", "text": "Primary"},
+            {"predicate": "#V#hasContent", "lang": "en-NZ", "text": "Primary"},
         ],
     )
 
     fragments = service.get_user_specific_prompt_fragments("#V#michael_witbrock")
     assert fragments == [{"concept_id": "#V#prompt_a", "content": "Primary"}]
+
+
+def test_get_user_specific_prompt_fragments_queries_multiple_scoping_predicates(
+    monkeypatch,
+):
+    from src.backend.services import chat_auxiliary_prompt_service as service
+
+    captured = {}
+
+    def _fake_find(filter_doc, **_kwargs):
+        captured["filter"] = filter_doc
+        return []
+
+    monkeypatch.setattr(service.ConceptsRepository, "find", _fake_find)
+
+    service.get_user_specific_prompt_fragments("#V#michael_witbrock")
+
+    filter_doc = captured.get("filter")
+    assert isinstance(filter_doc, dict)
+    type_filter = filter_doc.get("relationships.is_an_instance_of")
+    assert isinstance(type_filter, dict)
+    assert type_filter.get("$in") == [
+        "#V#von_chat_behaviour_prompt",
+        "#V#von_llm_prompt",
+    ]
+
+    ors = filter_doc.get("$or")
+    assert isinstance(ors, list)
+
+    expected_fields = {
+        "relationships.#V#specific_to_von_user",
+        "relationships.specific_to_von_user",
+        "relationships.specific_to_user",
+    }
+    seen_fields = set()
+    for clause in ors:
+        assert isinstance(clause, dict)
+        ((key, value),) = clause.items()
+        if key in expected_fields:
+            seen_fields.add(key)
+            assert value == "#V#michael_witbrock"
+
+    assert seen_fields == expected_fields
