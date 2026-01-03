@@ -1,13 +1,192 @@
 import logging
-from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from pymongo.errors import DuplicateKeyError
+
 from ..db.repositories.concepts_repository import ConceptsRepository
-from ..db.repositories.text_value_repository import TextValuesRepository
+from ..db.repositories.text_value_repository import TextRelationsRepository
 from ..services.concept_service import get_concept_by_id
-from ..vontology.utils_vontology import simulate_or_delete_concept
 
 logger = logging.getLogger(__name__)
 
 PROTECTED_CONCEPTS = {"#V#Thing", "#V#Root", "#V#System"}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _ordered_unique(values: Iterable[str]) -> List[str]:
+    result: List[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        item = raw.strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _replace_value(value: Any, source_id: str, target_id: str) -> Tuple[Any, bool]:
+    """Replace occurrences of source_id with target_id within relationship values."""
+
+    if isinstance(value, str):
+        if value == source_id:
+            return target_id, True
+        return value, False
+
+    if isinstance(value, list):
+        changed = False
+        replaced_list: List[Any] = []
+        for item in value:
+            new_item, item_changed = _replace_value(item, source_id, target_id)
+            changed = changed or item_changed
+            replaced_list.append(new_item)
+
+        # Relationship lists are expected to be strings; enforce de-dup on strings.
+        if all(isinstance(x, str) for x in replaced_list):
+            deduped = _ordered_unique([x for x in replaced_list if isinstance(x, str)])
+            return deduped, changed or (deduped != replaced_list)
+
+        return replaced_list, changed
+
+    if isinstance(value, dict):
+        changed = False
+        out: Dict[str, Any] = {}
+        for k, v in value.items():
+            new_v, v_changed = _replace_value(v, source_id, target_id)
+            changed = changed or v_changed
+            out[k] = new_v
+        return out, changed
+
+    return value, False
+
+
+def _replace_relationships(
+    relationships: Any, source_id: str, target_id: str
+) -> Tuple[Dict[str, Any], bool]:
+    if not isinstance(relationships, dict):
+        return {}, False
+    changed = False
+    new_rels: Dict[str, Any] = {}
+    for predicate, targets in relationships.items():
+        new_targets, targets_changed = _replace_value(targets, source_id, target_id)
+        changed = changed or targets_changed
+        new_rels[predicate] = new_targets
+    return new_rels, changed
+
+
+def _merge_relationship_maps(
+    target_relationships: Dict[str, Any], source_relationships: Dict[str, Any]
+) -> Tuple[Dict[str, Any], bool]:
+    """Merge source relationships into target; keep target ordering and add new uniques."""
+    merged: Dict[str, Any] = dict(target_relationships)
+    changed = False
+
+    for predicate, source_targets in source_relationships.items():
+        if predicate not in merged:
+            merged[predicate] = source_targets
+            changed = True
+            continue
+
+        target_targets = merged.get(predicate)
+        if isinstance(target_targets, list) or isinstance(source_targets, list):
+            t_list = (
+                target_targets
+                if isinstance(target_targets, list)
+                else ([target_targets] if isinstance(target_targets, str) else [])
+            )
+            s_list = (
+                source_targets
+                if isinstance(source_targets, list)
+                else ([source_targets] if isinstance(source_targets, str) else [])
+            )
+            if all(isinstance(x, str) for x in t_list + s_list):
+                combined = _ordered_unique([*t_list, *s_list])
+                if combined != t_list:
+                    merged[predicate] = combined
+                    changed = True
+            else:
+                # Fallback: keep target value.
+                pass
+        else:
+            # Both scalars
+            if target_targets != source_targets:
+                merged[predicate] = [target_targets, source_targets]
+                changed = True
+
+    return merged, changed
+
+
+def _merge_legacy_names(
+    target_doc: Dict[str, Any], source_doc: Dict[str, Any]
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Merge legacy `names` entries (if present) without duplication."""
+    target_names = target_doc.get("names")
+    source_names = source_doc.get("names")
+
+    target_list = target_names if isinstance(target_names, list) else []
+    source_list = source_names if isinstance(source_names, list) else []
+
+    seen: set[Tuple[str, str, str]] = set()
+    merged: List[Dict[str, Any]] = []
+
+    def _normalise_entry(entry: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(entry, dict):
+            return None
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return None
+        language = entry.get("language")
+        if not isinstance(language, str) or not language.strip():
+            language = "en"
+        kind = entry.get("type")
+        if not isinstance(kind, str) or not kind.strip():
+            kind = "NL"
+        return {
+            "name": name.strip(),
+            "language": language.strip(),
+            "type": kind.strip(),
+        }
+
+    for entry in target_list:
+        norm = _normalise_entry(entry)
+        if not norm:
+            continue
+        key = (norm["name"], norm["language"], norm["type"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(norm)
+
+    changed = False
+    for entry in source_list:
+        norm = _normalise_entry(entry)
+        if not norm:
+            continue
+        key = (norm["name"], norm["language"], norm["type"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(norm)
+        changed = True
+
+    # Also add source top-level name as an alias when distinct.
+    source_top = source_doc.get("name")
+    if isinstance(source_top, str) and source_top.strip():
+        source_top = source_top.strip()
+        target_top = target_doc.get("name")
+        if source_top != target_top:
+            key = (source_top, "en", "NL")
+            if key not in seen:
+                merged.append({"name": source_top, "language": "en", "type": "NL"})
+                changed = True
+
+    return merged, changed
 
 
 def merge_concepts(
@@ -59,113 +238,106 @@ def merge_concepts(
         report["errors"].append(f"Target concept {target_id} not found.")
         return report
 
-    # 1. Analyze Relationships
-    source_rels = source_doc.get("relationships", {})
-    ops_rels = []
+    # 1. Analyse relationship references across all concepts.
+    source_rels_raw = source_doc.get("relationships", {})
+    target_rels_raw = target_doc.get("relationships", {})
 
-    # Incoming relationships (other concepts pointing to source)
-    # We need to find all concepts that point to source_id and update them to point to target_id
-    # This is expensive to query perfectly without a reverse index, but we can check standard fields
-    # For now, we'll rely on the fact that we can query by value in Mongo
+    source_rels, _ = _replace_relationships(source_rels_raw, source_id, target_id)
+    target_rels, _ = _replace_relationships(target_rels_raw, source_id, target_id)
 
-    # Find concepts where source is a parent
-    children = ConceptsRepository.find({"relationships.is_a_type_of": source_id})
-    for child in children:
-        ops_rels.append(
+    concepts_cursor = ConceptsRepository.find({}, {"concept_id": 1, "relationships": 1})
+    affected_concepts: List[str] = []
+    for doc in concepts_cursor:
+        cid = doc.get("concept_id")
+        if not isinstance(cid, str) or not cid:
+            continue
+        if cid == source_id:
+            continue
+        new_rels, changed = _replace_relationships(
+            doc.get("relationships"), source_id, target_id
+        )
+        if changed:
+            affected_concepts.append(cid)
+
+    if affected_concepts:
+        report["operations"].append(
             {
-                "type": "reparent_child",
-                "concept_id": child["concept_id"],
-                "detail": f"Change parent from {source_id} to {target_id}",
+                "type": "rewrite_incoming_relationship_references",
+                "count": len(affected_concepts),
+                "concept_ids": affected_concepts[:50],
+                "detail": f"Replace references to {source_id} with {target_id} across concepts",
             }
         )
-
-    # Find concepts where source is a type (instance of)
-    instances = ConceptsRepository.find({"relationships.is_an_instance_of": source_id})
-    for inst in instances:
-        ops_rels.append(
-            {
-                "type": "retype_instance",
-                "concept_id": inst["concept_id"],
-                "detail": f"Change type from {source_id} to {target_id}",
-            }
-        )
-
-    # Outgoing relationships (source pointing to others)
-    # We merge these into target. If target already has them, we skip.
-    for rel_type, targets in source_rels.items():
-        if isinstance(targets, list):
-            for t in targets:
-                ops_rels.append(
-                    {
-                        "type": "move_outgoing_relation",
-                        "predicate": rel_type,
-                        "target": t,
-                        "detail": f"Add {rel_type} -> {t} to target",
-                    }
-                )
-        elif isinstance(targets, str):
-            ops_rels.append(
-                {
-                    "type": "move_outgoing_relation",
-                    "predicate": rel_type,
-                    "target": targets,
-                    "detail": f"Set {rel_type} -> {targets} on target",
-                }
+        if len(affected_concepts) > 50:
+            report["warnings"].append(
+                f"Relationship rewrite affects {len(affected_concepts)} concepts; report truncated to 50 ids"
             )
 
-    report["operations"].extend(ops_rels)
-
-    # 2. Analyze Names
-    source_names = source_doc.get("names", [])
-    ops_names = []
-    target_names = target_doc.get("names", [])
-    existing_names = {n.get("name") for n in target_names if isinstance(n, dict)}
-
-    for name_entry in source_names:
-        if isinstance(name_entry, dict):
-            name_val = name_entry.get("name")
-            if name_val and name_val not in existing_names:
-                ops_names.append(
-                    {
-                        "type": "move_name",
-                        "name": name_val,
-                        "detail": f"Add alias '{name_val}' to target",
-                    }
-                )
-
-    # Also check the top-level name
-    source_top_name = source_doc.get("name")
-    if (
-        source_top_name
-        and source_top_name not in existing_names
-        and source_top_name != target_doc.get("name")
-    ):
-        ops_names.append(
+    merged_rels_preview, rels_changed = _merge_relationship_maps(
+        target_rels, source_rels
+    )
+    if rels_changed:
+        report["operations"].append(
             {
-                "type": "move_name",
-                "name": source_top_name,
-                "detail": f"Add source name '{source_top_name}' as alias to target",
+                "type": "merge_outgoing_relationships",
+                "detail": "Merge source outgoing relationships into target",
             }
         )
 
-    report["operations"].extend(ops_names)
-
-    # 3. Analyze Text Values
-    # We need to find text values linked to source_id
-    text_values = TextValuesRepository.find({"concept_id": source_id})
-    ops_text = []
-    for tv in text_values:
-        ops_text.append(
+    # 2. Analyse legacy names field (if present)
+    merged_names_preview, names_changed = _merge_legacy_names(target_doc, source_doc)
+    if names_changed:
+        report["operations"].append(
             {
-                "type": "move_text_value",
-                "id": str(tv.get("_id")),
-                "predicate": tv.get("predicate"),
-                "text": tv.get("text")[:30] + "...",
-                "detail": f"Reassign text value '{tv.get('predicate')}' to target",
+                "type": "merge_legacy_names",
+                "detail": "Merge legacy name/alias entries from source into target",
+                "added_count": max(
+                    0,
+                    len(merged_names_preview)
+                    - (
+                        len(target_doc.get("names") or [])
+                        if isinstance(target_doc.get("names"), list)
+                        else 0
+                    ),
+                ),
             }
         )
 
-    report["operations"].extend(ops_text)
+    # 3. Analyse text relations
+    source_text_relations = list(
+        TextRelationsRepository.find({"subject_concept_id": source_id})
+    )
+    target_text_relations = list(
+        TextRelationsRepository.find({"subject_concept_id": target_id})
+    )
+    target_keys: set[Tuple[str, Any]] = set()
+    for rel in target_text_relations:
+        pred = rel.get("predicate")
+        obj = rel.get("object_text_id")
+        if isinstance(pred, str) and pred and obj is not None:
+            target_keys.add((pred, obj))
+
+    move_count = 0
+    dup_count = 0
+    for rel in source_text_relations:
+        pred = rel.get("predicate")
+        obj = rel.get("object_text_id")
+        if not isinstance(pred, str) or not pred or obj is None:
+            continue
+        if (pred, obj) in target_keys:
+            dup_count += 1
+        else:
+            move_count += 1
+
+    if move_count or dup_count:
+        report["operations"].append(
+            {
+                "type": "migrate_text_relations",
+                "move_count": move_count,
+                "duplicate_count": dup_count,
+                "detail": "Reassign text_relations from source to target (de-dup on conflicts)",
+            }
+        )
 
     # 4. Deletion
     report["operations"].append(
@@ -182,70 +354,92 @@ def merge_concepts(
 
     # EXECUTION
     try:
-        # 1. Update incoming references
-        # Reparent children
-        ConceptsRepository.update_many(
-            {"relationships.is_a_type_of": source_id},
-            {
-                "$set": {"relationships.is_a_type_of.$": target_id}
-            },  # This replaces the specific array element
-        )
-        # Retype instances
-        ConceptsRepository.update_many(
-            {"relationships.is_an_instance_of": source_id},
-            {"$set": {"relationships.is_an_instance_of.$": target_id}},
-        )
-
-        # 2. Merge outgoing relationships
-        # This is complex to do atomically without full document replacement.
-        # We'll fetch target again, update in memory, and save.
-        target_doc = get_concept_by_id(target_id)  # Refresh
+        # Refresh documents
+        source_doc = get_concept_by_id(source_id)
+        target_doc = get_concept_by_id(target_id)
+        if source_doc is None:
+            raise ValueError(f"Source concept '{source_id}' no longer exists")
         if target_doc is None:
             raise ValueError(f"Target concept '{target_id}' no longer exists")
-        target_rels = target_doc.get("relationships", {})
 
-        for rel_type, targets in source_rels.items():
-            if rel_type not in target_rels:
-                target_rels[rel_type] = targets
-            else:
-                # Merge lists
-                if isinstance(target_rels[rel_type], list):
-                    current_list = set(target_rels[rel_type])
-                    new_items = targets if isinstance(targets, list) else [targets]
-                    for item in new_items:
-                        current_list.add(item)
-                    target_rels[rel_type] = list(current_list)
-                # Overwrite scalars (or convert to list? For now, keep scalar if scalar)
-                # If both are scalar and different, we might have a conflict.
-                # Strategy: Convert to list if conflict.
-                elif target_rels[rel_type] != targets:
-                    target_rels[rel_type] = [target_rels[rel_type], targets]
-
-        ConceptsRepository.update_one(
-            {"concept_id": target_id}, {"$set": {"relationships": target_rels}}
+        # 1. Rewrite relationship references in all concepts except the source.
+        concepts_cursor = ConceptsRepository.find(
+            {}, {"concept_id": 1, "relationships": 1}
         )
+        for doc in concepts_cursor:
+            cid = doc.get("concept_id")
+            if not isinstance(cid, str) or not cid:
+                continue
+            if cid == source_id:
+                continue
 
-        # 3. Merge Names
-        names_to_add = []
-        for op in ops_names:
-            # Reconstruct the name entry (simplified)
-            names_to_add.append(
-                {
-                    "name": op["name"],
-                    "type": "NL",  # Defaulting to NL for merged names
-                    "language": "en",  # Default
-                }
+            new_rels, changed = _replace_relationships(
+                doc.get("relationships"), source_id, target_id
             )
+            if changed:
+                ConceptsRepository.update_one(
+                    {"concept_id": cid}, {"$set": {"relationships": new_rels}}
+                )
 
-        if names_to_add:
+        # 2. Merge source outgoing relationships into the target.
+        source_rels, _ = _replace_relationships(
+            source_doc.get("relationships", {}), source_id, target_id
+        )
+        target_rels, _ = _replace_relationships(
+            target_doc.get("relationships", {}), source_id, target_id
+        )
+        merged_rels, rels_changed = _merge_relationship_maps(target_rels, source_rels)
+        if rels_changed:
             ConceptsRepository.update_one(
-                {"concept_id": target_id}, {"$push": {"names": {"$each": names_to_add}}}
+                {"concept_id": target_id}, {"$set": {"relationships": merged_rels}}
             )
 
-        # 4. Move Text Values
-        TextValuesRepository.update_many(
-            {"concept_id": source_id}, {"$set": {"concept_id": target_id}}
+        # 3. Merge legacy names (if used)
+        merged_names, names_changed = _merge_legacy_names(target_doc, source_doc)
+        if names_changed:
+            ConceptsRepository.update_one(
+                {"concept_id": target_id}, {"$set": {"names": merged_names}}
+            )
+
+        # 4. Migrate text relations from source -> target (de-dup on unique index conflicts)
+        target_text_relations = list(
+            TextRelationsRepository.find({"subject_concept_id": target_id})
         )
+        target_keys: set[Tuple[str, Any]] = set()
+        for rel in target_text_relations:
+            pred = rel.get("predicate")
+            obj = rel.get("object_text_id")
+            if isinstance(pred, str) and pred and obj is not None:
+                target_keys.add((pred, obj))
+
+        source_text_relations = list(
+            TextRelationsRepository.find({"subject_concept_id": source_id})
+        )
+        for rel in source_text_relations:
+            rel_id = rel.get("_id")
+            pred = rel.get("predicate")
+            obj = rel.get("object_text_id")
+            if rel_id is None or not isinstance(pred, str) or not pred or obj is None:
+                continue
+
+            if (pred, obj) in target_keys:
+                TextRelationsRepository.delete_one({"_id": rel_id})
+                continue
+
+            try:
+                TextRelationsRepository.update_one(
+                    {"_id": rel_id},
+                    {
+                        "$set": {
+                            "subject_concept_id": target_id,
+                            "updated_at": _now(),
+                        }
+                    },
+                )
+                target_keys.add((pred, obj))
+            except DuplicateKeyError:
+                # If another process created the relation on target between fetch and update.
+                TextRelationsRepository.delete_one({"_id": rel_id})
 
         # 5. Delete Source
         ConceptsRepository.delete_one({"concept_id": source_id})

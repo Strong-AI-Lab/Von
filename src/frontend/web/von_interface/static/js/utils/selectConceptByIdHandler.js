@@ -16,6 +16,16 @@ export function normaliseVontologyId(value) {
         id = id.slice(0, -1);
     }
 
+    // Canonicalise slug: lowercased, and replace maximal spans of non-alphanumeric
+    // characters with a single underscore.
+    // This prevents hyphen/underscore variants resolving as distinct concepts.
+    const slug = id.slice(3).toLowerCase();
+    const canonicalSlug = slug
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+    if (!canonicalSlug) return '';
+    id = `#V#${canonicalSlug}`;
+
     return id;
 }
 

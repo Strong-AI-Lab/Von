@@ -157,4 +157,49 @@ describe('handleSelectConceptByIdDetail', () => {
         // selection is delayed via setTimeout; sanity check it was scheduled
         expect(selectVontologyNodeByIdentifier).not.toHaveBeenCalled();
     });
+
+    test('canonicalises hyphenated IDs to underscores for lookup and create', async () => {
+        const { handleSelectConceptByIdDetail } = require(handlerPath);
+
+        const createOrActivateConceptTab = jest.fn();
+        const activateTab = jest.fn();
+        const selectVontologyNodeByIdentifier = jest.fn();
+        const chooseCreateOptionsFn = jest.fn(async () => ({ createAsInstance: false, parentId: '#V#thing', kind: 'type' }));
+
+        let created = false;
+        const fetchFn = jest.fn((url, opts) => {
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                // Expect canonicalised identifier in both existence check + metadata fetch.
+                expect(url).toContain('identifier=%23V%23foo_bar');
+                if (url.includes('raw_only=1')) {
+                    if (!created) {
+                        return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
+                    }
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ display_name: 'Foo bar', kind: 'type', concept_id: '#V#foo_bar' })
+                    });
+                }
+                return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
+            }
+            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+                const body = JSON.parse(opts.body);
+                // Name derived from canonicalised concept id.
+                expect(body.new_concept_name).toBe('foo_bar');
+                created = true;
+                return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ concept_id: '#V#foo_bar' }) });
+            }
+            return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+        });
+
+        await handleSelectConceptByIdDetail(
+            { conceptId: '#V#foo-bar', createConceptTab: true, kind: 'type', modifierKeys: {} },
+            { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn, chooseCreateOptionsFn }
+        );
+
+        expect(chooseCreateOptionsFn).toHaveBeenCalled();
+        // Canonical tab id.
+        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#foo_bar', 'Loading…', false);
+    });
 });
