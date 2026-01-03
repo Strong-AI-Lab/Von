@@ -1,5 +1,6 @@
 import {
     __testOnly_convertQuotedInstructionBlockquotesToButtons,
+    __testOnly_convertReplyOptionsListsToButtons,
     __testOnly_deriveLlmDebugWarnings,
     __testOnly_hydrateChatConceptCartouches,
     __testOnly_resetChatConceptMetaCaches,
@@ -259,6 +260,93 @@ describe('chat insert prompt button behaviour', () => {
 
         expect(String(promptInput.value)).toContain('Do the thing');
         expect(sendButton.click).toHaveBeenCalledTimes(0);
+    });
+});
+
+describe('chat reply options button behaviour', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+        `;
+    });
+
+    test('list options become buttons that insert and submit by default', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = `
+            <p>Please reply with one of:</p>
+            <ul>
+                <li><strong>“Yes, scan all emails from the last 24 hours and update the to-do list.”</strong></li>
+                <li><strong>“Scan them, but show me the tasks before adding.”</strong></li>
+            </ul>
+        `;
+
+        __testOnly_convertReplyOptionsListsToButtons(root);
+
+        const buttons = Array.from(root.querySelectorAll('.chat-insert-prompt-button'));
+        expect(buttons.length).toBe(2);
+
+        buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+        expect(String(promptInput.value)).toContain('Yes, scan all emails from the last 24 hours and update the to-do list.');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+
+    test('shift-click inserts without submitting', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = `
+            <p>Please reply with one of:</p>
+            <ul>
+                <li>"Scan them, but show me the tasks before adding."</li>
+            </ul>
+        `;
+
+        __testOnly_convertReplyOptionsListsToButtons(root);
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+
+        expect(String(promptInput.value)).toContain('Scan them, but show me the tasks before adding.');
+        expect(sendButton.click).toHaveBeenCalledTimes(0);
+    });
+
+    test('supports "tell me how you want to proceed" marker and splits multi-option items', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = `
+            <p>Tell me how you want to proceed:</p>
+            <ul>
+                <li><strong>“Add both new tasks to today’s to-do list.”</strong></li>
+                <li><strong>“Add only #2.” / “Add only #3.”</strong></li>
+                <li><strong>“Add them as future / backlog items.”</strong></li>
+            </ul>
+        `;
+
+        __testOnly_convertReplyOptionsListsToButtons(root);
+
+        const buttons = Array.from(root.querySelectorAll('.chat-insert-prompt-button'));
+        expect(buttons.map((b) => b.textContent)).toEqual([
+            "Add both new tasks to today’s to-do list.",
+            'Add only #2.',
+            'Add only #3.',
+            'Add them as future / backlog items.'
+        ]);
+
+        buttons[2].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(String(promptInput.value)).toContain('Add only #3.');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
     });
 });
 
