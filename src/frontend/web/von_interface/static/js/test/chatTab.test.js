@@ -1,4 +1,6 @@
 import {
+    __testOnly_convertQuotedInstructionBlockquotesToButtons,
+    __testOnly_deriveLlmDebugWarnings,
     __testOnly_hydrateChatConceptCartouches,
     __testOnly_resetChatConceptMetaCaches,
     formatChatTimestamp,
@@ -210,5 +212,98 @@ describe('chat cartouche hydration retries', () => {
         await flushMicrotasks();
 
         expect(nameEl.textContent).toBe('Literary Work');
+    });
+});
+
+describe('chat insert prompt button behaviour', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+        `;
+    });
+
+    test('click inserts and submits by default', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = '<blockquote><p><strong>"Do the thing"</strong></p></blockquote>';
+        __testOnly_convertQuotedInstructionBlockquotesToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+        expect(String(promptInput.value)).toContain('Do the thing');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+
+    test('shift-click inserts without submitting', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = '<blockquote><p><strong>"Do the thing"</strong></p></blockquote>';
+        __testOnly_convertQuotedInstructionBlockquotesToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+
+        expect(String(promptInput.value)).toContain('Do the thing');
+        expect(sendButton.click).toHaveBeenCalledTimes(0);
+    });
+});
+
+describe('LLM debug warnings (presenter channel health)', () => {
+    test('flags missing spoken channel when screen exists', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            presenter_channels: {
+                screen: 'On-screen content',
+                spoken: null,
+                format: 'tagged_blocks_v1'
+            }
+        });
+
+        expect(warnings).toContain(
+            'Presenter output missing spoken channel; text-to-speech will fall back to screen text.'
+        );
+    });
+
+    test('flags missing screen channel when spoken exists', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            presenter_channels: {
+                screen: null,
+                spoken: 'Talk track',
+                format: 'tagged_blocks_v1'
+            }
+        });
+
+        expect(warnings).toContain(
+            'Presenter output missing screen channel; display will fall back to spoken text.'
+        );
+    });
+
+    test('flags failed spoken backfill attempt', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            presenter_channels: {
+                screen: 'On-screen content',
+                spoken: '',
+                format: 'narration_fallback_v1'
+            },
+            spoken_backfill_second_pass_attempted: true,
+            spoken_backfill_second_pass_reason: 'missing_spoken'
+        });
+
+        expect(warnings).toContain(
+            'Spoken backfill attempted but spoken channel is still missing (missing_spoken).'
+        );
     });
 });
