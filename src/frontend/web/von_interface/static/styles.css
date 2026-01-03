@@ -5684,30 +5684,47 @@ body.settings-body {
     margin: 0.8em 0;
 }
 
-.chat-markdown.markdown-rendered .chat-insert-prompt-wrapper {
+.chat-insert-prompt-wrapper {
     margin: 0.8em 0;
 }
 
-.chat-markdown.markdown-rendered .chat-insert-prompt-button {
+.chat-insert-prompt-button {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 12px;
-    border-radius: 8px;
+    position: relative;
+    padding: 12px 14px 12px 54px;
+    border-radius: 10px;
     border: 1px solid #cbd5e1;
-    background: #f8fafc;
+    background-color: #f8fafc;
     color: #0f172a;
     font: inherit;
     cursor: pointer;
 }
 
-.chat-markdown.markdown-rendered .chat-insert-prompt-button:hover {
-    background: #eef2ff;
+.chat-insert-prompt-button::before {
+    content: '';
+    position: absolute;
+    left: 14px;
+    top: 50%;
+    width: 28px;
+    height: 28px;
+    transform: translateY(-50%);
+    border-radius: 999px;
+    background-color: #064e3b;
+    background-image: url('/static/VonImageBig.png');
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 20px 20px;
+}
+
+.chat-insert-prompt-button:hover {
+    background-color: #eef2ff;
     border-color: #a5b4fc;
 }
 
-.chat-markdown.markdown-rendered .chat-insert-prompt-button:active {
-    background: #e0e7ff;
+.chat-insert-prompt-button:active {
+    background-color: #e0e7ff;
 }
 
 /* Standalone fenced code blocks containing exactly one #V#... token become a block cartouche. */

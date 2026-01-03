@@ -247,6 +247,169 @@ function insertTextIntoChatPrompt(text) {
     }
 }
 
+function submitChatPromptImmediately() {
+    const sendButton = document.getElementById('sendButton');
+    if (sendButton && typeof sendButton.click === 'function') {
+        sendButton.click();
+        return;
+    }
+
+    try {
+        handleSendPrompt();
+    } catch (_) {
+        // Ignore.
+    }
+}
+
+function convertReplyOptionsListsToButtons(root) {
+    if (!root || !root.querySelectorAll) return;
+
+    const normalise = (value) => String(value ?? '').trim().replace(/\s+/g, ' ');
+    const markerPhrases = new Set([
+        'please reply with one of:',
+        'please reply with one of',
+        'tell me how you want to proceed:',
+        'tell me how you want to proceed'
+    ]);
+
+    const extractQuotedSegments = (value) => {
+        const text = String(value ?? '');
+        if (!text.trim()) {
+            return [];
+        }
+
+        const results = [];
+
+        // Straight quotes
+        const straight = /"([^\n\r"]{1,400})"/g;
+        for (const match of text.matchAll(straight)) {
+            results.push(match[1]);
+        }
+
+        // Curly quotes
+        const curly = /“([^\n\r”]{1,400})”/g;
+        for (const match of text.matchAll(curly)) {
+            results.push(match[1]);
+        }
+
+        // Single quotes (avoid apostrophes; only accept if it looks like a full quoted segment)
+        const single = /(^|\s)[‘']([^\n\r’']{1,400})[’'](\s|$)/g;
+        for (const match of text.matchAll(single)) {
+            results.push(match[2]);
+        }
+
+        return results.map((s) => normalise(s)).filter((s) => s);
+    };
+
+    const stripSurroundingQuotes = (value) => {
+        let text = String(value ?? '').trim();
+        if (!text) return '';
+
+        const pairs = [
+            ['"', '"'],
+            ['“', '”'],
+            ["'", "'"],
+            ['‘', '’']
+        ];
+
+        for (const [start, end] of pairs) {
+            if (text.startsWith(start) && text.endsWith(end) && text.length >= start.length + end.length + 1) {
+                text = text.slice(start.length, text.length - end.length).trim();
+                break;
+            }
+        }
+
+        return text;
+    };
+
+    const markerParas = Array.from(root.querySelectorAll('p'));
+    for (const p of markerParas) {
+        try {
+            if (!p || p.closest('pre, code')) {
+                continue;
+            }
+
+            const markerText = normalise(p.textContent).toLowerCase();
+            if (!markerPhrases.has(markerText)) {
+                continue;
+            }
+
+            const list = p.nextElementSibling;
+            if (!list || (list.tagName !== 'UL' && list.tagName !== 'OL')) {
+                continue;
+            }
+
+            if (list.dataset && list.dataset.buttonified === '1') {
+                continue;
+            }
+
+            const items = Array.from(list.querySelectorAll(':scope > li'));
+            const options = [];
+            for (const li of items) {
+                const raw = normalise(li?.textContent);
+                if (!raw) {
+                    continue;
+                }
+
+                const quotedSegments = extractQuotedSegments(raw);
+                if (quotedSegments.length > 0) {
+                    for (const seg of quotedSegments) {
+                        options.push(seg);
+                    }
+                    continue;
+                }
+
+                const stripped = stripSurroundingQuotes(raw);
+                options.push(stripped ? stripped : raw);
+            }
+
+            if (options.length === 0) {
+                continue;
+            }
+            try {
+                list.dataset.buttonified = '1';
+            } catch (_) {
+                // Ignore.
+            }
+
+            while (list.firstChild) {
+                list.removeChild(list.firstChild);
+            }
+
+            for (const optionText of options) {
+                const li = document.createElement('li');
+
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'chat-insert-prompt-button';
+                btn.textContent = optionText;
+                btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
+                btn.setAttribute('aria-label', `Insert into chat prompt: ${optionText}`);
+                btn.addEventListener('click', (e) => {
+                    try {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    } catch (_) {
+                        // Ignore.
+                    }
+
+                    insertTextIntoChatPrompt(optionText);
+
+                    const shiftHeld = !!(e && e.shiftKey);
+                    if (!shiftHeld) {
+                        submitChatPromptImmediately();
+                    }
+                });
+
+                li.appendChild(btn);
+                list.appendChild(li);
+            }
+        } catch (_) {
+            // Ignore detached nodes or DOM mutation races.
+        }
+    }
+}
+
 function convertQuotedInstructionBlockquotesToButtons(root) {
     if (!root || !root.querySelectorAll) return;
 
@@ -268,9 +431,14 @@ function convertQuotedInstructionBlockquotesToButtons(root) {
             }
 
             const pElementChildren = Array.from(p.children ?? []);
-            if (pElementChildren.length !== 1) continue;
-            const strong = pElementChildren[0];
-            if (!strong || strong.tagName !== 'STRONG') continue;
+            const strongCandidates = pElementChildren.filter((el) => el && el.tagName === 'STRONG');
+            if (strongCandidates.length !== 1) continue;
+            const strong = strongCandidates[0];
+
+            // Allow harmless formatting elements that do not contribute text.
+            if (pElementChildren.some((el) => el !== strong && el.tagName !== 'BR')) {
+                continue;
+            }
 
             // No non-whitespace text nodes inside the paragraph.
             const pNodes = Array.from(p.childNodes ?? []);
@@ -289,7 +457,7 @@ function convertQuotedInstructionBlockquotesToButtons(root) {
             btn.type = 'button';
             btn.className = 'chat-insert-prompt-button';
             btn.textContent = instruction;
-            btn.title = 'Insert into chat prompt';
+            btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
             btn.setAttribute('aria-label', `Insert into chat prompt: ${instruction}`);
             btn.addEventListener('click', (e) => {
                 try {
@@ -299,6 +467,11 @@ function convertQuotedInstructionBlockquotesToButtons(root) {
                     // Ignore.
                 }
                 insertTextIntoChatPrompt(instruction);
+
+                const shiftHeld = !!(e && e.shiftKey);
+                if (!shiftHeld) {
+                    submitChatPromptImmediately();
+                }
             });
 
             const wrapper = document.createElement('div');
@@ -392,6 +565,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
 
     container.innerHTML = html;
     convertQuotedInstructionBlockquotesToButtons(container);
+    convertReplyOptionsListsToButtons(container);
     try {
         container.dataset.renderMode = 'rendered';
     } catch (_) {
@@ -785,6 +959,16 @@ export function __testOnly_hydrateChatConceptCartouches(root) {
     hydrateChatConceptCartouches(root);
 }
 
+// Export for testing.
+export function __testOnly_convertQuotedInstructionBlockquotesToButtons(root) {
+    convertQuotedInstructionBlockquotesToButtons(root);
+}
+
+// Export for testing.
+export function __testOnly_convertReplyOptionsListsToButtons(root) {
+    convertReplyOptionsListsToButtons(root);
+}
+
 function deriveLlmDebugWarnings(debugData) {
     const warnings = [];
     if (!debugData || typeof debugData !== 'object') {
@@ -828,7 +1012,38 @@ function deriveLlmDebugWarnings(debugData) {
         }
     }
 
+    // Presenter channel health (screen/spoken routes)
+    const presenterChannels = normalisePresenterChannels(debugData.presenter_channels);
+    if (presenterChannels) {
+        const hasScreen = typeof presenterChannels.screen === 'string' && presenterChannels.screen.trim();
+        const hasSpoken = typeof presenterChannels.spoken === 'string' && presenterChannels.spoken.trim();
+
+        if (hasScreen && !hasSpoken) {
+            warnings.push('Presenter output missing spoken channel; text-to-speech will fall back to screen text.');
+        } else if (hasSpoken && !hasScreen) {
+            warnings.push('Presenter output missing screen channel; display will fall back to spoken text.');
+        } else if (!hasScreen && !hasSpoken) {
+            warnings.push('Presenter output present but both screen and spoken channels are empty.');
+        }
+    }
+
+    const spokenBackfillAttempted = !!debugData.spoken_backfill_second_pass_attempted;
+    if (spokenBackfillAttempted) {
+        const spokenStillMissing = !(presenterChannels?.spoken && presenterChannels.spoken.trim());
+        if (spokenStillMissing) {
+            const reason = (typeof debugData.spoken_backfill_second_pass_reason === 'string' && debugData.spoken_backfill_second_pass_reason.trim())
+                ? debugData.spoken_backfill_second_pass_reason.trim()
+                : 'unknown_reason';
+            warnings.push(`Spoken backfill attempted but spoken channel is still missing (${reason}).`);
+        }
+    }
+
     return Array.from(new Set(warnings));
+}
+
+// Export for testing.
+export function __testOnly_deriveLlmDebugWarnings(debugData) {
+    return deriveLlmDebugWarnings(debugData);
 }
 
 function createChatDebugWarningIndicator(warnings) {
