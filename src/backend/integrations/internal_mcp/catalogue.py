@@ -2538,11 +2538,12 @@ def _jira_search_input_schema() -> Schema:
         optional={
             "max_results": (int,),
             "start_at": (int,),
+            "next_page_token": (str,),
             "fields": (list,),
         },
         allow_unknown=True,
         description=(
-            "jira_search input: jql (str, required) plus optional max_results, start_at, and fields (list of field names)."
+            "jira_search input: jql (str, required) plus optional max_results, next_page_token, start_at (deprecated), and fields (list of field names)."
         ),
     )
 
@@ -3461,6 +3462,7 @@ def _jira_search(**kwargs):
             jql=jql,
             max_results=kwargs.get("max_results"),
             start_at=kwargs.get("start_at"),
+            next_page_token=kwargs.get("next_page_token"),
             fields=kwargs.get("fields"),
         )
 

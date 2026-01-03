@@ -60,6 +60,7 @@ class JiraMCPProxy:
         jql: str,
         max_results: Optional[int] = None,
         start_at: Optional[int] = None,
+        next_page_token: Optional[str] = None,
         fields: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
         arguments: Dict[str, Any] = {"jql": jql}
@@ -67,6 +68,8 @@ class JiraMCPProxy:
             arguments["max_results"] = max_results
         if isinstance(start_at, int):
             arguments["start_at"] = start_at
+        if isinstance(next_page_token, str) and next_page_token.strip():
+            arguments["next_page_token"] = next_page_token.strip()
         if fields:
             arguments["fields"] = fields
         return await self._call("jira_search", arguments)
