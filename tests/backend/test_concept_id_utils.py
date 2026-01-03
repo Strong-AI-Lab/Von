@@ -1,4 +1,5 @@
 from src.backend.utils.concept_id_utils import (
+    canonicalise_vontology_concept_id,
     ensure_v_concept_prefix,
     normalise_concept_id_for_compare,
 )
@@ -27,3 +28,22 @@ def test_ensure_v_concept_prefix_handles_blanks() -> None:
     assert ensure_v_concept_prefix(123) is None
     assert ensure_v_concept_prefix("") is None
     assert ensure_v_concept_prefix("   ") is None
+
+
+def test_canonicalise_vontology_concept_id_handles_hyphens_and_punctuation() -> None:
+    assert canonicalise_vontology_concept_id("#V#foo-bar") == "#V#foo_bar"
+    assert canonicalise_vontology_concept_id("#V#foo---bar") == "#V#foo_bar"
+    assert canonicalise_vontology_concept_id("#V#foo bar") == "#V#foo_bar"
+    assert canonicalise_vontology_concept_id("#V#foo...bar") == "#V#foo_bar"
+
+
+def test_canonicalise_vontology_concept_id_coerces_prefix_and_case() -> None:
+    assert canonicalise_vontology_concept_id("foo-bar") == "#V#foo_bar"
+    assert canonicalise_vontology_concept_id("#v#Foo-Bar") == "#V#foo_bar"
+
+
+def test_canonicalise_vontology_concept_id_handles_blanks() -> None:
+    assert canonicalise_vontology_concept_id(None) is None
+    assert canonicalise_vontology_concept_id(123) is None
+    assert canonicalise_vontology_concept_id("") is None
+    assert canonicalise_vontology_concept_id("   ") is None

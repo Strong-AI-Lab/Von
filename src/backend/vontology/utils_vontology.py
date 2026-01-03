@@ -1317,13 +1317,25 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
         return {"error": "Identifier cannot be empty."}
     # Use repository for read
 
+    from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+
     query = {}
     try:
         if ObjectId.is_valid(identifier):
             # Try both ObjectId and string formats since the database might store IDs as strings
             query = {"_id": identifier}  # Try as real ObjectId first
         elif identifier.startswith("#V#"):
-            query = {"concept_id": identifier}
+            # Canonicalise punctuation variants (e.g. hyphen vs underscore).
+            # Prefer the canonical ID if it differs; fall back to the original if needed.
+            canonical_id = canonicalise_vontology_concept_id(identifier)
+            if canonical_id and canonical_id != identifier:
+                doc = ConceptsRepository.find_one({"concept_id": canonical_id})
+                if doc is None:
+                    query = {"concept_id": identifier}
+                else:
+                    query = {"concept_id": canonical_id}
+            else:
+                query = {"concept_id": identifier}
         else:
             query = {"path": identifier}
             # DEPRECATION WARNING
@@ -3479,28 +3491,31 @@ def create_vontology_concept(
     try:
         # Local import to avoid circular dependency at module import time
         from ..services.concept_service import create_concept  # type: ignore
+        from ..utils.concept_id_utils import canonicalise_vontology_concept_id
 
         # Validate concept name constraints upfront
         is_valid, error_msg = validate_concept_name_for_id(new_concept_name)
         if not is_valid:
             return {"success": False, "message": error_msg, "concept": None}
 
-        # Generate a base slug from the provided name (very lightweight normalisation)
-        # Collapse space sequences to single underscores (defensive; spaces are rejected by validator)
-        base_slug = re.sub(r"\s+", "_", new_concept_name).lower().strip()
-        if not base_slug:
+        # Generate a canonical concept_id from the provided name (slug-like input).
+        # This prevents punctuation variants (e.g. hyphen vs underscore) creating distinct concepts.
+        canonical_id = canonicalise_vontology_concept_id(new_concept_name)
+        if not canonical_id:
             return {
                 "success": False,
                 "message": "New concept name is empty after normalisation.",
                 "concept": None,
             }
 
+        base_slug = canonical_id[3:]
+
         # If creating an INSTANCE we allow duplicate display names by disambiguating the concept_id
         # (Users commonly create multiple instances sharing a natural language name.)
         # For TYPES we retain strict uniqueness to avoid hierarchy ambiguity.
         from ..db.repositories.concepts_repository import ConceptsRepository
 
-        candidate_concept_id = f"#V#{base_slug}"
+        candidate_concept_id = canonical_id
         if create_as_instance:
             # Preflight existence check and append incremental suffix until free
             counter = 2
