@@ -84,16 +84,24 @@ class JiraClient:
         fields: t.Optional[t.List[str]] = None,
         max_results: int = 50,
         start_at: int = 0,
+        next_page_token: t.Optional[str] = None,
     ) -> dict:
         self._ensure_config()
         payload = {
             "jql": jql,
             "maxResults": max_results,
-            "startAt": start_at,
         }
+        # Jira Cloud /rest/api/3/search/jql uses nextPageToken pagination.
+        # Avoid sending deprecated startAt, as some instances reject it.
+        if next_page_token:
+            payload["nextPageToken"] = next_page_token
+        elif start_at not in (0, None):
+            raise JiraConfigurationError(
+                "Deprecated pagination parameter: start_at. Use next_page_token instead."
+            )
         if fields:
             payload["fields"] = fields
-        url = f"{self.site_base}/rest/api/3/search"
+        url = f"{self.site_base}/rest/api/3/search/jql"
         resp = self._session.post(url, json=payload, timeout=60)
         if resp.status_code == 401:
             raise JiraConfigurationError("Unauthorized: check email/token validity")
