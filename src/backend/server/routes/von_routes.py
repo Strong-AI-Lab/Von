@@ -8,6 +8,11 @@ from ...languagemodels.llm_interface import get_llm_client, get_active_model_nam
 from .settings_routes import get_all_settings_data
 from ...integrations.internal_mcp import ToolCallParsingError
 from ...services import chat_history_service
+from ...workflows import (
+    CHAT_NARRATION_WORKFLOW_ID,
+    WorkflowExecutionTrace,
+    insert_workflow_execution_trace,
+)
 
 # NOTE: Previous relative template_folder path ('../../frontend/...') was incorrect.
 # From this file (src/backend/server/routes/von_routes.py) we need to traverse up THREE levels
@@ -478,6 +483,7 @@ def generate():
         # ---------------------------------------------------------
         auxiliary_system_prompt = None
         narration_prompt_text = None
+        narration_prompt_fragments = []
         user_prompt_debug = {
             "effective_user_concept_id": user_concept_id,
             "loaded": False,
@@ -1899,50 +1905,128 @@ def generate():
                         else str(response_text)
                     )
 
-                narration_system = (
-                    "You are Von. Produce a short talk track for text-to-speech. "
-                    "Return ONLY one block: <spoken>...</spoken>. "
-                    "Do not include <screen>. Do not include code blocks. "
-                    "Use New Zealand English spelling."
-                    + (
-                        "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
-                        + narration_prompt_text
-                        if narration_prompt_text
-                        else ""
-                    )
-                )
-
-                narration_user = (
-                    "User message:\n"
-                    f"{prompt_text}\n\n"
-                    "On-screen content (do not read verbatim if long; summarise):\n"
-                    f"{screen_text}\n"
-                )
-
-                narration_response = llm_client.generate(
-                    prompt="Generate <spoken> talk track",
-                    context=[
-                        {"role": "system", "content": narration_system},
-                        {"role": "user", "content": narration_user},
+                narration_data = {
+                    "presenter_mode_requested": presenter_mode_requested,
+                    "screen_text": screen_text,
+                    "user_prompt": prompt_text,
+                    "narration_prompt_text": narration_prompt_text,
+                    "narration_prompt_ids": [
+                        frag.get("concept_id")
+                        for frag in (narration_prompt_fragments or [])
+                        if isinstance(frag, dict)
                     ],
-                    model=model_name,
-                )
-
-                spoken_fallback = _coerce_spoken_text(narration_response)
-                if not spoken_fallback:
-                    # Last resort: derive a short talk track from the screen text.
-                    spoken_fallback = _coerce_spoken_text(screen_text)
-
-                if spoken_fallback:
-                    base_channels = (
+                    "presenter_channels": (
                         dict(presenter_channels)
                         if isinstance(presenter_channels, dict)
                         else {}
+                    ),
+                }
+
+                narration_trace = None
+                narration_trace_store = None
+                narration_trace_enabled = (
+                    os.getenv("VON_WORKFLOWS_TRACE_ENABLED", "0").lower()
+                    in {"1", "true"}
+                )
+                if narration_trace_enabled:
+                    try:
+                        narration_trace = WorkflowExecutionTrace(
+                            workflow_id=CHAT_NARRATION_WORKFLOW_ID
+                        )
+                        narration_trace.user_namespace = user_namespace
+                        narration_trace_store = insert_workflow_execution_trace
+                    except Exception:
+                        narration_trace = None
+                        narration_trace_store = None
+                        narration_trace_enabled = False
+
+                workflow_result = None
+                if orchestrator is not None:
+                    workflow_result = orchestrator.execute_workflow(
+                        CHAT_NARRATION_WORKFLOW_ID,
+                        data=narration_data,
+                        llm_client=llm_client,
+                        model=model_name,
+                        user_namespace=user_namespace,
+                        auxiliary_system_prompt=auxiliary_system_prompt,
+                        trace=narration_trace,
                     )
-                    base_channels["screen"] = screen_text
-                    base_channels["spoken"] = spoken_fallback
-                    base_channels["format"] = "narration_fallback_v1"
-                    presenter_channels = base_channels
+
+                if workflow_result is not None:
+                    channels = workflow_result.data.get(
+                        "presenter_channels", presenter_channels
+                    )
+                    if isinstance(channels, dict) and channels:
+                        presenter_channels = channels
+                    if narration_trace_enabled and narration_trace is not None:
+                        try:
+                            if workflow_result.completed:
+                                narration_trace.finish_completed()
+                            elif workflow_result.error:
+                                narration_trace.finish_failed(workflow_result.error)
+                        except Exception:
+                            pass
+                        if narration_trace_store is not None:
+                            try:
+                                stored_exec = narration_trace_store(
+                                    narration_trace.to_storage_document()
+                                )
+                                auxiliary_llm_calls.append(
+                                    {
+                                        "type": "workflow_execution_trace",
+                                        "path": "narration",
+                                        "workflow_id": CHAT_NARRATION_WORKFLOW_ID,
+                                        "execution_id": narration_trace.execution_id,
+                                        "stored": bool(stored_exec),
+                                        "status": narration_trace.status,
+                                    }
+                                )
+                            except Exception:
+                                pass
+                else:
+                    narration_system = (
+                        "You are Von. Produce a short talk track for text-to-speech. "
+                        "Return ONLY one block: <spoken>...</spoken>. "
+                        "Do not include <screen>. Do not include code blocks. "
+                        "Use New Zealand English spelling."
+                        + (
+                            "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
+                            + narration_prompt_text
+                            if narration_prompt_text
+                            else ""
+                        )
+                    )
+
+                    narration_user = (
+                        "User message:\n"
+                        f"{prompt_text}\n\n"
+                        "On-screen content (do not read verbatim if long; summarise):\n"
+                        f"{screen_text}\n"
+                    )
+
+                    narration_response = llm_client.generate(
+                        prompt="Generate <spoken> talk track",
+                        context=[
+                            {"role": "system", "content": narration_system},
+                            {"role": "user", "content": narration_user},
+                        ],
+                        model=model_name,
+                    )
+
+                    spoken_fallback = _coerce_spoken_text(narration_response)
+                    if not spoken_fallback:
+                        spoken_fallback = _coerce_spoken_text(screen_text)
+
+                    if spoken_fallback:
+                        base_channels = (
+                            dict(presenter_channels)
+                            if isinstance(presenter_channels, dict)
+                            else {}
+                        )
+                        base_channels["screen"] = screen_text
+                        base_channels["spoken"] = spoken_fallback
+                        base_channels["format"] = "narration_fallback_v1"
+                        presenter_channels = base_channels
             except Exception:
                 # Defensive: never fail the request just because narration generation failed.
                 presenter_channels = presenter_channels

@@ -6,6 +6,8 @@ from typing import List
 
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema
+from .orchestrator import InternalMCPChatOrchestrator
+from src.backend.services.prompt_template_service import PromptTemplateService
 
 
 def _run_async_compat(async_fn):
@@ -3649,6 +3651,44 @@ def _chat_get_prompt_context(
     behaviour_prompt_concepts = _format_fragments(behaviour_fragments)
     narration_prompt_concepts = _format_fragments(narration_fragments)
 
+    template_service = PromptTemplateService()
+    classifier_prompt_id, classifier_prompt_text = template_service.resolve_prompt_text(
+        InternalMCPChatOrchestrator._MISSING_TOOL_CLASSIFIER_PROMPTS,
+        fallback=InternalMCPChatOrchestrator._FALLBACK_MISSING_TOOL_CALL_PROMPT,
+        max_chars=max_chars_int,
+    )
+    retry_prompt_id, retry_prompt_text = template_service.resolve_prompt_text(
+        InternalMCPChatOrchestrator._MISSING_TOOL_RETRY_PROMPTS,
+        fallback=None,
+        max_chars=max_chars_int,
+    )
+    classifier_preview = (
+        classifier_prompt_text[:max_chars_int] if classifier_prompt_text else ""
+    )
+    retry_preview = retry_prompt_text[:max_chars_int] if retry_prompt_text else ""
+    narration_preview = ""
+    if narration_fragments and isinstance(narration_fragments[0], dict):
+        content = narration_fragments[0].get("content")
+        if isinstance(content, str):
+            narration_preview = content[:max_chars_int]
+    resolved_templates = {
+        "missing_tool_call_classifier": {
+            "prompt_id": classifier_prompt_id,
+            "preview": classifier_preview,
+        },
+        "missing_tool_call_retry": {
+            "prompt_id": retry_prompt_id,
+            "preview": retry_preview,
+        },
+        "behaviour_prompt": {"prompt_id": None, "preview": prompt_text or ""},
+        "narration_prompt": {
+            "prompt_id": narration_prompt_concept_ids[0]
+            if narration_prompt_concept_ids
+            else None,
+            "preview": narration_preview,
+        },
+    }
+
     return {
         "success": True,
         "namespace": namespace,
@@ -3662,6 +3702,7 @@ def _chat_get_prompt_context(
         "narration_prompt_concepts": narration_prompt_concepts,
         "prompt_text": prompt_text or "",
         "prompt_count": len(behaviour_prompt_concept_ids),
+        "resolved_templates": resolved_templates,
     }
 
 
@@ -3998,7 +4039,14 @@ def build_default_catalogue() -> MethodCatalogue:
                     "prompt_text": str,
                     "prompt_count": int,
                 },
-                optional={"error": str},
+                optional={
+                    "error": str,
+                    "behaviour_prompt_concept_ids": list,
+                    "behaviour_prompt_concepts": list,
+                    "narration_prompt_concept_ids": list,
+                    "narration_prompt_concepts": list,
+                    "resolved_templates": dict,
+                },
                 allow_unknown=False,
                 description="User-specific chat prompt context for debugging and transparency.",
             ),

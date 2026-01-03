@@ -2,6 +2,8 @@ import importlib
 
 import pytest
 
+pytest.importorskip("mongomock", reason="mongomock is required for workflow trace tests")
+
 
 @pytest.fixture()
 def mock_db_env(monkeypatch):
