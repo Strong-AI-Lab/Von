@@ -261,6 +261,152 @@ function submitChatPromptImmediately() {
     }
 }
 
+function convertReplyOptionsListsToButtons(root) {
+    if (!root || !root.querySelectorAll) return;
+
+    const normalise = (value) => String(value ?? '').trim().replace(/\s+/g, ' ');
+    const markerPhrases = new Set([
+        'please reply with one of:',
+        'please reply with one of',
+        'tell me how you want to proceed:',
+        'tell me how you want to proceed'
+    ]);
+
+    const extractQuotedSegments = (value) => {
+        const text = String(value ?? '');
+        if (!text.trim()) {
+            return [];
+        }
+
+        const results = [];
+
+        // Straight quotes
+        const straight = /"([^\n\r"]{1,400})"/g;
+        for (const match of text.matchAll(straight)) {
+            results.push(match[1]);
+        }
+
+        // Curly quotes
+        const curly = /“([^\n\r”]{1,400})”/g;
+        for (const match of text.matchAll(curly)) {
+            results.push(match[1]);
+        }
+
+        // Single quotes (avoid apostrophes; only accept if it looks like a full quoted segment)
+        const single = /(^|\s)[‘']([^\n\r’']{1,400})[’'](\s|$)/g;
+        for (const match of text.matchAll(single)) {
+            results.push(match[2]);
+        }
+
+        return results.map((s) => normalise(s)).filter((s) => s);
+    };
+
+    const stripSurroundingQuotes = (value) => {
+        let text = String(value ?? '').trim();
+        if (!text) return '';
+
+        const pairs = [
+            ['"', '"'],
+            ['“', '”'],
+            ["'", "'"],
+            ['‘', '’']
+        ];
+
+        for (const [start, end] of pairs) {
+            if (text.startsWith(start) && text.endsWith(end) && text.length >= start.length + end.length + 1) {
+                text = text.slice(start.length, text.length - end.length).trim();
+                break;
+            }
+        }
+
+        return text;
+    };
+
+    const markerParas = Array.from(root.querySelectorAll('p'));
+    for (const p of markerParas) {
+        try {
+            if (!p || p.closest('pre, code')) {
+                continue;
+            }
+
+            const markerText = normalise(p.textContent).toLowerCase();
+            if (!markerPhrases.has(markerText)) {
+                continue;
+            }
+
+            const list = p.nextElementSibling;
+            if (!list || (list.tagName !== 'UL' && list.tagName !== 'OL')) {
+                continue;
+            }
+
+            if (list.dataset && list.dataset.buttonified === '1') {
+                continue;
+            }
+
+            const items = Array.from(list.querySelectorAll(':scope > li'));
+            const options = [];
+            for (const li of items) {
+                const raw = normalise(li?.textContent);
+                if (!raw) {
+                    continue;
+                }
+
+                const quotedSegments = extractQuotedSegments(raw);
+                if (quotedSegments.length > 0) {
+                    for (const seg of quotedSegments) {
+                        options.push(seg);
+                    }
+                    continue;
+                }
+
+                const stripped = stripSurroundingQuotes(raw);
+                options.push(stripped ? stripped : raw);
+            }
+
+            if (options.length === 0) {
+                continue;
+            }
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'chat-insert-prompt-wrapper';
+            for (const optionText of options) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'chat-insert-prompt-button';
+                btn.textContent = optionText;
+                btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
+                btn.setAttribute('aria-label', `Insert into chat prompt: ${optionText}`);
+                btn.addEventListener('click', (e) => {
+                    try {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    } catch (_) {
+                        // Ignore.
+                    }
+
+                    insertTextIntoChatPrompt(optionText);
+
+                    const shiftHeld = !!(e && e.shiftKey);
+                    if (!shiftHeld) {
+                        submitChatPromptImmediately();
+                    }
+                });
+                wrapper.appendChild(btn);
+            }
+
+            try {
+                list.dataset.buttonified = '1';
+            } catch (_) {
+                // Ignore.
+            }
+
+            list.replaceWith(wrapper);
+        } catch (_) {
+            // Ignore detached nodes or DOM mutation races.
+        }
+    }
+}
+
 function convertQuotedInstructionBlockquotesToButtons(root) {
     if (!root || !root.querySelectorAll) return;
 
@@ -416,6 +562,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
 
     container.innerHTML = html;
     convertQuotedInstructionBlockquotesToButtons(container);
+    convertReplyOptionsListsToButtons(container);
     try {
         container.dataset.renderMode = 'rendered';
     } catch (_) {
@@ -812,6 +959,11 @@ export function __testOnly_hydrateChatConceptCartouches(root) {
 // Export for testing.
 export function __testOnly_convertQuotedInstructionBlockquotesToButtons(root) {
     convertQuotedInstructionBlockquotesToButtons(root);
+}
+
+// Export for testing.
+export function __testOnly_convertReplyOptionsListsToButtons(root) {
+    convertReplyOptionsListsToButtons(root);
 }
 
 function deriveLlmDebugWarnings(debugData) {
