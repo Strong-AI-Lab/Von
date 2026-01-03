@@ -247,6 +247,20 @@ function insertTextIntoChatPrompt(text) {
     }
 }
 
+function submitChatPromptImmediately() {
+    const sendButton = document.getElementById('sendButton');
+    if (sendButton && typeof sendButton.click === 'function') {
+        sendButton.click();
+        return;
+    }
+
+    try {
+        handleSendPrompt();
+    } catch (_) {
+        // Ignore.
+    }
+}
+
 function convertQuotedInstructionBlockquotesToButtons(root) {
     if (!root || !root.querySelectorAll) return;
 
@@ -268,9 +282,14 @@ function convertQuotedInstructionBlockquotesToButtons(root) {
             }
 
             const pElementChildren = Array.from(p.children ?? []);
-            if (pElementChildren.length !== 1) continue;
-            const strong = pElementChildren[0];
-            if (!strong || strong.tagName !== 'STRONG') continue;
+            const strongCandidates = pElementChildren.filter((el) => el && el.tagName === 'STRONG');
+            if (strongCandidates.length !== 1) continue;
+            const strong = strongCandidates[0];
+
+            // Allow harmless formatting elements that do not contribute text.
+            if (pElementChildren.some((el) => el !== strong && el.tagName !== 'BR')) {
+                continue;
+            }
 
             // No non-whitespace text nodes inside the paragraph.
             const pNodes = Array.from(p.childNodes ?? []);
@@ -289,7 +308,7 @@ function convertQuotedInstructionBlockquotesToButtons(root) {
             btn.type = 'button';
             btn.className = 'chat-insert-prompt-button';
             btn.textContent = instruction;
-            btn.title = 'Insert into chat prompt';
+            btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
             btn.setAttribute('aria-label', `Insert into chat prompt: ${instruction}`);
             btn.addEventListener('click', (e) => {
                 try {
@@ -299,6 +318,11 @@ function convertQuotedInstructionBlockquotesToButtons(root) {
                     // Ignore.
                 }
                 insertTextIntoChatPrompt(instruction);
+
+                const shiftHeld = !!(e && e.shiftKey);
+                if (!shiftHeld) {
+                    submitChatPromptImmediately();
+                }
             });
 
             const wrapper = document.createElement('div');
@@ -785,6 +809,11 @@ export function __testOnly_hydrateChatConceptCartouches(root) {
     hydrateChatConceptCartouches(root);
 }
 
+// Export for testing.
+export function __testOnly_convertQuotedInstructionBlockquotesToButtons(root) {
+    convertQuotedInstructionBlockquotesToButtons(root);
+}
+
 function deriveLlmDebugWarnings(debugData) {
     const warnings = [];
     if (!debugData || typeof debugData !== 'object') {
@@ -828,7 +857,38 @@ function deriveLlmDebugWarnings(debugData) {
         }
     }
 
+    // Presenter channel health (screen/spoken routes)
+    const presenterChannels = normalisePresenterChannels(debugData.presenter_channels);
+    if (presenterChannels) {
+        const hasScreen = typeof presenterChannels.screen === 'string' && presenterChannels.screen.trim();
+        const hasSpoken = typeof presenterChannels.spoken === 'string' && presenterChannels.spoken.trim();
+
+        if (hasScreen && !hasSpoken) {
+            warnings.push('Presenter output missing spoken channel; text-to-speech will fall back to screen text.');
+        } else if (hasSpoken && !hasScreen) {
+            warnings.push('Presenter output missing screen channel; display will fall back to spoken text.');
+        } else if (!hasScreen && !hasSpoken) {
+            warnings.push('Presenter output present but both screen and spoken channels are empty.');
+        }
+    }
+
+    const spokenBackfillAttempted = !!debugData.spoken_backfill_second_pass_attempted;
+    if (spokenBackfillAttempted) {
+        const spokenStillMissing = !(presenterChannels?.spoken && presenterChannels.spoken.trim());
+        if (spokenStillMissing) {
+            const reason = (typeof debugData.spoken_backfill_second_pass_reason === 'string' && debugData.spoken_backfill_second_pass_reason.trim())
+                ? debugData.spoken_backfill_second_pass_reason.trim()
+                : 'unknown_reason';
+            warnings.push(`Spoken backfill attempted but spoken channel is still missing (${reason}).`);
+        }
+    }
+
     return Array.from(new Set(warnings));
+}
+
+// Export for testing.
+export function __testOnly_deriveLlmDebugWarnings(debugData) {
+    return deriveLlmDebugWarnings(debugData);
 }
 
 function createChatDebugWarningIndicator(warnings) {

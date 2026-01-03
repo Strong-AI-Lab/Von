@@ -9,6 +9,7 @@ This document provides an overview of key files within the `docs` directory that
 > 2. **PowerShell is the default shell**. Do **NOT** emit Bash heredocs (`<<EOF`), `export VAR=`, `$(cmd)` substitution, or `source venv/bin/activate` unless the user explicitly asks for a Bash variant. Provide `$env:VAR = 'value'`, here-strings, or `pdm run` patterns.
 - **Pre-commit guardrails**: enable hooks with `git config core.hooksPath .githooks` to block committing runtime data (e.g., `data/rag_storage`, `data/raw`, `logs`).
 > 2.1. **Never clobber `.env`.** Under no circumstances should an agent create or overwrite the repo-root `.env` file. Only apply minimal, targeted edits when explicitly asked, and never print `.env` contents or secrets in chat.
+> 2.2. **JIRA issues MUST be assigned on creation.** When creating any JIRA issue/subtask, you MUST set the assignee to the current user at creation time. Do NOT rely on “fixing assignee later” (Atlassian tooling can be flaky, and post-create reassignment may be unavailable).
 > 3. Never auto-start the server; wait for explicit user instruction.
 > 4. Prefer clarity over clever chaining: separate lines instead of `&&` unless failure short‑circuit is required.
 > 5. Large multi-line Python → use a here-string variable then `python -c $code` (PowerShell) or propose a committed script.
@@ -45,7 +46,7 @@ Purpose: Eliminate unnecessary confirmation prompts for standard, codified workf
 
 When To Act Automatically:
 - After implementing a fix & tests pass: Post JIRA comment (summary, root cause, fix, tests, risk, follow-ups) then transition issue to the correct state (usually Done) without asking.
-- When creating a new JIRA issue: assign it to the current user by default (unless the user explicitly names a different assignee).
+- When creating a new JIRA issue: you MUST set the assignee to the current user at creation time (unless the user explicitly names a different assignee). Do NOT depend on post-create reassignment.
 - Retry transient Atlassian 5xx or rate limit errors up to 3 times with exponential backoff (~30s total) before surfacing failure.
 - When a somewhat complex operation already has a lightweight LLM heuristic path (e.g. missing tool-use detection), prefer improving the heuristic behaviour (prompt/context/inputs) over adding brittle, case-specific string matching that will break as natural language phrasing evolves.
 - Preserve raw user-authored text in UI workflows (store original in dataset/raw attribute) whenever rendered/HTML transformations occur — pattern originates from description markdown preservation.
@@ -488,7 +489,7 @@ Please use the correct project key when creating new issues.
 
 To ensure consistency and maintain a clean history, all agents must follow this workflow for every task:
 
-1.  **JIRA Issue**: Ensure a JIRA issue exists for the task. If not, create one and assign it to the current user by default (Project: `JVNAUTOSCI`) unless the user explicitly requests a different assignee.
+1.  **JIRA Issue**: Ensure a JIRA issue exists for the task. If not, create one and assign it to the current user at creation time by default (Project: `JVNAUTOSCI`) unless the user explicitly requests a different assignee.
 2.  **Branching**: Create a new branch from `main` using the JIRA key: `git checkout -b JVNAUTOSCI-XXX-short-description`.
 3.  **Implementation**:
     *   Make changes.
