@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import (
     Any,
     cast,
@@ -30,6 +30,22 @@ from ...languagemodels.structured_tool_calling import (
     ToolDefinition,
     ToolCall,
 )
+from ...services.prompt_template_service import PromptTemplateService
+from ...workflows.action_registry import (
+    ActionRegistry,
+    ActionSpec,
+    WorkflowActionResult,
+    WorkflowEnvironment,
+)
+from ...workflows.definitions import (
+    CHAT_ASSISTANT_WORKFLOW_ID,
+    CHAT_NARRATION_WORKFLOW_ID,
+    MISSING_TOOL_CALL_WORKFLOW_ID,
+    register_default_workflows,
+)
+from ...workflows.engine import WorkflowExecutor
+from ...workflows.workflow_registry import WorkflowRegistry
+from ...workflows.workflow_selector import WorkflowSelector
 
 
 @dataclass(frozen=True)
@@ -131,6 +147,9 @@ class InternalMCPChatOrchestrator:
         "Assistant response:\n"
         "{response}\n"
     )
+    _MISSING_TOOL_CLASSIFIER_PROMPTS = ("#V#missing_tool_call_classifier_prompt",)
+    _MISSING_TOOL_RETRY_PROMPTS = ("#V#missing_tool_call_retry_prompt",)
+    _TURN_SELECTOR_PROMPTS = ("#V#chat_turn_classifier_prompt",)
 
     def __init__(
         self,
@@ -176,6 +195,23 @@ class InternalMCPChatOrchestrator:
             max_value=200_000,
         )
 
+        self._prompt_templates = PromptTemplateService()
+        self._workflow_registry = WorkflowRegistry()
+        register_default_workflows(self._workflow_registry)
+        self._action_registry = self._build_action_registry()
+        self._workflow_executor = WorkflowExecutor(registry=self._action_registry)
+        self._workflow_selector = WorkflowSelector(
+            registry=self._workflow_registry,
+            prompt_service=self._prompt_templates,
+            verdict_mapping={
+                "plain_response": CHAT_ASSISTANT_WORKFLOW_ID,
+                "tool_seeking": CHAT_ASSISTANT_WORKFLOW_ID,
+                "summarisation": CHAT_ASSISTANT_WORKFLOW_ID,
+                "narration": CHAT_NARRATION_WORKFLOW_ID,
+            },
+            classifier_prompt_ids=self._TURN_SELECTOR_PROMPTS,
+        )
+
     @staticmethod
     def _coerce_int(
         value: int | None,
@@ -195,6 +231,354 @@ class InternalMCPChatOrchestrator:
         if value is None:
             value = default
         return max(min_value, min(max_value, int(value)))
+
+    def _build_action_registry(self) -> ActionRegistry:
+        registry = ActionRegistry()
+        registry.register(
+            ActionSpec(
+                action_id="missing_tool_call.assess",
+                handler=self._action_missing_tool_call_assess,
+                description="Classify and log missing tool-call verdicts.",
+                concept_id=self._MISSING_TOOL_CALL_ACTION_ID,
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="missing_tool_call.retry",
+                handler=self._action_missing_tool_call_retry,
+                description="Run retry prompt to elicit tool-call JSON.",
+                concept_id=self._MISSING_TOOL_CALL_ACTION_ID,
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="narration.classify",
+                handler=self._action_narration_classify,
+                description="Determine whether narration should run.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="narration.select_prompts",
+                handler=self._action_narration_select_prompts,
+                description="Resolve narration prompt fragments from Vontology.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="narration.render",
+                handler=self._action_narration_render,
+                description="Generate narration text via LLM.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="narration.emit_audio",
+                handler=self._action_narration_emit_audio,
+                description="Attach narration output to presenter channels.",
+            )
+        )
+        # Stubs for workflow catalogue completeness (Issue 7)
+        for action_id in (
+            "todo_refresh.check_cache",
+            "todo_refresh.fetch_gmail",
+            "todo_refresh.extract_tasks",
+            "todo_refresh.prioritise",
+            "todo_refresh.summarise",
+        ):
+            registry.register(
+                ActionSpec(
+                    action_id=action_id,
+                    handler=self._noop_action,
+                    description="Placeholder action; real implementation to be bound via MCP.",
+                )
+            )
+        return registry
+
+    @staticmethod
+    def _noop_action(request: Any) -> WorkflowActionResult:
+        return WorkflowActionResult(outputs={})
+
+    def _action_missing_tool_call_assess(
+        self, request: Any
+    ) -> WorkflowActionResult:
+        data = request.data
+        aux_log = data.setdefault("aux_llm_calls", [])
+        assessor = data.get("missing_tool_assessor")
+        if not callable(assessor):
+            return WorkflowActionResult(
+                status="failed", error="missing_assessor_callable"
+            )
+
+        assessment = assessor(
+            response_text=data.get("response_text", ""),
+            use_structured=bool(data.get("use_structured")),
+            interpretation=data.get("interpretation"),
+            llm_client=request.environment.llm_client,
+            model=request.environment.model,
+            aux_log=aux_log,
+            tool_call_parse_error=data.get("tool_call_parse_error"),
+        )
+
+        try:
+            aux_log.append(
+                {
+                    "type": "missing_tool_call_detection",
+                    "path": assessment.path,
+                    "is_json_action": assessment.is_json_action,
+                    "fenced_json": assessment.fenced_json,
+                    "classifier_invoked": assessment.classifier_invoked,
+                    "classifier_has_verdict": assessment.classifier_has_verdict,
+                    "classifier_used": assessment.classifier_used,
+                    "classifier_verdict": (
+                        "yes"
+                        if assessment.classifier_verdict is True
+                        else (
+                            "no"
+                            if assessment.classifier_verdict is False
+                            else "unavailable"
+                        )
+                    ),
+                    "retry_reason": assessment.retry_reason or "",
+                    "parse_error": (
+                        str(assessment.tool_call_parse_error)
+                        if assessment.tool_call_parse_error is not None
+                        else ""
+                    ),
+                }
+            )
+        except Exception:
+            pass
+
+        outputs = {
+            "missing_tool_call_assessment": asdict(assessment),
+            "missing_tool_call_retry_needed": bool(assessment.retry_reason),
+            "missing_tool_call_retry_reason": assessment.retry_reason,
+            "tool_call_parse_error": data.get("tool_call_parse_error"),
+        }
+
+        if request.trace is not None:
+            request.trace.metadata.setdefault("missing_tool_call", {})
+            request.trace.metadata["missing_tool_call"].update(
+                {
+                    "retry_reason": assessment.retry_reason,
+                    "classifier_verdict": assessment.classifier_verdict,
+                }
+            )
+
+        return WorkflowActionResult(outputs=outputs)
+
+    def _action_missing_tool_call_retry(self, request: Any) -> WorkflowActionResult:
+        data = request.data
+        aux_log = data.setdefault("aux_llm_calls", [])
+        augmented_context = data.get("augmented_context") or []
+        record_llm_call = data.get("record_llm_call")
+
+        rendered_prompt = self._prompt_templates.render_prompt(
+            self._MISSING_TOOL_RETRY_PROMPTS,
+            variables={},
+            fallback=self._missing_tool_call_retry_prompt(),
+            max_chars=4000,
+        )
+        prompt_text = (
+            rendered_prompt.text
+            if rendered_prompt is not None
+            else self._missing_tool_call_retry_prompt()
+        )
+        if request.trace is not None:
+            request.trace.record_prompt(
+                prompt_id=rendered_prompt.prompt_id if rendered_prompt else None,
+                resolved_prompt=prompt_text,
+                variables={},
+            )
+
+        try:
+            aux_log.append(
+                {
+                    "type": "missing_tool_call_retry",
+                    "path": "workflow",
+                    "stage": "prompt",
+                    "retry_reason": data.get("missing_tool_call_retry_reason") or "",
+                    "prompt_preview": prompt_text[:800],
+                }
+            )
+        except Exception:
+            pass
+
+        llm_start = time.perf_counter()
+        retry_response = request.environment.llm_client.generate(
+            prompt_text, context=augmented_context, model=request.environment.model
+        )
+        duration_ms = (time.perf_counter() - llm_start) * 1000.0
+
+        if callable(record_llm_call):
+            record_llm_call(
+                call_type="llm.generate",
+                model_name=request.environment.model,
+                duration_ms=duration_ms,
+                usage=None,
+                note="Missing tool call retry prompt (workflow).",
+            )
+
+        try:
+            aux_log.append(
+                {
+                    "type": "missing_tool_call_retry",
+                    "path": "workflow",
+                    "stage": "response",
+                    "retry_reason": data.get("missing_tool_call_retry_reason") or "",
+                    "response_preview": (
+                        retry_response[:800]
+                        if isinstance(retry_response, str)
+                        else str(retry_response)[:800]
+                    ),
+                }
+            )
+        except Exception:
+            pass
+
+        extract_fn = data.get("extract_tool_calls_fn") or self._extract_tool_calls
+        retry_calls = None
+        parse_error = None
+        try:
+            retry_calls = extract_fn(retry_response)
+        except ToolCallParsingError as exc:
+            parse_error = exc
+
+        success = bool(retry_calls)
+        outputs = {
+            "response_text": retry_response,
+            "tool_calls": retry_calls,
+            "missing_tool_call_retry_success": success,
+            "tool_call_parse_error": parse_error or data.get("tool_call_parse_error"),
+        }
+
+        return WorkflowActionResult(
+            outputs=outputs,
+            duration_ms=duration_ms,
+        )
+
+    def _action_narration_classify(self, request: Any) -> WorkflowActionResult:
+        required = bool(
+            request.data.get("presenter_mode_requested")
+            or request.data.get("force_narration")
+        )
+        return WorkflowActionResult(
+            outputs={
+                "narration_required": required,
+            }
+        )
+
+    def _action_narration_select_prompts(
+        self, request: Any
+    ) -> WorkflowActionResult:
+        prompt_ids = request.data.get("narration_prompt_ids") or ()
+        fallback_text = request.data.get("narration_prompt_text")
+        rendered = self._prompt_templates.render_prompt(
+            prompt_ids,
+            fallback=fallback_text,
+            variables={},
+            max_chars=6000,
+        )
+        prompt_text = rendered.text if rendered else fallback_text
+        outputs = {
+            "narration_prompt_text": prompt_text,
+            "narration_prompt_id": rendered.prompt_id if rendered else None,
+            "narration_prompts_resolved": bool(prompt_text),
+        }
+        if request.trace is not None and prompt_text:
+            request.trace.record_prompt(
+                prompt_id=rendered.prompt_id if rendered else None,
+                resolved_prompt=prompt_text,
+                variables={},
+            )
+        return WorkflowActionResult(outputs=outputs)
+
+    @staticmethod
+    def _coerce_spoken_text(text: object) -> str | None:
+        if text is None:
+            return None
+        raw = str(text).strip()
+        if not raw:
+            return None
+
+        import re
+
+        match = re.search(
+            r"<spoken>\s*(.*?)\s*</spoken>", raw, flags=re.DOTALL | re.IGNORECASE
+        )
+        if match:
+            raw = match.group(1)
+
+        raw = re.sub(r"</?spoken>", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"</?screen>", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"```.*?```", "", raw, flags=re.DOTALL)
+        raw = raw.replace("`", "").strip()
+        if not raw:
+            return None
+        max_chars = 800
+        if len(raw) > max_chars:
+            raw = raw[:max_chars].rstrip()
+        return raw or None
+
+    def _action_narration_render(self, request: Any) -> WorkflowActionResult:
+        prompt_text = request.data.get("narration_prompt_text") or ""
+        screen_text = request.data.get("screen_text") or ""
+        user_prompt = request.data.get("user_prompt") or ""
+
+        narration_system = (
+            "You are Von. Produce a short talk track for text-to-speech. "
+            "Return ONLY one block: <spoken>...</spoken>. "
+            "Do not include <screen>. Do not include code blocks. "
+            "Use New Zealand English spelling."
+        )
+        if prompt_text:
+            narration_system += "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
+            narration_system += prompt_text
+
+        narration_user = (
+            "User message:\n"
+            f"{user_prompt}\n\n"
+            "On-screen content (do not read verbatim if long; summarise):\n"
+            f"{screen_text}\n"
+        )
+
+        narration_response = request.environment.llm_client.generate(
+            prompt="Generate <spoken> talk track",
+            context=[
+                {"role": "system", "content": narration_system},
+                {"role": "user", "content": narration_user},
+            ],
+            model=request.environment.model,
+        )
+
+        spoken = self._coerce_spoken_text(narration_response)
+        if not spoken:
+            spoken = self._coerce_spoken_text(screen_text)
+
+        outputs = {
+            "narration_rendered": bool(spoken),
+            "narration_spoken": spoken,
+            "narration_raw_response": narration_response,
+        }
+        return WorkflowActionResult(outputs=outputs)
+
+    def _action_narration_emit_audio(self, request: Any) -> WorkflowActionResult:
+        spoken = request.data.get("narration_spoken")
+        presenter_channels = request.data.get("presenter_channels") or {}
+        if not isinstance(presenter_channels, dict):
+            presenter_channels = {}
+        screen_text = request.data.get("screen_text")
+        if screen_text and "screen" not in presenter_channels:
+            presenter_channels["screen"] = screen_text
+        if spoken:
+            presenter_channels["spoken"] = spoken
+        return WorkflowActionResult(
+            outputs={
+                "presenter_channels": presenter_channels,
+                "narration_emitted": bool(spoken),
+            }
+        )
 
     def _convert_mcp_tools_to_structured_definitions(
         self,
@@ -1659,6 +2043,36 @@ class InternalMCPChatOrchestrator:
             "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects (no prose, no Markdown)."
         )
 
+    def execute_workflow(
+        self,
+        workflow_id: str,
+        *,
+        data: dict[str, Any],
+        llm_client: Any,
+        model: Optional[str],
+        user_namespace: Optional[str] = None,
+        auxiliary_system_prompt: str | None = None,
+        trace: Any | None = None,
+    ):
+        workflow_def = self._workflow_registry.get(workflow_id)
+        if workflow_def is None:
+            return None
+        env = WorkflowEnvironment(
+            llm_client=llm_client,
+            gateway=self._gateway,
+            model=model,
+            user_namespace=user_namespace,
+            auxiliary_system_prompt=auxiliary_system_prompt,
+            max_tool_invocations=self._max_tool_invocations,
+            default_gmail_profile=self._default_gmail_profile,
+        )
+        return self._workflow_executor.run(
+            workflow_def,
+            environment=env,
+            data=data,
+            trace=trace,
+        )
+
     def run(
         self,
         *,
@@ -1855,6 +2269,21 @@ class InternalMCPChatOrchestrator:
             auxiliary_system_prompt=auxiliary_system_prompt,
         )
 
+        selector_selection = None
+        if self._workflow_selector.enabled():
+            try:
+                selector_selection = self._workflow_selector.select_workflow(
+                    llm_client=llm_client, model=model, turn_text=prompt
+                )
+                if trace_enabled and trace is not None:
+                    trace.metadata["workflow_selector"] = {
+                        "workflow_id": selector_selection.workflow_id,
+                        "verdict": selector_selection.verdict,
+                        "prompt_id": selector_selection.prompt_id,
+                    }
+            except Exception:
+                selector_selection = None
+
         # Phase 3 (JVNAUTOSCI-799): Attempt structured tool calling if available
         use_structured = (
             hasattr(llm_client, "generate_with_tools")
@@ -1999,136 +2428,62 @@ class InternalMCPChatOrchestrator:
         # Only attempt extraction if detection passed (has action="call_tool" structure)
         # This prevents treating tool result JSON as tool call requests (JVNAUTOSCI-699)
         if not has_valid_tool_call:
-            if is_json_action:
-                self._logger.warning(
-                    "[mcp_orchestrator] Model emitted JSON tool-call output but it was not executed. "
-                    "This indicates a tool-call schema mismatch or parsing issue for model: %s",
-                    model or "default",
+            workflow_def = self._workflow_registry.get(MISSING_TOOL_CALL_WORKFLOW_ID)
+            workflow_context = {
+                "response_text": response
+                if isinstance(response, str)
+                else str(response),
+                "interpretation": interpretation,
+                "use_structured": use_structured,
+                "tool_call_parse_error": tool_call_parse_error,
+                "aux_llm_calls": aux_llm_calls,
+                "augmented_context": augmented_context,
+                "tool_calls": tool_calls,
+                "missing_tool_assessor": self._assess_missing_tool_call,
+                "extract_tool_calls_fn": self._extract_tool_calls,
+                "record_llm_call": _record_llm_call,
+            }
+            if workflow_def is not None:
+                env = WorkflowEnvironment(
+                    llm_client=llm_client,
+                    gateway=self._gateway,
+                    model=model,
+                    user_namespace=user_namespace,
+                    auxiliary_system_prompt=auxiliary_system_prompt,
+                    max_tool_invocations=self._max_tool_invocations,
+                    default_gmail_profile=gmail_profile or self._default_gmail_profile,
                 )
-
-            # Gather richer diagnostics for debug panels and logs
-            assessment = self._assess_missing_tool_call(
-                response_text=response,
-                use_structured=use_structured,
-                interpretation=interpretation,
-                llm_client=llm_client,
-                model=model,
-                aux_log=aux_llm_calls,
-                tool_call_parse_error=tool_call_parse_error,
-            )
-
-            # Always append a compact detection summary for UI debugging
-            try:
-                aux_llm_calls.append(
-                    {
-                        "type": "missing_tool_call_detection",
-                        "path": assessment.path,
-                        "is_json_action": assessment.is_json_action,
-                        "fenced_json": assessment.fenced_json,
-                        "classifier_invoked": assessment.classifier_invoked,
-                        "classifier_has_verdict": assessment.classifier_has_verdict,
-                        "classifier_used": assessment.classifier_used,
-                        "classifier_verdict": (
-                            "yes"
-                            if assessment.classifier_verdict is True
-                            else (
-                                "no"
-                                if assessment.classifier_verdict is False
-                                else "unavailable"
-                            )
-                        ),
-                        "retry_reason": assessment.retry_reason or "",
-                        "parse_error": (
-                            str(tool_call_parse_error)
-                            if tool_call_parse_error is not None
-                            else ""
-                        ),
+                workflow_result = self._workflow_executor.run(
+                    workflow_def,
+                    environment=env,
+                    data=workflow_context,
+                    trace=trace if trace_enabled else None,
+                )
+                response = workflow_result.data.get("response_text", response)
+                interpretation = workflow_result.data.get(
+                    "interpretation", interpretation
+                )
+                tool_calls = workflow_result.data.get("tool_calls", tool_calls)
+                tool_call_parse_error = workflow_result.data.get(
+                    "tool_call_parse_error", tool_call_parse_error
+                )
+                has_valid_tool_call = bool(tool_calls)
+                if trace is not None:
+                    trace.metadata.setdefault("workflows", {})
+                    trace.metadata["workflows"]["missing_tool_call"] = {
+                        "final_state": workflow_result.final_state,
+                        "completed": workflow_result.completed,
+                        "error": workflow_result.error,
                     }
-                )
-            except Exception:  # pragma: no cover - best effort only
-                pass
 
-            if assessment.retry_reason:
-                self._logger.info(
-                    "[mcp_orchestrator] Model response looks like a missing tool call (%s); retrying once (model=%s).",
-                    assessment.retry_reason,
-                    model or "default",
-                )
-                retry_prompt = self._missing_tool_call_retry_prompt()
-
-                try:
-                    aux_llm_calls.append(
-                        {
-                            "type": "missing_tool_call_retry",
-                            "path": assessment.path,
-                            "stage": "prompt",
-                            "retry_reason": assessment.retry_reason,
-                            "prompt_preview": retry_prompt[:800],
-                        }
-                    )
-                except Exception:  # pragma: no cover - best effort only
-                    pass
-
-                llm_start = time.perf_counter()
-                retry_response = llm_client.generate(
-                    retry_prompt, context=augmented_context, model=model
-                )
-                _record_llm_call(
-                    call_type="llm.generate",
-                    model_name=model,
-                    duration_ms=(time.perf_counter() - llm_start) * 1000.0,
-                    usage=None,
-                    note="Missing tool call retry prompt.",
-                )
-
-                try:
-                    aux_llm_calls.append(
-                        {
-                            "type": "missing_tool_call_retry",
-                            "path": assessment.path,
-                            "stage": "response",
-                            "retry_reason": assessment.retry_reason,
-                            "response_preview": (
-                                retry_response[:800]
-                                if isinstance(retry_response, str)
-                                else str(retry_response)[:800]
-                            ),
-                        }
-                    )
-                except Exception:  # pragma: no cover - best effort only
-                    pass
-
-                try:
-                    retry_calls = self._extract_tool_calls(retry_response)
-                except ToolCallParsingError:
-                    retry_calls = None
-                if retry_calls:
-                    response = retry_response
-                    tool_calls = retry_calls
-                    has_valid_tool_call = True
-                else:
-                    # If we were already handling a tool-call parse error, keep
-                    # the user experience consistent with the route-level error
-                    # handling (but retain aux_llm_calls for debugging).
-                    if tool_call_parse_error is not None:
-                        result = _build_tool_call_parse_error_result(
-                            tool_call_parse_error,
-                        )
-                        _persist_trace(status="completed")
-                        return result
-
-                    result = OrchestratorResult(
-                        response_text=response,
-                        extra_messages=(),
-                        tool_invocations=(),
-                        aux_llm_calls=tuple(aux_llm_calls),
-                        llm_calls=tuple(llm_calls),
-                        llm_usage=_aggregate_usage_total(),
-                        orchestrator_duration_ms=_orchestrator_duration_ms(),
+            if not has_valid_tool_call:
+                if tool_call_parse_error is not None:
+                    result = _build_tool_call_parse_error_result(
+                        tool_call_parse_error,
                     )
                     _persist_trace(status="completed")
                     return result
-            else:
+
                 result = OrchestratorResult(
                     response_text=response,
                     extra_messages=(),
@@ -2162,112 +2517,52 @@ class InternalMCPChatOrchestrator:
                 try:
                     tool_calls = self._extract_tool_calls(current_response)
                 except ToolCallParsingError as exc:
-                    # Late-turn parse errors (after tool execution) should not crash the
-                    # orchestrator; route through the same single-retry recovery logic.
-                    assessment = self._assess_missing_tool_call(
-                        response_text=(
+                    workflow_def = self._workflow_registry.get(
+                        MISSING_TOOL_CALL_WORKFLOW_ID
+                    )
+                    workflow_context = {
+                        "response_text": (
                             current_response
                             if isinstance(current_response, str)
                             else str(current_response)
                         ),
-                        use_structured=False,
-                        interpretation=None,
-                        llm_client=llm_client,
-                        model=model,
-                        aux_log=aux_llm_calls,
-                        tool_call_parse_error=exc,
-                    )
-
-                    try:
-                        aux_llm_calls.append(
-                            {
-                                "type": "missing_tool_call_detection",
-                                "path": assessment.path,
-                                "is_json_action": assessment.is_json_action,
-                                "fenced_json": assessment.fenced_json,
-                                "classifier_invoked": assessment.classifier_invoked,
-                                "classifier_has_verdict": assessment.classifier_has_verdict,
-                                "classifier_used": assessment.classifier_used,
-                                "classifier_verdict": (
-                                    "yes"
-                                    if assessment.classifier_verdict is True
-                                    else (
-                                        "no"
-                                        if assessment.classifier_verdict is False
-                                        else "unavailable"
-                                    )
-                                ),
-                                "retry_reason": assessment.retry_reason or "",
-                                "parse_error": str(exc),
-                            }
+                        "interpretation": None,
+                        "use_structured": False,
+                        "tool_call_parse_error": exc,
+                        "aux_llm_calls": aux_llm_calls,
+                        "augmented_context": augmented_context,
+                        "tool_calls": None,
+                        "missing_tool_assessor": self._assess_missing_tool_call,
+                        "extract_tool_calls_fn": self._extract_tool_calls,
+                        "record_llm_call": _record_llm_call,
+                    }
+                    if workflow_def is not None:
+                        env = WorkflowEnvironment(
+                            llm_client=llm_client,
+                            gateway=self._gateway,
+                            model=model,
+                            user_namespace=user_namespace,
+                            auxiliary_system_prompt=auxiliary_system_prompt,
+                            max_tool_invocations=self._max_tool_invocations,
+                            default_gmail_profile=gmail_profile
+                            or self._default_gmail_profile,
                         )
-                    except Exception:  # pragma: no cover - best effort only
+                        workflow_result = self._workflow_executor.run(
+                            workflow_def,
+                            environment=env,
+                            data=workflow_context,
+                            trace=trace if trace_enabled else None,
+                        )
+                        current_response = workflow_result.data.get(
+                            "response_text", current_response
+                        )
+                        tool_calls = workflow_result.data.get("tool_calls")
+                        exc = workflow_result.data.get(
+                            "tool_call_parse_error", exc
+                        )
+                    if tool_calls:
+                        # Resume loop with recovered tool calls
                         pass
-
-                    if assessment.retry_reason:
-                        retry_prompt = self._missing_tool_call_retry_prompt()
-                        try:
-                            aux_llm_calls.append(
-                                {
-                                    "type": "missing_tool_call_retry",
-                                    "path": assessment.path,
-                                    "stage": "prompt",
-                                    "retry_reason": assessment.retry_reason,
-                                    "prompt_preview": retry_prompt[:800],
-                                }
-                            )
-                        except Exception:  # pragma: no cover
-                            pass
-
-                        llm_start = time.perf_counter()
-                        retry_response = llm_client.generate(
-                            retry_prompt, context=augmented_context, model=model
-                        )
-                        _record_llm_call(
-                            call_type="llm.generate",
-                            model_name=model,
-                            duration_ms=(time.perf_counter() - llm_start) * 1000.0,
-                            usage=None,
-                            note="Missing tool call retry prompt (parse-error path).",
-                        )
-                        try:
-                            aux_llm_calls.append(
-                                {
-                                    "type": "missing_tool_call_retry",
-                                    "path": assessment.path,
-                                    "stage": "response",
-                                    "retry_reason": assessment.retry_reason,
-                                    "response_preview": (
-                                        retry_response[:800]
-                                        if isinstance(retry_response, str)
-                                        else str(retry_response)[:800]
-                                    ),
-                                }
-                            )
-                        except Exception:  # pragma: no cover
-                            pass
-
-                        try:
-                            retry_calls = self._extract_tool_calls(retry_response)
-                        except ToolCallParsingError as retry_exc:
-                            result = _build_tool_call_parse_error_result(
-                                retry_exc,
-                                invocations_override=tuple(invocations),
-                                tool_messages_override=tuple(tool_messages),
-                            )
-                            _persist_trace(status="completed")
-                            return result
-
-                        if retry_calls:
-                            current_response = retry_response
-                            tool_calls = retry_calls
-                        else:
-                            current_response = (
-                                retry_response
-                                if isinstance(retry_response, str)
-                                else str(retry_response)
-                            )
-                            break
                     else:
                         result = _build_tool_call_parse_error_result(
                             exc,
