@@ -287,6 +287,12 @@ describe('chat reply options button behaviour', () => {
 
         __testOnly_convertReplyOptionsListsToButtons(root);
 
+        const list = root.querySelector('ul');
+        expect(list).not.toBeNull();
+
+        const items = Array.from(list.querySelectorAll(':scope > li'));
+        expect(items.length).toBe(2);
+
         const buttons = Array.from(root.querySelectorAll('.chat-insert-prompt-button'));
         expect(buttons.length).toBe(2);
 
@@ -310,6 +316,11 @@ describe('chat reply options button behaviour', () => {
         `;
 
         __testOnly_convertReplyOptionsListsToButtons(root);
+
+        const list = root.querySelector('ul');
+        expect(list).not.toBeNull();
+        expect(list.querySelectorAll(':scope > li').length).toBe(1);
+
         const btn = root.querySelector('.chat-insert-prompt-button');
         expect(btn).not.toBeNull();
 
@@ -335,6 +346,10 @@ describe('chat reply options button behaviour', () => {
         `;
 
         __testOnly_convertReplyOptionsListsToButtons(root);
+
+        const list = root.querySelector('ul');
+        expect(list).not.toBeNull();
+        expect(list.querySelectorAll(':scope > li').length).toBe(4);
 
         const buttons = Array.from(root.querySelectorAll('.chat-insert-prompt-button'));
         expect(buttons.map((b) => b.textContent)).toEqual([
