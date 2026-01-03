@@ -31,6 +31,7 @@ def _ensure_indexes() -> None:
         # Common query patterns
         coll.create_index([("workflow_id", DESCENDING), ("start_time", DESCENDING)])
         coll.create_index([("execution_id", DESCENDING)], unique=True)
+        coll.create_index([("user_namespace", DESCENDING), ("start_time", DESCENDING)])
 
         # TTL for routine traces: 30 days.
         # Using start_time rather than end_time ensures even crashed traces expire.
@@ -94,7 +95,9 @@ def get_workflow_execution_trace(execution_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def list_recent_workflow_execution_traces(limit: int = 20) -> List[Dict[str, Any]]:
+def list_recent_workflow_execution_traces(
+    limit: int = 20, *, namespace: str | None = None
+) -> List[Dict[str, Any]]:
     db = get_db()
     if db is None:
         return []
@@ -103,8 +106,11 @@ def list_recent_workflow_execution_traces(limit: int = 20) -> List[Dict[str, Any
 
     coll = db[WORKFLOW_EXECUTIONS_COLLECTION_NAME]
     try:
+        query: Dict[str, Any] = {}
+        if isinstance(namespace, str) and namespace.strip():
+            query["user_namespace"] = namespace.strip()
         cursor = (
-            coll.find({}, {"_id": 0})
+            coll.find(query, {"_id": 0})
             .sort("start_time", -1)
             .limit(max(1, min(200, int(limit))))
         )

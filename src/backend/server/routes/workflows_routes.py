@@ -329,6 +329,9 @@ def api_list_recent_workflow_executions():
         limit = int(limit_raw)
     except Exception:
         limit = 20
+    namespace = request.args.get("namespace")
 
-    docs = list_recent_workflow_execution_traces(limit=limit)
+    docs = list_recent_workflow_execution_traces(
+        limit=limit, namespace=namespace or None
+    )
     return jsonify({"items": docs, "count": len(docs)})
