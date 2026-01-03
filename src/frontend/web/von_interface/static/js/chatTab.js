@@ -366,10 +366,19 @@ function convertReplyOptionsListsToButtons(root) {
             if (options.length === 0) {
                 continue;
             }
+            try {
+                list.dataset.buttonified = '1';
+            } catch (_) {
+                // Ignore.
+            }
 
-            const wrapper = document.createElement('div');
-            wrapper.className = 'chat-insert-prompt-wrapper';
+            while (list.firstChild) {
+                list.removeChild(list.firstChild);
+            }
+
             for (const optionText of options) {
+                const li = document.createElement('li');
+
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'chat-insert-prompt-button';
@@ -391,16 +400,10 @@ function convertReplyOptionsListsToButtons(root) {
                         submitChatPromptImmediately();
                     }
                 });
-                wrapper.appendChild(btn);
-            }
 
-            try {
-                list.dataset.buttonified = '1';
-            } catch (_) {
-                // Ignore.
+                li.appendChild(btn);
+                list.appendChild(li);
             }
-
-            list.replaceWith(wrapper);
         } catch (_) {
             // Ignore detached nodes or DOM mutation races.
         }
