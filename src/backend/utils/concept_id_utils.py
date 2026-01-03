@@ -10,6 +10,7 @@ security-sensitive pathways (e.g. permission checks) and easily unit tested.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 
@@ -52,3 +53,48 @@ def ensure_v_concept_prefix(value: object) -> Optional[str]:
     if cleaned.startswith("#"):
         cleaned = cleaned.lstrip("#")
     return f"#V#{cleaned}"
+
+
+_NON_ALNUM_RUN_RE = re.compile(r"[^a-z0-9]+")
+
+
+def canonicalise_vontology_concept_id(value: object) -> Optional[str]:
+    """Canonicalise a Vontology concept identifier.
+
+    Canonical form:
+    - Always `#V#<slug>`
+    - Slug lowercased
+    - Each maximal span of non-alphanumeric characters becomes a single underscore
+    - Leading/trailing underscores are trimmed
+
+    Examples:
+    - `#V#foo-bar` -> `#V#foo_bar`
+    - `#V#Foo  Bar` -> `#V#foo_bar`
+    - `#v#foo...bar` -> `#V#foo_bar`
+    """
+
+    if not isinstance(value, str):
+        return None
+
+    raw = value.strip()
+    if not raw:
+        return None
+
+    # Accept common variants and coerce to #V#...
+    if raw.lower().startswith("#v#"):
+        slug = raw[3:]
+    else:
+        prefixed = ensure_v_concept_prefix(raw)
+        if prefixed is None:
+            return None
+        slug = prefixed[3:]
+
+    slug = slug.strip().lower()
+    if not slug:
+        return None
+
+    slug = _NON_ALNUM_RUN_RE.sub("_", slug).strip("_")
+    if not slug:
+        return None
+
+    return f"#V#{slug}"

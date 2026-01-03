@@ -452,7 +452,16 @@ def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
         raise ConceptServiceError("Database collection 'concepts' not available.")
 
     try:
-        concept_doc = concepts_coll.find_one({"concept_id": concept_id})
+        # Canonicalise punctuation variants (e.g. hyphen vs underscore) while keeping
+        # a safe fallback to the original value for existing legacy records.
+        from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+
+        canonical_id = canonicalise_vontology_concept_id(concept_id)
+        concept_doc = None
+        if canonical_id and canonical_id != concept_id:
+            concept_doc = concepts_coll.find_one({"concept_id": canonical_id})
+        if concept_doc is None:
+            concept_doc = concepts_coll.find_one({"concept_id": concept_id})
         if concept_doc:
             if "_id" in concept_doc:
                 concept_doc["id"] = str(concept_doc.pop("_id"))
