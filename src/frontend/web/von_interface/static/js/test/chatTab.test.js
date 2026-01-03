@@ -1,4 +1,7 @@
 import {
+    __testOnly_convertQuotedInstructionBlockquotesToButtons,
+    __testOnly_convertReplyOptionsListsToButtons,
+    __testOnly_deriveLlmDebugWarnings,
     __testOnly_hydrateChatConceptCartouches,
     __testOnly_resetChatConceptMetaCaches,
     formatChatTimestamp,
@@ -210,5 +213,200 @@ describe('chat cartouche hydration retries', () => {
         await flushMicrotasks();
 
         expect(nameEl.textContent).toBe('Literary Work');
+    });
+});
+
+describe('chat insert prompt button behaviour', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+        `;
+    });
+
+    test('click inserts and submits by default', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = '<blockquote><p><strong>"Do the thing"</strong></p></blockquote>';
+        __testOnly_convertQuotedInstructionBlockquotesToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+        expect(String(promptInput.value)).toContain('Do the thing');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+
+    test('shift-click inserts without submitting', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = '<blockquote><p><strong>"Do the thing"</strong></p></blockquote>';
+        __testOnly_convertQuotedInstructionBlockquotesToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+
+        expect(String(promptInput.value)).toContain('Do the thing');
+        expect(sendButton.click).toHaveBeenCalledTimes(0);
+    });
+});
+
+describe('chat reply options button behaviour', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+        `;
+    });
+
+    test('list options become buttons that insert and submit by default', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = `
+            <p>Please reply with one of:</p>
+            <ul>
+                <li><strong>“Yes, scan all emails from the last 24 hours and update the to-do list.”</strong></li>
+                <li><strong>“Scan them, but show me the tasks before adding.”</strong></li>
+            </ul>
+        `;
+
+        __testOnly_convertReplyOptionsListsToButtons(root);
+
+        const list = root.querySelector('ul');
+        expect(list).not.toBeNull();
+
+        const items = Array.from(list.querySelectorAll(':scope > li'));
+        expect(items.length).toBe(2);
+
+        const buttons = Array.from(root.querySelectorAll('.chat-insert-prompt-button'));
+        expect(buttons.length).toBe(2);
+
+        buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+        expect(String(promptInput.value)).toContain('Yes, scan all emails from the last 24 hours and update the to-do list.');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+
+    test('shift-click inserts without submitting', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = `
+            <p>Please reply with one of:</p>
+            <ul>
+                <li>"Scan them, but show me the tasks before adding."</li>
+            </ul>
+        `;
+
+        __testOnly_convertReplyOptionsListsToButtons(root);
+
+        const list = root.querySelector('ul');
+        expect(list).not.toBeNull();
+        expect(list.querySelectorAll(':scope > li').length).toBe(1);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+
+        expect(String(promptInput.value)).toContain('Scan them, but show me the tasks before adding.');
+        expect(sendButton.click).toHaveBeenCalledTimes(0);
+    });
+
+    test('supports "tell me how you want to proceed" marker and splits multi-option items', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = `
+            <p>Tell me how you want to proceed:</p>
+            <ul>
+                <li><strong>“Add both new tasks to today’s to-do list.”</strong></li>
+                <li><strong>“Add only #2.” / “Add only #3.”</strong></li>
+                <li><strong>“Add them as future / backlog items.”</strong></li>
+            </ul>
+        `;
+
+        __testOnly_convertReplyOptionsListsToButtons(root);
+
+        const list = root.querySelector('ul');
+        expect(list).not.toBeNull();
+        expect(list.querySelectorAll(':scope > li').length).toBe(4);
+
+        const buttons = Array.from(root.querySelectorAll('.chat-insert-prompt-button'));
+        expect(buttons.map((b) => b.textContent)).toEqual([
+            "Add both new tasks to today’s to-do list.",
+            'Add only #2.',
+            'Add only #3.',
+            'Add them as future / backlog items.'
+        ]);
+
+        buttons[2].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(String(promptInput.value)).toContain('Add only #3.');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('LLM debug warnings (presenter channel health)', () => {
+    test('flags missing spoken channel when screen exists', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            presenter_channels: {
+                screen: 'On-screen content',
+                spoken: null,
+                format: 'tagged_blocks_v1'
+            }
+        });
+
+        expect(warnings).toContain(
+            'Presenter output missing spoken channel; text-to-speech will fall back to screen text.'
+        );
+    });
+
+    test('flags missing screen channel when spoken exists', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            presenter_channels: {
+                screen: null,
+                spoken: 'Talk track',
+                format: 'tagged_blocks_v1'
+            }
+        });
+
+        expect(warnings).toContain(
+            'Presenter output missing screen channel; display will fall back to spoken text.'
+        );
+    });
+
+    test('flags failed spoken backfill attempt', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            presenter_channels: {
+                screen: 'On-screen content',
+                spoken: '',
+                format: 'narration_fallback_v1'
+            },
+            spoken_backfill_second_pass_attempted: true,
+            spoken_backfill_second_pass_reason: 'missing_spoken'
+        });
+
+        expect(warnings).toContain(
+            'Spoken backfill attempted but spoken channel is still missing (missing_spoken).'
+        );
     });
 });

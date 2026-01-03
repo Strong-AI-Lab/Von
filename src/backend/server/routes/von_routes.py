@@ -241,6 +241,53 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
             if isinstance(call.get("error"), str) and call.get("error", "").strip():
                 warnings.append(call["error"].strip())
 
+    # Check presenter channel health (screen/spoken routes)
+    presenter_channels = debug_info.get("presenter_channels")
+    if isinstance(presenter_channels, dict):
+        screen_value = presenter_channels.get("screen")
+        spoken_value = presenter_channels.get("spoken")
+        screen_ok = isinstance(screen_value, str) and bool(screen_value.strip())
+        spoken_ok = isinstance(spoken_value, str) and bool(spoken_value.strip())
+
+        # If one channel is missing, flag it so the other route output acts as a
+        # diagnostic cue (without mutating the actual output text).
+        if screen_ok and not spoken_ok:
+            warnings.append(
+                "Presenter output missing spoken channel; text-to-speech will fall back to screen text."
+            )
+        elif spoken_ok and not screen_ok:
+            warnings.append(
+                "Presenter output missing screen channel; display will fall back to spoken text."
+            )
+        elif not screen_ok and not spoken_ok:
+            warnings.append(
+                "Presenter output present but both screen and spoken channels are empty."
+            )
+
+    spoken_backfill_attempted = bool(
+        debug_info.get("spoken_backfill_second_pass_attempted")
+    )
+    spoken_backfill_reason = debug_info.get("spoken_backfill_second_pass_reason")
+    if spoken_backfill_attempted:
+        # Flag only if spoken is still missing after backfill attempt.
+        spoken_still_missing = True
+        if isinstance(presenter_channels, dict):
+            spoken_value = presenter_channels.get("spoken")
+            spoken_still_missing = not (
+                isinstance(spoken_value, str) and bool(spoken_value.strip())
+            )
+
+        if spoken_still_missing:
+            reason_text = (
+                str(spoken_backfill_reason).strip()
+                if isinstance(spoken_backfill_reason, str)
+                and spoken_backfill_reason.strip()
+                else "unknown_reason"
+            )
+            warnings.append(
+                f"Spoken backfill attempted but spoken channel is still missing ({reason_text})."
+            )
+
     # Remove duplicates while preserving order
     seen = set()
     unique_warnings = []
