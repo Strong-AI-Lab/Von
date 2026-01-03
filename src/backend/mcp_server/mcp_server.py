@@ -145,7 +145,24 @@ async def list_tools() -> List[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "jql": {"type": "string", "description": "JQL query string"}
+                    "jql": {"type": "string", "description": "JQL query string"},
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional Jira fields to include (e.g. ['summary','status']).",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of issues to return (Jira max is typically 100).",
+                    },
+                    "next_page_token": {
+                        "type": "string",
+                        "description": "Pagination token returned by Jira /search/jql (preferred over deprecated start_at).",
+                    },
+                    "start_at": {
+                        "type": "integer",
+                        "description": "Deprecated: Jira /search/jql uses next_page_token pagination (cursor-based).",
+                    },
                 },
                 "required": ["jql"],
             },
@@ -212,11 +229,34 @@ async def call_tool(
 ) -> Sequence[types.TextContent]:
     if name == "jira_search":
         jql = arguments["jql"]
-        search_params: Dict[str, Any] = {"jql": jql}
+        payload: Dict[str, Any] = {
+            "jql": jql,
+            "maxResults": 50,
+        }
+        max_results = arguments.get("max_results")
+        if isinstance(max_results, int):
+            payload["maxResults"] = max_results
+
+        # Jira Cloud /rest/api/3/search/jql uses cursor pagination via nextPageToken.
+        # Avoid sending deprecated startAt, as some instances reject it with HTTP 400.
+        start_at = arguments.get("start_at")
+        if isinstance(start_at, int) and start_at not in (0, None):
+            error = {
+                "success": False,
+                "error": "Deprecated pagination parameter: start_at. Use next_page_token instead.",
+            }
+            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+
+        next_page_token = arguments.get("next_page_token")
+        if isinstance(next_page_token, str) and next_page_token.strip():
+            payload["nextPageToken"] = next_page_token.strip()
+
         fields = arguments.get("fields")
         if isinstance(fields, list) and fields:
-            search_params["fields"] = ",".join(str(f) for f in fields)
-        result = jira_get("search", params=search_params)
+            payload["fields"] = [str(f) for f in fields]
+
+        # Jira Cloud is deprecating GET /search?jql=... for some usage; prefer POST /search/jql.
+        result = jira_post("search/jql", payload)
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
 
