@@ -236,6 +236,7 @@ Low-signal tool families for typical Von work (candidates to prune first when cl
 - In this Jira project, a **Task can have an Epic as its `parent`**.
 - This is not just UI-only: it can be set via tooling by updating the issue field `parent` to the Epic key (e.g. `{"parent": {"key": "JVNAUTOSCI-885"}}`).
 - Agents should prefer setting `parent` automatically when creating follow-on Tasks under an Epic, rather than leaving manual linkage instructions behind.
+- **Verified 4 Jan 2026:** `mcp_atlassian_editJiraIssue(cloudId=..., issueIdOrKey=..., fields={"parent": {"key": "JVNAUTOSCI-537"}})` successfully set a Task’s Epic parent, even when the tool’s `editmeta` did not list `parent` as editable.
 
 **Creating Subtasks under a Task:**
 ```python

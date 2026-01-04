@@ -178,6 +178,24 @@
                 <!-- Options populated by languageConfig.js -->
             </select>
             <small>This will be the default language for new names and text entries.</small>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <input type="checkbox" id="settingsShowCodeNamesToggle" />
+                <label for="settingsShowCodeNamesToggle" class="ml-1"
+                    title="When enabled, CODE names (e.g., concept ids, GUIDs) are shown in the Names section.">Show
+                    CODE names in concepts</label>
+            </div>
+            <small class="settings-note">Stored only in this browser (localStorage). Default: enabled.</small>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <input type="checkbox" id="settingsFilterNlNamesToPreferredLanguageToggle" />
+                <label for="settingsFilterNlNamesToPreferredLanguageToggle" class="ml-1"
+                    title="When enabled, Natural Language (NL) names are filtered to only show those in your preferred language.">Only
+                    show [NL] names in preferred language (<span
+                        id="settingsPreferredLanguageForNlFilter">en-NZ</span>)</label>
+            </div>
+            <small class="settings-note">Non-NL names (e.g., ABBR/CODE) are not filtered. Stored only in this browser.
+                Default: disabled.</small>
             <div class="inline-form inline-form-tight mt-8-align-center">
                 <button type="button" id="resetLocalPrefsButton" class="btn-danger"
                     title="Clear stored user/org/language preferences for this browser">Reset Local Preferences</button>
