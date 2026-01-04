@@ -26,7 +26,9 @@ from ...services.settings_service import (
     set_user_llm_setting,
     set_org_llm_setting,
     get_disable_remote_ollama_scan,
+    get_show_tool_use_during_thinking,
     set_disable_remote_ollama_scan,
+    set_show_tool_use_during_thinking,
     get_internal_mcp_max_tool_invocations,
     set_internal_mcp_max_tool_invocations,
     get_internal_mcp_tool_batch_cap,
@@ -492,6 +494,7 @@ def get_all_settings_data():
             "disable_remote_ollama_scan": get_disable_remote_ollama_scan(),
             "internal_mcp_max_tool_invocations": get_internal_mcp_max_tool_invocations(),
             "internal_mcp_tool_batch_cap": get_internal_mcp_tool_batch_cap(),
+            "show_tool_use_during_thinking": get_show_tool_use_during_thinking(),
         }
     except Exception as e:
         current_app.logger.error(f"Error retrieving settings data: {e}", exc_info=True)
@@ -585,6 +588,17 @@ def save_all_settings():
         if "internal_mcp_tool_batch_cap" in data:
             set_internal_mcp_tool_batch_cap(data.get("internal_mcp_tool_batch_cap"))
             current_app.logger.info("internal_mcp_tool_batch_cap updated")
+
+        if "show_tool_use_during_thinking" in data:
+            try:
+                enabled = bool(data.get("show_tool_use_during_thinking"))
+            except Exception:
+                enabled = True
+            set_show_tool_use_during_thinking(enabled)
+            current_app.logger.info(
+                "show_tool_use_during_thinking updated: %s",
+                enabled,
+            )
 
         # user/org/language fields intentionally ignored (browser-local)
 
@@ -1269,7 +1283,7 @@ def get_available_organisations():
         organisation_options = []
         for concept in unique_concepts:
             from ...services.concept_service import enrich_concept_with_text_relations
-            from backend.vontology.utils_vontology import (
+            from ...vontology.utils_vontology import (
                 get_concept_display_name_with_names_fallback,
             )
 

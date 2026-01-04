@@ -1,11 +1,6 @@
-import sys
-import os
 from datetime import datetime, timezone
 
-# Add src to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../src")))
-
-from backend.services.rag_service import get_rag_service
+from src.backend.services.rag_service import get_rag_service
 
 
 def test_rag():

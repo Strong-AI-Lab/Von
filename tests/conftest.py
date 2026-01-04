@@ -2,13 +2,16 @@ import os
 import sys
 from pathlib import Path
 
-# Ensure project root and src/ are on sys.path for test imports
+# Ensure project root is on sys.path for test imports.
+#
+# IMPORTANT: Do NOT add both the repo root and the src/ directory to sys.path.
+# Doing so makes both `src.backend...` and `backend...` importable and can lead to
+# modules being imported twice under different names, causing cross-test state
+# contamination (e.g., contextvars and cached DB clients).
 ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-for path in (ROOT, SRC):
-    path_str = str(path)
-    if path_str not in sys.path:
-        sys.path.insert(0, path_str)
+path_str = str(ROOT)
+if path_str not in sys.path:
+    sys.path.insert(0, path_str)
 
 
 # -----------------------------------------------------------------------------

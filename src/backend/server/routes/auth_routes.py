@@ -1,10 +1,11 @@
 from flask import Blueprint, request, redirect, session, url_for, jsonify
-from backend.auth_service import GoogleAuthService
-from backend.services.settings_service import (
+
+from ...auth_service import GoogleAuthService
+from ...services.settings_service import (
     set_current_user_by_email,
     get_current_user,
 )
-from backend.services.exceptions import MultipleUsersForEmailError
+from ...services.exceptions import MultipleUsersForEmailError
 import time
 
 auth_bp = Blueprint("auth_bp", __name__)

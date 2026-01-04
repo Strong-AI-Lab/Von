@@ -37,6 +37,9 @@ DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME = "disable_remote_ollama_scan"
 INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME = "internal_mcp_max_tool_invocations"
 INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME = "internal_mcp_tool_batch_cap"
 
+# Chat UI: show tool use during the “Thinking…” indicator (JVNAUTOSCI-942)
+SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME = "show_tool_use_during_thinking"
+
 # Prefixes for contextual (scoped) LLM settings (Phase 2 scaffold)
 _ACTIVE_LLM_USER_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:user:"
 _ACTIVE_LLM_ORG_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:org:"
@@ -669,6 +672,32 @@ def set_disable_remote_ollama_scan(disabled: bool) -> bool:
         # Coerce permissively but persist canonical bool
         disabled = bool(disabled)
     return update_setting(DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME, disabled)
+
+
+def get_show_tool_use_during_thinking() -> bool:
+    """Return whether the chat UI should show tool use while Von is thinking.
+
+    Defaults to True when unset or invalid.
+    """
+
+    val = get_setting(SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME)
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("1", "true", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "no", "n", "off"):
+            return False
+    if isinstance(val, (int, float)):
+        return val != 0
+    return True
+
+
+def set_show_tool_use_during_thinking(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        enabled = bool(enabled)
+    return update_setting(SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME, enabled)
 
 
 def _coerce_int_setting(

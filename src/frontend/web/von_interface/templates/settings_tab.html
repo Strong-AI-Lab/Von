@@ -168,6 +168,16 @@
             </div>
             <small class="settings-note">Defaults: 8 invocations, batch cap 4. Set invocations to 0 to disable tool
                 calls (chat still works).</small>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <input type="checkbox" id="showToolUseDuringThinkingToggle"
+                    aria-describedby="showToolUseDuringThinkingHelp" />
+                <label for="showToolUseDuringThinkingToggle" class="ml-1"
+                    title="When enabled, the Chat tab shows which internal MCP tool is being used while Von is thinking.">Show
+                    tool use during thinking</label>
+            </div>
+            <small id="showToolUseDuringThinkingHelp" class="settings-note">Default: enabled. Shows last tool name,
+                batch size, and remaining tool-call budget.</small>
         </section>
 
         <section id="current-user-settings">
