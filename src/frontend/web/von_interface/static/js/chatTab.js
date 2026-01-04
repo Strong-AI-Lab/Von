@@ -295,6 +295,372 @@ function submitChatPromptImmediately() {
     }
 }
 
+function convertJustSayInstructionsToButtons(root) {
+    if (!root || !root.querySelectorAll) return;
+
+    const normalise = (value) => String(value ?? '').trim().replace(/\s+/g, ' ');
+
+    const isAllowedQuickReply = (value) => {
+        const compact = normalise(value);
+        if (!compact) return false;
+
+        if (compact.length > 60) return false;
+        if (compact.split(' ').length > 4) return false;
+        if (/[\n\r]/.test(compact)) return false;
+        if (/[<>]/.test(compact)) return false;
+
+        return true;
+    };
+
+    const createInsertButton = (text) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'chat-insert-prompt-button';
+        btn.textContent = text;
+        btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
+        btn.setAttribute('aria-label', `Insert into chat prompt: ${text}`);
+        btn.addEventListener('click', (e) => {
+            try {
+                e.preventDefault();
+                e.stopPropagation();
+            } catch (_) {
+                // Ignore.
+            }
+
+            insertTextIntoChatPrompt(text);
+
+            const shiftHeld = !!(e && e.shiftKey);
+            if (!shiftHeld) {
+                submitChatPromptImmediately();
+            }
+        });
+        return btn;
+    };
+
+    const shouldSkipNode = (node) => {
+        const parent = node?.parentElement;
+        if (!parent?.closest) return true;
+        if (parent.closest('pre, code, a, button, textarea, input')) return true;
+        if (parent.closest('.chat-insert-prompt-wrapper, .chat-insert-prompt-inline-wrapper')) return true;
+        return false;
+    };
+
+    const splitJustSayMatch = (fullMatch) => {
+        const text = String(fullMatch ?? '');
+        const pairs = [
+            ['"', '"'],
+            ['“', '”'],
+            ["'", "'"],
+            ['‘', '’']
+        ];
+
+        for (const [open, close] of pairs) {
+            const openIndex = text.indexOf(open);
+            const closeIndex = text.lastIndexOf(close);
+            if (openIndex !== -1 && closeIndex !== -1 && closeIndex > openIndex) {
+                return {
+                    leading: text.slice(0, openIndex),
+                    reply: text.slice(openIndex + open.length, closeIndex),
+                    trailing: text.slice(closeIndex + close.length)
+                };
+            }
+        }
+
+        const trimmed = text.replace(/\s+$/g, '');
+        const lastSpace = trimmed.lastIndexOf(' ');
+        if (lastSpace === -1) {
+            return { leading: '', reply: trimmed, trailing: '' };
+        }
+        return {
+            leading: trimmed.slice(0, lastSpace + 1),
+            reply: trimmed.slice(lastSpace + 1),
+            trailing: ''
+        };
+    };
+
+    const splitSayOrMatch = (fullMatch) => {
+        const text = String(fullMatch ?? '');
+        const marker = text.match(/\b(?:just\s+)?say\b/i);
+        if (!marker || marker.index == null) {
+            return null;
+        }
+
+        const afterMarker = text.slice(marker.index + marker[0].length);
+        const orIndex = afterMarker.toLowerCase().indexOf(' or ');
+        if (orIndex === -1) {
+            return null;
+        }
+
+        return {
+            prefix: text.slice(0, marker.index + marker[0].length),
+            left: afterMarker.slice(0, orIndex),
+            right: afterMarker.slice(orIndex + 4)
+        };
+    };
+
+    const quickReplyWords = '(?:proceed|yes|no|continue|ok|okay|cancel)';
+    const saySingleRegex = new RegExp(
+        `\\b(?:just\\s+)?say\\s+(?:"[^"\\n\\r]{1,80}"|“[^”\\n\\r]{1,80}”|'[^'\\n\\r]{1,80}'|‘[^’\\n\\r]{1,80}’|\\b${quickReplyWords}\\b)`,
+        'gi'
+    );
+    const sayOrRegex = new RegExp(
+        `\\b(?:just\\s+)?say\\s+(?:"[^"\\n\\r]{1,80}"|“[^”\\n\\r]{1,80}”|'[^'\\n\\r]{1,80}'|‘[^’\\n\\r]{1,80}’|\\b${quickReplyWords}\\b)\\s+or\\s+(?:"[^"\\n\\r]{1,80}"|“[^”\\n\\r]{1,80}”|'[^'\\n\\r]{1,80}'|‘[^’\\n\\r]{1,80}’|\\b${quickReplyWords}\\b)`,
+        'gi'
+    );
+
+    // Pass 1: handle cases where "say …" / "just say …" is fully contained in a single text node.
+    const textNodes = [];
+    try {
+        const walker = document.createTreeWalker(
+            root,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode: (node) => {
+                    if (!node || node.nodeType !== Node.TEXT_NODE) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    const text = String(node.textContent ?? '');
+                    const lowered = text ? text.toLowerCase() : '';
+                    if (!lowered || (!lowered.includes(' just ') && !lowered.includes('just ') && !lowered.includes(' say '))) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    if (shouldSkipNode(node)) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            },
+            false
+        );
+
+        let current = walker.nextNode();
+        while (current) {
+            textNodes.push(current);
+            current = walker.nextNode();
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    for (const node of textNodes) {
+        try {
+            if (!node || node.nodeType !== Node.TEXT_NODE) continue;
+            const raw = String(node.textContent ?? '');
+            if (!raw.trim()) continue;
+
+            // Prefer the more specific "say X or Y" match so we can produce two buttons.
+            const orMatches = Array.from(raw.matchAll(sayOrRegex));
+            const singleMatches = orMatches.length === 0 ? Array.from(raw.matchAll(saySingleRegex)) : [];
+            if (orMatches.length === 0 && singleMatches.length === 0) continue;
+
+            const fragment = document.createDocumentFragment();
+            let cursor = 0;
+
+            const processSingleMatch = (match) => {
+                const matchIndex = match.index;
+                if (typeof matchIndex !== 'number') {
+                    return;
+                }
+
+                const full = String(match[0] ?? '');
+                if (!full) {
+                    return;
+                }
+
+                const start = matchIndex;
+                const end = matchIndex + full.length;
+                if (start < cursor) {
+                    return;
+                }
+
+                if (start > cursor) {
+                    fragment.appendChild(document.createTextNode(raw.slice(cursor, start)));
+                }
+
+                const { leading, reply, trailing } = splitJustSayMatch(full);
+                const replyText = normalise(reply);
+                if (!isAllowedQuickReply(replyText)) {
+                    fragment.appendChild(document.createTextNode(raw.slice(start, end)));
+                    cursor = end;
+                    return;
+                }
+
+                if (leading) {
+                    fragment.appendChild(document.createTextNode(leading));
+                }
+
+                const wrapper = document.createElement('span');
+                wrapper.className = 'chat-insert-prompt-inline-wrapper';
+                wrapper.appendChild(createInsertButton(replyText));
+                fragment.appendChild(wrapper);
+
+                if (trailing) {
+                    fragment.appendChild(document.createTextNode(trailing));
+                }
+
+                cursor = end;
+
+            };
+
+            const processOrMatch = (match) => {
+                const matchIndex = match.index;
+                if (typeof matchIndex !== 'number') {
+                    return;
+                }
+
+                const full = String(match[0] ?? '');
+                if (!full) {
+                    return;
+                }
+
+                const start = matchIndex;
+                const end = matchIndex + full.length;
+                if (start < cursor) {
+                    return;
+                }
+
+                if (start > cursor) {
+                    fragment.appendChild(document.createTextNode(raw.slice(cursor, start)));
+                }
+
+                const parts = splitSayOrMatch(full);
+                if (!parts) {
+                    fragment.appendChild(document.createTextNode(raw.slice(start, end)));
+                    cursor = end;
+                    return;
+                }
+
+                const leftParts = splitJustSayMatch(parts.left);
+                const rightParts = splitJustSayMatch(parts.right);
+                const leftText = normalise(leftParts.reply);
+                const rightText = normalise(rightParts.reply);
+
+                if (!isAllowedQuickReply(leftText) || !isAllowedQuickReply(rightText)) {
+                    fragment.appendChild(document.createTextNode(raw.slice(start, end)));
+                    cursor = end;
+                    return;
+                }
+
+                // Keep the original prefix, but replace options with buttons.
+                const prefix = String(full).replace(/\s+or\s+[\s\S]*$/i, ' ');
+                fragment.appendChild(document.createTextNode(prefix));
+
+                const leftWrapper = document.createElement('span');
+                leftWrapper.className = 'chat-insert-prompt-inline-wrapper';
+                leftWrapper.appendChild(createInsertButton(leftText));
+                fragment.appendChild(leftWrapper);
+
+                fragment.appendChild(document.createTextNode(' or '));
+
+                const rightWrapper = document.createElement('span');
+                rightWrapper.className = 'chat-insert-prompt-inline-wrapper';
+                rightWrapper.appendChild(createInsertButton(rightText));
+                fragment.appendChild(rightWrapper);
+
+                cursor = end;
+            };
+
+            const chosenMatches = orMatches.length > 0 ? orMatches : singleMatches;
+            const handler = orMatches.length > 0 ? processOrMatch : processSingleMatch;
+
+            for (const match of chosenMatches) {
+                handler(match);
+            }
+
+            if (cursor < raw.length) {
+                fragment.appendChild(document.createTextNode(raw.slice(cursor)));
+            }
+
+            node.replaceWith(fragment);
+        } catch (_) {
+            // Ignore.
+        }
+    }
+
+    const strongEls = Array.from(root.querySelectorAll('strong'));
+
+    // Pass 2: handle "say **X** or **Y**" where both options are separate <strong> nodes.
+    for (const strong of strongEls) {
+        try {
+            if (!strong || !strong.closest) continue;
+            if (strong.closest('pre, code, a, button')) continue;
+            if (strong.closest('.chat-insert-prompt-wrapper, .chat-insert-prompt-inline-wrapper')) continue;
+
+            const firstText = normalise(extractBoldQuotedInstructionFromStrong(strong));
+            if (!firstText || !isAllowedQuickReply(firstText)) {
+                continue;
+            }
+
+            const prev = strong.previousSibling;
+            if (!prev || prev.nodeType !== Node.TEXT_NODE) continue;
+            const prevText = String(prev.textContent ?? '');
+            if (!/\b(?:just\s+)?say\s*[:\-‑–—]?\s*$/i.test(prevText)) {
+                continue;
+            }
+
+            const between = strong.nextSibling;
+            if (!between || between.nodeType !== Node.TEXT_NODE) continue;
+            const betweenText = String(between.textContent ?? '');
+            if (!/^\s*or\s*$/i.test(betweenText)) {
+                continue;
+            }
+
+            const secondStrong = strong.nextElementSibling;
+            if (!secondStrong || secondStrong.tagName !== 'STRONG') {
+                continue;
+            }
+
+            const secondText = normalise(extractBoldQuotedInstructionFromStrong(secondStrong));
+            if (!secondText || !isAllowedQuickReply(secondText)) {
+                continue;
+            }
+
+            const firstWrapper = document.createElement('span');
+            firstWrapper.className = 'chat-insert-prompt-inline-wrapper';
+            firstWrapper.appendChild(createInsertButton(firstText));
+            strong.replaceWith(firstWrapper);
+
+            const secondWrapper = document.createElement('span');
+            secondWrapper.className = 'chat-insert-prompt-inline-wrapper';
+            secondWrapper.appendChild(createInsertButton(secondText));
+            secondStrong.replaceWith(secondWrapper);
+        } catch (_) {
+            // Ignore.
+        }
+    }
+
+    // Pass 3: handle markdown like "say **“Proceed”**" where the quoted reply is a separate <strong> node.
+    for (const strong of strongEls) {
+        try {
+            if (!strong || !strong.closest) continue;
+            if (strong.closest('pre, code, a, button')) continue;
+            if (strong.closest('.chat-insert-prompt-wrapper, .chat-insert-prompt-inline-wrapper')) continue;
+            if (strong.querySelector && strong.querySelector('.chat-insert-prompt-button')) continue;
+
+            const replyText = normalise(extractBoldQuotedInstructionFromStrong(strong));
+            if (!replyText) continue;
+            if (!isAllowedQuickReply(replyText)) continue;
+
+            const prev = strong.previousSibling;
+            if (!prev || prev.nodeType !== Node.TEXT_NODE) continue;
+            const prevText = String(prev.textContent ?? '');
+            if (!/\b(?:just\s+)?say\s*[:\-‑–—]?\s*$/i.test(prevText)) {
+                continue;
+            }
+
+            const wrapper = document.createElement('span');
+            wrapper.className = 'chat-insert-prompt-inline-wrapper';
+            wrapper.appendChild(createInsertButton(replyText));
+            strong.replaceWith(wrapper);
+        } catch (_) {
+            // Ignore.
+        }
+    }
+}
+
 function convertReplyOptionsListsToButtons(root) {
     if (!root || !root.querySelectorAll) return;
 
@@ -735,6 +1101,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
     container.innerHTML = html;
     convertQuotedInstructionBlockquotesToButtons(container);
     convertInlineQuotedStrongSegmentsToButtons(container);
+    convertJustSayInstructionsToButtons(container);
     convertReplyOptionsListsToButtons(container);
     convertQuotedInstructionListItemsToButtons(container);
     try {
@@ -785,6 +1152,7 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
         messageTextEl.innerHTML = cachedHtml;
         convertQuotedInstructionBlockquotesToButtons(messageTextEl);
         convertInlineQuotedStrongSegmentsToButtons(messageTextEl);
+        convertJustSayInstructionsToButtons(messageTextEl);
         convertQuotedInstructionListItemsToButtons(messageTextEl);
         cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
         hydrateChatConceptCartouches(messageTextEl);
