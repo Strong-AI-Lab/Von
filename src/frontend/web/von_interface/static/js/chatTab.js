@@ -36,12 +36,25 @@ function getLoadingIndicatorTextEl() {
     return loadingIndicator.querySelector('.loading-indicator-text');
 }
 
+function getLoadingIndicatorEl() {
+    return document.getElementById('loadingIndicator');
+}
+
 function setLoadingIndicatorText(text) {
     const el = getLoadingIndicatorTextEl();
     if (!el) {
         return;
     }
     el.textContent = String(text ?? '').trim() || DEFAULT_THINKING_TEXT;
+}
+
+function setLoadingIndicatorTooltip(text) {
+    const el = getLoadingIndicatorEl();
+    if (!el) {
+        return;
+    }
+    const value = String(text ?? '').trim();
+    el.title = value;
 }
 
 function createClientRequestId() {
@@ -127,6 +140,60 @@ function formatToolUseProgressText(progress) {
     return `${DEFAULT_THINKING_TEXT} (${bits.join(', ')})`;
 }
 
+function recordToolUseHistory(request, progress) {
+    if (!request || !progress || typeof progress !== 'object') {
+        return;
+    }
+
+    const tool = typeof progress.tool === 'string' ? progress.tool.trim() : '';
+    if (!tool) {
+        return;
+    }
+
+    const batchSize = Number.isFinite(progress.batch_size) ? Number(progress.batch_size) : null;
+
+    if (!Array.isArray(request.toolUseProgressHistory)) {
+        request.toolUseProgressHistory = [];
+    }
+
+    const history = request.toolUseProgressHistory;
+    const last = history.length ? history[history.length - 1] : null;
+    const lastTool = last && typeof last.tool === 'string' ? last.tool : null;
+    const lastBatch = last && Number.isFinite(last.batchSize) ? Number(last.batchSize) : null;
+
+    if (lastTool === tool && lastBatch === batchSize) {
+        return;
+    }
+
+    history.push({ tool, batchSize });
+}
+
+function formatToolUseHistoryTooltip(request) {
+    if (!request || !Array.isArray(request.toolUseProgressHistory)) {
+        return '';
+    }
+    const history = request.toolUseProgressHistory;
+    if (!history.length) {
+        return '';
+    }
+
+    const lines = ['Tools this turn:'];
+    for (const entry of history) {
+        const tool = entry && typeof entry.tool === 'string' ? entry.tool : '';
+        if (!tool) {
+            continue;
+        }
+        const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
+        if (batchSize === null) {
+            lines.push(`- ${tool}`);
+        } else {
+            lines.push(`- ${tool} (batch ${batchSize})`);
+        }
+    }
+
+    return lines.length > 1 ? lines.join('\n') : '';
+}
+
 function stopToolUseProgressPolling(request) {
     if (!request) {
         return;
@@ -183,6 +250,8 @@ function startToolUseProgressPolling(request) {
             }
             const progress = await resp.json();
             setLoadingIndicatorText(formatToolUseProgressText(progress));
+            recordToolUseHistory(request, progress);
+            setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
 
             const status = typeof progress?.status === 'string' ? progress.status : null;
             if (status === 'completed' || status === 'error') {
@@ -2796,8 +2865,10 @@ function setThinkingState(isThinking) {
         loadingIndicator.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
         if (isThinking) {
             setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+            setLoadingIndicatorTooltip('');
         } else {
             setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+            setLoadingIndicatorTooltip('');
         }
     }
 
@@ -2932,7 +3003,8 @@ async function handleSendPrompt() {
             selectionStart,
             selectionEnd,
             aborted: false,
-            clientRequestId
+            clientRequestId,
+            toolUseProgressHistory: []
         };
         activeChatRequest = request;
 
