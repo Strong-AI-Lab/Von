@@ -441,4 +441,105 @@ describe('chat markdown rendering (assistant)', () => {
 
         expect(promptInput.value).toBe('Alpha\nApply the hierarchy fix.');
     });
+
+    test('buttonifies "just say" replies (Proceed/yes/etc) into quick-reply buttons, but never inside code blocks', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        // sendMessage() requires a non-empty prompt; it will clear the input after sending.
+        promptInput.value = 'seed prompt';
+        promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
+
+        const assistantResponse = [
+            'To continue, just say “Proceed”.',
+            'If you agree, just say "yes".',
+            'Otherwise, just say no.',
+            'For the next step, say “Proceed with authors” or “Proceed with full enrichment”.',
+            '```',
+            'just say “Proceed”',
+            '```'
+        ].join('\n');
+
+        const assistantHtml = [
+            '<p>To continue, just say “Proceed”.</p>',
+            '<p>If you agree, just say <strong>“yes”</strong>.</p>',
+            '<p>Otherwise, just say no.</p>',
+            '<p>For the next step, say <strong>“Proceed with authors”</strong> or <strong>“Proceed with full enrichment”</strong>.</p>',
+            '<pre><code>just say “Proceed”</code></pre>'
+        ].join('\n');
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: assistantHtml })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/api/search')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ results: [] })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ response: assistantResponse, llm_debug: { model: 'gpt-5.2' } })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const scrollableField = document.getElementById('scrollableField');
+        const assistantMarkdown = scrollableField.querySelector('.chat-markdown.markdown-rendered');
+        expect(assistantMarkdown).not.toBeNull();
+
+        const buttons = Array.from(assistantMarkdown.querySelectorAll('button.chat-insert-prompt-button'));
+        expect(buttons.length).toBe(5);
+
+        const proceedButton = buttons.find((b) => (b.textContent || '') === 'Proceed');
+        expect(proceedButton).toBeTruthy();
+
+        const yesButton = buttons.find((b) => (b.textContent || '') === 'yes');
+        expect(yesButton).toBeTruthy();
+
+        const noButton = buttons.find((b) => (b.textContent || '') === 'no');
+        expect(noButton).toBeTruthy();
+
+        const proceedAuthorsButton = buttons.find((b) => (b.textContent || '') === 'Proceed with authors');
+        expect(proceedAuthorsButton).toBeTruthy();
+
+        const proceedFullButton = buttons.find((b) => (b.textContent || '') === 'Proceed with full enrichment');
+        expect(proceedFullButton).toBeTruthy();
+
+        const codeBlock = assistantMarkdown.querySelector('pre');
+        expect(codeBlock).toBeTruthy();
+        expect(codeBlock.querySelector('button')).toBeNull();
+
+        // Make insertion deterministic. (sendMessage clears the prompt input.)
+        promptInput.value = 'Alpha';
+        promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
+
+        proceedButton.click();
+        expect(promptInput.value).toBe('Alpha\nProceed');
+    });
 });
