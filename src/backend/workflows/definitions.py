@@ -19,7 +19,9 @@ CHAT_ASSISTANT_WORKFLOW_ID = "#V#chat_assistant_workflow"
 TODO_REFRESH_WORKFLOW_ID = "#V#todo_refresh_workflow"
 
 
-def _transition_if_flag_set(flag: str, *, to_state: str, reason: str) -> WorkflowTransitionSpec:
+def _transition_if_flag_set(
+    flag: str, *, to_state: str, reason: str
+) -> WorkflowTransitionSpec:
     return WorkflowTransitionSpec(
         to_state=to_state,
         condition=lambda ctx: bool(ctx.get(flag)),
@@ -111,15 +113,10 @@ def build_chat_narration_workflow() -> WorkflowDefinition:
         state_id="select_prompt_fragments",
         actions=(WorkflowActionInvocation(action_id="narration.select_prompts"),),
         transitions=(
-            _transition_if_flag_set(
-                "narration_prompts_resolved",
-                to_state="render_narration",
-                reason="prompt_resolved",
-            ),
             WorkflowTransitionSpec(
-                to_state="failed",
+                to_state="render_narration",
                 condition=lambda ctx: True,
-                reason="prompt_resolution_failed",
+                reason="prompt_selected",
             ),
         ),
     )
@@ -275,7 +272,9 @@ def register_default_workflows(registry: WorkflowRegistry) -> None:
             definition=WorkflowDefinition(
                 workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
                 initial_state="completed",
-                states={"completed": WorkflowStateSpec(state_id="completed", terminal=True)},
+                states={
+                    "completed": WorkflowStateSpec(state_id="completed", terminal=True)
+                },
                 termination_states=("completed",),
                 purpose="Default chat assistant no-op workflow placeholder.",
             ),
