@@ -160,13 +160,13 @@
 
             <div class="inline-form inline-form-tight">
                 <label for="internalMcpMaxToolInvocations" class="mr-1">Max tool invocations per turn:</label>
-                <input type="number" id="internalMcpMaxToolInvocations" min="0" max="50" step="1" value="8"
+                <input type="number" id="internalMcpMaxToolInvocations" min="0" max="50" step="1" value="30"
                     class="mr-2" />
 
                 <label for="internalMcpToolBatchCap" class="mr-1">Tool calls per batch:</label>
-                <input type="number" id="internalMcpToolBatchCap" min="1" max="50" step="1" value="4" />
+                <input type="number" id="internalMcpToolBatchCap" min="1" max="50" step="1" value="10" />
             </div>
-            <small class="settings-note">Defaults: 8 invocations, batch cap 4. Set invocations to 0 to disable tool
+            <small class="settings-note">Defaults: 30 invocations, batch cap 10. Set invocations to 0 to disable tool
                 calls (chat still works).</small>
 
             <div class="inline-form inline-form-tight mt-2">

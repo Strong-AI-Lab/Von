@@ -736,17 +736,17 @@ def _coerce_int_setting(
 def get_internal_mcp_max_tool_invocations() -> int:
     """Return the maximum number of internal MCP tool calls per chat turn.
 
-    Defaults to 8 when unset/invalid.
+    Defaults to 30 when unset/invalid.
     """
 
     val = get_setting(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME)
-    return _coerce_int_setting(val, default=8, min_value=0, max_value=50)
+    return _coerce_int_setting(val, default=30, min_value=0, max_value=50)
 
 
 def set_internal_mcp_max_tool_invocations(value: Any) -> bool:
     """Persist the max internal MCP tool invocations (canonical int, clamped)."""
 
-    coerced = _coerce_int_setting(value, default=8, min_value=0, max_value=50)
+    coerced = _coerce_int_setting(value, default=30, min_value=0, max_value=50)
     return update_setting(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME, coerced)
 
 
@@ -754,17 +754,17 @@ def get_internal_mcp_tool_batch_cap() -> int:
     """Return the maximum number of tool calls executed per batch.
 
     This is a guardrail against very large tool-call lists per iteration.
-    Defaults to 4 when unset/invalid.
+    Defaults to 10 when unset/invalid.
     """
 
     val = get_setting(INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME)
-    return _coerce_int_setting(val, default=4, min_value=1, max_value=50)
+    return _coerce_int_setting(val, default=10, min_value=1, max_value=50)
 
 
 def set_internal_mcp_tool_batch_cap(value: Any) -> bool:
     """Persist the tool-call batch cap (canonical int, clamped)."""
 
-    coerced = _coerce_int_setting(value, default=4, min_value=1, max_value=50)
+    coerced = _coerce_int_setting(value, default=10, min_value=1, max_value=50)
     return update_setting(INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME, coerced)
 
 
