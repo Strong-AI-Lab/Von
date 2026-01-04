@@ -2940,11 +2940,6 @@ def add_relationship_route():
                 400,
             )
 
-            # Canonicalise known legacy predicate ids.
-            # JVNAUTOSCI-913: todo membership was previously represented via '#V#has_item'.
-            if kind == "#V#has_item":
-                kind = "#V#has_todo_item"
-
     try:
         repo = ConceptsRepository
 

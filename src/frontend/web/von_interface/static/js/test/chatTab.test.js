@@ -511,4 +511,20 @@ describe('LLM debug warnings (presenter channel health)', () => {
             'Spoken backfill attempted but spoken channel is still missing (missing_spoken).'
         );
     });
+
+    test('flags when response claims more operations than executed tools', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            response: 'Done — 9 links added.',
+            tool_invocations: [
+                { method: 'add_relationship', arguments: { i: 0 } },
+                { method: 'add_relationship', arguments: { i: 1 } },
+                { method: 'add_relationship', arguments: { i: 2 } },
+                { method: 'add_relationship', arguments: { i: 3 } }
+            ]
+        });
+
+        expect(warnings).toContain(
+            'Response claims 9 operations, but only 4 tool invocations were recorded.'
+        );
+    });
 });

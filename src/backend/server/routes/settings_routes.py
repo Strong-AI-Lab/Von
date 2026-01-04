@@ -27,6 +27,10 @@ from ...services.settings_service import (
     set_org_llm_setting,
     get_disable_remote_ollama_scan,
     set_disable_remote_ollama_scan,
+    get_internal_mcp_max_tool_invocations,
+    set_internal_mcp_max_tool_invocations,
+    get_internal_mcp_tool_batch_cap,
+    set_internal_mcp_tool_batch_cap,
 )
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...languagemodels.llm_interface import OpenAIClient
@@ -486,6 +490,8 @@ def get_all_settings_data():
             "openai_api_key_env_var": get_openai_env_var(),
             "fetch_counts_on_load": get_fetch_counts_on_load(),
             "disable_remote_ollama_scan": get_disable_remote_ollama_scan(),
+            "internal_mcp_max_tool_invocations": get_internal_mcp_max_tool_invocations(),
+            "internal_mcp_tool_batch_cap": get_internal_mcp_tool_batch_cap(),
         }
     except Exception as e:
         current_app.logger.error(f"Error retrieving settings data: {e}", exc_info=True)
@@ -569,6 +575,16 @@ def save_all_settings():
                 disabled = False
             set_disable_remote_ollama_scan(disabled)
             current_app.logger.info(f"disable_remote_ollama_scan set to: {disabled}")
+
+        if "internal_mcp_max_tool_invocations" in data:
+            set_internal_mcp_max_tool_invocations(
+                data.get("internal_mcp_max_tool_invocations")
+            )
+            current_app.logger.info("internal_mcp_max_tool_invocations updated")
+
+        if "internal_mcp_tool_batch_cap" in data:
+            set_internal_mcp_tool_batch_cap(data.get("internal_mcp_tool_batch_cap"))
+            current_app.logger.info("internal_mcp_tool_batch_cap updated")
 
         # user/org/language fields intentionally ignored (browser-local)
 
