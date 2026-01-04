@@ -1,5 +1,40 @@
 const DEFAULT_LANGUAGE = 'en-NZ';
 
+function _isUuidLike(text) {
+    const t = (text || '').toString().trim();
+    if (!t) return false;
+    // RFC 4122 style UUIDs (case-insensitive)
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t);
+}
+
+function _isHexObjectIdLike(text) {
+    const t = (text || '').toString().trim();
+    if (!t) return false;
+    // MongoDB ObjectId-ish (24 hex chars).
+    return /^[0-9a-f]{24}$/i.test(t);
+}
+
+function _isVonConceptIdLike(text) {
+    const t = (text || '').toString().trim();
+    return t.startsWith('#V#');
+}
+
+function _isGuidLikeCandidate(candidate) {
+    if (!candidate) return false;
+    const type = (candidate.type || '').toString().trim().toUpperCase();
+    const language = (candidate.language || '').toString().trim().toLowerCase();
+    const text = (candidate.text || '').toString().trim();
+
+    // Display preference ordering (JVNAUTOSCI-937): GUID/UUID is last resort.
+    if (type === 'VONGUID') return true;
+    if (type === 'CODE' && language === 'vonguid') return true;
+    return _isUuidLike(text) || _isHexObjectIdLike(text);
+}
+
+function _guidPenalty(candidate) {
+    return _isGuidLikeCandidate(candidate) ? 1 : 0;
+}
+
 export function getPreferredLanguage() {
     try {
         const stored = localStorage.getItem('von_preferred_language');
@@ -55,6 +90,7 @@ function _typeScore(type) {
     if (type === 'NL') return 0;
     if (type === 'ABBR') return 1;
     if (type === 'CODE') return 2;
+    if (type === 'VONGUID') return 3;
     return 3;
 }
 
@@ -104,11 +140,30 @@ export function selectBestNameForContext(names, preferredLanguage = getPreferred
             continue;
         }
 
-        const prevScore = [_languageScore(prev.language, preferredLanguage), _typeScore(prev.type), prev.text.length];
-        const nextScore = [_languageScore(c.language, preferredLanguage), _typeScore(c.type), c.text.length];
+        // Ordering (JVNAUTOSCI-937):
+        // 1) NL in preferred language
+        // 2) other NL fallbacks
+        // 3) CODE identifiers (incl. ID-von) only if no NL
+        // 4) GUID/UUID last
+        const prevScore = [
+            _languageScore(prev.language, preferredLanguage),
+            _typeScore(prev.type),
+            _guidPenalty(prev),
+            prev.text.length
+        ];
+        const nextScore = [
+            _languageScore(c.language, preferredLanguage),
+            _typeScore(c.type),
+            _guidPenalty(c),
+            c.text.length
+        ];
         if (
             nextScore[0] < prevScore[0] ||
-            (nextScore[0] === prevScore[0] && (nextScore[1] < prevScore[1] || (nextScore[1] === prevScore[1] && nextScore[2] < prevScore[2])))
+            (nextScore[0] === prevScore[0] &&
+                (nextScore[1] < prevScore[1] ||
+                    (nextScore[1] === prevScore[1] &&
+                        (nextScore[2] < prevScore[2] ||
+                            (nextScore[2] === prevScore[2] && nextScore[3] < prevScore[3])))))
         ) {
             bestByText.set(key, c);
         }
@@ -123,6 +178,10 @@ export function selectBestNameForContext(names, preferredLanguage = getPreferred
         const aType = _typeScore(a.type);
         const bType = _typeScore(b.type);
         if (aType !== bType) return aType - bType;
+
+        const aGuid = _guidPenalty(a);
+        const bGuid = _guidPenalty(b);
+        if (aGuid !== bGuid) return aGuid - bGuid;
 
         return a.text.length - b.text.length || a.text.localeCompare(b.text);
     });
