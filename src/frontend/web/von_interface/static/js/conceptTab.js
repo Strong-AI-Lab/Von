@@ -2481,6 +2481,41 @@ export async function fetchInstancesWithSuffix(conceptId, suffix) {
 // Names Management Functions
 let currentConceptNames = [];
 
+function isUuidLike(text) {
+  const t = (text || '').toString().trim();
+  if (!t) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t);
+}
+
+function isHexObjectIdLike(text) {
+  const t = (text || '').toString().trim();
+  if (!t) return false;
+  // MongoDB ObjectId-ish (24 hex chars).
+  return /^[0-9a-f]{24}$/i.test(t);
+}
+
+function isVonConceptIdLike(text) {
+  const t = (text || '').toString().trim();
+  return t.startsWith('#V#');
+}
+
+function getDisplayLanguageForName(nameObj) {
+  const type = (nameObj?.type || '').toString().trim().toUpperCase();
+  const language = (nameObj?.language || '').toString().trim();
+  const text = (nameObj?.name || nameObj?.text || '').toString().trim();
+
+  // JVNAUTOSCI-937: GUID-like CODE values are not natural-language text.
+  // This is display-only; we do not rewrite stored language codes.
+  if (type === 'VONGUID') return 'guid';
+  if (type === 'CODE' && (isUuidLike(text) || isHexObjectIdLike(text))) return 'guid';
+  if (type === 'CODE' && language.toLowerCase() === 'vonguid') return 'guid';
+
+  // JVNAUTOSCI-937: Von concept IDs are CODE identifiers (display-only language `id-von`).
+  if (type === 'CODE' && isVonConceptIdLike(text)) return 'id-von';
+
+  return language || 'en-NZ';
+}
+
 /**
  * Get the preferred language from settings
  * @returns {Promise<string>} The preferred language code
@@ -2600,8 +2635,6 @@ export async function displayConceptNames(names = [], suffix = '') {
   if (currentConceptNames.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'names-empty-state';
-    empty.style.color = '#6b7280';
-    empty.style.fontStyle = 'italic';
     empty.textContent = 'No names yet. Add one below.';
     namesList.appendChild(empty);
     return;
@@ -2654,8 +2687,10 @@ export async function displayConceptNames(names = [], suffix = '') {
       return spaced;
     };
 
-    // Inline edit behavior
-    nameText.addEventListener('click', () => {
+    const isCodeName = (nameObj.type || '').toString().trim().toUpperCase() === 'CODE';
+
+    // Inline edit behaviour (JVNAUTOSCI-937): CODE names are read-only (for now).
+    if (!isCodeName) nameText.addEventListener('click', () => {
       try {
         const original = nameObj.name || nameObj.text || '';
         // Only propose CamelCase spacing for Latin languages and when text looks Latin-script
@@ -2718,7 +2753,7 @@ export async function displayConceptNames(names = [], suffix = '') {
 
     const languageBadge = document.createElement('span');
     languageBadge.className = 'name-language-badge';
-    languageBadge.textContent = nameObj.language || 'en-NZ';
+    languageBadge.textContent = getDisplayLanguageForName(nameObj);
 
     nameMeta.appendChild(typeBadge);
     nameMeta.appendChild(languageBadge);
@@ -2728,7 +2763,11 @@ export async function displayConceptNames(names = [], suffix = '') {
     deleteBtn.className = 'name-delete-button';
     deleteBtn.innerHTML = '×';
     deleteBtn.title = 'Remove this name';
-    deleteBtn.disabled = currentConceptNames.length === 1;
+    deleteBtn.disabled = currentConceptNames.length === 1 || isCodeName;
+
+    if (isCodeName) {
+      deleteBtn.title = 'CODE names are read-only and cannot be removed';
+    }
 
     if (!deleteBtn.disabled) {
       deleteBtn.addEventListener('click', () => deleteName(index, suffix));
@@ -2837,6 +2876,11 @@ export async function deleteName(index, suffix = '') {
   }
 
   const nameToDelete = currentConceptNames[index];
+
+  if ((nameToDelete?.type || '').toString().trim().toUpperCase() === 'CODE') {
+    setNamesStatusMessage(suffix, 'CODE names are read-only and cannot be removed', 'red', true);
+    return;
+  }
 
   try {
     setNamesStatusMessage(suffix, 'Deleting...', 'blue');

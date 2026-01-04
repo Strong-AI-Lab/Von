@@ -4559,6 +4559,30 @@ button.prompt-vontology-cartouche {
     background-color: #f9f9f9;
 }
 
+.names-empty-state {
+    color: #6b7280;
+    font-style: italic;
+    padding: 6px 8px;
+}
+
+.names-technical-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 4px 8px 4px;
+    font-size: 12px;
+    color: #6b7280;
+}
+
+.names-technical-toggle-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
 /* NUCLEAR OPTION - Maximum specificity cartouche rules */
 html body div[id^="namesList_"] .name-cartouche,
 html body .names-list-container .name-cartouche,
