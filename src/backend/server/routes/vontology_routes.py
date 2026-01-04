@@ -2940,8 +2940,53 @@ def add_relationship_route():
                 400,
             )
 
+            # Canonicalise known legacy predicate ids.
+            # JVNAUTOSCI-913: todo membership was previously represented via '#V#has_item'.
+            if kind == "#V#has_item":
+                kind = "#V#has_todo_item"
+
     try:
         repo = ConceptsRepository
+
+        from ...vontology.code_concepts_registry import (
+            build_virtual_concept_doc,
+            is_code_concept_id,
+        )
+        from ...vontology.utils_vontology import is_predicate
+
+        if is_dynamic_predicate:
+            predicate_doc = repo.find_one(
+                {"concept_id": kind}, {"concept_id": 1, "relationships": 1}
+            )
+            if predicate_doc is None and is_code_concept_id(kind):
+                predicate_doc = build_virtual_concept_doc(kind)
+
+            if predicate_doc is None:
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": (
+                                f"Predicate concept '{kind}' not found. Create it as a predicate concept "
+                                "(e.g. instance of #V#predicate) before using it as a relationship."
+                            ),
+                        }
+                    ),
+                    400,
+                )
+            if not is_predicate(predicate_doc):
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": (
+                                f"Concept '{kind}' exists but is not typed as a predicate. "
+                                "Predicates must be instances of #V#predicate (or a predicate subtype)."
+                            ),
+                        }
+                    ),
+                    400,
+                )
 
         # Check if this is a binary text predicate (expects text values, not concept references)
         is_text_predicate = False
