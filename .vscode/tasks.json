@@ -30,6 +30,22 @@
 			"label": "todo",
 			"type": "shell",
 			"command": "Write-Output \"TODO placeholder\""
+		},
+		{
+			"label": "pytest:backend",
+			"type": "shell",
+			"command": "pdm run pytest tests/backend -q",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "pytest:backend (test db)",
+			"type": "shell",
+			"command": "& { $env:VON_DB_NAME = 'test_von_db'; pdm run pytest tests/backend -q }",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
 		}
 	]
 }

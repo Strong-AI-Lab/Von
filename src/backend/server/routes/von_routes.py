@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, render_template, current_app, session
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -304,6 +305,583 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
     return unique_warnings
 
 
+def _extract_presenter_channels(text: str) -> dict[str, object] | None:
+    """Extract presenter-style output blocks.
+
+    Expected format (v1):
+      <spoken>...talk track...</spoken>
+      <screen>...what to display...</screen>
+
+    Returns None when no tags are present.
+    """
+
+    if not isinstance(text, str) or not text:
+        return None
+
+    def _find_block(tag: str) -> str | None:
+        pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
+        match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+        if not match:
+            return None
+        value = match.group(1)
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value if value else None
+
+    spoken = _find_block("spoken")
+    screen = _find_block("screen")
+
+    if spoken is None and screen is None:
+        return None
+
+    # Defaults:
+    # - If only <spoken> is provided, display it on-screen too (otherwise we'd render the raw tags).
+    # - If only <screen> is provided, do NOT fabricate spoken from screen; let the client fall back.
+    screen_text = screen if screen is not None else spoken
+    spoken_text = spoken
+
+    if screen_text is None:
+        screen_text = text.strip()
+
+    return {
+        "format": "tagged_blocks_v1",
+        "extracted": True,
+        "screen": screen_text,
+        "spoken": spoken_text,
+    }
+
+
+def _is_prompt_introspection_question(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return False
+    triggers = (
+        "what is my user prompt",
+        "what's my user prompt",
+        "what is my system prompt",
+        "what's my system prompt",
+        "what prompt is active",
+        "which prompt is active",
+        "tell me what my user prompt is",
+        "tell me what my system prompt is",
+    )
+    return any(t in lowered for t in triggers)
+
+
+def _is_tool_introspection_question(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return False
+    triggers = (
+        "what tools do you have",
+        "what tools can you",
+        "what tools can i",
+        "list tools",
+        "show tools",
+        "available tools",
+        "tool list",
+        "mcp tools",
+        "what can you do",
+        "what capabilities do you have",
+    )
+    return any(t in lowered for t in triggers)
+
+
+def _is_rag_status_question(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return False
+    triggers = (
+        "rag status",
+        "what is my rag status",
+        "is rag enabled",
+        "is rag on",
+        "rag enabled",
+        "rag on",
+        "rag working",
+        "rag isolation",
+    )
+    return any(t in lowered for t in triggers)
+
+
+def _format_tool_inventory(methods: dict) -> str:
+    # Deterministic plain-text listing; keep stable ordering.
+    if not isinstance(methods, dict) or not methods:
+        return "No internal MCP tools are registered."
+
+    # Group by category
+    buckets: dict[str, list[tuple[str, str]]] = {}
+    for name, meta in methods.items():
+        if not isinstance(name, str):
+            continue
+        meta_dict = meta if isinstance(meta, dict) else {}
+
+        category: str = "other"
+        category_value = meta_dict.get("category")
+        if isinstance(category_value, str) and category_value.strip():
+            category = category_value.strip()
+
+        desc: str = ""
+        desc_value = meta_dict.get("description")
+        if isinstance(desc_value, str):
+            desc = desc_value.strip()
+
+        buckets.setdefault(category, []).append((name, desc))
+
+    lines: list[str] = []
+    lines.append("Internal MCP tools currently registered:")
+    for category in sorted(buckets.keys()):
+        lines.append("")
+        lines.append(f"- {category}:")
+        for name, desc in sorted(buckets[category], key=lambda x: x[0]):
+            if desc:
+                lines.append(f"  - {name}: {desc}")
+            else:
+                lines.append(f"  - {name}")
+    lines.append("")
+    lines.append(
+        "Note: Some tools (especially RAG) require a user namespace to avoid cross-user data leakage."
+    )
+    return "\n".join(lines)
+
+
+def _deterministic_introspection_enabled() -> bool:
+    try:
+        flag_value = os.getenv("VON_DETERMINISTIC_INTROSPECTION", "0")
+        return str(flag_value).strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return False
+
+
+def _maybe_handle_prompt_introspection_fastpath(
+    *,
+    prompt_text: str,
+    user_concept_id: str,
+    session_id: str,
+    auxiliary_system_prompt: str | None,
+    user_prompt_debug: dict,
+    context: list[dict],
+    interaction_timestamp_utc: str,
+    model_name: str,
+    request_start_perf: float,
+):
+    gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
+    import json as _json
+
+    tool_messages: list[dict] = []
+    tool_invocations: list[dict] = []
+
+    response_text = None
+    used_tool = False
+
+    if gateway is not None and getattr(gateway, "enabled", False):
+        try:
+            tool_result = gateway.invoke(
+                "chat_get_prompt_context",
+                {
+                    "namespace": user_concept_id,
+                    "include_content": True,
+                    "max_chars": 5000,
+                },
+            )
+            payload = tool_result.payload
+            duration_ms = getattr(tool_result, "duration_ms", None)
+            used_tool = True
+
+            tool_messages = [
+                {
+                    "role": "tool",
+                    "content": _json.dumps(
+                        {
+                            "tool": "chat_get_prompt_context",
+                            "status": "ok",
+                            "duration_ms": duration_ms,
+                            "payload": payload,
+                        },
+                        default=str,
+                    ),
+                }
+            ]
+            tool_invocations = [
+                {
+                    "tool": "chat_get_prompt_context",
+                    "payload": {
+                        "namespace": user_concept_id,
+                        "include_content": True,
+                        "max_chars": 5000,
+                    },
+                    "duration_ms": duration_ms,
+                    "direct_user_call": False,
+                }
+            ]
+
+            if isinstance(payload, dict) and payload.get("success"):
+                prompt_ids = payload.get("prompt_concept_ids") or []
+                prompt_text_value = payload.get("prompt_text") or ""
+                if not isinstance(prompt_text_value, str):
+                    prompt_text_value = str(prompt_text_value)
+                prompt_text_value = prompt_text_value.strip()
+                if not prompt_text_value:
+                    response_text = (
+                        "No user-specific system prompt text is currently available for your account. "
+                        "(The prompt linkage exists but no content was returned.)"
+                    )
+                else:
+                    response_text = (
+                        "Here is your current user-specific system prompt (from Vontology).\n\n"
+                        f"Prompt concept IDs: {prompt_ids}\n\n"
+                        f"{prompt_text_value}"
+                    )
+            else:
+                response_text = (
+                    "I could not retrieve your user-specific prompt context via internal tools. "
+                    f"Result: {payload}"
+                )
+        except Exception as exc:
+            current_app.logger.warning(
+                "[mcp_orchestrator] Prompt introspection tool failed: %s", exc
+            )
+
+    # Fallback: use already-loaded prompt fragments (no tool required)
+    if response_text is None:
+        prompt_ids = (
+            user_prompt_debug.get("prompt_concept_ids")
+            if isinstance(user_prompt_debug, dict)
+            else []
+        )
+        if not isinstance(prompt_ids, list):
+            prompt_ids = []
+        prompt_text_value = auxiliary_system_prompt or ""
+        prompt_text_value = (
+            prompt_text_value.strip()
+            if isinstance(prompt_text_value, str)
+            else str(prompt_text_value)
+        )
+        if not prompt_text_value:
+            response_text = "No user-specific system prompt is currently active (no prompt content was loaded from Vontology)."
+        else:
+            response_text = (
+                "Here is your current user-specific system prompt (from Vontology).\n\n"
+                f"Prompt concept IDs: {prompt_ids}\n\n"
+                f"{prompt_text_value}"
+            )
+
+    # Store messages in history/context, matching the direct-tool-call pattern.
+    chat_history_service.add_message_to_history(
+        user_concept_id,
+        session_id,
+        {"role": "user", "content": prompt_text},
+    )
+    for tool_msg in _truncate_large_tool_results(
+        tool_messages, max_tool_content_chars=5000
+    ):
+        chat_history_service.add_message_to_history(
+            user_concept_id, session_id, tool_msg
+        )
+    chat_history_service.add_message_to_history(
+        user_concept_id,
+        session_id,
+        {"role": "assistant", "content": response_text},
+    )
+
+    current_app.config["CONTEXT"] = _limit_context_size(
+        current_app.config.get("CONTEXT", []), max_messages=20
+    )
+
+    current_turn_messages = [{"role": "user", "content": prompt_text}] + tool_messages
+    context_stats = _calculate_context_stats(context)
+    current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
+    tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
+
+    llm_debug_info = {
+        "interaction_timestamp_utc": interaction_timestamp_utc,
+        "model": model_name,
+        "llm_interaction": {
+            "requested_model": model_name,
+            "orchestrator_used": False,
+            "duration_ms": None,
+            "usage": None,
+            "calls": [],
+            "server_elapsed_ms": (time.perf_counter() - request_start_perf) * 1000.0,
+        },
+        "messages": current_turn_messages,
+        "response": response_text,
+        "user_prompt": user_prompt_debug,
+        "context_stats": {
+            "sent_to_llm": context_stats,
+            "stored_context": current_context_stats,
+        },
+        "tool_stats": tool_stats,
+        "tool_invocations": tool_invocations,
+        "prompt_introspection_fastpath": {"used_tool": used_tool, "enabled": True},
+        "fastpath": {
+            "name": "prompt_introspection",
+            "bypassed_llm": True,
+            "used_tool": used_tool,
+            "enabled": True,
+        },
+    }
+    llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+
+    return jsonify(
+        {
+            "response": response_text,
+            "fastpath": {
+                "name": "prompt_introspection",
+                "bypassed_llm": True,
+                "used_tool": used_tool,
+            },
+            "llm_debug": llm_debug_info,
+        }
+    )
+
+
+def _maybe_handle_tool_inventory_fastpath(
+    *,
+    prompt_text: str,
+    user_concept_id: str | None,
+    session_id: str,
+    context: list[dict],
+    interaction_timestamp_utc: str,
+    model_name: str,
+    request_start_perf: float,
+    user_prompt_debug: dict,
+):
+    gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
+
+    response_text = None
+    used_tool = False
+    methods_snapshot = None
+
+    if gateway is not None and getattr(gateway, "enabled", False):
+        try:
+            methods_snapshot = gateway.describe_methods()
+            used_tool = True
+            response_text = _format_tool_inventory(methods_snapshot)
+        except Exception as exc:
+            response_text = (
+                f"Could not retrieve tool inventory from the internal gateway: {exc}"
+            )
+    else:
+        response_text = (
+            "Internal MCP gateway is disabled; tool inventory is unavailable."
+        )
+
+    current_turn_messages = [{"role": "user", "content": prompt_text}]
+    context_stats = _calculate_context_stats(context)
+    current_context_stats = _calculate_context_stats(
+        current_app.config.get("CONTEXT", [])
+    )
+
+    llm_debug_info = {
+        "interaction_timestamp_utc": interaction_timestamp_utc,
+        "model": model_name,
+        "llm_interaction": {
+            "requested_model": model_name,
+            "orchestrator_used": False,
+            "duration_ms": None,
+            "usage": None,
+            "calls": [],
+            "server_elapsed_ms": (time.perf_counter() - request_start_perf) * 1000.0,
+        },
+        "messages": current_turn_messages,
+        "response": response_text,
+        "user_prompt": user_prompt_debug,
+        "context_stats": {
+            "sent_to_llm": context_stats,
+            "stored_context": current_context_stats,
+        },
+        "tool_stats": None,
+        "tool_invocations": (
+            [
+                {
+                    "tool": "gateway.describe_methods",
+                    "payload": {},
+                    "duration_ms": None,
+                    "direct_user_call": False,
+                    "ok": bool(methods_snapshot is not None),
+                }
+            ]
+            if used_tool
+            else []
+        ),
+        "fastpath": {
+            "name": "tool_inventory",
+            "bypassed_llm": True,
+            "used_tool": used_tool,
+            "enabled": True,
+        },
+    }
+
+    llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+
+    if user_concept_id:
+        chat_history_service.add_message_to_history(
+            user_concept_id,
+            session_id,
+            {"role": "user", "content": prompt_text},
+        )
+        chat_history_service.add_message_to_history(
+            user_concept_id,
+            session_id,
+            {"role": "assistant", "content": response_text},
+        )
+    else:
+        stored_context = current_app.config.get("CONTEXT", [])
+        stored_context.append({"role": "user", "content": prompt_text})
+        stored_context.append({"role": "assistant", "content": response_text})
+        current_app.config["CONTEXT"] = _limit_context_size(
+            stored_context, max_messages=20
+        )
+
+    current_app.config["CONTEXT"] = _limit_context_size(
+        current_app.config.get("CONTEXT", []), max_messages=20
+    )
+
+    return jsonify(
+        {
+            "response": response_text,
+            "fastpath": {
+                "name": "tool_inventory",
+                "bypassed_llm": True,
+                "used_tool": used_tool,
+            },
+            "llm_debug": llm_debug_info,
+        }
+    )
+
+
+def _maybe_handle_rag_status_fastpath(
+    *,
+    prompt_text: str,
+    user_concept_id: str,
+    session_id: str,
+    context: list[dict],
+    interaction_timestamp_utc: str,
+    model_name: str,
+    request_start_perf: float,
+    user_prompt_debug: dict,
+):
+    gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
+    import json as _json
+
+    tool_messages: list[dict] = []
+    tool_invocations: list[dict] = []
+    used_tool = False
+    response_text = None
+
+    if gateway is not None and getattr(gateway, "enabled", False):
+        try:
+            tool_result = gateway.invoke(
+                "rag_get_status",
+                {"namespace": user_concept_id},
+            )
+            payload = tool_result.payload
+            duration_ms = getattr(tool_result, "duration_ms", None)
+            used_tool = True
+
+            tool_messages = [
+                {
+                    "role": "tool",
+                    "content": _json.dumps(
+                        {
+                            "tool": "rag_get_status",
+                            "status": "ok",
+                            "duration_ms": duration_ms,
+                            "payload": payload,
+                        },
+                        default=str,
+                    ),
+                }
+            ]
+            tool_invocations = [
+                {
+                    "tool": "rag_get_status",
+                    "payload": {"namespace": user_concept_id},
+                    "duration_ms": duration_ms,
+                    "direct_user_call": False,
+                }
+            ]
+
+            response_text = (
+                "Here is your current RAG status (server-truth):\n\n"
+                + _json.dumps(payload, indent=2, default=str)
+            )
+        except Exception as exc:
+            response_text = f"I could not retrieve RAG status via internal tools: {exc}"
+    else:
+        response_text = "Internal MCP gateway is disabled; RAG status is unavailable."
+
+    # Persist messages in history/context.
+    chat_history_service.add_message_to_history(
+        user_concept_id,
+        session_id,
+        {"role": "user", "content": prompt_text},
+    )
+    for tool_msg in _truncate_large_tool_results(
+        tool_messages, max_tool_content_chars=5000
+    ):
+        chat_history_service.add_message_to_history(
+            user_concept_id, session_id, tool_msg
+        )
+    chat_history_service.add_message_to_history(
+        user_concept_id,
+        session_id,
+        {"role": "assistant", "content": response_text},
+    )
+
+    current_app.config["CONTEXT"] = _limit_context_size(
+        current_app.config.get("CONTEXT", []), max_messages=20
+    )
+
+    current_turn_messages = [{"role": "user", "content": prompt_text}] + tool_messages
+    context_stats = _calculate_context_stats(context)
+    current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
+    tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
+
+    llm_debug_info = {
+        "interaction_timestamp_utc": interaction_timestamp_utc,
+        "model": model_name,
+        "llm_interaction": {
+            "requested_model": model_name,
+            "orchestrator_used": False,
+            "duration_ms": None,
+            "usage": None,
+            "calls": [],
+            "server_elapsed_ms": (time.perf_counter() - request_start_perf) * 1000.0,
+        },
+        "messages": current_turn_messages,
+        "response": response_text,
+        "user_prompt": user_prompt_debug,
+        "context_stats": {
+            "sent_to_llm": context_stats,
+            "stored_context": current_context_stats,
+        },
+        "tool_stats": tool_stats,
+        "tool_invocations": tool_invocations,
+        "fastpath": {
+            "name": "rag_status",
+            "bypassed_llm": True,
+            "used_tool": used_tool,
+            "enabled": True,
+        },
+    }
+    llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+
+    return jsonify(
+        {
+            "response": response_text,
+            "fastpath": {
+                "name": "rag_status",
+                "bypassed_llm": True,
+                "used_tool": used_tool,
+            },
+            "llm_debug": llm_debug_info,
+        }
+    )
+
+
 @von_bp.route("/onboard_new_member", methods=["POST"])
 def onboard_new_member():
     """Onboards a new lab member."""
@@ -354,7 +932,7 @@ def serve_page():
 
 
 @von_bp.route("/generate", methods=["POST"])
-def generate():  # pyright: ignore[reportGeneralTypeIssues]
+def generate():
     """Handle text generation requests."""
     data = request.get_json()
     prompt_text = data.get("prompt", "")
@@ -389,55 +967,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     # REFACTORING_NOTE: Use the new factory to get the correct client and model
     # Get user and org context for per-user/org LLM settings
     try:
-
-        def _extract_presenter_channels(text: str) -> dict[str, object] | None:
-            """Extract presenter-style output blocks.
-
-            Expected format (v1):
-              <spoken>...talk track...</spoken>
-              <screen>...what to display...</screen>
-
-            Returns None when no tags are present.
-            """
-
-            if not isinstance(text, str) or not text:
-                return None
-
-            import re
-
-            def _find_block(tag: str) -> str | None:
-                pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
-                m = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
-                if not m:
-                    return None
-                value = m.group(1)
-                if not isinstance(value, str):
-                    return None
-                value = value.strip()
-                return value if value else None
-
-            spoken = _find_block("spoken")
-            screen = _find_block("screen")
-
-            if spoken is None and screen is None:
-                return None
-
-            # Defaults:
-            # - If only <spoken> is provided, display it on-screen too (otherwise we'd render the raw tags).
-            # - If only <screen> is provided, do NOT fabricate spoken from screen; let the client fall back.
-            screen_text = screen if screen is not None else spoken
-            spoken_text = spoken
-
-            if screen_text is None:
-                screen_text = text.strip()
-
-            return {
-                "format": "tagged_blocks_v1",
-                "extracted": True,
-                "screen": screen_text,
-                "spoken": spoken_text,
-            }
-
         from ...security.access_control import get_effective_user_concept_id
 
         user_concept_id = get_effective_user_concept_id()
@@ -578,560 +1107,46 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 user_prompt_debug["error"] = str(e)
 
-        def _is_prompt_introspection_question(text: str) -> bool:
-            lowered = (text or "").strip().lower()
-            if not lowered:
-                return False
-            triggers = (
-                "what is my user prompt",
-                "what's my user prompt",
-                "what is my system prompt",
-                "what's my system prompt",
-                "what prompt is active",
-                "which prompt is active",
-                "tell me what my user prompt is",
-                "tell me what my system prompt is",
-            )
-            return any(t in lowered for t in triggers)
+        deterministic_introspection_enabled = _deterministic_introspection_enabled()
 
-        def _is_tool_introspection_question(text: str) -> bool:
-            lowered = (text or "").strip().lower()
-            if not lowered:
-                return False
-            triggers = (
-                "what tools do you have",
-                "what tools can you",
-                "what tools can i",
-                "list tools",
-                "show tools",
-                "available tools",
-                "tool list",
-                "mcp tools",
-                "what can you do",
-                "what capabilities do you have",
-            )
-            return any(t in lowered for t in triggers)
-
-        def _is_rag_status_question(text: str) -> bool:
-            lowered = (text or "").strip().lower()
-            if not lowered:
-                return False
-            triggers = (
-                "rag status",
-                "what is my rag status",
-                "is rag enabled",
-                "is rag on",
-                "rag enabled",
-                "rag on",
-                "rag working",
-                "rag isolation",
-            )
-            return any(t in lowered for t in triggers)
-
-        def _format_tool_inventory(methods: dict) -> str:
-            # Deterministic plain-text listing; keep stable ordering.
-            if not isinstance(methods, dict) or not methods:
-                return "No internal MCP tools are registered."
-
-            # Group by category
-            buckets: dict[str, list[tuple[str, str]]] = {}
-            for name, meta in methods.items():
-                if not isinstance(name, str):
-                    continue
-                meta_dict = meta if isinstance(meta, dict) else {}
-
-                category: str = "other"
-                category_value = meta_dict.get("category")
-                if isinstance(category_value, str) and category_value.strip():
-                    category = category_value.strip()
-
-                desc: str = ""
-                desc_value = meta_dict.get("description")
-                if isinstance(desc_value, str):
-                    desc = desc_value.strip()
-
-                buckets.setdefault(category, []).append((name, desc))
-
-            lines: list[str] = []
-            lines.append("Internal MCP tools currently registered:")
-            for category in sorted(buckets.keys()):
-                lines.append("")
-                lines.append(f"- {category}:")
-                for name, desc in sorted(buckets[category], key=lambda x: x[0]):
-                    if desc:
-                        lines.append(f"  - {name}: {desc}")
-                    else:
-                        lines.append(f"  - {name}")
-            lines.append("")
-            lines.append(
-                "Note: Some tools (especially RAG) require a user namespace to avoid cross-user data leakage."
-            )
-            return "\n".join(lines)
-
-        # ---------------------------------------------------------
-        # Deterministic prompt introspection (avoid LLM self-report)
-        # ---------------------------------------------------------
-        deterministic_introspection_enabled = False
-        try:
-            import os
-
-            flag_value = os.getenv("VON_DETERMINISTIC_INTROSPECTION", "0")
-            deterministic_introspection_enabled = str(flag_value).strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-        except Exception:
-            deterministic_introspection_enabled = False
-
-        if (
-            deterministic_introspection_enabled
-            and user_concept_id
-            and _is_prompt_introspection_question(prompt_text)
-        ):
-            gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-            import json as _json
-
-            tool_messages = []
-            tool_invocations = []
-
-            response_text = None
-            used_tool = False
-
-            if gateway is not None and getattr(gateway, "enabled", False):
-                try:
-                    tool_result = gateway.invoke(
-                        "chat_get_prompt_context",
-                        {
-                            "namespace": user_concept_id,
-                            "include_content": True,
-                            "max_chars": 5000,
-                        },
-                    )
-                    payload = tool_result.payload
-                    duration_ms = getattr(tool_result, "duration_ms", None)
-                    used_tool = True
-
-                    tool_messages = [
-                        {
-                            "role": "tool",
-                            "content": _json.dumps(
-                                {
-                                    "tool": "chat_get_prompt_context",
-                                    "status": "ok",
-                                    "duration_ms": duration_ms,
-                                    "payload": payload,
-                                },
-                                default=str,
-                            ),
-                        }
-                    ]
-                    tool_invocations = [
-                        {
-                            "tool": "chat_get_prompt_context",
-                            "payload": {
-                                "namespace": user_concept_id,
-                                "include_content": True,
-                                "max_chars": 5000,
-                            },
-                            "duration_ms": duration_ms,
-                            "direct_user_call": False,
-                        }
-                    ]
-
-                    if isinstance(payload, dict) and payload.get("success"):
-                        prompt_ids = payload.get("prompt_concept_ids") or []
-                        prompt_text_value = payload.get("prompt_text") or ""
-                        if not isinstance(prompt_text_value, str):
-                            prompt_text_value = str(prompt_text_value)
-                        prompt_text_value = prompt_text_value.strip()
-                        if not prompt_text_value:
-                            response_text = (
-                                "No user-specific system prompt text is currently available for your account. "
-                                "(The prompt linkage exists but no content was returned.)"
-                            )
-                        else:
-                            response_text = (
-                                "Here is your current user-specific system prompt (from Vontology).\n\n"
-                                f"Prompt concept IDs: {prompt_ids}\n\n"
-                                f"{prompt_text_value}"
-                            )
-                    else:
-                        response_text = (
-                            "I could not retrieve your user-specific prompt context via internal tools. "
-                            f"Result: {payload}"
-                        )
-                except Exception as exc:
-                    current_app.logger.warning(
-                        "[mcp_orchestrator] Prompt introspection tool failed: %s", exc
-                    )
-
-            # Fallback: use already-loaded prompt fragments (no tool required)
-            if response_text is None:
-                prompt_ids = (
-                    user_prompt_debug.get("prompt_concept_ids")
-                    if isinstance(user_prompt_debug, dict)
-                    else []
-                )
-                if not isinstance(prompt_ids, list):
-                    prompt_ids = []
-                prompt_text_value = auxiliary_system_prompt or ""
-                prompt_text_value = (
-                    prompt_text_value.strip()
-                    if isinstance(prompt_text_value, str)
-                    else str(prompt_text_value)
-                )
-                if not prompt_text_value:
-                    response_text = "No user-specific system prompt is currently active (no prompt content was loaded from Vontology)."
-                else:
-                    response_text = (
-                        "Here is your current user-specific system prompt (from Vontology).\n\n"
-                        f"Prompt concept IDs: {prompt_ids}\n\n"
-                        f"{prompt_text_value}"
-                    )
-
-            # Store messages in history/context, matching the direct-tool-call pattern.
-            if user_concept_id:
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "user", "content": prompt_text},
-                )
-                for tool_msg in _truncate_large_tool_results(
-                    tool_messages, max_tool_content_chars=5000
-                ):
-                    chat_history_service.add_message_to_history(
-                        user_concept_id, session_id, tool_msg
-                    )
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "assistant", "content": response_text},
-                )
-            else:
-                current_app.config["CONTEXT"].append(
-                    {"role": "user", "content": prompt_text}
-                )
-                for tool_msg in _truncate_large_tool_results(
-                    tool_messages, max_tool_content_chars=5000
-                ):
-                    current_app.config["CONTEXT"].append(tool_msg)
-                current_app.config["CONTEXT"].append(
-                    {"role": "assistant", "content": response_text}
+        if deterministic_introspection_enabled and user_concept_id:
+            if _is_prompt_introspection_question(prompt_text):
+                return _maybe_handle_prompt_introspection_fastpath(
+                    prompt_text=prompt_text,
+                    user_concept_id=user_concept_id,
+                    session_id=session_id,
+                    auxiliary_system_prompt=auxiliary_system_prompt,
+                    user_prompt_debug=user_prompt_debug,
+                    context=context,
+                    interaction_timestamp_utc=interaction_timestamp_utc,
+                    model_name=model_name or "unknown",
+                    request_start_perf=request_start_perf,
                 )
 
-            current_app.config["CONTEXT"] = _limit_context_size(
-                current_app.config["CONTEXT"], max_messages=20
-            )
+            if _is_rag_status_question(prompt_text):
+                return _maybe_handle_rag_status_fastpath(
+                    prompt_text=prompt_text,
+                    user_concept_id=user_concept_id,
+                    session_id=session_id,
+                    context=context,
+                    interaction_timestamp_utc=interaction_timestamp_utc,
+                    model_name=model_name or "unknown",
+                    request_start_perf=request_start_perf,
+                    user_prompt_debug=user_prompt_debug,
+                )
 
-            current_turn_messages = [
-                {"role": "user", "content": prompt_text}
-            ] + tool_messages
-            context_stats = _calculate_context_stats(context)
-            current_context_stats = _calculate_context_stats(
-                current_app.config["CONTEXT"]
-            )
-            tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
-
-            llm_debug_info = {
-                "interaction_timestamp_utc": interaction_timestamp_utc,
-                "model": model_name,
-                "llm_interaction": {
-                    "requested_model": model_name,
-                    "orchestrator_used": False,
-                    "duration_ms": None,
-                    "usage": None,
-                    "calls": [],
-                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
-                    * 1000.0,
-                },
-                "messages": current_turn_messages,
-                "response": response_text,
-                "user_prompt": user_prompt_debug,
-                "context_stats": {
-                    "sent_to_llm": context_stats,
-                    "stored_context": current_context_stats,
-                },
-                "tool_stats": tool_stats,
-                "tool_invocations": tool_invocations,
-                "prompt_introspection_fastpath": {
-                    "used_tool": used_tool,
-                    "enabled": True,
-                },
-                "fastpath": {
-                    "name": "prompt_introspection",
-                    "bypassed_llm": True,
-                    "used_tool": used_tool,
-                    "enabled": True,
-                },
-            }
-
-            llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
-
-            return jsonify(
-                {
-                    "response": response_text,
-                    "fastpath": {
-                        "name": "prompt_introspection",
-                        "bypassed_llm": True,
-                        "used_tool": used_tool,
-                    },
-                    "llm_debug": llm_debug_info,
-                }
-            )
-
-        # ---------------------------------------------------------
-        # Deterministic tool inventory (avoid LLM narration)
-        # ---------------------------------------------------------
         if deterministic_introspection_enabled and _is_tool_introspection_question(
             prompt_text
         ):
-            gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-
-            response_text = None
-            used_tool = False
-            methods_snapshot = None
-
-            if gateway is not None and getattr(gateway, "enabled", False):
-                try:
-                    methods_snapshot = gateway.describe_methods()
-                    used_tool = True
-                    response_text = _format_tool_inventory(methods_snapshot)
-                except Exception as exc:
-                    response_text = f"Could not retrieve tool inventory from the internal gateway: {exc}"
-            else:
-                response_text = (
-                    "Internal MCP gateway is disabled; tool inventory is unavailable."
-                )
-
-            current_turn_messages = [{"role": "user", "content": prompt_text}]
-            context_stats = _calculate_context_stats(context)
-            current_context_stats = _calculate_context_stats(
-                current_app.config["CONTEXT"]
-            )
-
-            llm_debug_info = {
-                "interaction_timestamp_utc": interaction_timestamp_utc,
-                "model": model_name,
-                "llm_interaction": {
-                    "requested_model": model_name,
-                    "orchestrator_used": False,
-                    "duration_ms": None,
-                    "usage": None,
-                    "calls": [],
-                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
-                    * 1000.0,
-                },
-                "messages": current_turn_messages,
-                "response": response_text,
-                "user_prompt": user_prompt_debug,
-                "context_stats": {
-                    "sent_to_llm": context_stats,
-                    "stored_context": current_context_stats,
-                },
-                "tool_stats": None,
-                "tool_invocations": (
-                    [
-                        {
-                            "tool": "gateway.describe_methods",
-                            "payload": {},
-                            "duration_ms": None,
-                            "direct_user_call": False,
-                            "ok": bool(methods_snapshot is not None),
-                        }
-                    ]
-                    if used_tool
-                    else []
-                ),
-                "fastpath": {
-                    "name": "tool_inventory",
-                    "bypassed_llm": True,
-                    "used_tool": used_tool,
-                    "enabled": True,
-                },
-            }
-
-            # Persist minimal history for continuity.
-            if user_concept_id:
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "user", "content": prompt_text},
-                )
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "assistant", "content": response_text},
-                )
-            else:
-                current_app.config["CONTEXT"].append(
-                    {"role": "user", "content": prompt_text}
-                )
-                current_app.config["CONTEXT"].append(
-                    {"role": "assistant", "content": response_text}
-                )
-            current_app.config["CONTEXT"] = _limit_context_size(
-                current_app.config["CONTEXT"], max_messages=20
-            )
-
-            return jsonify(
-                {
-                    "response": response_text,
-                    "fastpath": {
-                        "name": "tool_inventory",
-                        "bypassed_llm": True,
-                        "used_tool": used_tool,
-                    },
-                    "llm_debug": llm_debug_info,
-                }
-            )
-
-        # ---------------------------------------------------------
-        # Deterministic RAG status (avoid LLM narration)
-        # ---------------------------------------------------------
-        if (
-            deterministic_introspection_enabled
-            and user_concept_id
-            and _is_rag_status_question(prompt_text)
-        ):
-            gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-            import json as _json
-
-            tool_messages = []
-            tool_invocations = []
-            used_tool = False
-            response_text = None
-
-            if gateway is not None and getattr(gateway, "enabled", False):
-                try:
-                    tool_result = gateway.invoke(
-                        "rag_get_status",
-                        {"namespace": user_concept_id},
-                    )
-                    payload = tool_result.payload
-                    duration_ms = getattr(tool_result, "duration_ms", None)
-                    used_tool = True
-
-                    tool_messages = [
-                        {
-                            "role": "tool",
-                            "content": _json.dumps(
-                                {
-                                    "tool": "rag_get_status",
-                                    "status": "ok",
-                                    "duration_ms": duration_ms,
-                                    "payload": payload,
-                                },
-                                default=str,
-                            ),
-                        }
-                    ]
-                    tool_invocations = [
-                        {
-                            "tool": "rag_get_status",
-                            "payload": {"namespace": user_concept_id},
-                            "duration_ms": duration_ms,
-                            "direct_user_call": False,
-                        }
-                    ]
-
-                    response_text = (
-                        "Here is your current RAG status (server-truth):\n\n"
-                        + _json.dumps(payload, indent=2, default=str)
-                    )
-                except Exception as exc:
-                    response_text = (
-                        f"I could not retrieve RAG status via internal tools: {exc}"
-                    )
-            else:
-                response_text = (
-                    "Internal MCP gateway is disabled; RAG status is unavailable."
-                )
-
-            # Persist messages in history/context.
-            if user_concept_id:
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "user", "content": prompt_text},
-                )
-                for tool_msg in _truncate_large_tool_results(
-                    tool_messages, max_tool_content_chars=5000
-                ):
-                    chat_history_service.add_message_to_history(
-                        user_concept_id, session_id, tool_msg
-                    )
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "assistant", "content": response_text},
-                )
-            else:
-                current_app.config["CONTEXT"].append(
-                    {"role": "user", "content": prompt_text}
-                )
-                for tool_msg in _truncate_large_tool_results(
-                    tool_messages, max_tool_content_chars=5000
-                ):
-                    current_app.config["CONTEXT"].append(tool_msg)
-                current_app.config["CONTEXT"].append(
-                    {"role": "assistant", "content": response_text}
-                )
-            current_app.config["CONTEXT"] = _limit_context_size(
-                current_app.config["CONTEXT"], max_messages=20
-            )
-
-            current_turn_messages = [
-                {"role": "user", "content": prompt_text}
-            ] + tool_messages
-            context_stats = _calculate_context_stats(context)
-            current_context_stats = _calculate_context_stats(
-                current_app.config["CONTEXT"]
-            )
-            tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
-
-            llm_debug_info = {
-                "interaction_timestamp_utc": interaction_timestamp_utc,
-                "model": model_name,
-                "llm_interaction": {
-                    "requested_model": model_name,
-                    "orchestrator_used": False,
-                    "duration_ms": None,
-                    "usage": None,
-                    "calls": [],
-                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
-                    * 1000.0,
-                },
-                "messages": current_turn_messages,
-                "response": response_text,
-                "user_prompt": user_prompt_debug,
-                "context_stats": {
-                    "sent_to_llm": context_stats,
-                    "stored_context": current_context_stats,
-                },
-                "tool_stats": tool_stats,
-                "tool_invocations": tool_invocations,
-                "fastpath": {
-                    "name": "rag_status",
-                    "bypassed_llm": True,
-                    "used_tool": used_tool,
-                    "enabled": True,
-                },
-            }
-
-            llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
-
-            return jsonify(
-                {
-                    "response": response_text,
-                    "fastpath": {
-                        "name": "rag_status",
-                        "bypassed_llm": True,
-                        "used_tool": used_tool,
-                    },
-                    "llm_debug": llm_debug_info,
-                }
+            return _maybe_handle_tool_inventory_fastpath(
+                prompt_text=prompt_text,
+                user_concept_id=user_concept_id,
+                session_id=session_id,
+                context=context,
+                interaction_timestamp_utc=interaction_timestamp_utc,
+                model_name=model_name or "unknown",
+                request_start_perf=request_start_perf,
+                user_prompt_debug=user_prompt_debug,
             )
 
         # Try to get user name from concept if user_id provided
@@ -1924,10 +1939,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                 narration_trace = None
                 narration_trace_store = None
-                narration_trace_enabled = (
-                    os.getenv("VON_WORKFLOWS_TRACE_ENABLED", "0").lower()
-                    in {"1", "true"}
-                )
+                narration_trace_enabled = os.getenv(
+                    "VON_WORKFLOWS_TRACE_ENABLED", "0"
+                ).lower() in {"1", "true"}
                 if narration_trace_enabled:
                     try:
                         narration_trace = WorkflowExecutionTrace(
