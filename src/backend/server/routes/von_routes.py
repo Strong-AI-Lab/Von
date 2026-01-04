@@ -9,6 +9,10 @@ from ...languagemodels.llm_interface import get_llm_client, get_active_model_nam
 from .settings_routes import get_all_settings_data
 from ...integrations.internal_mcp import ToolCallParsingError
 from ...services import chat_history_service
+from ...services.settings_service import (
+    get_internal_mcp_max_tool_invocations,
+    get_internal_mcp_tool_batch_cap,
+)
 from ...workflows import (
     CHAT_NARRATION_WORKFLOW_ID,
     WorkflowExecutionTrace,
@@ -1744,6 +1748,14 @@ def generate():
                     "[NAMESPACE] Calling orchestrator.run() with user_namespace=%s",
                     user_namespace,
                 )
+                try:
+                    orchestrator.configure_execution_caps(
+                        max_tool_invocations=get_internal_mcp_max_tool_invocations(),
+                        tool_batch_cap=get_internal_mcp_tool_batch_cap(),
+                    )
+                except Exception:
+                    # Defensive: never fail the request due to settings refresh.
+                    pass
                 orchestrator_start_perf = time.perf_counter()
                 orchestrator_result = orchestrator.run(
                     prompt=prompt_text,

@@ -1526,6 +1526,41 @@ function deriveLlmDebugWarnings(debugData) {
         return warnings;
     }
 
+    const responseText = (typeof debugData.response === 'string') ? debugData.response : '';
+    const toolInvocations = Array.isArray(debugData.tool_invocations) ? debugData.tool_invocations : [];
+    const toolStatsCount = (debugData.tool_stats && Number.isFinite(debugData.tool_stats.tool_count))
+        ? Number(debugData.tool_stats.tool_count)
+        : null;
+    const executedToolCount = toolInvocations.length || (toolStatsCount ?? 0);
+
+    // Heuristic: detect when the assistant claims it performed N operations but we
+    // only executed M tool calls. This often indicates tool truncation/early stop.
+    // (e.g., “Done — 9 links” but tool_invocations contains 4 items).
+    if (responseText) {
+        const patterns = [
+            /\b(?:done|complete|completed)\s*[—\-:]\s*(\d+)\b/gi,
+            /\b(?:added|linked|created|removed|updated|executed)\s+(\d+)\b/gi,
+            /\b(\d+)\s+(?:links?|relationships?|relations?|tool\s*calls?|tools?)\b/gi
+        ];
+
+        let claimed = null;
+        for (const re of patterns) {
+            let match;
+            while ((match = re.exec(responseText)) !== null) {
+                const n = Number(match[1]);
+                if (Number.isFinite(n)) {
+                    claimed = claimed == null ? n : Math.max(claimed, n);
+                }
+            }
+        }
+
+        if (claimed != null && claimed > 0 && executedToolCount >= 0 && claimed > executedToolCount) {
+            warnings.push(
+                `Response claims ${claimed} operations, but only ${executedToolCount} tool invocations were recorded.`
+            );
+        }
+    }
+
     if (typeof debugData.error === 'string' && debugData.error.trim()) {
         warnings.push(`Backend error: ${debugData.error.trim()}`);
     }

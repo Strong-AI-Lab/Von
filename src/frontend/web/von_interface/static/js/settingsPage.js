@@ -1007,6 +1007,24 @@ async function loadAndDisplaySettings() {
       }
     } catch { }
 
+    // Populate internal MCP execution caps
+    try {
+      const maxInvEl = document.getElementById('internalMcpMaxToolInvocations');
+      if (maxInvEl) {
+        const raw = Object.prototype.hasOwnProperty.call(settings, 'internal_mcp_max_tool_invocations')
+          ? settings.internal_mcp_max_tool_invocations
+          : 8;
+        maxInvEl.value = String(clampNumber(raw, 0, 50, 8));
+      }
+      const batchCapEl = document.getElementById('internalMcpToolBatchCap');
+      if (batchCapEl) {
+        const raw = Object.prototype.hasOwnProperty.call(settings, 'internal_mcp_tool_batch_cap')
+          ? settings.internal_mcp_tool_batch_cap
+          : 4;
+        batchCapEl.value = String(clampNumber(raw, 1, 50, 4));
+      }
+    } catch { }
+
     // Populate preferred language setting
     const languageSelect = document.getElementById('preferredLanguageSelect');
     if (languageSelect) {
@@ -1192,6 +1210,18 @@ async function saveAllSettings(changedProvider = null) {
     openai_api_key_env_var: document.getElementById('openaiApiKeyEnvVar')?.value,
     fetch_counts_on_load: !!document.getElementById('fetchCountsOnLoadToggle')?.checked,
     disable_remote_ollama_scan: !!document.getElementById('disableRemoteOllamaScanToggle')?.checked,
+    internal_mcp_max_tool_invocations: clampNumber(
+      document.getElementById('internalMcpMaxToolInvocations')?.value,
+      0,
+      50,
+      8,
+    ),
+    internal_mcp_tool_batch_cap: clampNumber(
+      document.getElementById('internalMcpToolBatchCap')?.value,
+      1,
+      50,
+      4,
+    ),
   };
 
   try {

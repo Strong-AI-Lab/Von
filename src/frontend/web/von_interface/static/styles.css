@@ -5307,6 +5307,15 @@ body.settings-body {
     margin-bottom: 10px;
 }
 
+/* Tool Execution Caps inputs (settings_tab) */
+#internalMcpMaxToolInvocations {
+    width: 110px;
+}
+
+#internalMcpToolBatchCap {
+    width: 90px;
+}
+
 #dbInfoContent {
     font-size: 0.95em;
     color: #333;
