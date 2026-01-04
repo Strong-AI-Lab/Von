@@ -663,6 +663,65 @@ def enrich_concept_with_text_relations(
         for item in names_from_relations
     ]
 
+    # Ensure CODE identifiers are present for UI/debugging (JVNAUTOSCI-938):
+    # Some concepts may not have had CODE names persisted historically, but users
+    # expect to see IDs (e.g., #V#..., db ObjectId, stable guid) in the Names section.
+    def _looks_like_object_id(value: str) -> bool:
+        if not isinstance(value, str):
+            return False
+        s = value.strip()
+        if len(s) != 24:
+            return False
+        try:
+            int(s, 16)
+            return True
+        except Exception:
+            return False
+
+    existing_keys = set()
+    for n in concept.get("names", []) or []:
+        if not isinstance(n, dict):
+            continue
+        existing_keys.add(
+            (
+                str(n.get("name") or "").strip(),
+                str(n.get("language") or "").strip() or "en-NZ",
+                str(n.get("type") or "").strip().upper() or "NL",
+            )
+        )
+
+    def _add_code_name(text: Optional[str]) -> None:
+        if not text or not isinstance(text, str):
+            return
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        key = (cleaned, "en-NZ", "CODE")
+        if key in existing_keys:
+            return
+        concept.setdefault("names", []).append(
+            {
+                "name": cleaned,
+                "language": "en-NZ",
+                "type": "CODE",
+                "relation_id": None,
+            }
+        )
+        existing_keys.add(key)
+
+    # Always include the ontological ID itself.
+    _add_code_name(concept_id)
+
+    # Include db document ID when it looks like a Mongo ObjectId.
+    maybe_db_id = concept.get("id")
+    if isinstance(maybe_db_id, str) and _looks_like_object_id(maybe_db_id):
+        _add_code_name(maybe_db_id)
+
+    # Include stable UUID (JVNAUTOSCI-730).
+    maybe_guid = concept.get("guid")
+    if isinstance(maybe_guid, str) and maybe_guid.strip():
+        _add_code_name(maybe_guid)
+
     # MIGRATE-ON-READ: Legacy description field → text relations
     legacy_description = concept.get("description")
     if (

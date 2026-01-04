@@ -33,6 +33,8 @@ const LS_TTS_VOLUME = 'chatTtsVolume';
 const LS_STT_LANGUAGE = 'chatSttLanguage';
 const LS_STT_CONTINUOUS = 'chatSttContinuous';
 const LS_STT_INTERIM_RESULTS = 'chatSttInterimResults';
+const LS_SHOW_CODE_NAMES = 'von_show_code_names';
+const LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE = 'von_filter_nl_names_to_preferred_language';
 const RUNTIME_REFRESH_MS = 12000;
 
 let runtimeIntervalId = null;
@@ -105,6 +107,36 @@ function parseBoolSetting(value, fallbackValue) {
     return fallbackValue;
   }
   return String(value) === 'true';
+}
+
+function setShowCodeNamesSetting(value) {
+  safeLocalStorageSet(LS_SHOW_CODE_NAMES, value ? 'true' : 'false');
+  try {
+    window.dispatchEvent(new CustomEvent('von-preferences-changed', {
+      detail: { key: LS_SHOW_CODE_NAMES, value: !!value }
+    }));
+  } catch (_) {
+    // ignore
+  }
+}
+
+function getShowCodeNamesSetting() {
+  return parseBoolSetting(safeLocalStorageGet(LS_SHOW_CODE_NAMES), true);
+}
+
+function setFilterNlNamesToPreferredLanguageSetting(value) {
+  safeLocalStorageSet(LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE, value ? 'true' : 'false');
+  try {
+    window.dispatchEvent(new CustomEvent('von-preferences-changed', {
+      detail: { key: LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE, value: !!value }
+    }));
+  } catch (_) {
+    // ignore
+  }
+}
+
+function getFilterNlNamesToPreferredLanguageSetting() {
+  return parseBoolSetting(safeLocalStorageGet(LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE), false);
 }
 
 function getPreferredLanguage() {
@@ -358,6 +390,29 @@ function setupSpeechSettingsSection() {
     sttInterimToggle.addEventListener('change', (e) => {
       safeLocalStorageSet(LS_STT_INTERIM_RESULTS, e.target.checked ? 'true' : 'false');
     });
+  }
+}
+
+function setupConceptUiSettings() {
+  const showCodeToggle = document.getElementById('settingsShowCodeNamesToggle');
+  if (showCodeToggle) {
+    showCodeToggle.checked = getShowCodeNamesSetting();
+    showCodeToggle.addEventListener('change', () => {
+      setShowCodeNamesSetting(!!showCodeToggle.checked);
+    });
+  }
+
+  const nlFilterToggle = document.getElementById('settingsFilterNlNamesToPreferredLanguageToggle');
+  if (nlFilterToggle) {
+    nlFilterToggle.checked = getFilterNlNamesToPreferredLanguageSetting();
+    nlFilterToggle.addEventListener('change', () => {
+      setFilterNlNamesToPreferredLanguageSetting(!!nlFilterToggle.checked);
+    });
+  }
+
+  const langLabel = document.getElementById('settingsPreferredLanguageForNlFilter');
+  if (langLabel) {
+    langLabel.textContent = getPreferredLanguage();
   }
 }
 
@@ -633,6 +688,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Initialize all settings sections
   await loadAndDisplaySettings();
   setupSpeechSettingsSection();
+  setupConceptUiSettings();
   // Load DB info
   try { await loadAndDisplayDbInfo(); } catch { }
   // Load deprecation metrics
@@ -689,6 +745,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('preferredLanguageSelect')?.addEventListener('change', () => {
     const val = document.getElementById('preferredLanguageSelect')?.value;
     if (val) localStorage.setItem(LS_LANG_KEY, val); else localStorage.removeItem(LS_LANG_KEY);
+    try {
+      const langLabel = document.getElementById('settingsPreferredLanguageForNlFilter');
+      if (langLabel) {
+        langLabel.textContent = getPreferredLanguage();
+      }
+      window.dispatchEvent(new CustomEvent('von-preferences-changed', {
+        detail: { key: LS_LANG_KEY, value: getPreferredLanguage() }
+      }));
+    } catch (_) {
+      // ignore
+    }
     // Emit event so footer or other UI can react
     if (window.parent) { window.parent.document.dispatchEvent(new CustomEvent('von:settingsChanged')); }
     // Persist language preference (with current organisation if available)
@@ -794,11 +861,20 @@ document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () =
     localStorage.removeItem(LS_ORG_KEY);
     localStorage.removeItem(LS_LANG_KEY);
     localStorage.removeItem(LS_GMAIL_PROFILE);
+    localStorage.removeItem(LS_SHOW_CODE_NAMES);
+    localStorage.removeItem(LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE);
     // Reset selects visually
     const userSel = document.getElementById('currentUserSelect'); if (userSel) userSel.selectedIndex = 0;
     const orgSel = document.getElementById('currentOrganisationSelect'); if (orgSel) orgSel.selectedIndex = 0;
     const langSel = document.getElementById('preferredLanguageSelect'); if (langSel) langSel.value = 'en-NZ';
     const gmailProfileInput = document.getElementById('gmailProfileInput'); if (gmailProfileInput) gmailProfileInput.value = '';
+    const showCodeToggle = document.getElementById('settingsShowCodeNamesToggle'); if (showCodeToggle) showCodeToggle.checked = true;
+    setShowCodeNamesSetting(true);
+    const nlFilterToggle = document.getElementById('settingsFilterNlNamesToPreferredLanguageToggle');
+    if (nlFilterToggle) nlFilterToggle.checked = false;
+    setFilterNlNamesToPreferredLanguageSetting(false);
+    const langLabel = document.getElementById('settingsPreferredLanguageForNlFilter');
+    if (langLabel) langLabel.textContent = getPreferredLanguage();
     if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
     showStatusMessage('settingsStatusMessage', 'Local preferences cleared');
   } catch (e) {
