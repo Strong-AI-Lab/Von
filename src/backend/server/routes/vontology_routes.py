@@ -1469,7 +1469,7 @@ def analyze_import_preview(nodes_to_import):
     """
     Analyze import data and return detailed preview information.
     """
-    from backend.db.repositories.concepts_repository import ConceptsRepository
+    from ...db.repositories.concepts_repository import ConceptsRepository
     from ...vontology.utils_vontology import (
         detect_circular_references_in_import,
         break_cycles_in_import_nodes,

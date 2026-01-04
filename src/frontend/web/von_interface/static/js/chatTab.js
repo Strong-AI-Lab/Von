@@ -22,6 +22,187 @@ const transcriptTurns = [];
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 
+// JVNAUTOSCI-942: Tool-use progress while "Thinking..."
+const DEFAULT_THINKING_TEXT = 'Thinking...';
+let showToolUseDuringThinkingSetting = true;
+let lastToolUseSettingRefreshMs = 0;
+const TOOL_USE_SETTING_REFRESH_COOLDOWN_MS = 30_000;
+
+function getLoadingIndicatorTextEl() {
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    if (!loadingIndicator) {
+        return null;
+    }
+    return loadingIndicator.querySelector('.loading-indicator-text');
+}
+
+function setLoadingIndicatorText(text) {
+    const el = getLoadingIndicatorTextEl();
+    if (!el) {
+        return;
+    }
+    el.textContent = String(text ?? '').trim() || DEFAULT_THINKING_TEXT;
+}
+
+function createClientRequestId() {
+    try {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+            return crypto.randomUUID();
+        }
+    } catch (_) {
+        // Ignore.
+    }
+    return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function refreshToolUseDuringThinkingSetting(force = false) {
+    const now = Date.now();
+    if (!force && now - lastToolUseSettingRefreshMs < TOOL_USE_SETTING_REFRESH_COOLDOWN_MS) {
+        return showToolUseDuringThinkingSetting;
+    }
+
+    lastToolUseSettingRefreshMs = now;
+    try {
+        const resp = await fetch('/settings/', { method: 'GET' });
+        if (!resp || !resp.ok) {
+            return showToolUseDuringThinkingSetting;
+        }
+        const data = await resp.json();
+        if (data && typeof data.show_tool_use_during_thinking !== 'undefined') {
+            showToolUseDuringThinkingSetting = !!data.show_tool_use_during_thinking;
+            if (!showToolUseDuringThinkingSetting && activeChatRequest) {
+                stopToolUseProgressPolling(activeChatRequest);
+                setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+            }
+        }
+    } catch (_) {
+        // Ignore.
+    }
+    return showToolUseDuringThinkingSetting;
+}
+
+function formatToolUseProgressText(progress) {
+    if (!progress || typeof progress !== 'object') {
+        return DEFAULT_THINKING_TEXT;
+    }
+
+    const status = typeof progress.status === 'string' ? progress.status : 'thinking';
+    const tool = typeof progress.tool === 'string' ? progress.tool : null;
+    const batchSize = Number.isFinite(progress.batch_size) ? Number(progress.batch_size) : null;
+    const done = Number.isFinite(progress.tool_calls_done) ? Number(progress.tool_calls_done) : null;
+    const cap = Number.isFinite(progress.tool_calls_cap) ? Number(progress.tool_calls_cap) : null;
+    const remaining = Number.isFinite(progress.tool_calls_remaining) ? Number(progress.tool_calls_remaining) : null;
+
+    const bits = [];
+
+    if (tool) {
+        bits.push(`tool: ${tool}`);
+    }
+
+    if (batchSize !== null) {
+        bits.push(`batch ${batchSize}`);
+    }
+
+    if (done !== null && cap !== null) {
+        bits.push(`${done}/${cap} used`);
+    }
+
+    if (remaining !== null) {
+        bits.push(`${remaining} remaining`);
+    }
+
+    if (status === 'tool_failed' || status === 'error') {
+        const error = typeof progress.error === 'string' ? progress.error.trim() : '';
+        if (error) {
+            bits.push(`error: ${error}`);
+        } else {
+            bits.push('error');
+        }
+    }
+
+    if (!bits.length) {
+        return DEFAULT_THINKING_TEXT;
+    }
+
+    return `${DEFAULT_THINKING_TEXT} (${bits.join(', ')})`;
+}
+
+function stopToolUseProgressPolling(request) {
+    if (!request) {
+        return;
+    }
+
+    const poll = request.toolUseProgressPoll;
+    if (!poll) {
+        return;
+    }
+
+    request.toolUseProgressPoll = null;
+
+    try {
+        if (poll.intervalId) {
+            clearInterval(poll.intervalId);
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    try {
+        poll.abortController?.abort();
+    } catch (_) {
+        // Ignore.
+    }
+}
+
+function startToolUseProgressPolling(request) {
+    if (!request || request.aborted) {
+        return;
+    }
+
+    if (!showToolUseDuringThinkingSetting) {
+        return;
+    }
+
+    const requestId = request.clientRequestId;
+    if (!requestId) {
+        return;
+    }
+
+    stopToolUseProgressPolling(request);
+    const abortController = new AbortController();
+
+    const pollOnce = async () => {
+        if (request.aborted || activeChatRequest !== request) {
+            return;
+        }
+        try {
+            const resp = await fetch(`/von/progress/${encodeURIComponent(requestId)}`,
+                { method: 'GET', signal: abortController.signal });
+            if (!resp || !resp.ok) {
+                return;
+            }
+            const progress = await resp.json();
+            setLoadingIndicatorText(formatToolUseProgressText(progress));
+
+            const status = typeof progress?.status === 'string' ? progress.status : null;
+            if (status === 'completed' || status === 'error') {
+                stopToolUseProgressPolling(request);
+            }
+        } catch (err) {
+            if (err && err.name === 'AbortError') {
+                return;
+            }
+        }
+    };
+
+    request.toolUseProgressPoll = {
+        abortController,
+        intervalId: setInterval(() => { void pollOnce(); }, 350)
+    };
+
+    void pollOnce();
+}
+
 // Cool-down for failed history talk-track backfills so we do not spam the server.
 // Map<turnId, { at: number, error: string }>
 const historySpokenBackfillFailures = new Map();
@@ -2601,6 +2782,7 @@ export function initializeChatTab() {
 
     loadChatHistory();
     updateHistoryLength();
+    void refreshToolUseDuringThinkingSetting();
     console.log("Chat tab initialized successfully");
 }
 
@@ -2612,6 +2794,11 @@ function setThinkingState(isThinking) {
     if (loadingIndicator) {
         loadingIndicator.style.display = isThinking ? 'inline-flex' : 'none';
         loadingIndicator.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+        if (isThinking) {
+            setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+        } else {
+            setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+        }
     }
 
     if (sendButton) {
@@ -2656,6 +2843,8 @@ function abortActiveChatRequest() {
     const request = activeChatRequest;
     request.aborted = true;
     activeChatRequest = null;
+
+    stopToolUseProgressPolling(request);
 
     try {
         request.abortController?.abort();
@@ -2705,6 +2894,11 @@ async function handleSendPrompt() {
         return;
     }
 
+    // Refresh setting in the background; default is enabled.
+    void refreshToolUseDuringThinkingSetting();
+
+    const clientRequestId = createClientRequestId();
+
     // Show loading indicator and disable send button
     setThinkingState(true);
 
@@ -2737,9 +2931,13 @@ async function handleSendPrompt() {
             promptRaw,
             selectionStart,
             selectionEnd,
-            aborted: false
+            aborted: false,
+            clientRequestId
         };
         activeChatRequest = request;
+
+        // Start polling immediately while the request is in flight.
+        startToolUseProgressPolling(request);
 
         // Get user context from localStorage to send to backend
         const userContext = getUserContext();
@@ -2756,6 +2954,7 @@ async function handleSendPrompt() {
             signal: request.abortController.signal,
             body: JSON.stringify({
                 prompt: promptText,
+                client_request_id: request.clientRequestId,
                 user_id: userContext.user_id,
                 org_id: userContext.org_id,
                 language: userContext.language,
@@ -2841,6 +3040,7 @@ async function handleSendPrompt() {
         const isStillActive = activeChatRequest === request;
         if (isStillActive) {
             activeChatRequest = null;
+            stopToolUseProgressPolling(request);
             setThinkingState(false);
         }
         updateHistoryLength();

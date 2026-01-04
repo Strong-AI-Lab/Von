@@ -1025,6 +1025,17 @@ async function loadAndDisplaySettings() {
       }
     } catch { }
 
+    // Populate tool-use during thinking toggle (JVNAUTOSCI-942)
+    try {
+      const toolUseToggleEl = document.getElementById('showToolUseDuringThinkingToggle');
+      if (toolUseToggleEl) {
+        const flag = Object.prototype.hasOwnProperty.call(settings, 'show_tool_use_during_thinking')
+          ? !!settings.show_tool_use_during_thinking
+          : true;
+        toolUseToggleEl.checked = !!flag;
+      }
+    } catch { }
+
     // Populate preferred language setting
     const languageSelect = document.getElementById('preferredLanguageSelect');
     if (languageSelect) {
@@ -1222,6 +1233,7 @@ async function saveAllSettings(changedProvider = null) {
       50,
       4,
     ),
+    show_tool_use_during_thinking: !!document.getElementById('showToolUseDuringThinkingToggle')?.checked,
   };
 
   try {

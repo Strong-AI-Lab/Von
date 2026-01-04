@@ -2,13 +2,13 @@
 import unittest
 from unittest.mock import patch, MagicMock
 
-from backend.services.relation_elicitation_service import RelationElicitationService
+from src.backend.services.relation_elicitation_service import RelationElicitationService
 
 
 class TestRelationElicitationService(unittest.TestCase):
 
-    @patch("backend.services.concept_service.get_concept_by_concept_id")
-    @patch("backend.services.concept_service.get_concept_by_id")
+    @patch("src.backend.services.concept_service.get_concept_by_concept_id")
+    @patch("src.backend.services.concept_service.get_concept_by_id")
     def test_get_elicitation_opportunities(
         self, mock_get_by_id, mock_get_by_concept_id
     ):

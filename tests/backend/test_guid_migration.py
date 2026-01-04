@@ -1,15 +1,8 @@
-import sys
-import os
 import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 
-# Add src to path
-sys.path.append(
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src"))
-)
-
-from backend.services.concept_service import (
+from src.backend.services.concept_service import (
     create_concept,
     update_concept,
     InvalidConceptDataError,
@@ -18,8 +11,8 @@ from utilities.migrate_guids import migrate_guids
 
 
 class TestGuidMigration(unittest.TestCase):
-    @patch("backend.services.concept_service.ConceptsRepository")
-    @patch("backend.services.text_value_service.upsert_text_for_concept")
+    @patch("src.backend.services.concept_service.ConceptsRepository")
+    @patch("src.backend.services.text_value_service.upsert_text_for_concept")
     def test_create_concept_generates_guid(self, mock_upsert, mock_repo):
         print("Testing create_concept_generates_guid...")
         mock_collection = MagicMock()
@@ -68,7 +61,7 @@ class TestGuidMigration(unittest.TestCase):
         ]
         self.assertTrue(guid_call, "GUID not registered as CODE name")
 
-    @patch("backend.services.concept_service.ConceptsRepository")
+    @patch("src.backend.services.concept_service.ConceptsRepository")
     def test_update_concept_immutability(self, mock_repo):
         print("Testing update_concept_immutability...")
         mock_collection = MagicMock()

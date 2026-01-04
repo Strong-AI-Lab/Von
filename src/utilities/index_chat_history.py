@@ -7,9 +7,9 @@ from datetime import datetime, timezone
 # Add src to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from backend.db.mongo_client import get_db
-from backend.services.rag_service import get_rag_service
-from backend.models.chat_history_model import chat_history_collection_name
+from src.backend.db.mongo_client import get_db
+from src.backend.services.rag_service import get_rag_service
+from src.backend.models.chat_history_model import chat_history_collection_name
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
