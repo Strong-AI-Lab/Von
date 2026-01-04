@@ -299,9 +299,7 @@ class InternalMCPChatOrchestrator:
     def _noop_action(request: Any) -> WorkflowActionResult:
         return WorkflowActionResult(outputs={})
 
-    def _action_missing_tool_call_assess(
-        self, request: Any
-    ) -> WorkflowActionResult:
+    def _action_missing_tool_call_assess(self, request: Any) -> WorkflowActionResult:
         data = request.data
         aux_log = data.setdefault("aux_llm_calls", [])
         assessor = data.get("missing_tool_assessor")
@@ -310,14 +308,17 @@ class InternalMCPChatOrchestrator:
                 status="failed", error="missing_assessor_callable"
             )
 
-        assessment = assessor(
-            response_text=data.get("response_text", ""),
-            use_structured=bool(data.get("use_structured")),
-            interpretation=data.get("interpretation"),
-            llm_client=request.environment.llm_client,
-            model=request.environment.model,
-            aux_log=aux_log,
-            tool_call_parse_error=data.get("tool_call_parse_error"),
+        assessment = cast(
+            _MissingToolCallAssessment,
+            assessor(
+                response_text=data.get("response_text", ""),
+                use_structured=bool(data.get("use_structured")),
+                interpretation=data.get("interpretation"),
+                llm_client=request.environment.llm_client,
+                model=request.environment.model,
+                aux_log=aux_log,
+                tool_call_parse_error=data.get("tool_call_parse_error"),
+            ),
         )
 
         try:
@@ -374,6 +375,11 @@ class InternalMCPChatOrchestrator:
         augmented_context = data.get("augmented_context") or []
         record_llm_call = data.get("record_llm_call")
 
+        calling_path = "legacy"
+        assessment = data.get("missing_tool_call_assessment")
+        if isinstance(assessment, dict) and isinstance(assessment.get("path"), str):
+            calling_path = str(assessment.get("path") or "legacy")
+
         rendered_prompt = self._prompt_templates.render_prompt(
             self._MISSING_TOOL_RETRY_PROMPTS,
             variables={},
@@ -396,7 +402,8 @@ class InternalMCPChatOrchestrator:
             aux_log.append(
                 {
                     "type": "missing_tool_call_retry",
-                    "path": "workflow",
+                    "path": calling_path,
+                    "mechanism": "workflow",
                     "stage": "prompt",
                     "retry_reason": data.get("missing_tool_call_retry_reason") or "",
                     "prompt_preview": prompt_text[:800],
@@ -424,7 +431,8 @@ class InternalMCPChatOrchestrator:
             aux_log.append(
                 {
                     "type": "missing_tool_call_retry",
-                    "path": "workflow",
+                    "path": calling_path,
+                    "mechanism": "workflow",
                     "stage": "response",
                     "retry_reason": data.get("missing_tool_call_retry_reason") or "",
                     "response_preview": (
@@ -469,9 +477,7 @@ class InternalMCPChatOrchestrator:
             }
         )
 
-    def _action_narration_select_prompts(
-        self, request: Any
-    ) -> WorkflowActionResult:
+    def _action_narration_select_prompts(self, request: Any) -> WorkflowActionResult:
         prompt_ids = request.data.get("narration_prompt_ids") or ()
         fallback_text = request.data.get("narration_prompt_text")
         rendered = self._prompt_templates.render_prompt(
@@ -2269,11 +2275,21 @@ class InternalMCPChatOrchestrator:
             auxiliary_system_prompt=auxiliary_system_prompt,
         )
 
-        selector_selection = None
+        selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
         if self._workflow_selector.enabled():
             try:
                 selector_selection = self._workflow_selector.select_workflow(
                     llm_client=llm_client, model=model, turn_text=prompt
+                )
+                if selector_selection.workflow_id:
+                    selected_workflow_id = selector_selection.workflow_id
+                aux_llm_calls.append(
+                    {
+                        "type": "workflow_selector",
+                        "workflow_id": selector_selection.workflow_id,
+                        "verdict": selector_selection.verdict,
+                        "prompt_id": selector_selection.prompt_id,
+                    }
                 )
                 if trace_enabled and trace is not None:
                     trace.metadata["workflow_selector"] = {
@@ -2282,7 +2298,69 @@ class InternalMCPChatOrchestrator:
                         "prompt_id": selector_selection.prompt_id,
                     }
             except Exception:
-                selector_selection = None
+                selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
+
+        def _maybe_apply_narration_routing(screen_text: Any) -> Any:
+            if selected_workflow_id != CHAT_NARRATION_WORKFLOW_ID:
+                return screen_text
+
+            try:
+                screen_value = (
+                    screen_text.strip()
+                    if isinstance(screen_text, str)
+                    else str(screen_text)
+                )
+                narration_data = {
+                    "presenter_mode_requested": True,
+                    "force_narration": True,
+                    "screen_text": screen_value,
+                    "user_prompt": prompt,
+                    "presenter_channels": {},
+                }
+
+                narration_result = self.execute_workflow(
+                    CHAT_NARRATION_WORKFLOW_ID,
+                    data=narration_data,
+                    llm_client=llm_client,
+                    model=model,
+                    user_namespace=user_namespace,
+                    auxiliary_system_prompt=auxiliary_system_prompt,
+                    trace=None,
+                )
+
+                channels_obj = (
+                    narration_result.data.get("presenter_channels")
+                    if narration_result is not None
+                    else None
+                )
+                if isinstance(channels_obj, dict):
+                    channels = cast(Mapping[str, Any], channels_obj)
+                    spoken = (
+                        channels.get("spoken")
+                        if isinstance(channels.get("spoken"), str)
+                        else None
+                    )
+                    screen = (
+                        channels.get("screen")
+                        if isinstance(channels.get("screen"), str)
+                        else None
+                    )
+                    if spoken and screen:
+                        aux_llm_calls.append(
+                            {
+                                "type": "narration",
+                                "workflow_id": CHAT_NARRATION_WORKFLOW_ID,
+                                "presenter_channels": {
+                                    "spoken": spoken,
+                                    "screen": screen,
+                                },
+                            }
+                        )
+                        return f"<spoken>{spoken}</spoken>\n\n<screen>{screen}</screen>"
+            except Exception:
+                return screen_text
+
+            return screen_text
 
         # Phase 3 (JVNAUTOSCI-799): Attempt structured tool calling if available
         use_structured = (
@@ -2430,9 +2508,9 @@ class InternalMCPChatOrchestrator:
         if not has_valid_tool_call:
             workflow_def = self._workflow_registry.get(MISSING_TOOL_CALL_WORKFLOW_ID)
             workflow_context = {
-                "response_text": response
-                if isinstance(response, str)
-                else str(response),
+                "response_text": (
+                    response if isinstance(response, str) else str(response)
+                ),
                 "interpretation": interpretation,
                 "use_structured": use_structured,
                 "tool_call_parse_error": tool_call_parse_error,
@@ -2484,8 +2562,9 @@ class InternalMCPChatOrchestrator:
                     _persist_trace(status="completed")
                     return result
 
+                response_text = _maybe_apply_narration_routing(response)
                 result = OrchestratorResult(
-                    response_text=response,
+                    response_text=response_text,
                     extra_messages=(),
                     tool_invocations=(),
                     aux_llm_calls=tuple(aux_llm_calls),
@@ -2557,9 +2636,7 @@ class InternalMCPChatOrchestrator:
                             "response_text", current_response
                         )
                         tool_calls = workflow_result.data.get("tool_calls")
-                        exc = workflow_result.data.get(
-                            "tool_call_parse_error", exc
-                        )
+                        exc = workflow_result.data.get("tool_call_parse_error", exc)
                     if tool_calls:
                         # Resume loop with recovered tool calls
                         pass
@@ -2773,8 +2850,10 @@ class InternalMCPChatOrchestrator:
                 self._max_tool_invocations,
             )
 
+        final_response_text = _maybe_apply_narration_routing(current_response)
+
         result = OrchestratorResult(
-            response_text=current_response,
+            response_text=final_response_text,
             extra_messages=tuple(tool_messages),
             tool_invocations=tuple(invocations),
             aux_llm_calls=tuple(aux_llm_calls),

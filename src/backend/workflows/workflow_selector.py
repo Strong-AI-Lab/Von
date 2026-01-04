@@ -48,7 +48,7 @@ class WorkflowSelector:
         self._fallback_prompt = fallback_prompt
 
     def enabled(self) -> bool:
-        value = os.getenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "1").strip().lower()
+        value = os.getenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "0").strip().lower()
         return value not in {"0", "false", "off"}
 
     def select_workflow(
@@ -76,8 +76,11 @@ class WorkflowSelector:
         workflow_id = self._verdict_mapping.get(verdict) or self._verdict_mapping.get(
             "plain_response"
         )
+        if not isinstance(workflow_id, str):
+            workflow_id = ""
         if workflow_id not in self._registry.all_workflow_ids():
-            workflow_id = self._verdict_mapping.get("plain_response", workflow_id or "")
+            fallback_id = self._verdict_mapping.get("plain_response")
+            workflow_id = fallback_id if isinstance(fallback_id, str) else workflow_id
         return WorkflowSelection(
             workflow_id=workflow_id or "",
             verdict=verdict or "",
