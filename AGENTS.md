@@ -634,6 +634,14 @@ export async function handleSubmit(event) {
 
 ### CRITICAL: Test Database Environment Variable Hygiene
 
+**Agent rule (required):** before running any pytest command, set `VON_DB_NAME=test_von_db` (recommended). The test suite refuses to run against `VON_DB_NAME=von_db`.
+
+- Prefer the VS Code task `pytest:backend (test db)`.
+- If running manually in PowerShell, use a scoped scriptblock so you don’t accidentally leave it set:
+  ```powershell
+  & { $env:VON_DB_NAME = 'test_von_db'; pdm run pytest tests/backend -q }
+  ```
+
 **Problem:** Setting `VON_DB_NAME=test_von_db` to run tests and forgetting to reset it can cause the production server to run against test data, leading to data loss or corruption.
 
 **Prevention Mechanisms (Added October 2025):**

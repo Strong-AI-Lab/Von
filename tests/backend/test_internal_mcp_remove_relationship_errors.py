@@ -51,7 +51,7 @@ def test_remove_relationship_rejects_missing_dynamic_predicate_concepts(monkeypa
 
     assert result["success"] is False
     assert result.get("error_code") == "predicate_concept_not_found"
-    assert "#V#has_todo_item" in (result.get("error") or "")
+    assert "#V#has_item" in (result.get("error") or "")
 
 
 def test_remove_relationship_returns_structured_error_for_missing_source(monkeypatch):
