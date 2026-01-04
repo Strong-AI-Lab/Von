@@ -126,8 +126,8 @@ def test_backfill_spoken_generates_and_persists_presenter_channels(
 ):
     _, client = app_client
 
-    user_id = "#V#tester"
-    session_id = "sess-1"
+    user_id = f"#V#tester_{uuid.uuid4().hex}"
+    session_id = f"sess-{uuid.uuid4()}"
     history = [
         {"role": "user", "content": "What is this?"},
         {"role": "assistant", "content": "Here is the answer on screen."},
