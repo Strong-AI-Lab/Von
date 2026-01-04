@@ -1,6 +1,7 @@
 import {
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
     __testOnly_convertQuotedInstructionBlockquotesToButtons,
+    __testOnly_convertQuotedInstructionListItemsToButtons,
     __testOnly_convertReplyOptionsListsToButtons,
     __testOnly_deriveLlmDebugWarnings,
     __testOnly_hydrateChatConceptCartouches,
@@ -328,6 +329,38 @@ describe('chat inline insert prompt button behaviour', () => {
 
         btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         expect(String(promptInput.value)).toContain('Yes');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('chat list-item insert prompt button behaviour', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+        `;
+    });
+
+    test('quoted bold list item becomes an insert button', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = `
+            <ul>
+                <li><strong>“Extract and materialise the full author list as researcher concepts.”</strong></li>
+            </ul>
+        `;
+
+        __testOnly_convertQuotedInstructionListItemsToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+        expect(btn.textContent).toBe('Extract and materialise the full author list as researcher concepts.');
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(String(promptInput.value)).toContain('Extract and materialise the full author list as researcher concepts.');
         expect(sendButton.click).toHaveBeenCalledTimes(1);
     });
 });

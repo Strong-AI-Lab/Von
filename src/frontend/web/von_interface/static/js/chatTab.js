@@ -591,6 +591,68 @@ function convertInlineQuotedStrongSegmentsToButtons(root) {
     }
 }
 
+function convertQuotedInstructionListItemsToButtons(root) {
+    if (!root || !root.querySelectorAll) return;
+
+    const listItems = Array.from(root.querySelectorAll('li'));
+    for (const li of listItems) {
+        try {
+            if (!li || !li.closest) continue;
+            if (li.closest('pre, code, a, button')) continue;
+            if (li.closest('.chat-insert-prompt-wrapper, .chat-insert-prompt-inline-wrapper')) continue;
+
+            if (li.querySelector('.chat-insert-prompt-button')) {
+                continue;
+            }
+
+            const elementChildren = Array.from(li.children ?? []);
+            const strongCandidates = elementChildren.filter((el) => el && el.tagName === 'STRONG');
+            if (strongCandidates.length !== 1) continue;
+            const strong = strongCandidates[0];
+
+            if (elementChildren.some((el) => el !== strong && el.tagName !== 'BR')) {
+                continue;
+            }
+
+            const liNodes = Array.from(li.childNodes ?? []);
+            if (liNodes.some((n) => n.nodeType === Node.TEXT_NODE && String(n.textContent ?? '').trim())) {
+                continue;
+            }
+
+            const instruction = extractBoldQuotedInstructionFromStrong(strong);
+            if (!instruction) continue;
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'chat-insert-prompt-button';
+            btn.textContent = instruction;
+            btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
+            btn.setAttribute('aria-label', `Insert into chat prompt: ${instruction}`);
+            btn.addEventListener('click', (e) => {
+                try {
+                    e.preventDefault();
+                    e.stopPropagation();
+                } catch (_) {
+                    // Ignore.
+                }
+                insertTextIntoChatPrompt(instruction);
+
+                const shiftHeld = !!(e && e.shiftKey);
+                if (!shiftHeld) {
+                    submitChatPromptImmediately();
+                }
+            });
+
+            const wrapper = document.createElement('span');
+            wrapper.className = 'chat-insert-prompt-inline-wrapper';
+            wrapper.appendChild(btn);
+            strong.replaceWith(wrapper);
+        } catch (_) {
+            // Ignore detached nodes or DOM mutation races.
+        }
+    }
+}
+
 // Cache concept metadata used for cartouches in chat transcript.
 // Map<fullId, { name: string, kind: string, source?: string, provisional?: boolean }>
 const chatConceptMetaCache = new Map();
@@ -674,6 +736,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
     convertQuotedInstructionBlockquotesToButtons(container);
     convertInlineQuotedStrongSegmentsToButtons(container);
     convertReplyOptionsListsToButtons(container);
+    convertQuotedInstructionListItemsToButtons(container);
     try {
         container.dataset.renderMode = 'rendered';
     } catch (_) {
@@ -722,6 +785,7 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
         messageTextEl.innerHTML = cachedHtml;
         convertQuotedInstructionBlockquotesToButtons(messageTextEl);
         convertInlineQuotedStrongSegmentsToButtons(messageTextEl);
+        convertQuotedInstructionListItemsToButtons(messageTextEl);
         cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
         hydrateChatConceptCartouches(messageTextEl);
         return;
@@ -1081,6 +1145,11 @@ export function __testOnly_convertReplyOptionsListsToButtons(root) {
 // Export for testing.
 export function __testOnly_convertInlineQuotedStrongSegmentsToButtons(root) {
     convertInlineQuotedStrongSegmentsToButtons(root);
+}
+
+// Export for testing.
+export function __testOnly_convertQuotedInstructionListItemsToButtons(root) {
+    convertQuotedInstructionListItemsToButtons(root);
 }
 
 function deriveLlmDebugWarnings(debugData) {
