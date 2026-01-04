@@ -2276,7 +2276,30 @@ class InternalMCPChatOrchestrator:
         )
 
         selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
-        if self._workflow_selector.enabled():
+        presenter_mode_requested = False
+        if context:
+            for msg in context:
+                if not isinstance(msg, Mapping):
+                    continue
+                role = msg.get("role")
+                content = msg.get("content")
+                if (
+                    role == "system"
+                    and isinstance(content, str)
+                    and content.lstrip().startswith("PRESENTER MODE PROTOCOL:")
+                ):
+                    presenter_mode_requested = True
+                    break
+
+        # Workflow selection is currently only used to decide whether to route to
+        # the narration workflow. To avoid interfering with tool-calling flows and
+        # test doubles (which often provide a finite response sequence), we only
+        # invoke the selector for authenticated presenter-mode turns.
+        if (
+            user_namespace
+            and presenter_mode_requested
+            and self._workflow_selector.enabled()
+        ):
             try:
                 selector_selection = self._workflow_selector.select_workflow(
                     llm_client=llm_client, model=model, turn_text=prompt
