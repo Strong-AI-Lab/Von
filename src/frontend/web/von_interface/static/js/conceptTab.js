@@ -43,6 +43,97 @@ export function initializeConceptTabState() {
 // Global interaction state
 let currentInteractionId = null;
 
+// Browser-local preference: show CODE names in Names section (default: true)
+const LS_SHOW_CODE_NAMES = 'von_show_code_names';
+// Browser-local preference: filter NL names to preferred language (default: false)
+const LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE = 'von_filter_nl_names_to_preferred_language';
+// Browser-local preferred language key (used by settings page)
+const LS_PREFERRED_LANGUAGE = 'von_preferred_language';
+function getShowCodeNamesSetting() {
+  try {
+    const raw = localStorage.getItem(LS_SHOW_CODE_NAMES);
+    if (raw === null || raw === undefined) {
+      return true;
+    }
+    return String(raw) === 'true';
+  } catch {
+    return true;
+  }
+}
+
+function getFilterNlNamesToPreferredLanguageSetting() {
+  try {
+    const raw = localStorage.getItem(LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE);
+    if (raw === null || raw === undefined) {
+      return false;
+    }
+    return String(raw) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function getSelectedConceptIdForSuffix(suffix) {
+  try {
+    const containerId = suffix ? `conceptTab_${suffix}` : 'conceptTab';
+    const container = document.getElementById(containerId) || document;
+    const expectedRadioName = suffix ? `selectedconcept_${suffix}` : 'selectedconcept';
+    const radios = container.querySelectorAll('input[type="radio"]');
+    for (const radio of radios) {
+      if (radio?.name === expectedRadioName && radio.checked) {
+        return radio.value;
+      }
+    }
+  } catch (_) {
+    // ignore
+  }
+  return getCurrentlySelectedConceptId();
+}
+
+function listOpenConceptTabSuffixes() {
+  const suffixes = new Set(['']);
+  try {
+    document.querySelectorAll('.tab-content').forEach((el) => {
+      const id = String(el?.id || '');
+      if (!id) return;
+      if (id === 'conceptTab') {
+        suffixes.add('');
+        return;
+      }
+      if (id.startsWith('conceptTab_')) {
+        suffixes.add(id.replace('conceptTab_', ''));
+      }
+    });
+  } catch (_) {
+    // ignore
+  }
+  return Array.from(suffixes);
+}
+
+function refreshNamesForAllOpenConceptTabs() {
+  const suffixes = listOpenConceptTabSuffixes();
+  for (const suffix of suffixes) {
+    const conceptId = getSelectedConceptIdForSuffix(suffix);
+    if (!conceptId) {
+      continue;
+    }
+    void loadConceptNames(conceptId, suffix);
+  }
+}
+
+// If settings change while a concept is open, refresh names in all open concept tabs (incl. suffix tabs).
+try {
+  window.addEventListener('von-preferences-changed', (evt) => {
+    const key = evt?.detail?.key;
+    if (![LS_SHOW_CODE_NAMES, LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE, LS_PREFERRED_LANGUAGE].includes(key)) {
+      return;
+    }
+    refreshNamesForAllOpenConceptTabs();
+  });
+} catch (_) {
+  // ignore
+}
+
 // Save button state management
 let originalNotes = '';
 let updateSaveButtonStateTimeout = null;
@@ -2522,6 +2613,14 @@ function getDisplayLanguageForName(nameObj) {
  */
 async function getPreferredLanguage() {
   try {
+    const local = String(localStorage.getItem(LS_PREFERRED_LANGUAGE) || '').trim();
+    if (local) {
+      return local;
+    }
+  } catch (_) {
+    // ignore
+  }
+  try {
     const response = await fetch('/api/settings/');
     if (response.ok) {
       const settings = await response.json();
@@ -3000,7 +3099,25 @@ export async function loadConceptNames(conceptId, suffix = '') {
     const concept = await response.json();
     console.log('Loaded concept data:', concept);
 
-    const names = concept.names || [];
+    let names = concept.names || [];
+    if (!getShowCodeNamesSetting() && Array.isArray(names)) {
+      names = names.filter((n) => {
+        const type = (n?.type ?? n?.context?.name_type ?? 'NL');
+        return String(type || '').trim().toUpperCase() !== 'CODE';
+      });
+    }
+
+    if (getFilterNlNamesToPreferredLanguageSetting() && Array.isArray(names)) {
+      const preferredLanguage = await getPreferredLanguage();
+      names = names.filter((n) => {
+        const type = String(n?.type ?? n?.context?.name_type ?? 'NL').trim().toUpperCase();
+        if (type !== 'NL') {
+          return true;
+        }
+        const lang = String(n?.language ?? n?.lang ?? 'en-NZ').trim() || 'en-NZ';
+        return lang === preferredLanguage;
+      });
+    }
     console.log('Extracted names array:', names);
 
     await displayConceptNames(names, suffix);
