@@ -157,6 +157,7 @@ class InternalMCPChatOrchestrator:
         gateway: InternalMCPGateway,
         logger: logging.Logger | None = None,
         max_tool_invocations: int = 1,
+        tool_batch_cap: int = 4,
         default_gmail_profile: str | None = None,
         max_context_chars: int | None = None,
         max_tool_result_chars: int | None = None,
@@ -165,6 +166,7 @@ class InternalMCPChatOrchestrator:
         self._gateway = gateway
         self._logger = logger or logging.getLogger(__name__)
         self._max_tool_invocations = max(0, int(max_tool_invocations))
+        self._tool_batch_cap = max(1, int(tool_batch_cap))
         self._default_gmail_profile = default_gmail_profile
 
         # Vontology-backed missing-tool-call detector (lazy loaded)
@@ -211,6 +213,39 @@ class InternalMCPChatOrchestrator:
             },
             classifier_prompt_ids=self._TURN_SELECTOR_PROMPTS,
         )
+
+    def configure_execution_caps(
+        self,
+        *,
+        max_tool_invocations: int | None = None,
+        tool_batch_cap: int | None = None,
+    ) -> None:
+        """Update execution caps in-place.
+
+        This is intentionally lightweight so callers (e.g., /von/generate) can
+        apply persisted Settings without requiring a server restart.
+        """
+
+        if max_tool_invocations is not None:
+            try:
+                coerced = int(max_tool_invocations)
+            except Exception:
+                coerced = self._max_tool_invocations
+            # Safety clamp.
+            self._max_tool_invocations = max(0, min(50, coerced))
+
+        if tool_batch_cap is not None:
+            try:
+                coerced = int(tool_batch_cap)
+            except Exception:
+                coerced = self._tool_batch_cap
+            self._tool_batch_cap = max(1, min(50, coerced))
+
+    def get_execution_caps(self) -> dict[str, int]:
+        return {
+            "max_tool_invocations": int(self._max_tool_invocations),
+            "tool_batch_cap": int(self._tool_batch_cap),
+        }
 
     @staticmethod
     def _coerce_int(
@@ -2630,6 +2665,8 @@ class InternalMCPChatOrchestrator:
         first_iteration_structured = use_structured and has_valid_tool_call
 
         while iteration_count < self._max_tool_invocations:
+            remaining_tool_calls: list[_ToolCallRequest] = []
+
             # Skip extraction on first iteration if structured calling already did it
             if first_iteration_structured:
                 first_iteration_structured = False  # Only skip once
@@ -2697,9 +2734,10 @@ class InternalMCPChatOrchestrator:
             remaining = self._max_tool_invocations - iteration_count
             if remaining <= 0:
                 break
-            batch_cap = 4
+            batch_cap = max(1, int(getattr(self, "_tool_batch_cap", 4)))
             allowed = min(remaining, batch_cap)
             if len(tool_calls) > allowed:
+                remaining_tool_calls = tool_calls[allowed:]
                 tool_calls = tool_calls[:allowed]
 
             # Add the assistant JSON response once per batch.
@@ -2862,6 +2900,14 @@ class InternalMCPChatOrchestrator:
 
                 augmented_context.append({"role": "tool", "content": tool_payload})
                 tool_messages.append({"role": "tool", "content": tool_payload})
+
+            # If the model provided more tool calls than the batch cap, execute them
+            # (up to max_tool_invocations) before asking for a final answer. This
+            # prevents the assistant from prematurely narrating completion after only
+            # the first batch executes (JVNAUTOSCI-941).
+            if remaining_tool_calls and iteration_count < self._max_tool_invocations:
+                current_response = json.dumps(remaining_tool_calls)
+                continue
 
             follow_up_prompt = (
                 "Provide a final answer to the user now that the tool result is available. "

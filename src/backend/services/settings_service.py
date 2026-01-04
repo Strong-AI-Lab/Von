@@ -33,6 +33,10 @@ PREFERRED_LANGUAGE_SETTING_NAME = "preferred_language"
 FETCH_COUNTS_ON_LOAD_SETTING_NAME = "fetch_counts_on_load"
 DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME = "disable_remote_ollama_scan"
 
+# Internal MCP orchestrator caps (Settings → Agent Configuration)
+INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME = "internal_mcp_max_tool_invocations"
+INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME = "internal_mcp_tool_batch_cap"
+
 # Prefixes for contextual (scoped) LLM settings (Phase 2 scaffold)
 _ACTIVE_LLM_USER_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:user:"
 _ACTIVE_LLM_ORG_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:org:"
@@ -665,6 +669,74 @@ def set_disable_remote_ollama_scan(disabled: bool) -> bool:
         # Coerce permissively but persist canonical bool
         disabled = bool(disabled)
     return update_setting(DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME, disabled)
+
+
+def _coerce_int_setting(
+    value: Any,
+    *,
+    default: int,
+    min_value: int,
+    max_value: int,
+) -> int:
+    if value is None:
+        return default
+
+    parsed: int | None = None
+    if isinstance(value, bool):
+        # Avoid treating True/False as 1/0 for numeric settings.
+        parsed = None
+    elif isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float):
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = None
+    elif isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except Exception:
+            parsed = None
+
+    if parsed is None:
+        return default
+
+    return max(min_value, min(max_value, parsed))
+
+
+def get_internal_mcp_max_tool_invocations() -> int:
+    """Return the maximum number of internal MCP tool calls per chat turn.
+
+    Defaults to 8 when unset/invalid.
+    """
+
+    val = get_setting(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME)
+    return _coerce_int_setting(val, default=8, min_value=0, max_value=50)
+
+
+def set_internal_mcp_max_tool_invocations(value: Any) -> bool:
+    """Persist the max internal MCP tool invocations (canonical int, clamped)."""
+
+    coerced = _coerce_int_setting(value, default=8, min_value=0, max_value=50)
+    return update_setting(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME, coerced)
+
+
+def get_internal_mcp_tool_batch_cap() -> int:
+    """Return the maximum number of tool calls executed per batch.
+
+    This is a guardrail against very large tool-call lists per iteration.
+    Defaults to 4 when unset/invalid.
+    """
+
+    val = get_setting(INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME)
+    return _coerce_int_setting(val, default=4, min_value=1, max_value=50)
+
+
+def set_internal_mcp_tool_batch_cap(value: Any) -> bool:
+    """Persist the tool-call batch cap (canonical int, clamped)."""
+
+    coerced = _coerce_int_setting(value, default=4, min_value=1, max_value=50)
+    return update_setting(INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME, coerced)
 
 
 # Ollama hosts settings functions

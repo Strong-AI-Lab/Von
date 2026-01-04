@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any, List
 
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema
@@ -686,9 +686,9 @@ def _add_relationship(**kwargs):
 
         # Determine if this is a text predicate (binary_text_predicate instance)
         is_text_predicate = False
-        if predicate.startswith("#V#"):
+        if predicate_str.startswith("#V#"):
             pred_doc = repo.find_one(
-                {"concept_id": predicate}, {"relationships.is_an_instance_of": 1}
+                {"concept_id": predicate_str}, {"relationships.is_an_instance_of": 1}
             )
             if pred_doc:
                 instance_of = pred_doc.get("relationships", {}).get(
@@ -702,7 +702,7 @@ def _add_relationship(**kwargs):
         if is_text_predicate:
             result = upsert_text_for_concept(
                 subject_concept_id=source_id,
-                predicate=predicate,
+                predicate=predicate_str,
                 text=target,
                 lang="en",
                 provenance={"source": "add_relationship"},
@@ -711,7 +711,7 @@ def _add_relationship(**kwargs):
                 "success": True,
                 "relationship_type": "text_relation",
                 "source_id": source_id,
-                "predicate": predicate,
+                "predicate": predicate_str,
                 "target": target,
                 "text_value_id": str(result.get("text_value_id")),
                 "relation_id": str(result.get("relation_id")),
@@ -736,12 +736,7 @@ def _add_relationship(**kwargs):
             "subtype": "has_subtype",
             "instance": "has_instance",
         }
-        rel_kind = predicate_map.get(predicate, predicate)
-
-        # Canonicalise known legacy predicate ids.
-        # JVNAUTOSCI-913: todo membership was previously represented via '#V#has_item'.
-        if rel_kind == "#V#has_item":
-            rel_kind = "#V#has_todo_item"
+        rel_kind = predicate_map.get(predicate_str, predicate_str)
 
         # Guardrail: concept-to-concept relationship predicates must be either:
         # - one of the structural relationship kinds (is_a_type_of, has_subtype, ...), or
@@ -794,48 +789,129 @@ def _add_relationship(**kwargs):
                 details={"predicate_input": predicate, "predicate_canonical": rel_kind},
             )
 
-        # Read current relationships
+        # For structural predicates, maintain inverse consistency like the HTTP API.
+        inverse_map = {
+            "is_a_type_of": ("has_subtype", target, source_id),
+            "has_subtype": ("is_a_type_of", target, source_id),
+            "is_an_instance_of": ("has_instance", target, source_id),
+            "has_instance": ("is_an_instance_of", target, source_id),
+            "related_to": ("related_to", target, source_id),
+        }
+        has_inverse = isinstance(rel_kind, str) and rel_kind in inverse_map
+
+        # Ensure relationship storage is list-typed for the forward predicate.
+        # This prevents $addToSet failures when legacy data stored a single string.
+        repo._ensure_relationship_array(source_id, rel_kind)
+
+        forward_exists_before = False
         existing = (
             repo.find_one({"concept_id": source_id}, {f"relationships.{rel_kind}": 1})
             or {}
         )
         rels = existing.get("relationships") or {}
         curr = rels.get(rel_kind)
+        if isinstance(curr, list):
+            forward_exists_before = target in curr
+        elif isinstance(curr, str):
+            forward_exists_before = target == curr
 
-        # Normalize to array
-        if isinstance(curr, str):
-            curr_list = [curr] if curr else []
-        elif isinstance(curr, list):
-            curr_list = curr
-        else:
-            curr_list = []
-
-        # Check if already exists
-        if target in curr_list:
-            return {
-                "success": True,
-                "message": "Relationship already exists",
-                "source_id": source_id,
-                "predicate": rel_kind,
-                "target": target,
-                "already_existed": True,
-            }
-
-        # Add the relationship
-        update_result = repo.update_one(
+        forward_update = repo.update_one(
             {"concept_id": source_id},
             {"$addToSet": {f"relationships.{rel_kind}": target}},
         )
 
-        if update_result.modified_count > 0 or update_result.matched_count > 0:
-            return {
-                "success": True,
-                "source_id": source_id,
-                "predicate": rel_kind,
-                "target": target,
-                "added": update_result.modified_count > 0,
-            }
-        else:
+        inverse_payload = None
+        inverse_failed = None
+        if has_inverse:
+            inv_kind, inv_src, inv_tgt = inverse_map[rel_kind]
+            try:
+                repo._ensure_relationship_array(inv_src, inv_kind)
+                inverse_update = repo.update_one(
+                    {"concept_id": inv_src},
+                    {"$addToSet": {f"relationships.{inv_kind}": inv_tgt}},
+                )
+                if (
+                    inverse_update.matched_count > 0
+                    and inverse_update.modified_count == 0
+                ):
+                    # Defensive verification: if we didn't modify anything, ensure the
+                    # inverse edge is actually present (it may have already existed or
+                    # been added concurrently).
+                    inv_existing = (
+                        repo.find_one(
+                            {"concept_id": inv_src},
+                            {f"relationships.{inv_kind}": 1},
+                        )
+                        or {}
+                    )
+                    inv_rels = inv_existing.get("relationships") or {}
+                    inv_curr = inv_rels.get(inv_kind)
+                    inverse_present_after = False
+                    if isinstance(inv_curr, list):
+                        inverse_present_after = inv_tgt in inv_curr
+                    elif isinstance(inv_curr, str):
+                        inverse_present_after = inv_tgt == inv_curr
+                    if not inverse_present_after:
+                        inverse_failed = {
+                            "predicate": inv_kind,
+                            "source_id": inv_src,
+                            "target": inv_tgt,
+                            "exception_type": "InverseNoOp",
+                            "error": "Inverse relationship update did not persist",
+                        }
+                inverse_payload = {
+                    "predicate": inv_kind,
+                    "source_id": inv_src,
+                    "target": inv_tgt,
+                    "added": inverse_update.modified_count > 0,
+                    "matched": inverse_update.matched_count > 0,
+                }
+            except Exception as exc:
+                inverse_failed = {
+                    "predicate": inv_kind,
+                    "source_id": inv_src,
+                    "target": inv_tgt,
+                    "exception_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+
+        forward_ok = forward_update.matched_count > 0
+        forward_added = forward_update.modified_count > 0
+
+        if forward_ok and not forward_added and not forward_exists_before:
+            # Defensive verification: if we didn't modify anything and the edge did
+            # not appear to exist pre-write, confirm the edge exists post-write.
+            # This prevents returning success when the update is effectively a no-op.
+            verify = (
+                repo.find_one(
+                    {"concept_id": source_id},
+                    {f"relationships.{rel_kind}": 1},
+                )
+                or {}
+            )
+            verify_rels = verify.get("relationships") or {}
+            verify_curr = verify_rels.get(rel_kind)
+            present_after = False
+            if isinstance(verify_curr, list):
+                present_after = target in verify_curr
+            elif isinstance(verify_curr, str):
+                present_after = target == verify_curr
+            if present_after:
+                forward_exists_before = True
+            else:
+                return _err(
+                    "relationship_add_noop",
+                    "Relationship update did not persist",
+                    details={
+                        "source_id": source_id,
+                        "predicate": rel_kind,
+                        "target": target,
+                        "matched": forward_update.matched_count > 0,
+                        "modified": forward_update.modified_count > 0,
+                    },
+                )
+
+        if not forward_ok:
             return _err(
                 "relationship_add_failed",
                 "Failed to add relationship",
@@ -845,6 +921,36 @@ def _add_relationship(**kwargs):
                     "target": target,
                 },
             )
+
+        if inverse_failed:
+            return _err(
+                "relationship_add_partial_failure",
+                "Relationship added, but inverse relationship update failed",
+                details={
+                    "forward": {
+                        "source_id": source_id,
+                        "predicate": rel_kind,
+                        "target": target,
+                        "added": forward_added,
+                        "already_existed": bool(
+                            forward_exists_before and not forward_added
+                        ),
+                    },
+                    "inverse_failed": inverse_failed,
+                },
+            )
+
+        response: dict[str, Any] = {
+            "success": True,
+            "source_id": source_id,
+            "predicate": rel_kind,
+            "target": target,
+            "added": forward_added,
+            "already_existed": bool(forward_exists_before and not forward_added),
+        }
+        if inverse_payload:
+            response["inverse"] = inverse_payload
+        return response
 
     except Exception as e:
         return _err(
@@ -947,11 +1053,6 @@ def _remove_relationship(**kwargs):
             "instance": "has_instance",
         }
         rel_kind = predicate_map.get(predicate, predicate)
-
-        # Canonicalise known legacy predicate ids.
-        # JVNAUTOSCI-913: todo membership was previously represented via '#V#has_item'.
-        if rel_kind == "#V#has_item":
-            rel_kind = "#V#has_todo_item"
 
         # Determine if this is a text predicate (binary_text_predicate instance)
         if isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
@@ -4113,6 +4214,7 @@ def _chat_introspect(
 
     gateway_enabled = None
     orchestrator_max_tool_invocations = None
+    orchestrator_tool_batch_cap = None
     if include_runtime_status:
         try:
             from flask import current_app
@@ -4123,9 +4225,11 @@ def _chat_introspect(
             orchestrator_max_tool_invocations = getattr(
                 orchestrator, "_max_tool_invocations", None
             )
+            orchestrator_tool_batch_cap = getattr(orchestrator, "_tool_batch_cap", None)
         except Exception:
             gateway_enabled = None
             orchestrator_max_tool_invocations = None
+            orchestrator_tool_batch_cap = None
 
     # Tool-guidance fingerprint (stable-ish) without dumping full text by default
     tool_guidance_text = ""
@@ -4188,6 +4292,7 @@ def _chat_introspect(
         "tool_guidance_preview": tool_guidance_preview,
         "gateway_enabled": gateway_enabled,
         "orchestrator_max_tool_invocations": orchestrator_max_tool_invocations,
+        "orchestrator_tool_batch_cap": orchestrator_tool_batch_cap,
     }
 
 
@@ -4346,6 +4451,7 @@ def build_default_catalogue() -> MethodCatalogue:
                     "tool_guidance_preview": (str, type(None)),
                     "gateway_enabled": (bool, type(None)),
                     "orchestrator_max_tool_invocations": (int, type(None)),
+                    "orchestrator_tool_batch_cap": (int, type(None)),
                 },
                 optional={"error": str},
                 allow_unknown=False,
