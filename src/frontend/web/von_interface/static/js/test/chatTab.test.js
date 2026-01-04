@@ -1,4 +1,5 @@
 import {
+    __testOnly_convertInlineQuotedStrongSegmentsToButtons,
     __testOnly_convertQuotedInstructionBlockquotesToButtons,
     __testOnly_convertReplyOptionsListsToButtons,
     __testOnly_deriveLlmDebugWarnings,
@@ -260,6 +261,74 @@ describe('chat insert prompt button behaviour', () => {
 
         expect(String(promptInput.value)).toContain('Do the thing');
         expect(sendButton.click).toHaveBeenCalledTimes(0);
+    });
+
+    test('supports blockquotes with plain quoted text (no strong)', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = '<blockquote><p>“Create the full representation as specified.”</p></blockquote>';
+        __testOnly_convertQuotedInstructionBlockquotesToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+        expect(btn.textContent).toBe('Create the full representation as specified.');
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+        expect(String(promptInput.value)).toContain('Create the full representation as specified.');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+
+    test('supports unquoted strong blockquote confirmation prompt', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML =
+            '<blockquote><p><strong>Proceed with creation using verified parents and contribution‑based modelling?</strong></p></blockquote>';
+        __testOnly_convertQuotedInstructionBlockquotesToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+        expect(btn.textContent).toBe('Proceed with creation using verified parents and contribution‑based modelling?');
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(String(promptInput.value)).toContain('Proceed with creation using verified parents and contribution‑based modelling?');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('chat inline insert prompt button behaviour', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+        `;
+    });
+
+    test('inline quoted strong (e.g. “Yes”) becomes an insert button', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = '<p>If you say <strong>“Yes”</strong>, I will do the thing.</p>';
+        __testOnly_convertInlineQuotedStrongSegmentsToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+        expect(btn.textContent).toBe('Yes');
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(String(promptInput.value)).toContain('Yes');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
     });
 });
 

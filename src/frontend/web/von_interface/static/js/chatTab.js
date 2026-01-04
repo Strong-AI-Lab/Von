@@ -174,6 +174,40 @@ function extractBoldQuotedInstruction(text) {
     return instruction;
 }
 
+function extractQuotedInstruction(text) {
+    const value = String(text ?? '').trim();
+    if (!value) return null;
+
+    // Support curly or straight quotes.
+    const m = value.match(/^(?:“|")(.+?)(?:”|")\s*$/);
+    if (!m) return null;
+
+    const instruction = String(m[1] ?? '').trim();
+    if (!instruction) return null;
+    return instruction;
+}
+
+function isAllowedUnquotedBlockquoteInstruction(text) {
+    const value = String(text ?? '').trim();
+    if (!value) return false;
+
+    // Purposefully narrow: broken-windows fix for known UI phrasing.
+    // (Avoid turning arbitrary bolded blockquotes into buttons.)
+    const compact = value.replace(/\s+/g, ' ');
+    return /^Proceed with creation using verified parents and contribution[-‑–—]based modelling\?$/i.test(compact);
+}
+
+function shouldButtonifyInlineQuotedInstruction(instruction) {
+    const value = String(instruction ?? '').trim();
+    if (!value) return false;
+    const compact = value.replace(/\s+/g, ' ');
+
+    if (/^(yes|no)$/i.test(compact)) return true;
+    if (/^Create the core paper representation now \(paper \+ authors \+ core contribution only\)\.?$/i.test(compact)) return true;
+    if (/^Create the full representation as specified\.?$/i.test(compact)) return true;
+    return false;
+}
+
 function extractBoldQuotedInstructionFromStrong(strongEl) {
     if (!strongEl) return null;
 
@@ -432,26 +466,52 @@ function convertQuotedInstructionBlockquotesToButtons(root) {
 
             const pElementChildren = Array.from(p.children ?? []);
             const strongCandidates = pElementChildren.filter((el) => el && el.tagName === 'STRONG');
-            if (strongCandidates.length !== 1) continue;
-            const strong = strongCandidates[0];
-
-            // Allow harmless formatting elements that do not contribute text.
-            if (pElementChildren.some((el) => el !== strong && el.tagName !== 'BR')) {
-                continue;
-            }
-
-            // No non-whitespace text nodes inside the paragraph.
-            const pNodes = Array.from(p.childNodes ?? []);
-            if (pNodes.some((n) => n.nodeType === Node.TEXT_NODE && String(n.textContent ?? '').trim())) {
-                continue;
-            }
-
-            const instruction = extractBoldQuotedInstructionFromStrong(strong);
-            if (!instruction) continue;
-
-            // Ensure the blockquote text is exactly the quoted strong text (no extra content).
             const normalise = (s) => String(s ?? '').trim().replace(/\s+/g, ' ');
-            if (normalise(block.textContent) !== normalise(strong.textContent)) continue;
+
+            let instruction = null;
+
+            if (strongCandidates.length === 1) {
+                const strong = strongCandidates[0];
+
+                // Allow harmless formatting elements that do not contribute text.
+                if (pElementChildren.some((el) => el !== strong && el.tagName !== 'BR')) {
+                    continue;
+                }
+
+                // No non-whitespace text nodes inside the paragraph.
+                const pNodes = Array.from(p.childNodes ?? []);
+                if (pNodes.some((n) => n.nodeType === Node.TEXT_NODE && String(n.textContent ?? '').trim())) {
+                    continue;
+                }
+
+                instruction = extractBoldQuotedInstructionFromStrong(strong);
+                if (!instruction) {
+                    const candidate = normalise(strong.textContent);
+                    if (isAllowedUnquotedBlockquoteInstruction(candidate)) {
+                        instruction = candidate;
+                    }
+                }
+                if (!instruction) continue;
+
+                // Ensure the blockquote text is exactly the expected paragraph text (no extra content).
+                if (normalise(block.textContent) !== normalise(p.textContent)) continue;
+            } else {
+                // Also support plain quoted text without bold:
+                // <blockquote><p>“...”</p></blockquote>
+                // Allow only <br> tags and no other nested markup.
+                if (pElementChildren.some((el) => el && el.tagName !== 'BR')) {
+                    continue;
+                }
+
+                const pNodes = Array.from(p.childNodes ?? []);
+                if (pNodes.some((n) => n.nodeType === Node.ELEMENT_NODE && n.tagName && n.tagName !== 'BR')) {
+                    continue;
+                }
+
+                instruction = extractQuotedInstruction(p.textContent);
+                if (!instruction) continue;
+                if (normalise(block.textContent) !== normalise(p.textContent)) continue;
+            }
 
             const btn = document.createElement('button');
             btn.type = 'button';
@@ -478,6 +538,53 @@ function convertQuotedInstructionBlockquotesToButtons(root) {
             wrapper.className = 'chat-insert-prompt-wrapper';
             wrapper.appendChild(btn);
             block.replaceWith(wrapper);
+        } catch (_) {
+            // Ignore detached nodes or DOM mutation races.
+        }
+    }
+}
+
+function convertInlineQuotedStrongSegmentsToButtons(root) {
+    if (!root || !root.querySelectorAll) return;
+
+    const strongEls = Array.from(root.querySelectorAll('strong'));
+    for (const strong of strongEls) {
+        try {
+            if (!strong || !strong.closest) continue;
+            if (strong.closest('pre, code, a, button')) continue;
+            if (strong.closest('blockquote')) continue;
+            if (strong.closest('ul, ol')) continue;
+            if (strong.closest('.chat-insert-prompt-wrapper')) continue;
+
+            const instruction = extractBoldQuotedInstructionFromStrong(strong);
+            if (!instruction) continue;
+            if (!shouldButtonifyInlineQuotedInstruction(instruction)) continue;
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'chat-insert-prompt-button';
+            btn.textContent = instruction;
+            btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
+            btn.setAttribute('aria-label', `Insert into chat prompt: ${instruction}`);
+            btn.addEventListener('click', (e) => {
+                try {
+                    e.preventDefault();
+                    e.stopPropagation();
+                } catch (_) {
+                    // Ignore.
+                }
+                insertTextIntoChatPrompt(instruction);
+
+                const shiftHeld = !!(e && e.shiftKey);
+                if (!shiftHeld) {
+                    submitChatPromptImmediately();
+                }
+            });
+
+            const wrapper = document.createElement('span');
+            wrapper.className = 'chat-insert-prompt-inline-wrapper';
+            wrapper.appendChild(btn);
+            strong.replaceWith(wrapper);
         } catch (_) {
             // Ignore detached nodes or DOM mutation races.
         }
@@ -565,6 +672,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
 
     container.innerHTML = html;
     convertQuotedInstructionBlockquotesToButtons(container);
+    convertInlineQuotedStrongSegmentsToButtons(container);
     convertReplyOptionsListsToButtons(container);
     try {
         container.dataset.renderMode = 'rendered';
@@ -613,6 +721,7 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
     if (cachedHtml) {
         messageTextEl.innerHTML = cachedHtml;
         convertQuotedInstructionBlockquotesToButtons(messageTextEl);
+        convertInlineQuotedStrongSegmentsToButtons(messageTextEl);
         cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
         hydrateChatConceptCartouches(messageTextEl);
         return;
@@ -967,6 +1076,11 @@ export function __testOnly_convertQuotedInstructionBlockquotesToButtons(root) {
 // Export for testing.
 export function __testOnly_convertReplyOptionsListsToButtons(root) {
     convertReplyOptionsListsToButtons(root);
+}
+
+// Export for testing.
+export function __testOnly_convertInlineQuotedStrongSegmentsToButtons(root) {
+    convertInlineQuotedStrongSegmentsToButtons(root);
 }
 
 function deriveLlmDebugWarnings(debugData) {

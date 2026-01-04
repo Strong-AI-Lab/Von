@@ -38,4 +38,50 @@ describe('nameSelection', () => {
 
         expect(selectBestNameForContext(names, 'en-NZ')).toBe('country');
     });
+
+    test('ignores technical Von ID CODE names', () => {
+        const names = [
+            { name: '#V#person', language: 'en-NZ', type: 'CODE' },
+            { name: 'Person', language: 'en-NZ', type: 'NL' }
+        ];
+
+        expect(selectBestNameForContext(names, 'en-NZ')).toBe('Person');
+    });
+
+    test('ignores UUID/GUID CODE names (including vonGUID language)', () => {
+        const names = [
+            { name: '2f1c3c9b-7b9c-4d1a-9b79-0c3d1a2b3c4d', language: 'en-NZ', type: 'CODE' },
+            { name: '2f1c3c9b-7b9c-4d1a-9b79-0c3d1a2b3c4d', language: 'vonGUID', type: 'CODE' },
+            { name: 'Human', language: 'en-NZ', type: 'NL' }
+        ];
+
+        expect(selectBestNameForContext(names, 'en-NZ')).toBe('Human');
+    });
+
+    test('ignores ObjectId-like CODE names (24 hex) when NL exists', () => {
+        const names = [
+            { name: '6959bf0c1de296491ab69cb6', language: 'en-NZ', type: 'CODE' },
+            { name: 'Human', language: 'en-NZ', type: 'NL' }
+        ];
+
+        expect(selectBestNameForContext(names, 'en-NZ')).toBe('Human');
+    });
+
+    test('falls back to ID-von CODE before GUID-like CODE', () => {
+        const names = [
+            { name: '#V#thing', language: 'en-NZ', type: 'CODE' },
+            { name: '2f1c3c9b-7b9c-4d1a-9b79-0c3d1a2b3c4d', language: 'en-NZ', type: 'CODE' }
+        ];
+
+        expect(selectBestNameForContext(names, 'en-NZ')).toBe('#V#thing');
+    });
+
+    test('falls back to ID-von CODE before ObjectId-like CODE', () => {
+        const names = [
+            { name: '#V#thing', language: 'en-NZ', type: 'CODE' },
+            { name: '6959bf0c1de296491ab69cb6', language: 'en-NZ', type: 'CODE' }
+        ];
+
+        expect(selectBestNameForContext(names, 'en-NZ')).toBe('#V#thing');
+    });
 });
