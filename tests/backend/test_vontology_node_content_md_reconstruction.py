@@ -25,6 +25,9 @@ def test_reconstructed_md_content_omits_boilerplate_metadata_fields():
 
     concept_id = "#V#verified_entity_representation_agentic_workflow_design"
 
+    # Idempotence: this test DB can be persistent between runs.
+    concepts.delete_one({"concept_id": concept_id})
+
     concepts.insert_one(
         {
             "concept_id": concept_id,
@@ -67,6 +70,9 @@ def test_reconstruct_md_false_preserves_missing_md_content():
         pytest.skip("MongoDB not configured for this test run")
 
     concept_id = "#V#md_content_missing_reconstruct_md_false"
+
+    # Idempotence: this test DB can be persistent between runs.
+    concepts.delete_one({"concept_id": concept_id})
 
     concepts.insert_one(
         {
