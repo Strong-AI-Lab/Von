@@ -1340,7 +1340,10 @@ class InternalMCPChatOrchestrator:
         if not isinstance(response, str):
             return False
 
-        # Look for ```json or ``` fences
+        # Look for ```json or ``` fences.
+        # NOTE: Some models emit an opening fence but omit the closing fence.
+        # We attempt a safe recovery for that failure mode by treating the rest
+        # of the response as the fenced content.
         fence_patterns = [
             ("```json\n", "\n```"),
             ("```\n", "\n```"),
@@ -1352,11 +1355,16 @@ class InternalMCPChatOrchestrator:
                 continue
             content_start = start + len(open_fence)
             end = response.find(close_fence, content_start)
+
             if end == -1:
+                fenced_content = response[content_start:].strip()
+            else:
+                fenced_content = response[content_start:end].strip()
+
+            if not fenced_content:
                 continue
 
-            fenced_content = response[content_start:end].strip()
-            if not fenced_content:
+            if not (fenced_content.startswith("{") or fenced_content.startswith("[")):
                 continue
 
             # Try to parse as JSON
@@ -1487,6 +1495,10 @@ class InternalMCPChatOrchestrator:
                                 close_line_end = len(fenced)
                             post_fence_trailing = fenced[close_line_end:].strip()
                             raw = fenced[open_line_end + 1 : close_idx].strip()
+                        else:
+                            # Unterminated fence recovery: treat the remainder of the
+                            # response as the fenced JSON payload.
+                            raw = fenced[open_line_end + 1 :].strip()
 
         looks_like_tool_call = any(
             token in raw
@@ -1669,6 +1681,10 @@ class InternalMCPChatOrchestrator:
                                 close_line_end = len(fenced)
                             post_fence_trailing = fenced[close_line_end:].strip()
                             raw = fenced[open_line_end + 1 : close_idx].strip()
+                        else:
+                            # Unterminated fence recovery: treat the remainder of the
+                            # response as the fenced JSON payload.
+                            raw = fenced[open_line_end + 1 :].strip()
 
         looks_like_tool_call = any(
             token in raw
@@ -2046,7 +2062,9 @@ class InternalMCPChatOrchestrator:
     def _missing_tool_call_retry_prompt(self) -> str:
         return (
             "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
-            "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects (no prose, no Markdown)."
+            "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects. "
+            "No prose. No Markdown. Do NOT wrap the JSON in ``` fences (including ```json). "
+            "The first character MUST be an opening curly brace or an opening square bracket, and the response must contain only valid JSON."
         )
 
     def execute_workflow(

@@ -21,7 +21,12 @@ from typing import Dict, List, Any, Optional
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.backend.db.mongo_client import get_db, USE_MOCK_DB, MONGO_URI, DATABASE_NAME
+from src.backend.db.mongo_client import (
+    get_db,
+    get_configured_database_name,
+    is_mock_db_enabled,
+    MONGO_URI,
+)
 
 
 def print_banner():
@@ -34,7 +39,7 @@ def print_banner():
 
 def get_database_info() -> Dict[str, Any]:
     """Get current database connection info."""
-    if USE_MOCK_DB:
+    if is_mock_db_enabled():
         return {
             "type": "mock",
             "uri": "in-memory",
@@ -61,7 +66,7 @@ def get_database_info() -> Dict[str, Any]:
     return {
         "type": db_type,
         "uri": redacted_uri,
-        "database": DATABASE_NAME,
+        "database": get_configured_database_name(),
         "connected": False,  # Will be set by connection test
     }
 
@@ -81,7 +86,7 @@ def test_connection() -> bool:
         if db is None:
             raise RuntimeError("Database connection unavailable")
 
-        if USE_MOCK_DB:
+        if is_mock_db_enabled():
             print("✅ Connected to MOCK database (in-memory)")
             print("   Note: Data will not persist after script exits")
             return True

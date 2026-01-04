@@ -210,6 +210,25 @@ def test_extract_tool_calls_accepts_fenced_json_array_batch():
     assert len(calls) == 2
 
 
+def test_extract_tool_calls_accepts_unterminated_fenced_json_array_batch():
+    text = (
+        "```json\n"
+        '[{"action":"call_tool","tool":"test","payload":{}},'
+        '{"action":"call_tool","tool":"test","payload":{}}]\n'
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    calls = orchestrator._extract_tool_calls("".join(text))
+    assert calls is not None
+    assert len(calls) == 2
+
+
+def test_interpret_model_turn_detects_unterminated_fenced_tool_call_json():
+    text = '```json\n{"action":"call_tool","tool":"test","payload":{}}\n'
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    interpretation = orchestrator._interpret_model_turn(text)
+    assert interpretation.fenced_tool_call_json
+
+
 def test_extract_tool_calls_accepts_missing_action_when_tool_is_known_in_batch():
     text = '[{"tool": "test", "payload": {}}, {"tool": "test", "payload": {"x": 2}}]'
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
