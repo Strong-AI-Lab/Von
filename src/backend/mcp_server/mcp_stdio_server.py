@@ -2239,8 +2239,22 @@ async def _handle_add_relationship(arguments: dict[str, Any]) -> list[TextConten
     predicate = arguments.get("predicate")
     target = arguments.get("target")
     if not source_id or not predicate or not target:
+        missing: list[str] = []
+        if not source_id:
+            missing.append("source_id")
+        if not predicate:
+            missing.append("predicate")
+        if not target:
+            missing.append("target")
         return [
-            _json_error("Missing required parameters: source_id, predicate, and target")
+            _json_text(
+                {
+                    "success": False,
+                    "error": "Missing required parameters: source_id, predicate, and target",
+                    "error_code": "missing_parameter",
+                    "error_details": {"missing": missing},
+                }
+            )
         ]
     try:
         result = _add_relationship(
@@ -2248,7 +2262,16 @@ async def _handle_add_relationship(arguments: dict[str, Any]) -> list[TextConten
         )
         return [_json_text(result)]
     except Exception as exc:
-        return [_json_error(f"Failed to add relationship: {str(exc)}")]
+        return [
+            _json_text(
+                {
+                    "success": False,
+                    "error": f"Failed to add relationship: {str(exc)}",
+                    "error_code": "exception",
+                    "error_details": {"exception_type": type(exc).__name__},
+                }
+            )
+        ]
 
 
 async def _handle_remove_relationship(arguments: dict[str, Any]) -> list[TextContent]:
@@ -2256,8 +2279,22 @@ async def _handle_remove_relationship(arguments: dict[str, Any]) -> list[TextCon
     predicate = arguments.get("predicate")
     target = arguments.get("target")
     if not source_id or not predicate or not target:
+        missing: list[str] = []
+        if not source_id:
+            missing.append("source_id")
+        if not predicate:
+            missing.append("predicate")
+        if not target:
+            missing.append("target")
         return [
-            _json_error("Missing required parameters: source_id, predicate, and target")
+            _json_text(
+                {
+                    "success": False,
+                    "error": "Missing required parameters: source_id, predicate, and target",
+                    "error_code": "missing_parameter",
+                    "error_details": {"missing": missing},
+                }
+            )
         ]
     try:
         result = _remove_relationship(
@@ -2265,7 +2302,16 @@ async def _handle_remove_relationship(arguments: dict[str, Any]) -> list[TextCon
         )
         return [_json_text(result)]
     except Exception as exc:
-        return [_json_error(f"Failed to remove relationship: {str(exc)}")]
+        return [
+            _json_text(
+                {
+                    "success": False,
+                    "error": f"Failed to remove relationship: {str(exc)}",
+                    "error_code": "exception",
+                    "error_details": {"exception_type": type(exc).__name__},
+                }
+            )
+        ]
 
 
 async def _handle_delete_concept(arguments: dict[str, Any]) -> list[TextContent]:

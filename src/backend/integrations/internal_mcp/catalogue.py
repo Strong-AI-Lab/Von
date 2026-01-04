@@ -592,30 +592,67 @@ def _add_relationship(**kwargs):
     from ...db.repositories.concepts_repository import ConceptsRepository
     from ...services.text_value_service import upsert_text_for_concept
 
+    def _err(
+        code: str,
+        message: str,
+        *,
+        details: dict | None = None,
+    ) -> dict:
+        # Keep backward compatibility: preserve the top-level 'error' string.
+        return {
+            "success": False,
+            "error": message,
+            "error_code": code,
+            "error_details": details or {},
+        }
+
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
     target = kwargs.get("target")
 
     if not source_id:
-        return {"success": False, "error": "Missing 'source_id' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'source_id' parameter",
+            details={"missing": ["source_id"]},
+        )
     if not predicate:
-        return {"success": False, "error": "Missing 'predicate' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'predicate' parameter",
+            details={"missing": ["predicate"]},
+        )
     if not target:
-        return {"success": False, "error": "Missing 'target' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'target' parameter",
+            details={"missing": ["target"]},
+        )
 
     if source_id == target:
-        return {"success": False, "error": "Source and target cannot be the same"}
+        return _err(
+            "relationship_self_reference",
+            "Source and target cannot be the same",
+            details={"source_id": source_id, "target": target},
+        )
 
     try:
         repo = ConceptsRepository
 
+        from ...vontology.code_concepts_registry import (
+            build_virtual_concept_doc,
+            is_code_concept_id,
+        )
+        from ...vontology.utils_vontology import is_predicate
+
         # Check if source exists
         src = repo.find_one({"concept_id": source_id})
         if not src:
-            return {
-                "success": False,
-                "error": f"Source concept '{source_id}' not found",
-            }
+            return _err(
+                "source_concept_not_found",
+                f"Source concept '{source_id}' not found",
+                details={"role": "source", "concept_id": source_id},
+            )
 
         # Common text predicates are frequently provided either as plain predicate IDs
         # (e.g. 'hasContent') or V-prefixed IDs (e.g. '#V#hasContent'). Treat these
@@ -684,7 +721,11 @@ def _add_relationship(**kwargs):
         # Check if target concept exists
         tgt = repo.find_one({"concept_id": target})
         if not tgt:
-            return {"success": False, "error": f"Target concept '{target}' not found"}
+            return _err(
+                "target_concept_not_found",
+                f"Target concept '{target}' not found",
+                details={"role": "target", "concept_id": target},
+            )
 
         # Map common predicate names to database field names
         predicate_map = {
@@ -696,6 +737,62 @@ def _add_relationship(**kwargs):
             "instance": "has_instance",
         }
         rel_kind = predicate_map.get(predicate, predicate)
+
+        # Canonicalise known legacy predicate ids.
+        # JVNAUTOSCI-913: todo membership was previously represented via '#V#has_item'.
+        if rel_kind == "#V#has_item":
+            rel_kind = "#V#has_todo_item"
+
+        # Guardrail: concept-to-concept relationship predicates must be either:
+        # - one of the structural relationship kinds (is_a_type_of, has_subtype, ...), or
+        # - a Vontology predicate concept id (starts with #V# and exists as a predicate).
+        from ...db.repositories.concepts_repository import RELATIONSHIP_KINDS
+
+        if isinstance(rel_kind, str) and rel_kind in RELATIONSHIP_KINDS:
+            pass
+        elif isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
+            pred_doc = repo.find_one(
+                {"concept_id": rel_kind}, {"concept_id": 1, "relationships": 1}
+            )
+            if pred_doc is None and is_code_concept_id(rel_kind):
+                pred_doc = build_virtual_concept_doc(rel_kind)
+            if pred_doc is None:
+                return _err(
+                    "predicate_concept_not_found",
+                    (
+                        f"Predicate concept '{rel_kind}' not found. "
+                        "Create it as a predicate in the Vontology (e.g. as an instance of #V#predicate) "
+                        "before using it as a relationship."
+                    ),
+                    details={
+                        "role": "predicate",
+                        "predicate": rel_kind,
+                        "predicate_input": predicate,
+                    },
+                )
+            if not is_predicate(pred_doc):
+                return _err(
+                    "predicate_concept_not_typed",
+                    (
+                        f"Concept '{rel_kind}' exists but is not typed as a predicate. "
+                        "Predicates must be instances of #V#predicate (or a predicate subtype)."
+                    ),
+                    details={
+                        "role": "predicate",
+                        "predicate": rel_kind,
+                        "predicate_input": predicate,
+                        "required_instance_of": "#V#predicate",
+                    },
+                )
+        else:
+            return _err(
+                "invalid_relationship_predicate",
+                (
+                    "Invalid relationship predicate. For concept-to-concept relationships, "
+                    "use a structural predicate (e.g. 'typeOf', 'instance_of') or a '#V#...' predicate concept id."
+                ),
+                details={"predicate_input": predicate, "predicate_canonical": rel_kind},
+            )
 
         # Read current relationships
         existing = (
@@ -739,36 +836,106 @@ def _add_relationship(**kwargs):
                 "added": update_result.modified_count > 0,
             }
         else:
-            return {"success": False, "error": "Failed to add relationship"}
+            return _err(
+                "relationship_add_failed",
+                "Failed to add relationship",
+                details={
+                    "source_id": source_id,
+                    "predicate": rel_kind,
+                    "target": target,
+                },
+            )
 
     except Exception as e:
-        return {"success": False, "error": f"Exception: {str(e)}"}
+        return _err(
+            "exception",
+            f"Exception: {str(e)}",
+            details={
+                "source_id": source_id,
+                "predicate": predicate,
+                "target": target,
+                "exception_type": type(e).__name__,
+            },
+        )
 
 
 def _remove_relationship(**kwargs):
     """Remove a relationship between two concepts. Text relations removal is not supported here."""
     from ...db.repositories.concepts_repository import ConceptsRepository
 
+    def _err(
+        code: str,
+        message: str,
+        *,
+        details: dict | None = None,
+    ) -> dict:
+        # Keep backward compatibility: preserve the top-level 'error' string.
+        return {
+            "success": False,
+            "error": message,
+            "error_code": code,
+            "error_details": details or {},
+        }
+
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
     target = kwargs.get("target")
 
     if not source_id:
-        return {"success": False, "error": "Missing 'source_id' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'source_id' parameter",
+            details={"missing": ["source_id"]},
+        )
     if not predicate:
-        return {"success": False, "error": "Missing 'predicate' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'predicate' parameter",
+            details={"missing": ["predicate"]},
+        )
     if not target:
-        return {"success": False, "error": "Missing 'target' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'target' parameter",
+            details={"missing": ["target"]},
+        )
 
     try:
         repo = ConceptsRepository
+
+        from ...vontology.code_concepts_registry import (
+            build_virtual_concept_doc,
+            is_code_concept_id,
+        )
+        from ...vontology.utils_vontology import is_predicate
+
         # Verify source concept exists
         src = repo.find_one({"concept_id": source_id})
         if not src:
-            return {
-                "success": False,
-                "error": f"Source concept '{source_id}' not found",
-            }
+            return _err(
+                "source_concept_not_found",
+                f"Source concept '{source_id}' not found",
+                details={"role": "source", "concept_id": source_id},
+            )
+
+        # This tool only supports concept-to-concept relationships. Provide an
+        # explicit, agent-readable error when users attempt to remove text relations.
+        predicate_str = (
+            predicate.strip() if isinstance(predicate, str) else str(predicate)
+        )
+        predicate_normalised = (
+            predicate_str[3:] if predicate_str.startswith("#V#") else predicate_str
+        )
+        well_known_text_predicates = {"hasContent", "hasDescription", "hasName"}
+        if predicate_normalised in well_known_text_predicates:
+            return _err(
+                "unsupported_text_relation_removal",
+                "Text relation removal is not supported by remove_relationship",
+                details={
+                    "predicate_input": predicate,
+                    "predicate": predicate_normalised,
+                },
+            )
 
         # Map common predicate aliases to stored field names
         predicate_map = {
@@ -780,6 +947,80 @@ def _remove_relationship(**kwargs):
             "instance": "has_instance",
         }
         rel_kind = predicate_map.get(predicate, predicate)
+
+        # Canonicalise known legacy predicate ids.
+        # JVNAUTOSCI-913: todo membership was previously represented via '#V#has_item'.
+        if rel_kind == "#V#has_item":
+            rel_kind = "#V#has_todo_item"
+
+        # Determine if this is a text predicate (binary_text_predicate instance)
+        if isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
+            pred_doc = repo.find_one(
+                {"concept_id": rel_kind}, {"relationships.is_an_instance_of": 1}
+            )
+            if pred_doc:
+                instance_of = pred_doc.get("relationships", {}).get(
+                    "is_an_instance_of", []
+                )
+                if isinstance(instance_of, str):
+                    instance_of = [instance_of]
+                if "#V#binary_text_predicate" in instance_of:
+                    return _err(
+                        "unsupported_text_relation_removal",
+                        "Text relation removal is not supported by remove_relationship",
+                        details={"predicate": rel_kind, "predicate_input": predicate},
+                    )
+
+        # Guardrail: concept-to-concept relationship predicates must be either:
+        # - one of the structural relationship kinds (is_a_type_of, has_subtype, ...), or
+        # - a Vontology predicate concept id (starts with #V# and exists as a predicate).
+        from ...db.repositories.concepts_repository import RELATIONSHIP_KINDS
+
+        if isinstance(rel_kind, str) and rel_kind in RELATIONSHIP_KINDS:
+            pass
+        elif isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
+            pred_doc = repo.find_one(
+                {"concept_id": rel_kind}, {"concept_id": 1, "relationships": 1}
+            )
+            if pred_doc is None and is_code_concept_id(rel_kind):
+                pred_doc = build_virtual_concept_doc(rel_kind)
+            if pred_doc is None:
+                return _err(
+                    "predicate_concept_not_found",
+                    (
+                        f"Predicate concept '{rel_kind}' not found. "
+                        "Create it as a predicate in the Vontology (e.g. as an instance of #V#predicate) "
+                        "before using it as a relationship."
+                    ),
+                    details={
+                        "role": "predicate",
+                        "predicate": rel_kind,
+                        "predicate_input": predicate,
+                    },
+                )
+            if not is_predicate(pred_doc):
+                return _err(
+                    "predicate_concept_not_typed",
+                    (
+                        f"Concept '{rel_kind}' exists but is not typed as a predicate. "
+                        "Predicates must be instances of #V#predicate (or a predicate subtype)."
+                    ),
+                    details={
+                        "role": "predicate",
+                        "predicate": rel_kind,
+                        "predicate_input": predicate,
+                        "required_instance_of": "#V#predicate",
+                    },
+                )
+        else:
+            return _err(
+                "invalid_relationship_predicate",
+                (
+                    "Invalid relationship predicate. For concept-to-concept relationships, "
+                    "use a structural predicate (e.g. 'typeOf', 'instance_of') or a '#V#...' predicate concept id."
+                ),
+                details={"predicate_input": predicate, "predicate_canonical": rel_kind},
+            )
 
         # Ensure the relationship field exists (optional sanity)
         existing = (
@@ -829,7 +1070,16 @@ def _remove_relationship(**kwargs):
                 "removed": False,
             }
     except Exception as e:
-        return {"success": False, "error": f"Exception: {str(e)}"}
+        return _err(
+            "exception",
+            f"Exception: {str(e)}",
+            details={
+                "source_id": source_id,
+                "predicate": predicate,
+                "target": target,
+                "exception_type": type(e).__name__,
+            },
+        )
 
 
 # arXiv MCP proxy handlers
@@ -1670,9 +1920,11 @@ def _add_relationship_output_schema() -> Schema:
             "text_value_id": (str, type(None)),
             "relation_id": (str, type(None)),
             "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
         },
         allow_unknown=True,
-        description="add_relationship output: success (bool), relationship_type (str), message (str), source_id (str), predicate (str), target (str), already_existed (bool), added (bool), text_value_id (str), relation_id (str), error (str)",
+        description="add_relationship output: success (bool), relationship_type (str), message (str), source_id (str), predicate (str), target (str), already_existed (bool), added (bool), text_value_id (str), relation_id (str), error (str), error_code (str), error_details (dict)",
     )
 
 
@@ -1702,9 +1954,11 @@ def _remove_relationship_output_schema() -> Schema:
             "already_absent": (bool, type(None)),
             "message": (str, type(None)),
             "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
         },
         allow_unknown=True,
-        description="remove_relationship output: success (bool), source_id, predicate, target, removed (bool), already_absent (bool when relation was not present), message, error",
+        description="remove_relationship output: success (bool), source_id, predicate, target, removed (bool), already_absent (bool when relation was not present), message, error, error_code (str), error_details (dict)",
     )
 
 
@@ -3682,9 +3936,11 @@ def _chat_get_prompt_context(
         },
         "behaviour_prompt": {"prompt_id": None, "preview": prompt_text or ""},
         "narration_prompt": {
-            "prompt_id": narration_prompt_concept_ids[0]
-            if narration_prompt_concept_ids
-            else None,
+            "prompt_id": (
+                narration_prompt_concept_ids[0]
+                if narration_prompt_concept_ids
+                else None
+            ),
             "preview": narration_preview,
         },
     }
