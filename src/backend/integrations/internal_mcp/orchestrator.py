@@ -2145,9 +2145,74 @@ class InternalMCPChatOrchestrator:
         return (
             "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
             "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects. "
+            "Choose a tool that matches the user's request; do NOT call write tools unless the user explicitly asked to create/update/delete Vontology data. "
             "No prose. No Markdown. Do NOT wrap the JSON in ``` fences (including ```json). "
             "The first character MUST be an opening curly brace or an opening square bracket, and the response must contain only valid JSON."
         )
+
+    @staticmethod
+    def _prompt_allows_write_tools(prompt: str) -> bool:
+        """Return True when the user explicitly requests a Vontology mutation.
+
+        This guard prevents accidental writes when the model emits an unrelated
+        write tool call (often after a missing-tool-call retry).
+
+        Keep this conservative: require both a write verb and an ontology/concept
+        reference so unrelated "create" requests (e.g., "create a file") do not
+        enable write-category tools.
+        """
+
+        if not isinstance(prompt, str):
+            return False
+
+        lowered = prompt.lower()
+
+        mentions_vontology = any(
+            token in lowered
+            for token in (
+                "#v#",
+                "vontology",
+                "ontology",
+                "concept",
+                "relationship",
+                "predicate",
+                "text relation",
+            )
+        )
+        if not mentions_vontology:
+            return False
+
+        import re
+
+        verbs = (
+            "create",
+            "add",
+            "insert",
+            "upsert",
+            "update",
+            "edit",
+            "change",
+            "delete",
+            "remove",
+            "rename",
+            "merge",
+            "link",
+            "unlink",
+            "set",
+        )
+
+        negated = {
+            match.group(1)
+            for match in re.finditer(
+                r"\b(?:do not|don't|dont|never)\s+(create|add|insert|upsert|update|edit|change|delete|remove|rename|merge|link|unlink|set)\b",
+                lowered,
+            )
+        }
+
+        for verb in verbs:
+            if re.search(rf"\b{re.escape(verb)}\b", lowered) and verb not in negated:
+                return True
+        return False
 
     def execute_workflow(
         self,
@@ -2705,6 +2770,17 @@ class InternalMCPChatOrchestrator:
         tool_messages: List[Mapping[str, Any]] = []
         selected_gmail_profile = gmail_profile or self._default_gmail_profile
 
+        method_catalogue = self._gateway.describe_methods()
+        tool_categories: dict[str, str] = {}
+        for name, meta in method_catalogue.items():
+            if not isinstance(meta, Mapping):
+                continue
+            category = meta.get("category")
+            if isinstance(category, str):
+                tool_categories[name] = category
+
+        write_allowed = self._prompt_allows_write_tools(prompt)
+
         # Support chained tool calls up to max_tool_invocations limit (JVNAUTOSCI-699)
         iteration_count = 0
         current_response = response
@@ -2841,6 +2917,54 @@ class InternalMCPChatOrchestrator:
                             else str(current_response)
                         ),
                     )
+
+                # Safety: block write-category tools unless user explicitly requested a Vontology mutation.
+                # This is intentionally enforced at execution time so it applies to both legacy and
+                # structured tool-calling paths, including retry flows.
+                tool_category = tool_categories.get(tool_name)
+                if tool_category == "write" and not write_allowed:
+                    message = (
+                        f"Blocked write tool {tool_name!r}: the user request appears read-only. "
+                        "If you intended to modify the Vontology, restate the request explicitly."
+                    )
+                    tool_payload = self._format_tool_result(
+                        tool_name, None, None, "error", message
+                    )
+
+                    blocked_record: dict[str, Any] = {
+                        "tool": tool_name,
+                        "payload": dict(payload),
+                        "error": message,
+                        "blocked": True,
+                    }
+                    if call_id:
+                        blocked_record["call_id"] = call_id
+                    invocations.append(blocked_record)
+
+                    if tool_step is not None:
+                        try:
+                            tool_step.finish_failed(message)
+                        except Exception:
+                            pass
+
+                    self._emit_progress(
+                        {
+                            "status": "tool_blocked",
+                            "tool": tool_name,
+                            "batch_size": current_batch_size,
+                            "tool_calls_done": iteration_count,
+                            "tool_calls_cap": int(self._max_tool_invocations),
+                            "tool_calls_remaining": max(
+                                0, int(self._max_tool_invocations) - iteration_count
+                            ),
+                            "call_id": call_id,
+                            "error": message,
+                        }
+                    )
+
+                    augmented_context.append({"role": "tool", "content": tool_payload})
+                    tool_messages.append({"role": "tool", "content": tool_payload})
+                    continue
 
                 try:
                     if tool_name.startswith("gmail_"):

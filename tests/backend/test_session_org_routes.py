@@ -206,3 +206,40 @@ def test_get_my_organisations_returns_stubbed_memberships(app_client):
     assert org["concept_id"] == "#V#university_of_auckland_strong_ai_lab"
     assert org["role"] == "admin"
     assert org["name"] == "University Of Auckland Strong Ai Lab"
+
+
+def test_get_my_organisations_prefers_memberships_from_user_concept_relationships(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    # Stub concept lookup via the normal concept service path.
+    import src.backend.services.concept_service as concept_service
+
+    def _fake_get_concept_by_concept_id(concept_id: str, **_kwargs):
+        if concept_id == "#V#lu_yunli":
+            return {
+                "concept_id": "#V#lu_yunli",
+                "relationships": {
+                    "#V#member_of_organisation": ["#V#the_lu_witbrock_household"]
+                },
+            }
+        return None
+
+    monkeypatch.setattr(
+        concept_service, "get_concept_by_concept_id", _fake_get_concept_by_concept_id
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = "lu_yunli"
+        sess["user_concept_id"] = "#V#lu_yunli"
+
+    resp = client.get("/von/api/organisations/my_organisations")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 1
+    org = data["organisations"][0]
+    assert org["concept_id"] == "#V#the_lu_witbrock_household"
+    assert org["role"] == "member"
+    assert org["name"] == "The Lu Witbrock Household"
