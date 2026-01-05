@@ -23,10 +23,10 @@ class _StubGateway:
 @pytest.mark.parametrize(
     "raw, expected",
     [
-        (None, 8),
-        ("", 8),
-        ("not-a-number", 8),
-        (True, 8),
+        (None, 30),
+        ("", 30),
+        ("not-a-number", 30),
+        (True, 30),
         (-5, 0),
         (0, 0),
         (7, 7),
@@ -44,10 +44,10 @@ def test_get_internal_mcp_max_tool_invocations_clamps(
 @pytest.mark.parametrize(
     "raw, expected",
     [
-        (None, 4),
-        ("", 4),
-        ("not-a-number", 4),
-        (True, 4),
+        (None, 10),
+        ("", 10),
+        ("not-a-number", 10),
+        (True, 10),
         (0, 1),
         (1, 1),
         (7, 7),
@@ -96,8 +96,8 @@ def test_set_internal_mcp_tool_batch_cap_persists_clamped_value(monkeypatch):
 def test_orchestrator_configure_execution_caps_clamps():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=cast(Any, _StubGateway()),
-        max_tool_invocations=8,
-        tool_batch_cap=4,
+        max_tool_invocations=30,
+        tool_batch_cap=10,
     )
 
     orchestrator.configure_execution_caps(max_tool_invocations=999, tool_batch_cap=0)

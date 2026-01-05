@@ -6,11 +6,11 @@ from typing import Optional
 
 from flask import Blueprint, jsonify, redirect, request, session
 
-from backend.services.agent_gmail_oauth_service import (
+from ...services.agent_gmail_oauth_service import (
     AgentGmailOAuthService,
     AgentGmailOAuthError,
 )
-from backend.services.agent_gmail_token_store import (
+from ...services.agent_gmail_token_store import (
     get_agent_gmail_token_status,
     revoke_agent_gmail_tokens,
 )

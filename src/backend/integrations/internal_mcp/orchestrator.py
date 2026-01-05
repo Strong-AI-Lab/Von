@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from typing import (
     Any,
     cast,
+    Callable,
     Dict,
     Iterable,
     List,
@@ -169,6 +170,10 @@ class InternalMCPChatOrchestrator:
         self._tool_batch_cap = max(1, int(tool_batch_cap))
         self._default_gmail_profile = default_gmail_profile
 
+        # Optional progress callback for UI telemetry (JVNAUTOSCI-942).
+        # This must never be allowed to break tool execution.
+        self._progress_callback: Callable[[Mapping[str, Any]], None] | None = None
+
         # Vontology-backed missing-tool-call detector (lazy loaded)
         self._missing_tool_call_detector: Optional[_MissingToolCallDetectorSpec] = None
         self._missing_tool_call_detector_loaded: bool = False
@@ -246,6 +251,21 @@ class InternalMCPChatOrchestrator:
             "max_tool_invocations": int(self._max_tool_invocations),
             "tool_batch_cap": int(self._tool_batch_cap),
         }
+
+    def set_progress_callback(
+        self, callback: Callable[[Mapping[str, Any]], None] | None
+    ) -> None:
+        self._progress_callback = callback
+
+    def _emit_progress(self, info: Mapping[str, Any]) -> None:
+        callback = getattr(self, "_progress_callback", None)
+        if callback is None:
+            return
+        try:
+            callback(info)
+        except Exception:
+            # Progress is best-effort; never disrupt the main chat flow.
+            return
 
     @staticmethod
     def _coerce_int(
@@ -889,6 +909,9 @@ class InternalMCPChatOrchestrator:
                 "If user asks about their RAG data/sessions/indexed content, explain they need to log in first.\n"
             )
 
+        max_invocations = int(getattr(self, "_max_tool_invocations", 0))
+        batch_cap = int(getattr(self, "_tool_batch_cap", 4))
+
         base_message = (
             "You have access to internal MCP tools.\n\n"
             "⚠️ WHEN TO USE TOOLS (CHECK THESE FIRST) ⚠️\n"
@@ -916,7 +939,8 @@ class InternalMCPChatOrchestrator:
             "- DO NOT explain what you're going to do - just do it\n"
             "- DO NOT output JSON as an example or description - only output JSON when you want to invoke a tool NOW\n"
             "- DO NOT say 'I will call' or 'Let me call' - just call it\n"
-            "- You MAY batch multiple tool calls in ONE message as a JSON array (keep it to <= 4 calls)\n"
+            f"- You MAY batch multiple tool calls in ONE message as a JSON array (keep it to <= {batch_cap} calls)\n"
+            f"- Server limits: max tool invocations per turn = {max_invocations}; tool calls per batch = {batch_cap}\n"
             "- After you receive the tool result (role 'tool'), respond naturally to the user\n\n"
             "VERIFICATION & CONSISTENCY RULES:\n"
             "- If the user doubts whether a specific concept_id exists (e.g. '#V#...') or challenges a claim about Vontology state, ALWAYS verify first using fetch_concept (or search_concepts) before responding.\n"
@@ -2740,6 +2764,8 @@ class InternalMCPChatOrchestrator:
                 remaining_tool_calls = tool_calls[allowed:]
                 tool_calls = tool_calls[:allowed]
 
+            current_batch_size = len(tool_calls)
+
             # Add the assistant JSON response once per batch.
             if iteration_count == 0:
                 augmented_context.extend(
@@ -2848,6 +2874,20 @@ class InternalMCPChatOrchestrator:
                         invocation_record["call_id"] = call_id
                     invocations.append(invocation_record)
 
+                    self._emit_progress(
+                        {
+                            "status": "tool_invoked",
+                            "tool": tool_name,
+                            "batch_size": current_batch_size,
+                            "tool_calls_done": iteration_count,
+                            "tool_calls_cap": int(self._max_tool_invocations),
+                            "tool_calls_remaining": max(
+                                0, int(self._max_tool_invocations) - iteration_count
+                            ),
+                            "call_id": call_id,
+                        }
+                    )
+
                     if tool_step is not None:
                         try:
                             tool_step.finish_success(
@@ -2883,6 +2923,21 @@ class InternalMCPChatOrchestrator:
                     if call_id:
                         error_record["call_id"] = call_id
                     invocations.append(error_record)
+
+                    self._emit_progress(
+                        {
+                            "status": "tool_failed",
+                            "tool": tool_name,
+                            "batch_size": current_batch_size,
+                            "tool_calls_done": iteration_count,
+                            "tool_calls_cap": int(self._max_tool_invocations),
+                            "tool_calls_remaining": max(
+                                0, int(self._max_tool_invocations) - iteration_count
+                            ),
+                            "call_id": call_id,
+                            "error": str(exc),
+                        }
+                    )
 
                     if tool_step is not None:
                         try:

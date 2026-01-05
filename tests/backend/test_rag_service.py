@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from backend.services.rag_service import get_rag_service, RAGService
+from src.backend.services.rag_service import get_rag_service, RAGService
 
 
 # Mock LlamaIndex components to avoid real API calls and dependencies during unit tests

@@ -22,6 +22,379 @@ const transcriptTurns = [];
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 
+// JVNAUTOSCI-942: Tool-use progress while "Thinking..."
+const DEFAULT_THINKING_TEXT = 'Thinking...';
+let showToolUseDuringThinkingSetting = true;
+let lastToolUseSettingRefreshMs = 0;
+const TOOL_USE_SETTING_REFRESH_COOLDOWN_MS = 30_000;
+
+function getLoadingIndicatorTextEl() {
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    if (!loadingIndicator) {
+        return null;
+    }
+    return loadingIndicator.querySelector('.loading-indicator-text');
+}
+
+function getLoadingIndicatorEl() {
+    return document.getElementById('loadingIndicator');
+}
+
+function setLoadingIndicatorText(text) {
+    const el = getLoadingIndicatorTextEl();
+    if (!el) {
+        return;
+    }
+    el.textContent = String(text ?? '').trim() || DEFAULT_THINKING_TEXT;
+}
+
+function setLoadingIndicatorTooltip(text) {
+    const value = String(text ?? '').trim();
+    const wrapper = getLoadingIndicatorEl();
+    if (wrapper) {
+        // Opt out of suppressTooltips.js for this element.
+        // Important: set before `title`, otherwise the MutationObserver may strip it.
+        wrapper.setAttribute('data-keep-title', 'true');
+        wrapper.title = value;
+        wrapper.setAttribute('aria-label', value);
+        wrapper.setAttribute('data-original-title', value);
+    }
+
+    const textEl = getLoadingIndicatorTextEl();
+    if (textEl) {
+        textEl.setAttribute('data-keep-title', 'true');
+        textEl.title = value;
+        textEl.setAttribute('aria-label', value);
+        textEl.setAttribute('data-original-title', value);
+    }
+}
+
+function createClientRequestId() {
+    try {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+            return crypto.randomUUID();
+        }
+    } catch (_) {
+        // Ignore.
+    }
+    return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function refreshToolUseDuringThinkingSetting(force = false) {
+    const now = Date.now();
+    if (!force && now - lastToolUseSettingRefreshMs < TOOL_USE_SETTING_REFRESH_COOLDOWN_MS) {
+        return showToolUseDuringThinkingSetting;
+    }
+
+    lastToolUseSettingRefreshMs = now;
+    try {
+        const resp = await fetch('/api/settings/', { method: 'GET' });
+        if (!resp || !resp.ok) {
+            return showToolUseDuringThinkingSetting;
+        }
+        const data = await resp.json();
+        if (data && typeof data.show_tool_use_during_thinking !== 'undefined') {
+            showToolUseDuringThinkingSetting = !!data.show_tool_use_during_thinking;
+            if (!showToolUseDuringThinkingSetting && activeChatRequest) {
+                stopToolUseProgressPolling(activeChatRequest);
+                setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+            }
+        }
+    } catch (_) {
+        // Ignore.
+    }
+    return showToolUseDuringThinkingSetting;
+}
+
+function formatToolUseProgressText(progress) {
+    if (!progress || typeof progress !== 'object') {
+        return DEFAULT_THINKING_TEXT;
+    }
+
+    const status = typeof progress.status === 'string' ? progress.status : 'thinking';
+    const tool = typeof progress.tool === 'string' ? progress.tool : null;
+    const batchSize = Number.isFinite(progress.batch_size) ? Number(progress.batch_size) : null;
+    const done = Number.isFinite(progress.tool_calls_done) ? Number(progress.tool_calls_done) : null;
+    const cap = Number.isFinite(progress.tool_calls_cap) ? Number(progress.tool_calls_cap) : null;
+    const remaining = Number.isFinite(progress.tool_calls_remaining) ? Number(progress.tool_calls_remaining) : null;
+
+    const bits = [];
+
+    if (tool) {
+        bits.push(`tool: ${tool}`);
+    }
+
+    if (batchSize !== null) {
+        bits.push(`batch ${batchSize}`);
+    }
+
+    if (done !== null && cap !== null) {
+        bits.push(`${done}/${cap} used`);
+    }
+
+    if (remaining !== null) {
+        bits.push(`${remaining} remaining`);
+    }
+
+    if (status === 'tool_failed' || status === 'error') {
+        const error = typeof progress.error === 'string' ? progress.error.trim() : '';
+        if (error) {
+            bits.push(`error: ${error}`);
+        } else {
+            bits.push('error');
+        }
+    }
+
+    if (!bits.length) {
+        return DEFAULT_THINKING_TEXT;
+    }
+
+    return `${DEFAULT_THINKING_TEXT} (${bits.join(', ')})`;
+}
+
+function recordToolUseHistory(request, progress) {
+    if (!request || !progress || typeof progress !== 'object') {
+        return;
+    }
+
+    const tool = typeof progress.tool === 'string' ? progress.tool.trim() : '';
+    if (!tool) {
+        return;
+    }
+
+    const batchSize = Number.isFinite(progress.batch_size) ? Number(progress.batch_size) : null;
+
+    if (!Array.isArray(request.toolUseProgressHistory)) {
+        request.toolUseProgressHistory = [];
+    }
+
+    const history = request.toolUseProgressHistory;
+    const last = history.length ? history[history.length - 1] : null;
+    const lastTool = last && typeof last.tool === 'string' ? last.tool : null;
+    const lastBatch = last && Number.isFinite(last.batchSize) ? Number(last.batchSize) : null;
+
+    if (lastTool === tool && lastBatch === batchSize) {
+        return;
+    }
+
+    history.push({ tool, batchSize });
+}
+
+function formatThinkingDuration(elapsedMs) {
+    const ms = Number.isFinite(elapsedMs) ? Math.max(0, Number(elapsedMs)) : 0;
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+
+    if (minutes > 0) {
+        return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+    }
+    return `${totalSeconds}s`;
+}
+
+function formatToolUseHistoryTooltip(request) {
+    if (!request) {
+        return '';
+    }
+
+    const thinkingStartedAtMs = Number.isFinite(request.thinkingStartedAtMs)
+        ? Number(request.thinkingStartedAtMs)
+        : null;
+    const elapsedMs = thinkingStartedAtMs === null ? null : Date.now() - thinkingStartedAtMs;
+
+    const history = Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory : [];
+
+    if (!history.length) {
+        const lines = ['No tool use yet.'];
+        if (elapsedMs !== null) {
+            lines.push(`Thinking for ${formatThinkingDuration(elapsedMs)}.`);
+        }
+        return lines.join('\n');
+    }
+
+    const lines = [];
+    if (elapsedMs !== null) {
+        lines.push(`Thinking for ${formatThinkingDuration(elapsedMs)}`);
+    }
+    lines.push('Tools this turn:');
+    for (const entry of history) {
+        const tool = entry && typeof entry.tool === 'string' ? entry.tool : '';
+        if (!tool) {
+            continue;
+        }
+        const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
+        if (batchSize === null) {
+            lines.push(`- ${tool}`);
+        } else {
+            lines.push(`- ${tool} (batch ${batchSize})`);
+        }
+    }
+
+    return lines.length > 1 ? lines.join('\n') : '';
+}
+
+function stopToolUseProgressPolling(request) {
+    if (!request) {
+        return;
+    }
+
+    const poll = request.toolUseProgressPoll;
+    if (!poll) {
+        return;
+    }
+
+    request.toolUseProgressPoll = null;
+
+    try {
+        if (poll.intervalId) {
+            clearInterval(poll.intervalId);
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    try {
+        if (poll.timeoutId) {
+            clearTimeout(poll.timeoutId);
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    try {
+        poll.abortController?.abort();
+    } catch (_) {
+        // Ignore.
+    }
+}
+
+function stopThinkingTooltipTicker(request) {
+    if (!request) {
+        return;
+    }
+
+    try {
+        if (request.thinkingTooltipIntervalId) {
+            clearInterval(request.thinkingTooltipIntervalId);
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    request.thinkingTooltipIntervalId = null;
+}
+
+function startThinkingTooltipTicker(request) {
+    if (!request || request.aborted) {
+        return;
+    }
+
+    stopThinkingTooltipTicker(request);
+
+    // Update once per second so the elapsed time in the tooltip stays current,
+    // even if tool-progress polling backs off (e.g., repeated 404s).
+    request.thinkingTooltipIntervalId = setInterval(() => {
+        if (request.aborted || activeChatRequest !== request) {
+            stopThinkingTooltipTicker(request);
+            return;
+        }
+        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+    }, 1000);
+}
+
+function startToolUseProgressPolling(request) {
+    if (!request || request.aborted) {
+        return;
+    }
+
+    if (!showToolUseDuringThinkingSetting) {
+        return;
+    }
+
+    const requestId = request.clientRequestId;
+    if (!requestId) {
+        return;
+    }
+
+    stopToolUseProgressPolling(request);
+    const abortController = new AbortController();
+
+    const poll = {
+        abortController,
+        timeoutId: null,
+        intervalId: null,
+        nextDelayMs: 350,
+        consecutiveNotFound: 0
+    };
+
+    const scheduleNextPoll = (delayMs) => {
+        if (request.aborted || activeChatRequest !== request) {
+            return;
+        }
+        poll.timeoutId = setTimeout(() => {
+            void pollOnce();
+        }, Math.max(0, Number(delayMs) || 0));
+    };
+
+    const pollOnce = async () => {
+        if (request.aborted || activeChatRequest !== request) {
+            return;
+        }
+
+        // Keep tooltip "alive" even before the server has any tool-progress state.
+        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+
+        try {
+            const resp = await fetch(`/von/progress/${encodeURIComponent(requestId)}`,
+                { method: 'GET', signal: abortController.signal });
+            if (!resp) {
+                scheduleNextPoll(Math.min(5000, poll.nextDelayMs * 1.7));
+                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                return;
+            }
+
+            if (resp.status === 404) {
+                poll.consecutiveNotFound += 1;
+                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+
+            if (!resp.ok) {
+                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+            const progress = await resp.json();
+
+            poll.consecutiveNotFound = 0;
+            poll.nextDelayMs = 350;
+            setLoadingIndicatorText(formatToolUseProgressText(progress));
+            recordToolUseHistory(request, progress);
+            setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+
+            const status = typeof progress?.status === 'string' ? progress.status : null;
+            if (status === 'completed' || status === 'error') {
+                stopToolUseProgressPolling(request);
+                return;
+            }
+
+            scheduleNextPoll(poll.nextDelayMs);
+        } catch (err) {
+            if (err && err.name === 'AbortError') {
+                return;
+            }
+
+            poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+            scheduleNextPoll(poll.nextDelayMs);
+        }
+    };
+
+    request.toolUseProgressPoll = poll;
+
+    void pollOnce();
+}
+
 // Cool-down for failed history talk-track backfills so we do not spam the server.
 // Map<turnId, { at: number, error: string }>
 const historySpokenBackfillFailures = new Map();
@@ -2601,6 +2974,7 @@ export function initializeChatTab() {
 
     loadChatHistory();
     updateHistoryLength();
+    void refreshToolUseDuringThinkingSetting();
     console.log("Chat tab initialized successfully");
 }
 
@@ -2612,6 +2986,13 @@ function setThinkingState(isThinking) {
     if (loadingIndicator) {
         loadingIndicator.style.display = isThinking ? 'inline-flex' : 'none';
         loadingIndicator.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+        if (isThinking) {
+            setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+            setLoadingIndicatorTooltip('');
+        } else {
+            setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+            setLoadingIndicatorTooltip('');
+        }
     }
 
     if (sendButton) {
@@ -2656,6 +3037,9 @@ function abortActiveChatRequest() {
     const request = activeChatRequest;
     request.aborted = true;
     activeChatRequest = null;
+
+    stopToolUseProgressPolling(request);
+    stopThinkingTooltipTicker(request);
 
     try {
         request.abortController?.abort();
@@ -2705,6 +3089,11 @@ async function handleSendPrompt() {
         return;
     }
 
+    // Refresh setting in the background; default is enabled.
+    void refreshToolUseDuringThinkingSetting();
+
+    const clientRequestId = createClientRequestId();
+
     // Show loading indicator and disable send button
     setThinkingState(true);
 
@@ -2737,9 +3126,19 @@ async function handleSendPrompt() {
             promptRaw,
             selectionStart,
             selectionEnd,
-            aborted: false
+            aborted: false,
+            clientRequestId,
+            thinkingStartedAtMs: Date.now(),
+            toolUseProgressHistory: []
         };
         activeChatRequest = request;
+
+        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+
+        startThinkingTooltipTicker(request);
+
+        // Start polling immediately while the request is in flight.
+        startToolUseProgressPolling(request);
 
         // Get user context from localStorage to send to backend
         const userContext = getUserContext();
@@ -2756,6 +3155,7 @@ async function handleSendPrompt() {
             signal: request.abortController.signal,
             body: JSON.stringify({
                 prompt: promptText,
+                client_request_id: request.clientRequestId,
                 user_id: userContext.user_id,
                 org_id: userContext.org_id,
                 language: userContext.language,
@@ -2841,6 +3241,8 @@ async function handleSendPrompt() {
         const isStillActive = activeChatRequest === request;
         if (isStillActive) {
             activeChatRequest = null;
+            stopToolUseProgressPolling(request);
+            stopThinkingTooltipTicker(request);
             setThinkingState(false);
         }
         updateHistoryLength();

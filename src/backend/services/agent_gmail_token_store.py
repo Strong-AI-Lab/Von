@@ -7,9 +7,9 @@ from typing import Any, Mapping, Optional
 
 from pymongo.collection import Collection
 
-from backend.db.mongo_client import get_agent_gmail_tokens_collection
-from backend.security.token_encryption import encrypt_json, decrypt_json
-from backend.utils.time_utils import utc_now
+from ..db.mongo_client import get_agent_gmail_tokens_collection
+from ..security.token_encryption import encrypt_json, decrypt_json
+from ..utils.time_utils import utc_now
 
 logger = logging.getLogger(__name__)
 

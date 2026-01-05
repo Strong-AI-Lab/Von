@@ -2,8 +2,11 @@ from flask import Blueprint, request, jsonify, render_template, current_app, ses
 import os
 import re
 import time
+import threading
+import secrets
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 from workflows.onboarding_workflow import run_onboarding_workflow  # fixed import path
 from ...languagemodels.llm_interface import get_llm_client, get_active_model_name
 from .settings_routes import get_all_settings_data
@@ -12,6 +15,7 @@ from ...services import chat_history_service
 from ...services.settings_service import (
     get_internal_mcp_max_tool_invocations,
     get_internal_mcp_tool_batch_cap,
+    get_show_tool_use_during_thinking,
 )
 from ...workflows import (
     CHAT_NARRATION_WORKFLOW_ID,
@@ -29,6 +33,102 @@ _TEMPLATE_DIR = os.path.abspath(
     )
 )
 von_bp = Blueprint("von", __name__, template_folder=_TEMPLATE_DIR)
+
+
+# ----------------- Tool progress (JVNAUTOSCI-942) -----------------
+
+_TOOL_PROGRESS_TTL_SEC = 10 * 60
+_TOOL_PROGRESS_LOCK = threading.Lock()
+_TOOL_PROGRESS: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _get_tool_progress_scope_key() -> str:
+    """Return a stable scope key for tool-progress lookup.
+
+    - Authenticated: scope is user concept id
+    - Unauthenticated: scope is a session-scoped random token
+    """
+
+    user_concept_id = None
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if isinstance(user_concept_id, str) and user_concept_id.strip():
+        return f"user:{user_concept_id.strip()}"
+
+    if "tool_progress_scope" not in session:
+        session["tool_progress_scope"] = secrets.token_urlsafe(16)
+
+    return f"anon:{session.get('tool_progress_scope')}"
+
+
+def _prune_tool_progress() -> None:
+    cutoff = time.time() - _TOOL_PROGRESS_TTL_SEC
+    with _TOOL_PROGRESS_LOCK:
+        stale_keys = [
+            key
+            for key, value in _TOOL_PROGRESS.items()
+            if isinstance(value, dict)
+            and isinstance(value.get("updated_at_epoch"), (int, float))
+            and float(value["updated_at_epoch"]) < cutoff
+        ]
+        for key in stale_keys:
+            _TOOL_PROGRESS.pop(key, None)
+
+
+def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) -> None:
+    _prune_tool_progress()
+    now_epoch = time.time()
+    with _TOOL_PROGRESS_LOCK:
+        key = (scope_key, request_id)
+        existing = _TOOL_PROGRESS.get(key)
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = {**existing, **(update or {})}
+        merged["updated_at"] = _now_utc_iso()
+        merged["updated_at_epoch"] = now_epoch
+        _TOOL_PROGRESS[key] = merged
+
+
+def _get_tool_progress(scope_key: str, request_id: str) -> dict[str, Any] | None:
+    _prune_tool_progress()
+    with _TOOL_PROGRESS_LOCK:
+        value = _TOOL_PROGRESS.get((scope_key, request_id))
+        return dict(value) if isinstance(value, dict) else None
+
+
+def _clear_tool_progress(scope_key: str, request_id: str) -> None:
+    with _TOOL_PROGRESS_LOCK:
+        _TOOL_PROGRESS.pop((scope_key, request_id), None)
+
+
+@von_bp.route("/progress/<request_id>", methods=["GET"])
+def get_generation_progress(request_id: str):
+    """Return the latest tool-execution progress for an in-flight generate() call."""
+
+    if (
+        not isinstance(request_id, str)
+        or not request_id.strip()
+        or len(request_id) > 200
+    ):
+        return jsonify({"error": "Invalid request_id"}), 400
+
+    scope_key = _get_tool_progress_scope_key()
+    state = _get_tool_progress(scope_key, request_id.strip())
+    if not state:
+        return jsonify({"status": "not_found"}), 404
+
+    # Do not leak internal epoch detail to the UI.
+    state.pop("updated_at_epoch", None)
+    return jsonify(state), 200
 
 
 def _truncate_large_tool_results(
@@ -941,6 +1041,16 @@ def generate():
     data = request.get_json()
     prompt_text = data.get("prompt", "")
 
+    client_request_id = data.get("client_request_id")
+    if (
+        isinstance(client_request_id, str)
+        and client_request_id.strip()
+        and len(client_request_id) <= 200
+    ):
+        request_id = client_request_id.strip()
+    else:
+        request_id = str(uuid.uuid4())
+
     presenter_mode_requested = bool(data.get("presenter_mode"))
 
     request_start_perf = time.perf_counter()
@@ -995,6 +1105,37 @@ def generate():
     except Exception:
         user_concept_id = None
         org_concept_id = None
+
+    progress_scope_key = _get_tool_progress_scope_key()
+    show_tool_use_progress = False
+    try:
+        show_tool_use_progress = bool(get_show_tool_use_during_thinking())
+    except Exception:
+        show_tool_use_progress = False
+
+    if show_tool_use_progress:
+        try:
+            max_calls = int(get_internal_mcp_max_tool_invocations())
+        except Exception:
+            max_calls = 0
+        try:
+            batch_cap = int(get_internal_mcp_tool_batch_cap())
+        except Exception:
+            batch_cap = 4
+        _set_tool_progress(
+            progress_scope_key,
+            request_id,
+            {
+                "status": "thinking",
+                "request_id": request_id,
+                "tool": None,
+                "batch_size": None,
+                "tool_calls_done": 0,
+                "tool_calls_cap": max_calls,
+                "tool_calls_remaining": max(0, max_calls),
+                "tool_batch_cap": batch_cap,
+            },
+        )
 
     try:
         llm_client = get_llm_client(
@@ -1756,16 +1897,40 @@ def generate():
                 except Exception:
                     # Defensive: never fail the request due to settings refresh.
                     pass
+
+                if show_tool_use_progress:
+
+                    def _progress_update(info: dict[str, Any]) -> None:
+                        payload = (
+                            dict(info)
+                            if isinstance(info, dict)
+                            else {"status": "unknown"}
+                        )
+                        payload.setdefault("request_id", request_id)
+                        _set_tool_progress(progress_scope_key, request_id, payload)
+
+                    try:
+                        orchestrator.set_progress_callback(_progress_update)
+                    except Exception:
+                        pass
+
                 orchestrator_start_perf = time.perf_counter()
-                orchestrator_result = orchestrator.run(
-                    prompt=prompt_text,
-                    context=enhanced_context,
-                    llm_client=llm_client,
-                    model=model_name,
-                    user_namespace=user_namespace,
-                    gmail_profile=request_gmail_profile,
-                    auxiliary_system_prompt=auxiliary_system_prompt,
-                )
+                try:
+                    orchestrator_result = orchestrator.run(
+                        prompt=prompt_text,
+                        context=enhanced_context,
+                        llm_client=llm_client,
+                        model=model_name,
+                        user_namespace=user_namespace,
+                        gmail_profile=request_gmail_profile,
+                        auxiliary_system_prompt=auxiliary_system_prompt,
+                    )
+                finally:
+                    if show_tool_use_progress:
+                        try:
+                            orchestrator.set_progress_callback(None)
+                        except Exception:
+                            pass
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf
                 ) * 1000.0
@@ -1808,6 +1973,16 @@ def generate():
                         else "not_authenticated"
                     )
                 rag_trace["tool_results_included_in_prompt"] = bool(tool_messages)
+
+                if show_tool_use_progress:
+                    _set_tool_progress(
+                        progress_scope_key,
+                        request_id,
+                        {
+                            "status": "completed",
+                            "request_id": request_id,
+                        },
+                    )
             except ToolCallParsingError as exc:
                 current_app.logger.warning(
                     "[mcp_orchestrator] Invalid tool request payload: %s", exc
@@ -1832,6 +2007,17 @@ def generate():
                         "error": str(exc),
                     }
                 ]
+
+                if show_tool_use_progress:
+                    _set_tool_progress(
+                        progress_scope_key,
+                        request_id,
+                        {
+                            "status": "error",
+                            "request_id": request_id,
+                            "error": str(exc),
+                        },
+                    )
 
         presenter_channels = _extract_presenter_channels(response_text)
 
@@ -2164,8 +2350,19 @@ def generate():
             except Exception:
                 tool_catalogue_summary = None
 
+        try:
+            applied_max_tool_invocations = int(get_internal_mcp_max_tool_invocations())
+        except Exception:
+            applied_max_tool_invocations = None
+
+        try:
+            applied_tool_batch_cap = int(get_internal_mcp_tool_batch_cap())
+        except Exception:
+            applied_tool_batch_cap = None
+
         llm_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
+            "request_id": request_id,
             "model": model_name,
             "llm_interaction": {
                 **llm_interaction,
@@ -2187,6 +2384,14 @@ def generate():
                     else False
                 ),
                 "orchestrator_present": orchestrator is not None,
+                "execution_caps": {
+                    "max_tool_invocations": applied_max_tool_invocations,
+                    "tool_batch_cap": applied_tool_batch_cap,
+                },
+                "tool_use_progress": {
+                    "enabled": show_tool_use_progress,
+                    "request_id": request_id,
+                },
                 "tool_catalogue": tool_catalogue_summary,
             },
             "context_stats": {
@@ -2250,6 +2455,7 @@ def generate():
 
         return jsonify(
             {
+                "request_id": request_id,
                 "response": response_text,
                 "response_channels": (
                     {
@@ -2279,8 +2485,25 @@ def generate():
             except:
                 pass
 
+        if "show_tool_use_progress" in locals() and show_tool_use_progress:
+            try:
+                _set_tool_progress(
+                    _get_tool_progress_scope_key(),
+                    request_id if "request_id" in locals() else "unknown",
+                    {
+                        "status": "error",
+                        "request_id": (
+                            request_id if "request_id" in locals() else "unknown"
+                        ),
+                        "error": str(e),
+                    },
+                )
+            except Exception:
+                pass
+
         error_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
+            "request_id": request_id,
             "model": model_name if "model_name" in locals() else "unknown",
             "messages": [{"role": "user", "content": prompt_text}],
             "response": None,
@@ -2292,7 +2515,11 @@ def generate():
             "tool_invocations": [],
         }
         error_debug_info["warnings"] = _derive_llm_debug_warnings(error_debug_info)
-        body = {"error": str(e), "llm_debug": error_debug_info}
+        body = {
+            "request_id": request_id,
+            "error": str(e),
+            "llm_debug": error_debug_info,
+        }
         if "rag_trace" in locals():
             body["rag_trace"] = rag_trace
         if "namespace_report" in locals():
