@@ -1,4 +1,5 @@
 import {
+    __testOnly_buildLlmDebugMetadata,
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
     __testOnly_convertQuotedInstructionBlockquotesToButtons,
     __testOnly_convertQuotedInstructionListItemsToButtons,
@@ -526,5 +527,46 @@ describe('LLM debug warnings (presenter channel health)', () => {
         expect(warnings).toContain(
             'Response claims 9 operations, but only 4 tool invocations were recorded.'
         );
+    });
+});
+
+describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
+    test('includes internal MCP caps and usage against them', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            tool_invocations: [{}, {}, {}],
+            internal_mcp: {
+                execution_caps: {
+                    max_tool_invocations: 5,
+                    tool_batch_cap: 2
+                },
+                tool_use_progress: {
+                    enabled: true,
+                    request_id: 'req-123'
+                }
+            }
+        });
+
+        expect(metadata.internal_mcp).toBeTruthy();
+        expect(metadata.internal_mcp.execution_caps).toEqual({
+            max_tool_invocations: 5,
+            tool_batch_cap: 2
+        });
+
+        expect(metadata.internal_mcp.usage_against_caps).toEqual({
+            tool_invocations_done: 3,
+            tool_invocations_cap: 5,
+            tool_invocations_remaining: 2,
+            tool_invocations_exceeded: false,
+            tool_batch_cap: 2,
+            estimated_batches: 2,
+            estimated_last_batch_size: 1
+        });
+
+        expect(metadata.internal_mcp.tool_use_progress).toEqual({
+            enabled: true,
+            request_id: 'req-123'
+        });
     });
 });

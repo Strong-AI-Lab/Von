@@ -3859,39 +3859,13 @@ function initializeLlmDebugPopup() {
     });
 }
 
-// Show LLM debug popup for a specific turn
-function showLlmDebugPopup(turnId) {
-    const debugDataRaw = llmDebugData.get(turnId);
-    const debugData = enrichDebugDataWithSpeechPlanning(debugDataRaw, { turnId });
-    if (!debugData) {
-        console.warn('[chatTab] No debug data for turn:', turnId);
-        return;
-    }
-
-    const popup = document.getElementById('chatLlmDebugPopup');
-    const metaDiv = document.getElementById('chatLlmDebugMeta');
-    const messagesPre = document.getElementById('chatLlmDebugMessages');
-    const responsePre = document.getElementById('chatLlmDebugResponse');
-    const toolsSection = document.getElementById('chatLlmDebugToolsSection');
-    const toolsPre = document.getElementById('chatLlmDebugTools');
-    const auxSection = document.getElementById('chatLlmDebugAuxSection');
-    const auxPre = document.getElementById('chatLlmDebugAux');
-
-    if (!popup || !metaDiv || !messagesPre || !responsePre || !toolsSection || !toolsPre || !auxSection || !auxPre) {
-        console.error('[chatTab] LLM debug popup elements missing');
-        return;
-    }
-
-    // Display metadata
-    const hasError = debugData.error !== undefined;
-
-    // Build metadata object (not HTML) so it's included in JSON structure
+function buildLlmDebugMetadata(debugData) {
     const metadata = {
-        model: debugData.model || 'Unknown',
-        message_count: debugData.messages?.length || 0
+        model: debugData?.model || 'Unknown',
+        message_count: debugData?.messages?.length || 0
     };
 
-    if (debugData.presenter_channels || debugData.speech_planning) {
+    if (debugData?.presenter_channels || debugData?.speech_planning) {
         metadata.speech_planning = debugData.speech_planning || null;
         metadata.presenter_channels = debugData.presenter_channels || null;
     }
@@ -3928,7 +3902,7 @@ function showLlmDebugPopup(turnId) {
     }
 
     // Add context statistics if available
-    if (debugData.context_stats) {
+    if (debugData?.context_stats) {
         const sentStats = debugData.context_stats.sent_to_llm;
         const storedStats = debugData.context_stats.stored_context;
 
@@ -3949,7 +3923,7 @@ function showLlmDebugPopup(turnId) {
     }
 
     // Add tool statistics if available
-    if (debugData.tool_stats) {
+    if (debugData?.tool_stats) {
         metadata.mcp_tools_used = {
             tool_count: debugData.tool_stats.tool_count,
             total_chars: debugData.tool_stats.total_chars,
@@ -3957,9 +3931,74 @@ function showLlmDebugPopup(turnId) {
         };
     }
 
-    if (hasError) {
+    // Surface internal MCP execution caps + usage in the visible debug metadata.
+    const internalMcp = (debugData && typeof debugData === 'object') ? debugData.internal_mcp : null;
+    if (internalMcp && typeof internalMcp === 'object') {
+        const caps = internalMcp.execution_caps;
+        const progress = internalMcp.tool_use_progress;
+        const toolInvocationsCount = Array.isArray(debugData.tool_invocations) ? debugData.tool_invocations.length : 0;
+
+        const maxToolInvocations = (caps && Number.isFinite(caps.max_tool_invocations)) ? caps.max_tool_invocations : null;
+        const toolBatchCap = (caps && Number.isFinite(caps.tool_batch_cap)) ? caps.tool_batch_cap : null;
+
+        const usageAgainstCaps = {
+            tool_invocations_done: toolInvocationsCount,
+            tool_invocations_cap: maxToolInvocations,
+            tool_invocations_remaining: (typeof maxToolInvocations === 'number') ? Math.max(0, maxToolInvocations - toolInvocationsCount) : null,
+            tool_invocations_exceeded: (typeof maxToolInvocations === 'number') ? toolInvocationsCount > maxToolInvocations : null,
+            tool_batch_cap: toolBatchCap,
+            estimated_batches: (typeof toolBatchCap === 'number' && toolBatchCap > 0) ? Math.ceil(toolInvocationsCount / toolBatchCap) : null,
+            estimated_last_batch_size: (typeof toolBatchCap === 'number' && toolBatchCap > 0)
+                ? (toolInvocationsCount === 0 ? 0 : (toolInvocationsCount % toolBatchCap || toolBatchCap))
+                : null
+        };
+
+        if (caps || progress) {
+            metadata.internal_mcp = {
+                execution_caps: caps || null,
+                usage_against_caps: usageAgainstCaps,
+                tool_use_progress: progress || null
+            };
+        }
+    }
+
+    if (debugData?.error !== undefined) {
         metadata.error = debugData.error;
     }
+
+    return metadata;
+}
+
+export function __testOnly_buildLlmDebugMetadata(debugData) {
+    return buildLlmDebugMetadata(debugData);
+}
+
+// Show LLM debug popup for a specific turn
+function showLlmDebugPopup(turnId) {
+    const debugDataRaw = llmDebugData.get(turnId);
+    const debugData = enrichDebugDataWithSpeechPlanning(debugDataRaw, { turnId });
+    if (!debugData) {
+        console.warn('[chatTab] No debug data for turn:', turnId);
+        return;
+    }
+
+    const popup = document.getElementById('chatLlmDebugPopup');
+    const metaDiv = document.getElementById('chatLlmDebugMeta');
+    const messagesPre = document.getElementById('chatLlmDebugMessages');
+    const responsePre = document.getElementById('chatLlmDebugResponse');
+    const toolsSection = document.getElementById('chatLlmDebugToolsSection');
+    const toolsPre = document.getElementById('chatLlmDebugTools');
+    const auxSection = document.getElementById('chatLlmDebugAuxSection');
+    const auxPre = document.getElementById('chatLlmDebugAux');
+
+    if (!popup || !metaDiv || !messagesPre || !responsePre || !toolsSection || !toolsPre || !auxSection || !auxPre) {
+        console.error('[chatTab] LLM debug popup elements missing');
+        return;
+    }
+
+    // Display metadata
+    const metadata = buildLlmDebugMetadata(debugData);
+    const hasError = debugData.error !== undefined;
 
     let workflowExecutionTrace = null;
     if (Array.isArray(debugData.aux_llm_calls)) {
