@@ -726,6 +726,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (opt) {
       setStoredJson(LS_USER_KEY, { id: opt.dataset.id || null, concept_id: opt.dataset.conceptId || null, name: opt.textContent || null });
       if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
+      // Keep the authenticated server session aligned with the selected user concept.
+      if (opt.dataset.conceptId) {
+        try {
+          await postJson('/von/api/session/set_user_concept', { user_concept_id: opt.dataset.conceptId });
+        } catch (e) {
+          console.warn('Failed to update server session user concept', e);
+        }
+      }
       // When user changes, attempt to load stored server-side prefs (language/org)
       if (opt.dataset.conceptId) {
         await loadUserConceptPreferences(opt.dataset.conceptId);
@@ -947,6 +955,23 @@ async function loadAndDisplaySettings() {
     // Override with stored local selection if present
     applyStoredSelection('currentUserSelect', getStoredJson(LS_USER_KEY));
 
+    // Align server session identity with the selected user concept on initial load.
+    // Without this, the UI can show #V#lu_yunli while the server session remains email-derived,
+    // causing org/namespace inconsistencies.
+    try {
+      const userSelect = document.getElementById('currentUserSelect');
+      const selected = userSelect?.selectedOptions?.[0];
+      const selectedConceptId = selected?.dataset?.conceptId;
+      if (selectedConceptId) {
+        const resp = await postJson('/von/api/session/set_user_concept', { user_concept_id: selectedConceptId });
+        if (resp?.namespace) {
+          try { localStorage.setItem('current_user_namespace', resp.namespace); } catch { }
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to sync server session user concept (initial load)', e);
+    }
+
     // Populate Organisations and select the saved one
     await populateOrganisationsDropdown('currentOrganisationSelect', settings.current_organisation_id);
     // If we have concept_id too, attempt to match based on data attribute
@@ -980,6 +1005,17 @@ async function loadAndDisplaySettings() {
             localStorage.setItem('current_user_namespace', namespace);
           }
         } catch { }
+
+        // Keep footer/user-visible org display in sync with Phase 2 org selection.
+        try {
+          if (orgId) {
+            setStoredJson(LS_ORG_KEY, { id: null, concept_id: orgId, name: null });
+          } else {
+            setStoredJson(LS_ORG_KEY, null);
+          }
+        } catch { }
+        if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
+
         renderActiveNamespace();
         void loadRagStatus(null);
       });
