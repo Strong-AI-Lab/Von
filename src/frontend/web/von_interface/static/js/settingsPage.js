@@ -726,6 +726,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (opt) {
       setStoredJson(LS_USER_KEY, { id: opt.dataset.id || null, concept_id: opt.dataset.conceptId || null, name: opt.textContent || null });
       if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
+      // Keep the authenticated server session aligned with the selected user concept.
+      if (opt.dataset.conceptId) {
+        try {
+          await postJson('/von/api/session/set_user_concept', { user_concept_id: opt.dataset.conceptId });
+        } catch (e) {
+          console.warn('Failed to update server session user concept', e);
+        }
+      }
       // When user changes, attempt to load stored server-side prefs (language/org)
       if (opt.dataset.conceptId) {
         await loadUserConceptPreferences(opt.dataset.conceptId);

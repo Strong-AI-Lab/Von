@@ -182,6 +182,36 @@ def test_get_session_context_derives_role_and_namespace_with_org(app_client):
     )
 
 
+def test_set_user_concept_updates_session_context_and_org_listing(app_client):
+    _, client = app_client
+
+    with client.session_transaction() as sess:
+        sess["user_email"] = "jeremyluyunli123@gmail.com"
+
+    resp = client.post(
+        "/von/api/session/set_user_concept", json={"user_concept_id": "#V#lu_yunli"}
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["user_id"] == "#V#lu_yunli"
+    assert data["organisation_id"] is None
+    assert data["role"] is None
+    assert data["namespace"] == "#V#lu_yunli"
+
+    ctx = client.get("/von/api/session/context")
+    assert ctx.status_code == 200
+    ctx_data = ctx.get_json()
+    assert ctx_data["user_id"] == "#V#lu_yunli"
+    assert ctx_data["namespace"] == "#V#lu_yunli"
+
+    orgs = client.get("/von/api/organisations/my_organisations")
+    assert orgs.status_code == 200
+    orgs_data = orgs.get_json()
+    assert orgs_data["total_count"] == 1
+    assert orgs_data["organisations"][0]["concept_id"] == "#V#the_lu_witbrock_household"
+
+
 def test_get_my_organisations_requires_authentication(app_client):
     _, client = app_client
 
