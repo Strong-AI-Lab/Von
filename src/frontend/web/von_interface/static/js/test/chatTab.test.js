@@ -528,6 +528,39 @@ describe('LLM debug warnings (presenter channel health)', () => {
             'Response claims 9 operations, but only 4 tool invocations were recorded.'
         );
     });
+
+    test('surfaces tool-call parse errors from tool invocations', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            response: 'Tool call was not executed due to an MCP serialisation error.',
+            tool_invocations: [
+                {
+                    method: '__tool_call_parse_error__',
+                    error: 'Tool call was not executed: multiple JSON values were emitted in one response.'
+                }
+            ]
+        });
+
+        expect(warnings).toContain(
+            'Tool call was not executed: multiple JSON values were emitted in one response.'
+        );
+    });
+
+    test('flags when max tool invocation cap is hit but response still looks tool-shaped', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            response: '{"action":"call_tool","tool":"test","payload":{}}',
+            tool_invocations: [{ method: 'a' }, { method: 'b' }],
+            internal_mcp: {
+                execution_caps: {
+                    max_tool_invocations: 2,
+                    tool_batch_cap: 1
+                }
+            }
+        });
+
+        expect(warnings).toContain(
+            'Reached max tool invocation limit (2); additional tool calls were not executed.'
+        );
+    });
 });
 
 describe('LLM debug popup metadata (internal MCP caps + usage)', () => {

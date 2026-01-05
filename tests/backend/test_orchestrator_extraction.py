@@ -61,6 +61,32 @@ def test_extract_tool_calls_accepts_single_tool_call():
     assert calls == [{"action": "call_tool", "tool": "test", "payload": {}}]
 
 
+def test_extract_tool_calls_tolerates_trailing_json_marker_suffix():
+    """Regression test: tolerate trailing markers like "[json]".
+
+    Some models append a non-JSON suffix such as "[json]" after emitting a valid
+    tool-call JSON payload. This should not be treated as a second JSON value.
+    """
+
+    text = '{"action":"call_tool","tool":"test","payload":{}}[json]'
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    calls = orchestrator._extract_tool_calls(text)
+    assert calls == [{"action": "call_tool", "tool": "test", "payload": {}}]
+
+
+def test_extract_tool_calls_rejects_concatenated_json_values():
+    """Still reject truly concatenated JSON values."""
+
+    text = (
+        '{"action":"call_tool","tool":"test","payload":{}}'
+        '{"action":"call_tool","tool":"test","payload":{}}'
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    with pytest.raises(ToolCallParsingError) as excinfo:
+        orchestrator._extract_tool_calls(text)
+    assert "multiple JSON values" in str(excinfo.value)
+
+
 def test_extract_tool_calls_accepts_json_array_batch():
     text = (
         '[{"action":"call_tool","tool":"test","payload":{}},'
