@@ -351,6 +351,62 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
             if isinstance(call.get("error"), str) and call.get("error", "").strip():
                 warnings.append(call["error"].strip())
 
+    # Tool invocation failures / parse errors
+    tool_invocations = debug_info.get("tool_invocations", [])
+    if isinstance(tool_invocations, list):
+        for inv in tool_invocations:
+            if not isinstance(inv, dict):
+                continue
+            method = inv.get("method")
+            if not isinstance(method, str):
+                method = (
+                    inv.get("tool") if isinstance(inv.get("tool"), str) else "unknown"
+                )
+            error = inv.get("error")
+            error_text = error.strip() if isinstance(error, str) else ""
+            if not error_text:
+                continue
+
+            # Surface parse errors directly so it is obvious tools were not executed.
+            if method == "__tool_call_parse_error__":
+                warnings.append(error_text)
+            else:
+                warnings.append(f"Tool {method} failed: {error_text}")
+
+    # Max tool invocation cap reached (LLM still wants tools)
+    try:
+        internal_mcp = debug_info.get("internal_mcp")
+        caps = (
+            internal_mcp.get("execution_caps")
+            if isinstance(internal_mcp, dict)
+            else None
+        )
+        max_invocations = (
+            caps.get("max_tool_invocations") if isinstance(caps, dict) else None
+        )
+        max_invocations = int(max_invocations) if max_invocations is not None else None
+    except Exception:
+        max_invocations = None
+
+    response_text = debug_info.get("response")
+    if (
+        isinstance(response_text, str)
+        and isinstance(max_invocations, int)
+        and max_invocations > 0
+        and isinstance(tool_invocations, list)
+        and len(tool_invocations) >= max_invocations
+    ):
+        trimmed = response_text.strip()
+        looks_like_tool_call = (
+            (trimmed.startswith("{") or trimmed.startswith("["))
+            and '"call_tool"' in trimmed
+            and '"tool"' in trimmed
+        )
+        if looks_like_tool_call:
+            warnings.append(
+                f"Reached max tool invocation limit ({max_invocations}); additional tool calls were not executed."
+            )
+
     # Check presenter channel health (screen/spoken routes)
     presenter_channels = debug_info.get("presenter_channels")
     if isinstance(presenter_channels, dict):
