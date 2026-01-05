@@ -3011,6 +3011,108 @@ def reset_context():
 
 
 # Phase 2: Organisation and Role Selection Endpoints
+@von_bp.route("/api/session/set_user_concept", methods=["POST"])
+def set_user_concept():
+    """Set the current user concept in the session.
+
+    This aligns the authenticated session identity with the user selected in Settings.
+
+    Request body: {user_concept_id: str}
+    Returns: {user_id, organisation_id, role, namespace, status: 'updated'}
+    """
+    try:
+        from ...services.namespace_service import derive_namespace
+
+        authenticated_id = (
+            session.get("user_id")
+            or session.get("user_concept_id")
+            or session.get("user_email")
+        )
+        if not authenticated_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        user_concept_id = data.get("user_concept_id")
+        if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+            return jsonify({"error": "user_concept_id required"}), 400
+
+        user_concept_id = user_concept_id.strip()
+        if not user_concept_id.startswith("#V#"):
+            user_concept_id = f"#V#{user_concept_id}"
+
+        user_slug = user_concept_id[3:]
+        user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
+
+        existing_user_concept_id = session.get("user_concept_id")
+        if isinstance(existing_user_concept_id, str):
+            existing_user_concept_id = existing_user_concept_id.strip()
+            if existing_user_concept_id and not existing_user_concept_id.startswith(
+                "#V#"
+            ):
+                existing_user_concept_id = f"#V#{existing_user_concept_id}"
+        else:
+            existing_user_concept_id = None
+
+        organisation_concept_id = session.get("organisation_concept_id")
+        role_in_org = session.get("role_in_org")
+        org_slug = None
+        if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
+            org_slug_raw = organisation_concept_id.strip()
+            if org_slug_raw.startswith("#V#"):
+                org_slug_raw = org_slug_raw[3:]
+            if "@" in org_slug_raw:
+                org_slug_raw = org_slug_raw.split("@", 1)[0]
+            if "+" in org_slug_raw:
+                org_slug_raw = org_slug_raw.split("+", 1)[0]
+            org_slug = re.sub(r"[^a-z0-9]+", "_", org_slug_raw.strip().lower()).strip(
+                "_"
+            )
+
+        namespace = derive_namespace(user_slug, org_slug, role_in_org)
+
+        # Store the concept id for authoritative identity.
+        session["user_concept_id"] = user_concept_id
+        # Keep backward compatibility with code that still reads session['user_id'].
+        session["user_id"] = user_concept_id
+
+        # Clear org-scoped context only when switching between different user concepts.
+        # If we are simply backfilling user_concept_id for an already-authenticated session,
+        # keep any existing org selection and recompute namespace accordingly.
+        if existing_user_concept_id and existing_user_concept_id != user_concept_id:
+            organisation_concept_id = None
+            role_in_org = None
+            session.pop("organisation_concept_id", None)
+            session.pop("role_in_org", None)
+        session["namespace"] = namespace
+        session.modified = True
+
+        organisation_id_response = None
+        if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
+            organisation_id_response = organisation_concept_id.strip()
+            if not organisation_id_response.startswith("#V#"):
+                organisation_id_response = f"#V#{organisation_id_response}"
+
+        return (
+            jsonify(
+                {
+                    "status": (
+                        "updated"
+                        if existing_user_concept_id != user_concept_id
+                        else "unchanged"
+                    ),
+                    "user_id": user_concept_id,
+                    "organisation_id": organisation_id_response,
+                    "role": role_in_org,
+                    "namespace": namespace,
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error setting user concept: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/api/session/set_organisation", methods=["POST"])
 def set_organisation():
     """
@@ -3026,8 +3128,8 @@ def set_organisation():
         from ...security.role_resolver import get_user_role
 
         user_id = (
-            session.get("user_id")
-            or session.get("user_concept_id")
+            session.get("user_concept_id")
+            or session.get("user_id")
             or session.get("user_email")
         )
         if not user_id:
@@ -3041,8 +3143,10 @@ def set_organisation():
         if user_slug.startswith("#V#"):
             user_slug = user_slug[3:]
         if "@" in user_slug:
-            user_slug = user_slug.split("@")[0]
-        user_slug = user_slug.strip().lower().replace(" ", "_")
+            user_slug = user_slug.split("@", 1)[0]
+        if "+" in user_slug:
+            user_slug = user_slug.split("+", 1)[0]
+        user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
 
         # Check if this is a clear request (empty dict or explicit null/empty string)
         is_clear_request = "organisation_concept_id" in data and not org_id
@@ -3130,8 +3234,8 @@ def get_session_context():
         from ...security.role_resolver import get_user_role
 
         user_id = (
-            session.get("user_id")
-            or session.get("user_concept_id")
+            session.get("user_concept_id")
+            or session.get("user_id")
             or session.get("user_email")
         )
         if not user_id:
@@ -3158,8 +3262,10 @@ def get_session_context():
             if user_slug.startswith("#V#"):
                 user_slug = user_slug[3:]
             if "@" in user_slug:
-                user_slug = user_slug.split("@")[0]
-            user_slug = user_slug.strip().lower().replace(" ", "_")
+                user_slug = user_slug.split("@", 1)[0]
+            if "+" in user_slug:
+                user_slug = user_slug.split("+", 1)[0]
+            user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
             if org_id:
                 # Get role if not in session
                 if not role_in_org:
@@ -3171,12 +3277,18 @@ def get_session_context():
             else:
                 namespace = derive_namespace(user_slug)
 
+        organisation_id_response = None
+        if isinstance(org_id, str) and org_id.strip():
+            organisation_id_response = org_id.strip()
+            if not organisation_id_response.startswith("#V#"):
+                organisation_id_response = f"#V#{organisation_id_response}"
+
         return (
             jsonify(
                 {
                     "authenticated": True,
                     "user_id": user_id,
-                    "organisation_id": org_id,
+                    "organisation_id": organisation_id_response,
                     "role": role_in_org,
                     "namespace": namespace,
                 }
@@ -3285,7 +3397,9 @@ def get_my_organisations():
         if not user_id:
             return jsonify({"error": "Not authenticated"}), 401
 
-        user_concept_id = session.get("user_concept_id")
+        requested_user_concept_id = request.args.get("user_concept_id")
+        user_concept_id = requested_user_concept_id or session.get("user_concept_id")
+        user_email = session.get("user_email")
 
         def _normalise_relationships(rel):
             if not isinstance(rel, (dict, list)):
@@ -3310,21 +3424,33 @@ def get_my_organisations():
         def _prettify_concept_id(concept_id: str) -> str:
             return concept_id.replace("#V#", "").replace("_", " ").title()
 
-        # Derive a slug for stub role resolution
-        user_slug = str(user_id)
+        # Derive a slug for stub role resolution.
+        # Prefer identifiers that are stable/meaningful (concept ID or email) over
+        # opaque auth subjects.
+        slug_source = user_concept_id or user_email or user_id
+
+        user_slug = str(slug_source)
         if user_slug.startswith("#V#"):
             user_slug = user_slug[3:]
         if "@" in user_slug:
-            user_slug = user_slug.split("@")[0]
-        user_slug = user_slug.strip().lower().replace(" ", "_")
+            user_slug = user_slug.split("@", 1)[0]
+        if "+" in user_slug:
+            user_slug = user_slug.split("+", 1)[0]
+
+        import re
+
+        user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
 
         USER_PREF_ORG_PREDICATE = "#V#member_of_organisation"
 
         organisations = []
 
-        # Prefer memberships stored on the authenticated user concept.
+        # Prefer memberships stored on the selected/authenticated user concept.
         if isinstance(user_concept_id, str) and user_concept_id.strip():
-            user_concept = get_concept_by_concept_id(concept_id=user_concept_id)
+            try:
+                user_concept = get_concept_by_concept_id(concept_id=user_concept_id)
+            except Exception:
+                user_concept = None
             if isinstance(user_concept, dict):
                 rel = _normalise_relationships(user_concept.get("relationships", {}))
                 org_raw = rel.get(USER_PREF_ORG_PREDICATE)
