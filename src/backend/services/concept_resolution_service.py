@@ -5,9 +5,15 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from bson import ObjectId
+
 from .concept_search_service import _search_text_relations
 from .text_value_service import get_texts_for_concept
 from ..db.repositories.concepts_repository import ConceptsRepository
+from ..db.repositories.text_value_repository import (
+    TextRelationsRepository,
+    TextValuesRepository,
+)
 from ..vontology.code_concepts_registry import is_code_concept_id
 from ..vontology.utils_vontology import get_vontology_node_and_descendant_ids
 
@@ -162,6 +168,65 @@ def resolve_concept_by_name(
         )
         candidate_ids.update(hits)
 
+    # Stage 3b: diacritic-insensitive fallback.
+    # If the user types ASCII (e.g. 'Gael') but the stored name contains diacritics
+    # (e.g. 'Gaël'), Mongo text/regex matching may not find it. Do a bounded scan of
+    # hasName text relations and compare with diacritics stripped.
+    if not candidate_ids:
+        query_cf_stripped = _strip_diacritics(raw.casefold())
+        if query_cf_stripped:
+            relations = list(
+                TextRelationsRepository.find(
+                    {"predicate": "hasName"},
+                    limit=10000,
+                )
+            )
+
+            # Map text_value_id -> subject_concept_ids
+            tv_to_subjects: dict[str, set[str]] = {}
+            tv_object_ids: list[ObjectId] = []
+            for rel in relations:
+                subj = rel.get("subject_concept_id")
+                obj = rel.get("object_text_id")
+                if not isinstance(subj, str) or not subj:
+                    continue
+                obj_str = str(obj) if obj is not None else ""
+                if not obj_str:
+                    continue
+                tv_to_subjects.setdefault(obj_str, set()).add(subj)
+                if ObjectId.is_valid(obj_str):
+                    tv_object_ids.append(ObjectId(obj_str))
+
+            if tv_object_ids:
+                text_value_docs = list(
+                    TextValuesRepository.find(
+                        {"_id": {"$in": tv_object_ids}},
+                        limit=5000,
+                    )
+                )
+            else:
+                text_value_docs = []
+
+            diacritic_hits: set[str] = set()
+            for tv in text_value_docs:
+                tv_id = str(tv.get("_id"))
+                text = tv.get("text")
+                if not isinstance(text, str) or not text:
+                    continue
+                if _strip_diacritics(text.casefold()) == query_cf_stripped:
+                    diacritic_hits.update(tv_to_subjects.get(tv_id, set()))
+
+            audit.append(
+                {
+                    "stage": "candidate_generation",
+                    "method": "text_relations_diacritic_scan",
+                    "query": raw,
+                    "hits": len(diacritic_hits),
+                    "relation_scan_cap": 10000,
+                }
+            )
+            candidate_ids.update(diacritic_hits)
+
     # Deterministic cap to avoid pathological scans.
     candidate_pool_cap = max(50, min(500, max_results * 50))
     if len(candidate_ids) > candidate_pool_cap:
@@ -197,6 +262,20 @@ def resolve_concept_by_name(
                 "candidates": [],
                 "audit": audit,
             }
+
+        # Be robust to incomplete type-hierarchy data: if descendant expansion fails to
+        # locate the start node, still treat instance_of as a valid direct filter.
+        if not descendant_ids:
+            if ConceptsRepository.find_one({"concept_id": instance_of}, {"_id": 1}):
+                descendant_ids = [instance_of]
+            audit.append(
+                {
+                    "stage": "filter",
+                    "method": "instance_of_descendants_fallback",
+                    "instance_of": instance_of,
+                    "descendants": len(descendant_ids),
+                }
+            )
 
         filtered: set[str] = set()
         cursor = ConceptsRepository.find(

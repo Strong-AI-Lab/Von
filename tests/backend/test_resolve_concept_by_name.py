@@ -144,7 +144,7 @@ def test_resolve_concept_by_name_honours_instance_of_filter():
     result = resolve_concept_by_name(name="Alex Example", instance_of=researcher_type)
 
     assert result["success"] is True
-    assert result["status"] == "resolved"
+    assert result["status"] == "resolved", result
     assert result["resolved_concept_id"] == good
 
 
