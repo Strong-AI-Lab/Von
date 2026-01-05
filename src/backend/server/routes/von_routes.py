@@ -3285,7 +3285,9 @@ def get_my_organisations():
         if not user_id:
             return jsonify({"error": "Not authenticated"}), 401
 
-        user_concept_id = session.get("user_concept_id")
+        requested_user_concept_id = request.args.get("user_concept_id")
+        user_concept_id = requested_user_concept_id or session.get("user_concept_id")
+        user_email = session.get("user_email")
 
         def _normalise_relationships(rel):
             if not isinstance(rel, (dict, list)):
@@ -3310,21 +3312,33 @@ def get_my_organisations():
         def _prettify_concept_id(concept_id: str) -> str:
             return concept_id.replace("#V#", "").replace("_", " ").title()
 
-        # Derive a slug for stub role resolution
-        user_slug = str(user_id)
+        # Derive a slug for stub role resolution.
+        # Prefer identifiers that are stable/meaningful (concept ID or email) over
+        # opaque auth subjects.
+        slug_source = user_concept_id or user_email or user_id
+
+        user_slug = str(slug_source)
         if user_slug.startswith("#V#"):
             user_slug = user_slug[3:]
         if "@" in user_slug:
-            user_slug = user_slug.split("@")[0]
-        user_slug = user_slug.strip().lower().replace(" ", "_")
+            user_slug = user_slug.split("@", 1)[0]
+        if "+" in user_slug:
+            user_slug = user_slug.split("+", 1)[0]
+
+        import re
+
+        user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
 
         USER_PREF_ORG_PREDICATE = "#V#member_of_organisation"
 
         organisations = []
 
-        # Prefer memberships stored on the authenticated user concept.
+        # Prefer memberships stored on the selected/authenticated user concept.
         if isinstance(user_concept_id, str) and user_concept_id.strip():
-            user_concept = get_concept_by_concept_id(concept_id=user_concept_id)
+            try:
+                user_concept = get_concept_by_concept_id(concept_id=user_concept_id)
+            except Exception:
+                user_concept = None
             if isinstance(user_concept, dict):
                 rel = _normalise_relationships(user_concept.get("relationships", {}))
                 org_raw = rel.get(USER_PREF_ORG_PREDICATE)

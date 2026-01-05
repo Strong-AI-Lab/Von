@@ -208,6 +208,44 @@ def test_get_my_organisations_returns_stubbed_memberships(app_client):
     assert org["name"] == "University Of Auckland Strong Ai Lab"
 
 
+def test_get_my_organisations_uses_user_email_for_stub_memberships(app_client):
+    _, client = app_client
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = "opaque-oauth-subject"
+        sess["user_email"] = "lu.yunli@example.com"
+
+    resp = client.get("/von/api/organisations/my_organisations")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 1
+    org = data["organisations"][0]
+    assert org["concept_id"] == "#V#the_lu_witbrock_household"
+    assert org["role"] == "member"
+    assert org["name"] == "The Lu Witbrock Household"
+
+
+def test_get_my_organisations_allows_selected_user_concept_id_override(app_client):
+    _, client = app_client
+
+    # Authenticated session identity does not match stub mapping.
+    with client.session_transaction() as sess:
+        sess["user_id"] = "jeremyluyunli123@gmail.com"
+
+    resp = client.get(
+        "/von/api/organisations/my_organisations?user_concept_id=%23V%23lu_yunli"
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 1
+    org = data["organisations"][0]
+    assert org["concept_id"] == "#V#the_lu_witbrock_household"
+    assert org["role"] == "member"
+    assert org["name"] == "The Lu Witbrock Household"
+
+
 def test_get_my_organisations_prefers_memberships_from_user_concept_relationships(
     app_client, monkeypatch
 ):
