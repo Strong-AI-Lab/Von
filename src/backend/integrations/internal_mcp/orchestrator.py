@@ -1659,13 +1659,21 @@ class InternalMCPChatOrchestrator:
                 )
             return None
 
-        # Reject concatenated JSON values.
+        # Reject concatenated JSON values, but tolerate non-JSON markers like
+        # "[json]" that some models append after a valid tool call.
         if trailing:
             if trailing.startswith("{") or trailing.startswith("["):
-                raise ToolCallParsingError(
-                    "Tool call was not executed: multiple JSON values were emitted in one response.",
-                    raw_response=text,
-                )
+                try:
+                    # Only treat the remainder as a second value if it is itself
+                    # valid JSON.
+                    decoder.raw_decode(trailing)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    raise ToolCallParsingError(
+                        "Tool call was not executed: multiple JSON values were emitted in one response.",
+                        raw_response=text,
+                    )
 
             snippet = trailing
             if len(snippet) > 120:
@@ -1680,10 +1688,15 @@ class InternalMCPChatOrchestrator:
             if post_fence_trailing.startswith("{") or post_fence_trailing.startswith(
                 "["
             ):
-                raise ToolCallParsingError(
-                    "Tool call was not executed: multiple JSON values were emitted in one response.",
-                    raw_response=text,
-                )
+                try:
+                    decoder.raw_decode(post_fence_trailing)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    raise ToolCallParsingError(
+                        "Tool call was not executed: multiple JSON values were emitted in one response.",
+                        raw_response=text,
+                    )
             snippet = post_fence_trailing
             if len(snippet) > 120:
                 snippet = snippet[:117] + "..."
@@ -1803,10 +1816,15 @@ class InternalMCPChatOrchestrator:
         trailing = raw[end:].strip()
         if trailing and is_tool_call:
             if trailing.startswith("{") or trailing.startswith("["):
-                raise ToolCallParsingError(
-                    "Tool call was not executed: multiple tool calls were emitted in one response.",
-                    raw_response=text,
-                )
+                try:
+                    decoder.raw_decode(trailing)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    raise ToolCallParsingError(
+                        "Tool call was not executed: multiple tool calls were emitted in one response.",
+                        raw_response=text,
+                    )
 
             # Some models append explanatory prose after a valid JSON tool call.
             # Prefer a safe recovery that preserves the single-tool-call contract
@@ -1825,10 +1843,15 @@ class InternalMCPChatOrchestrator:
             if post_fence_trailing.startswith("{") or post_fence_trailing.startswith(
                 "["
             ):
-                raise ToolCallParsingError(
-                    "Tool call was not executed: multiple tool calls were emitted in one response.",
-                    raw_response=text,
-                )
+                try:
+                    decoder.raw_decode(post_fence_trailing)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    raise ToolCallParsingError(
+                        "Tool call was not executed: multiple tool calls were emitted in one response.",
+                        raw_response=text,
+                    )
             snippet = post_fence_trailing
             if len(snippet) > 120:
                 snippet = snippet[:117] + "..."

@@ -1906,6 +1906,47 @@ function deriveLlmDebugWarnings(debugData) {
         : null;
     const executedToolCount = toolInvocations.length || (toolStatsCount ?? 0);
 
+    // Surface tool invocation failures / parse errors so it is obvious when tool
+    // use was intended but did not execute.
+    for (const inv of toolInvocations) {
+        if (!inv || typeof inv !== 'object') {
+            continue;
+        }
+
+        const method = (typeof inv.method === 'string')
+            ? inv.method
+            : ((typeof inv.tool === 'string') ? inv.tool : 'unknown');
+
+        const errorText = (typeof inv.error === 'string') ? inv.error.trim() : '';
+        if (!errorText) {
+            continue;
+        }
+
+        if (method === '__tool_call_parse_error__') {
+            warnings.push(errorText);
+        } else {
+            warnings.push(`Tool ${method} failed: ${errorText}`);
+        }
+    }
+
+    // Detect when we reached the max tool invocation cap but the response still
+    // looks like a tool call (i.e., the LLM wanted more tools than we executed).
+    const maxToolInvocations = (debugData.internal_mcp && debugData.internal_mcp.execution_caps && Number.isFinite(debugData.internal_mcp.execution_caps.max_tool_invocations))
+        ? Number(debugData.internal_mcp.execution_caps.max_tool_invocations)
+        : null;
+
+    if (maxToolInvocations != null && maxToolInvocations > 0 && toolInvocations.length >= maxToolInvocations) {
+        const trimmed = String(responseText || '').trim();
+        const looksLikeToolCall = (trimmed.startsWith('{') || trimmed.startsWith('['))
+            && trimmed.includes('"call_tool"')
+            && trimmed.includes('"tool"');
+        if (looksLikeToolCall) {
+            warnings.push(
+                `Reached max tool invocation limit (${maxToolInvocations}); additional tool calls were not executed.`
+            );
+        }
+    }
+
     // Heuristic: detect when the assistant claims it performed N operations but we
     // only executed M tool calls. This often indicates tool truncation/early stop.
     // (e.g., “Done — 9 links” but tool_invocations contains 4 items).
