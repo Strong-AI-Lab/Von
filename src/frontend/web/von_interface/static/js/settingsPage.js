@@ -1013,15 +1013,26 @@ async function loadAndDisplaySettings() {
       if (maxInvEl) {
         const raw = Object.prototype.hasOwnProperty.call(settings, 'internal_mcp_max_tool_invocations')
           ? settings.internal_mcp_max_tool_invocations
-          : 8;
-        maxInvEl.value = String(clampNumber(raw, 0, 50, 8));
+          : 30;
+        maxInvEl.value = String(clampNumber(raw, 0, 50, 30));
       }
       const batchCapEl = document.getElementById('internalMcpToolBatchCap');
       if (batchCapEl) {
         const raw = Object.prototype.hasOwnProperty.call(settings, 'internal_mcp_tool_batch_cap')
           ? settings.internal_mcp_tool_batch_cap
-          : 4;
-        batchCapEl.value = String(clampNumber(raw, 1, 50, 4));
+          : 10;
+        batchCapEl.value = String(clampNumber(raw, 1, 50, 10));
+      }
+    } catch { }
+
+    // Populate tool-use during thinking toggle (JVNAUTOSCI-942)
+    try {
+      const toolUseToggleEl = document.getElementById('showToolUseDuringThinkingToggle');
+      if (toolUseToggleEl) {
+        const flag = Object.prototype.hasOwnProperty.call(settings, 'show_tool_use_during_thinking')
+          ? !!settings.show_tool_use_during_thinking
+          : true;
+        toolUseToggleEl.checked = !!flag;
       }
     } catch { }
 
@@ -1214,14 +1225,15 @@ async function saveAllSettings(changedProvider = null) {
       document.getElementById('internalMcpMaxToolInvocations')?.value,
       0,
       50,
-      8,
+      30,
     ),
     internal_mcp_tool_batch_cap: clampNumber(
       document.getElementById('internalMcpToolBatchCap')?.value,
       1,
       50,
-      4,
+      10,
     ),
+    show_tool_use_during_thinking: !!document.getElementById('showToolUseDuringThinkingToggle')?.checked,
   };
 
   try {

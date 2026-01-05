@@ -6,7 +6,7 @@ when the MCP orchestrator or other callers included extra context fields.
 """
 
 import pytest
-from backend.integrations.internal_mcp.catalogue import _create_concepts
+from src.backend.integrations.internal_mcp.catalogue import _create_concepts
 
 
 def test_create_concepts_accepts_namespace_field():
@@ -87,4 +87,5 @@ def test_create_concepts_accepts_multiple_unknown_fields():
     assert result is not None
     assert result.get("total") == 1
     first_result = result["results"][0]
+    assert isinstance(first_result, dict)
     assert first_result.get("success") is True or "concept_id" in first_result

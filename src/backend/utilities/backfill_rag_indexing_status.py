@@ -3,11 +3,13 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-# Ensure src on path (run from repo root)
-sys.path.append(os.path.abspath("src"))
+# Ensure repo root on path (run from repo root)
+_repo_root = os.path.abspath(".")
+if _repo_root not in sys.path:
+    sys.path.append(_repo_root)
 
-from backend.db.connection_manager import get_db
-from backend.models.concept_models import IndexingStatus
+from src.backend.db.connection_manager import get_db
+from src.backend.models.concept_models import IndexingStatus
 
 """Backfill RAG Indexing Status
 

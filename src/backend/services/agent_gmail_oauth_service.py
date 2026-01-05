@@ -15,12 +15,12 @@ if TYPE_CHECKING:  # pragma: no cover
 
 from googleapiclient.discovery import build
 
-from backend.integrations.google.gmail_service import (
+from ..integrations.google.gmail_service import (
     GmailProfile,
     get_profile,
     load_profiles_from_env,
 )
-from backend.services.agent_gmail_token_store import upsert_agent_gmail_tokens
+from .agent_gmail_token_store import upsert_agent_gmail_tokens
 
 logger = logging.getLogger(__name__)
 
