@@ -266,28 +266,40 @@ def resolve_concept_by_name(
         # Be robust to incomplete type-hierarchy data: if descendant expansion fails to
         # locate the start node, still treat instance_of as a valid direct filter.
         if not descendant_ids:
-            if ConceptsRepository.find_one({"concept_id": instance_of}, {"_id": 1}):
-                descendant_ids = [instance_of]
+            descendant_ids = [instance_of]
             audit.append(
                 {
                     "stage": "filter",
                     "method": "instance_of_descendants_fallback",
                     "instance_of": instance_of,
-                    "descendants": len(descendant_ids),
+                    "descendants": 1,
                 }
             )
 
+        descendant_set = {str(cid) for cid in descendant_ids if cid}
+
         filtered: set[str] = set()
+        # Filter in Python rather than relying on nested $in queries. This is robust
+        # across Mongo backends and avoids subtle driver/mongomock incompatibilities.
         cursor = ConceptsRepository.find(
-            {
-                "concept_id": {"$in": list(candidate_ids)},
-                "relationships.is_an_instance_of": {"$in": descendant_ids},
-            },
-            {"concept_id": 1},
+            {"concept_id": {"$in": list(candidate_ids)}},
+            {"concept_id": 1, "relationships": 1},
         )
         for doc in cursor:
             cid = doc.get("concept_id")
-            if cid:
+            rels = doc.get("relationships") or {}
+            raw_instances = (
+                rels.get("is_an_instance_of") if isinstance(rels, dict) else None
+            )
+
+            if isinstance(raw_instances, str):
+                instance_ids = [raw_instances]
+            elif isinstance(raw_instances, list):
+                instance_ids = [x for x in raw_instances if isinstance(x, str)]
+            else:
+                instance_ids = []
+
+            if cid and any(inst in descendant_set for inst in instance_ids):
                 filtered.add(cid)
 
         audit.append(
