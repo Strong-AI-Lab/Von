@@ -90,7 +90,6 @@ class AccessEvaluator:
                 self._cache[normalised] = True
                 return True
         except Exception:
-            # Best-effort: fall through to Mongo lookup.
             pass
 
         if normalised == self.user_id:
