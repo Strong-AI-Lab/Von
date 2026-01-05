@@ -49,12 +49,24 @@ function setLoadingIndicatorText(text) {
 }
 
 function setLoadingIndicatorTooltip(text) {
-    const el = getLoadingIndicatorEl();
-    if (!el) {
-        return;
-    }
     const value = String(text ?? '').trim();
-    el.title = value;
+    const wrapper = getLoadingIndicatorEl();
+    if (wrapper) {
+        // Opt out of suppressTooltips.js for this element.
+        // Important: set before `title`, otherwise the MutationObserver may strip it.
+        wrapper.setAttribute('data-keep-title', 'true');
+        wrapper.title = value;
+        wrapper.setAttribute('aria-label', value);
+        wrapper.setAttribute('data-original-title', value);
+    }
+
+    const textEl = getLoadingIndicatorTextEl();
+    if (textEl) {
+        textEl.setAttribute('data-keep-title', 'true');
+        textEl.title = value;
+        textEl.setAttribute('aria-label', value);
+        textEl.setAttribute('data-original-title', value);
+    }
 }
 
 function createClientRequestId() {
@@ -76,7 +88,7 @@ async function refreshToolUseDuringThinkingSetting(force = false) {
 
     lastToolUseSettingRefreshMs = now;
     try {
-        const resp = await fetch('/settings/', { method: 'GET' });
+        const resp = await fetch('/api/settings/', { method: 'GET' });
         if (!resp || !resp.ok) {
             return showToolUseDuringThinkingSetting;
         }
@@ -168,16 +180,43 @@ function recordToolUseHistory(request, progress) {
     history.push({ tool, batchSize });
 }
 
-function formatToolUseHistoryTooltip(request) {
-    if (!request || !Array.isArray(request.toolUseProgressHistory)) {
-        return '';
+function formatThinkingDuration(elapsedMs) {
+    const ms = Number.isFinite(elapsedMs) ? Math.max(0, Number(elapsedMs)) : 0;
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+
+    if (minutes > 0) {
+        return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
     }
-    const history = request.toolUseProgressHistory;
-    if (!history.length) {
+    return `${totalSeconds}s`;
+}
+
+function formatToolUseHistoryTooltip(request) {
+    if (!request) {
         return '';
     }
 
-    const lines = ['Tools this turn:'];
+    const thinkingStartedAtMs = Number.isFinite(request.thinkingStartedAtMs)
+        ? Number(request.thinkingStartedAtMs)
+        : null;
+    const elapsedMs = thinkingStartedAtMs === null ? null : Date.now() - thinkingStartedAtMs;
+
+    const history = Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory : [];
+
+    if (!history.length) {
+        const lines = ['No tool use yet.'];
+        if (elapsedMs !== null) {
+            lines.push(`Thinking for ${formatThinkingDuration(elapsedMs)}.`);
+        }
+        return lines.join('\n');
+    }
+
+    const lines = [];
+    if (elapsedMs !== null) {
+        lines.push(`Thinking for ${formatThinkingDuration(elapsedMs)}`);
+    }
+    lines.push('Tools this turn:');
     for (const entry of history) {
         const tool = entry && typeof entry.tool === 'string' ? entry.tool : '';
         if (!tool) {
@@ -215,10 +254,52 @@ function stopToolUseProgressPolling(request) {
     }
 
     try {
+        if (poll.timeoutId) {
+            clearTimeout(poll.timeoutId);
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    try {
         poll.abortController?.abort();
     } catch (_) {
         // Ignore.
     }
+}
+
+function stopThinkingTooltipTicker(request) {
+    if (!request) {
+        return;
+    }
+
+    try {
+        if (request.thinkingTooltipIntervalId) {
+            clearInterval(request.thinkingTooltipIntervalId);
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    request.thinkingTooltipIntervalId = null;
+}
+
+function startThinkingTooltipTicker(request) {
+    if (!request || request.aborted) {
+        return;
+    }
+
+    stopThinkingTooltipTicker(request);
+
+    // Update once per second so the elapsed time in the tooltip stays current,
+    // even if tool-progress polling backs off (e.g., repeated 404s).
+    request.thinkingTooltipIntervalId = setInterval(() => {
+        if (request.aborted || activeChatRequest !== request) {
+            stopThinkingTooltipTicker(request);
+            return;
+        }
+        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+    }, 1000);
 }
 
 function startToolUseProgressPolling(request) {
@@ -238,17 +319,56 @@ function startToolUseProgressPolling(request) {
     stopToolUseProgressPolling(request);
     const abortController = new AbortController();
 
+    const poll = {
+        abortController,
+        timeoutId: null,
+        intervalId: null,
+        nextDelayMs: 350,
+        consecutiveNotFound: 0
+    };
+
+    const scheduleNextPoll = (delayMs) => {
+        if (request.aborted || activeChatRequest !== request) {
+            return;
+        }
+        poll.timeoutId = setTimeout(() => {
+            void pollOnce();
+        }, Math.max(0, Number(delayMs) || 0));
+    };
+
     const pollOnce = async () => {
         if (request.aborted || activeChatRequest !== request) {
             return;
         }
+
+        // Keep tooltip "alive" even before the server has any tool-progress state.
+        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+
         try {
             const resp = await fetch(`/von/progress/${encodeURIComponent(requestId)}`,
                 { method: 'GET', signal: abortController.signal });
-            if (!resp || !resp.ok) {
+            if (!resp) {
+                scheduleNextPoll(Math.min(5000, poll.nextDelayMs * 1.7));
+                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                return;
+            }
+
+            if (resp.status === 404) {
+                poll.consecutiveNotFound += 1;
+                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+
+            if (!resp.ok) {
+                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                scheduleNextPoll(poll.nextDelayMs);
                 return;
             }
             const progress = await resp.json();
+
+            poll.consecutiveNotFound = 0;
+            poll.nextDelayMs = 350;
             setLoadingIndicatorText(formatToolUseProgressText(progress));
             recordToolUseHistory(request, progress);
             setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
@@ -256,18 +376,21 @@ function startToolUseProgressPolling(request) {
             const status = typeof progress?.status === 'string' ? progress.status : null;
             if (status === 'completed' || status === 'error') {
                 stopToolUseProgressPolling(request);
+                return;
             }
+
+            scheduleNextPoll(poll.nextDelayMs);
         } catch (err) {
             if (err && err.name === 'AbortError') {
                 return;
             }
+
+            poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+            scheduleNextPoll(poll.nextDelayMs);
         }
     };
 
-    request.toolUseProgressPoll = {
-        abortController,
-        intervalId: setInterval(() => { void pollOnce(); }, 350)
-    };
+    request.toolUseProgressPoll = poll;
 
     void pollOnce();
 }
@@ -2916,6 +3039,7 @@ function abortActiveChatRequest() {
     activeChatRequest = null;
 
     stopToolUseProgressPolling(request);
+    stopThinkingTooltipTicker(request);
 
     try {
         request.abortController?.abort();
@@ -3004,9 +3128,14 @@ async function handleSendPrompt() {
             selectionEnd,
             aborted: false,
             clientRequestId,
+            thinkingStartedAtMs: Date.now(),
             toolUseProgressHistory: []
         };
         activeChatRequest = request;
+
+        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+
+        startThinkingTooltipTicker(request);
 
         // Start polling immediately while the request is in flight.
         startToolUseProgressPolling(request);
@@ -3113,6 +3242,7 @@ async function handleSendPrompt() {
         if (isStillActive) {
             activeChatRequest = null;
             stopToolUseProgressPolling(request);
+            stopThinkingTooltipTicker(request);
             setThinkingState(false);
         }
         updateHistoryLength();

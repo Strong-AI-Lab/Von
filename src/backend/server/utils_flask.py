@@ -395,18 +395,11 @@ def create_flask_app(
                 print(f"[health] Public IP fetch failed: {e}")
                 public_ip = None
 
-        # RAG Indexing Status
-        rag_pending_count = 0
-        try:
-            db = get_db()
-            if db is not None:
-                # Use string "pending" to avoid importing model class and potential circular deps
-                rag_pending_count = db["interaction_sessions"].count_documents(
-                    {"indexing_status": "pending"}
-                )
-        except Exception as e:
-            print(f"[health] RAG status check failed: {e}")
-            rag_pending_count = -1  # Indicate error
+        # NOTE: Keep /health lightweight.
+        # Avoid DB calls here because the UI polls frequently and client-side aborts
+        # do not cancel server work. If a DB call hangs, it can occupy Waitress
+        # threads and block *all* endpoints (including /health) for minutes.
+        rag_pending_count = None
 
         return jsonify(
             status="healthy",
@@ -432,6 +425,51 @@ def create_flask_app(
           }
         """
         try:
+            # Cache results briefly to avoid self-DOS:
+            # the UI polls frequently and aborts client-side after ~5s, but the
+            # server keeps running DB work unless we short-circuit.
+            import threading
+            import time
+
+            t0 = time.perf_counter()
+
+            ttl_seconds = 10.0
+            if request.args.get("nocache") in {"1", "true", "yes", "on"}:
+                ttl_seconds = 0.0
+
+            ns = request.args.get("namespace")
+            include_detail = request.args.get("detail", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            cache_key = (ns or "", bool(include_detail))
+            cache = app.config.setdefault("_RAG_STATUS_CACHE", {})
+            lock = app.config.setdefault("_RAG_STATUS_CACHE_LOCK", threading.Lock())
+
+            if ttl_seconds > 0:
+                try:
+                    with lock:
+                        entry = cache.get(cache_key)
+                    if entry:
+                        cached_at = float(entry.get("at", 0.0) or 0.0)
+                        if (time.time() - cached_at) <= ttl_seconds:
+                            payload = entry.get("payload")
+                            if isinstance(payload, dict):
+                                response_payload = dict(payload)
+                                response_payload["cache_hit"] = True
+                                response_payload["server_elapsed_ms"] = int(
+                                    (time.perf_counter() - t0) * 1000
+                                )
+                                response_payload["cache_age_sec"] = max(
+                                    0.0, float(time.time() - cached_at)
+                                )
+                                return jsonify(response_payload)
+                except Exception:
+                    # If caching fails, fall back to computing.
+                    pass
+
             db = get_db()
             if db is None:
                 return jsonify(error="db_unavailable"), 503
@@ -450,7 +488,7 @@ def create_flask_app(
             # user-only namespace (#V#user) or a composite namespace (#V#user@org).
             # For backwards compatibility, if a composite namespace is provided we
             # scope to BOTH values.
-            ns = request.args.get("namespace")
+            # NOTE: ns/include_detail already parsed above for caching.
             session_ns_values: list[str] | None = None
             if ns:
                 session_ns_values = [ns]
@@ -645,13 +683,6 @@ def create_flask_app(
                         user_id_for_ns = None
 
                 match = {"user_id": user_id_for_ns} if user_id_for_ns else {}
-
-                include_detail = request.args.get("detail", "").lower() in {
-                    "1",
-                    "true",
-                    "yes",
-                    "on",
-                }
 
                 pipeline = [
                     {"$match": match},
@@ -943,29 +974,44 @@ def create_flask_app(
                     except Exception:
                         chat_summary["chat_history_backfill_available"] = False
                         chat_summary["chat_history_backfill_reason"] = "unavailable"
-            return jsonify(
-                {
-                    "total": total_sessions,
-                    "scoped_sessions": scoped_sessions,
-                    "indexed": indexed,
-                    "pending": pending,
-                    "failed": failed,
-                    "skipped": skipped,
-                    "sessions_missing_namespace": sessions_missing_namespace,
-                    "sessions_other_namespace": sessions_other_namespace,
-                    "sessions_namespace_breakdown": sessions_namespace_breakdown,
-                    "sessions": total_sessions,
-                    "interactions": total_interactions,
-                    "eligible_sessions": eligible_sessions,
-                    "eligible_interactions": eligible_interactions,
-                    "namespace": ns,
-                    "session_namespace": (
-                        session_ns_values[0] if session_ns_values else None
-                    ),
-                    "session_namespaces": session_ns_values,
-                    **chat_summary,
-                }
+            base_payload = {
+                "total": total_sessions,
+                "scoped_sessions": scoped_sessions,
+                "indexed": indexed,
+                "pending": pending,
+                "failed": failed,
+                "skipped": skipped,
+                "sessions_missing_namespace": sessions_missing_namespace,
+                "sessions_other_namespace": sessions_other_namespace,
+                "sessions_namespace_breakdown": sessions_namespace_breakdown,
+                "sessions": total_sessions,
+                "interactions": total_interactions,
+                "eligible_sessions": eligible_sessions,
+                "eligible_interactions": eligible_interactions,
+                "namespace": ns,
+                "session_namespace": (
+                    session_ns_values[0] if session_ns_values else None
+                ),
+                "session_namespaces": session_ns_values,
+                **chat_summary,
+            }
+
+            if ttl_seconds > 0:
+                try:
+                    with lock:
+                        cache[cache_key] = {
+                            "at": time.time(),
+                            "payload": base_payload,
+                        }
+                except Exception:
+                    pass
+
+            response_payload = dict(base_payload)
+            response_payload["cache_hit"] = False
+            response_payload["server_elapsed_ms"] = int(
+                (time.perf_counter() - t0) * 1000
             )
+            return jsonify(response_payload)
         except Exception as e:
             return jsonify(error="unexpected", detail=str(e)), 500
 
