@@ -720,7 +720,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     saveAllSettings('ollama');
   });
   document.getElementById('openaiModelSelect')?.addEventListener('change', () => saveAllSettings('openai'));
-  document.getElementById('currentUserSelect')?.addEventListener('change', () => {
+  document.getElementById('currentUserSelect')?.addEventListener('change', async () => {
     const sel = document.getElementById('currentUserSelect');
     const opt = sel?.selectedOptions?.[0];
     if (opt) {
@@ -728,7 +728,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
       // When user changes, attempt to load stored server-side prefs (language/org)
       if (opt.dataset.conceptId) {
-        loadUserConceptPreferences(opt.dataset.conceptId);
+        await loadUserConceptPreferences(opt.dataset.conceptId);
+        // Refresh organisation selector so memberships reflect the selected user.
+        if (window.refreshOrgSelector) {
+          try { await window.refreshOrgSelector(); } catch (e) { console.warn('Org selector refresh failed', e); }
+        }
       }
     } else { setStoredJson(LS_USER_KEY, null); }
   });

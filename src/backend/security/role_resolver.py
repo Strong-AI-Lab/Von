@@ -29,6 +29,9 @@ STUB_ROLE_MAPPINGS = {
     "von_archivist": {
         "university_of_auckland_strong_ai_lab": "member",
     },
+    "lu_yunli": {
+        "the_lu_witbrock_household": "member",
+    },
 }
 
 # Default role for new members

@@ -816,7 +816,9 @@ def get_user_prefs(user_concept_id: str):
     try:
         if not user_concept_id:
             return jsonify({"error": "Missing user_concept_id"}), 400
-        concept = ConceptsRepository.find_one({"concept_id": user_concept_id})
+        from ...services.concept_service import get_concept_by_concept_id
+
+        concept = get_concept_by_concept_id(concept_id=user_concept_id)
         if not concept:
             return jsonify({"error": "User concept not found"}), 404
         rel = _normalize_relationships(concept.get("relationships", {}))
@@ -857,7 +859,12 @@ def set_user_prefs(user_concept_id: str):
         data = request.get_json(silent=True) or {}
         preferred_language = data.get("preferred_language")
         organisation_concept_id = data.get("organisation_concept_id")
-        concept = ConceptsRepository.find_one({"concept_id": user_concept_id})
+        from ...services.concept_service import (
+            get_concept_by_concept_id,
+            update_concept,
+        )
+
+        concept = get_concept_by_concept_id(concept_id=user_concept_id)
         if not concept:
             return jsonify({"error": "User concept not found"}), 404
         rel = _normalize_relationships(concept.get("relationships", {}))
@@ -876,42 +883,7 @@ def set_user_prefs(user_concept_id: str):
         )
         desired_lang = desired_lang or None
 
-        for current_lang in list(existing_lang):
-            if desired_lang and current_lang == desired_lang:
-                continue
-            try:
-                ConceptsRepository.mutate_relationship_edge(
-                    user_concept_id,
-                    USER_PREF_LANG_PREDICATE,
-                    current_lang,
-                    action="remove",
-                    maintain_inverse=False,
-                )
-            except ValueError:
-                current_app.logger.debug(
-                    f"preferred_language remove skipped for {user_concept_id}: missing concept",
-                    exc_info=False,
-                )
-            existing_lang.remove(current_lang)
-
-        if desired_lang:
-            if desired_lang not in existing_lang:
-                try:
-                    ConceptsRepository.mutate_relationship_edge(
-                        user_concept_id,
-                        USER_PREF_LANG_PREDICATE,
-                        desired_lang,
-                        action="add",
-                        maintain_inverse=False,
-                    )
-                    existing_lang.append(desired_lang)
-                except ValueError:
-                    current_app.logger.warning(
-                        f"Failed to set preferred_language for {user_concept_id}"
-                    )
-        else:
-            rel.pop(USER_PREF_LANG_PREDICATE, None)
-
+        existing_lang = [desired_lang] if desired_lang else []
         if existing_lang:
             rel[USER_PREF_LANG_PREDICATE] = existing_lang
         else:
@@ -926,46 +898,14 @@ def set_user_prefs(user_concept_id: str):
         )
         desired_org = desired_org or None
 
-        for current_org in list(existing_org):
-            if desired_org and current_org == desired_org:
-                continue
-            try:
-                ConceptsRepository.mutate_relationship_edge(
-                    user_concept_id,
-                    USER_PREF_ORG_PREDICATE,
-                    current_org,
-                    action="remove",
-                    maintain_inverse=False,
-                )
-            except ValueError:
-                current_app.logger.debug(
-                    f"organisation remove skipped for {user_concept_id}: missing concept",
-                    exc_info=False,
-                )
-            existing_org.remove(current_org)
-
-        if desired_org:
-            if desired_org not in existing_org:
-                try:
-                    ConceptsRepository.mutate_relationship_edge(
-                        user_concept_id,
-                        USER_PREF_ORG_PREDICATE,
-                        desired_org,
-                        action="add",
-                        maintain_inverse=False,
-                    )
-                    existing_org.append(desired_org)
-                except ValueError:
-                    current_app.logger.warning(
-                        f"Failed to set organisation preference for {user_concept_id}"
-                    )
-        else:
-            rel.pop(USER_PREF_ORG_PREDICATE, None)
-
+        existing_org = [desired_org] if desired_org else []
         if existing_org:
             rel[USER_PREF_ORG_PREDICATE] = existing_org
         else:
             rel.pop(USER_PREF_ORG_PREDICATE, None)
+
+        # Persist updated relationships via the normal concept service update path.
+        update_concept(user_concept_id, {"relationships": rel})
 
         return (
             jsonify(

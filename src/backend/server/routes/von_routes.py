@@ -3274,7 +3274,8 @@ def get_my_organisations():
     Returns: {organisations: [{concept_id, name, role}, ...], total_count}
     """
     try:
-        from ...security.role_resolver import get_all_user_organisations
+        from ...security.role_resolver import get_all_user_organisations, get_user_role
+        from ...services.concept_service import get_concept_by_concept_id
 
         user_id = (
             session.get("user_id")
@@ -3284,6 +3285,31 @@ def get_my_organisations():
         if not user_id:
             return jsonify({"error": "Not authenticated"}), 401
 
+        user_concept_id = session.get("user_concept_id")
+
+        def _normalise_relationships(rel):
+            if not isinstance(rel, (dict, list)):
+                return {}
+            if isinstance(rel, list):
+                out = {}
+                for item in rel:
+                    if not isinstance(item, dict):
+                        continue
+                    pred = item.get("predicate")
+                    tgt = item.get("target")
+                    if not pred or not tgt:
+                        continue
+                    out.setdefault(pred, [])
+                    if isinstance(tgt, list):
+                        out[pred].extend(tgt)
+                    else:
+                        out[pred].append(tgt)
+                return out
+            return rel or {}
+
+        def _prettify_concept_id(concept_id: str) -> str:
+            return concept_id.replace("#V#", "").replace("_", " ").title()
+
         # Derive a slug for stub role resolution
         user_slug = str(user_id)
         if user_slug.startswith("#V#"):
@@ -3292,22 +3318,52 @@ def get_my_organisations():
             user_slug = user_slug.split("@")[0]
         user_slug = user_slug.strip().lower().replace(" ", "_")
 
-        # Get orgs from role resolver (Phase 1 hardcoded mappings)
-        # Returns dict: {org_id: role_name}
-        org_roles = get_all_user_organisations(user_slug)
+        USER_PREF_ORG_PREDICATE = "#V#member_of_organisation"
 
-        # TODO: Once organisation concepts exist in Vontology, fetch their names
-        # For now, use concept_id as name
         organisations = []
-        for org_id, role in org_roles.items():
-            concept_id = org_id if org_id.startswith("#V#") else f"#V#{org_id}"
-            organisations.append(
-                {
-                    "concept_id": concept_id,
-                    "name": concept_id.replace("#V#", "").replace("_", " ").title(),
-                    "role": role,
-                }
-            )
+
+        # Prefer memberships stored on the authenticated user concept.
+        if isinstance(user_concept_id, str) and user_concept_id.strip():
+            user_concept = get_concept_by_concept_id(concept_id=user_concept_id)
+            if isinstance(user_concept, dict):
+                rel = _normalise_relationships(user_concept.get("relationships", {}))
+                org_raw = rel.get(USER_PREF_ORG_PREDICATE)
+
+                org_targets: list[str] = []
+                if isinstance(org_raw, str) and org_raw:
+                    org_targets = [org_raw]
+                elif isinstance(org_raw, list):
+                    org_targets = [t for t in org_raw if isinstance(t, str) and t]
+
+                for org_cid in org_targets:
+                    org_cid = org_cid if org_cid.startswith("#V#") else f"#V#{org_cid}"
+                    org_slug = org_cid[3:] if org_cid.startswith("#V#") else org_cid
+                    org_slug = org_slug.strip().lower().replace(" ", "_")
+                    try:
+                        role = get_user_role(user_slug, org_slug)
+                    except Exception:
+                        role = "member"
+
+                    organisations.append(
+                        {
+                            "concept_id": org_cid,
+                            "name": _prettify_concept_id(org_cid),
+                            "role": role,
+                        }
+                    )
+
+        # Fallback: stub role resolver mappings (Phase 1 hardcoded)
+        if not organisations:
+            org_roles = get_all_user_organisations(user_slug)
+            for org_id, role in org_roles.items():
+                concept_id = org_id if org_id.startswith("#V#") else f"#V#{org_id}"
+                organisations.append(
+                    {
+                        "concept_id": concept_id,
+                        "name": _prettify_concept_id(concept_id),
+                        "role": role,
+                    }
+                )
 
         return (
             jsonify(
