@@ -3042,26 +3042,67 @@ def set_user_concept():
 
         user_slug = user_concept_id[3:]
         user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
-        namespace = derive_namespace(user_slug)
+
+        existing_user_concept_id = session.get("user_concept_id")
+        if isinstance(existing_user_concept_id, str):
+            existing_user_concept_id = existing_user_concept_id.strip()
+            if existing_user_concept_id and not existing_user_concept_id.startswith(
+                "#V#"
+            ):
+                existing_user_concept_id = f"#V#{existing_user_concept_id}"
+        else:
+            existing_user_concept_id = None
+
+        organisation_concept_id = session.get("organisation_concept_id")
+        role_in_org = session.get("role_in_org")
+        org_slug = None
+        if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
+            org_slug_raw = organisation_concept_id.strip()
+            if org_slug_raw.startswith("#V#"):
+                org_slug_raw = org_slug_raw[3:]
+            if "@" in org_slug_raw:
+                org_slug_raw = org_slug_raw.split("@", 1)[0]
+            if "+" in org_slug_raw:
+                org_slug_raw = org_slug_raw.split("+", 1)[0]
+            org_slug = re.sub(r"[^a-z0-9]+", "_", org_slug_raw.strip().lower()).strip(
+                "_"
+            )
+
+        namespace = derive_namespace(user_slug, org_slug, role_in_org)
 
         # Store the concept id for authoritative identity.
         session["user_concept_id"] = user_concept_id
         # Keep backward compatibility with code that still reads session['user_id'].
         session["user_id"] = user_concept_id
 
-        # Clear org-scoped context when switching user.
-        session.pop("organisation_concept_id", None)
-        session.pop("role_in_org", None)
+        # Clear org-scoped context only when switching between different user concepts.
+        # If we are simply backfilling user_concept_id for an already-authenticated session,
+        # keep any existing org selection and recompute namespace accordingly.
+        if existing_user_concept_id and existing_user_concept_id != user_concept_id:
+            organisation_concept_id = None
+            role_in_org = None
+            session.pop("organisation_concept_id", None)
+            session.pop("role_in_org", None)
         session["namespace"] = namespace
         session.modified = True
+
+        organisation_id_response = None
+        if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
+            organisation_id_response = organisation_concept_id.strip()
+            if not organisation_id_response.startswith("#V#"):
+                organisation_id_response = f"#V#{organisation_id_response}"
 
         return (
             jsonify(
                 {
-                    "status": "updated",
+                    "status": (
+                        "updated"
+                        if existing_user_concept_id != user_concept_id
+                        else "unchanged"
+                    ),
                     "user_id": user_concept_id,
-                    "organisation_id": None,
-                    "role": None,
+                    "organisation_id": organisation_id_response,
+                    "role": role_in_org,
                     "namespace": namespace,
                 }
             ),
@@ -3236,12 +3277,18 @@ def get_session_context():
             else:
                 namespace = derive_namespace(user_slug)
 
+        organisation_id_response = None
+        if isinstance(org_id, str) and org_id.strip():
+            organisation_id_response = org_id.strip()
+            if not organisation_id_response.startswith("#V#"):
+                organisation_id_response = f"#V#{organisation_id_response}"
+
         return (
             jsonify(
                 {
                     "authenticated": True,
                     "user_id": user_id,
-                    "organisation_id": org_id,
+                    "organisation_id": organisation_id_response,
                     "role": role_in_org,
                     "namespace": namespace,
                 }
