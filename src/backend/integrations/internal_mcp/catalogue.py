@@ -1405,6 +1405,7 @@ def _resilient_extract_url(**kwargs):
     def _truncate(text: str) -> str:
         if max_chars <= 0:
             return text
+
         if len(text) <= max_chars:
             return text
         return text[:max_chars]
@@ -1989,6 +1990,73 @@ def _add_names_output_schema() -> Schema:
         },
         allow_unknown=True,
         description="add_names output: success (bool), concept_id (str), added_count (int), error_count (int), results (list of {index, name, language, name_type, text_value_id, relation_id}), errors (list of {index, name?, error})",
+    )
+
+
+def _resolve_concept_by_name(**kwargs):
+    from ...services.concept_resolution_service import resolve_concept_by_name
+
+    name = kwargs.get("name")
+    if name is None or not str(name).strip():
+        return {
+            "success": False,
+            "status": "not_found",
+            "error": "Missing 'name' parameter",
+            "resolved_concept_id": None,
+            "candidates": [],
+            "audit": [],
+        }
+
+    return resolve_concept_by_name(
+        name=str(name),
+        preferred_languages=kwargs.get("preferred_languages"),
+        allowed_languages=kwargs.get("allowed_languages"),
+        instance_of=kwargs.get("instance_of"),
+        match_code_strings=bool(kwargs.get("match_code_strings", True)),
+        normalisation_level=str(kwargs.get("normalisation_level", "default")),
+        max_results=int(kwargs.get("max_results", 5)),
+    )
+
+
+def _resolve_concept_by_name_input_schema() -> Schema:
+    return Schema(
+        required={
+            "name": str,
+        },
+        optional={
+            "preferred_languages": (list, type(None)),
+            "allowed_languages": (list, type(None)),
+            "instance_of": (str, type(None)),
+            "match_code_strings": (bool, type(None)),
+            "normalisation_level": (str, type(None)),
+            "max_results": (int, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "resolve_concept_by_name input: name (str) plus optional language preferences/constraints, "
+            "instance_of restriction, code-string matching toggle, normalisation_level, max_results"
+        ),
+    )
+
+
+def _resolve_concept_by_name_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "status": str,
+            "resolved_concept_id": (str, type(None)),
+            "candidates": list,
+            "audit": list,
+        },
+        optional={
+            "match": (dict, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "resolve_concept_by_name output: status in {resolved, ambiguous, not_found} with "
+            "resolved_concept_id, optional match info, candidates (for ambiguous), and audit steps"
+        ),
     )
 
 
@@ -4537,6 +4605,18 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=concept_search_output_schema,
             category="read",
             description="Namespaced alias for concept search used by the MCP orchestrator. Same parameters as search_concepts (query required; pass empty string when using instance_of filters).",
+        ),
+        MethodDefinition(
+            name="resolve_concept_by_name",
+            handler=_resolve_concept_by_name,
+            input_schema=_resolve_concept_by_name_input_schema(),
+            output_schema=_resolve_concept_by_name_output_schema(),
+            category="read",
+            description=(
+                "Resolve a Vontology concept deterministically from a user-provided surface form. "
+                "Read-only: does not mutate concepts. Returns resolved/ambiguous/not_found with an audit trail. "
+                "Supports language preferences, instance_of restriction, and optional code-string matching."
+            ),
         ),
         MethodDefinition(
             name="upsert_text_relation",
