@@ -487,6 +487,25 @@ def _get_entity_with_fallback(
 def get_all_settings_data():
     """Get all settings (user/org/language now excluded - browser-local)."""
     try:
+        # Jira internal MCP guardrail environment settings (read-only; surfaced for visibility).
+        jira_allow_list_raw = os.getenv("VON_JIRA_PROJECT_ALLOW_LIST") or os.getenv(
+            "VON_JIRA_PROJECT_ALLOWLIST"
+        )
+        jira_allow_list_effective_raw = jira_allow_list_raw or "JVNAUTOSCI"
+        jira_allow_list_effective: list[str] = []
+        for part in jira_allow_list_effective_raw.split(","):
+            candidate = part.strip().upper()
+            if not candidate:
+                continue
+            if candidate not in jira_allow_list_effective:
+                jira_allow_list_effective.append(candidate)
+
+        jira_execute_mode_raw = os.getenv("VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", "0")
+        jira_execute_mode_enabled = str(jira_execute_mode_raw).strip().lower() in {
+            "1",
+            "true",
+        }
+
         return {
             "active_llm": get_active_llm_setting(),
             "openai_api_key_env_var": get_openai_env_var(),
@@ -495,6 +514,10 @@ def get_all_settings_data():
             "internal_mcp_max_tool_invocations": get_internal_mcp_max_tool_invocations(),
             "internal_mcp_tool_batch_cap": get_internal_mcp_tool_batch_cap(),
             "show_tool_use_during_thinking": get_show_tool_use_during_thinking(),
+            "jira_project_allow_list_raw": jira_allow_list_raw,
+            "jira_project_allow_list_effective": jira_allow_list_effective,
+            "internal_mcp_jira_execute_mode_raw": jira_execute_mode_raw,
+            "internal_mcp_jira_execute_mode_enabled": jira_execute_mode_enabled,
         }
     except Exception as e:
         current_app.logger.error(f"Error retrieving settings data: {e}", exc_info=True)
