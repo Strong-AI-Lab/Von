@@ -3232,6 +3232,13 @@ footer {
     background-color: white;
 }
 
+.scrollable-field.drag-over {
+    border-color: #2b7fff;
+    outline: 2px dashed #2b7fff;
+    outline-offset: -6px;
+    background-color: rgba(43, 127, 255, 0.06);
+}
+
 /* Chat variant (legacy class) updated for parity */
 .chat-scrollable-field {
     white-space: pre-wrap;
