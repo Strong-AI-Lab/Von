@@ -19,7 +19,7 @@ class WriteToolPolicyDecision:
 
 
 def compute_allowed_write_tools(
-    *, prompt: str, requested_tools: list[str]
+    *, prompt: str, requested_tools: list[str], recent_user_prompts: list[str] | None = None
 ) -> WriteToolPolicyDecision:
     """Compute which write tools are allowed for this user prompt.
 
@@ -29,20 +29,44 @@ def compute_allowed_write_tools(
 
     allowed: set[str] = set()
     requested = [tool for tool in requested_tools if isinstance(tool, str) and tool]
+    recent_prompts = [
+        str(item).strip()
+        for item in (recent_user_prompts or [])
+        if isinstance(item, str) and str(item).strip()
+    ]
 
-    if _prompt_allows_vontology_mutation(prompt):
+    explicit_vontology_intent = _prompt_allows_vontology_mutation(prompt)
+    explicit_artefact_intent = _prompt_allows_artefact_download(prompt)
+    recent_vontology_intent = any(
+        _prompt_allows_vontology_mutation(item) for item in recent_prompts
+    )
+    recent_artefact_intent = any(
+        _prompt_allows_artefact_download(item) for item in recent_prompts
+    )
+
+    if explicit_vontology_intent or recent_vontology_intent:
         allowed.update(requested)
         return WriteToolPolicyDecision(
             allowed_tools=frozenset(allowed),
-            reason="explicit_vontology_mutation_request",
+            reason=(
+                "explicit_vontology_mutation_request"
+                if explicit_vontology_intent
+                else "recent_vontology_mutation_request"
+            ),
         )
 
     # Side-effect writes (artefact storage) are allowed when explicitly requested.
-    if "download_paper" in requested and _prompt_allows_artefact_download(prompt):
+    if "download_paper" in requested and (
+        explicit_artefact_intent or recent_artefact_intent
+    ):
         allowed.add("download_paper")
         return WriteToolPolicyDecision(
             allowed_tools=frozenset(allowed),
-            reason="explicit_artefact_download_request",
+            reason=(
+                "explicit_artefact_download_request"
+                if explicit_artefact_intent
+                else "recent_artefact_download_request"
+            ),
         )
 
     return WriteToolPolicyDecision(
