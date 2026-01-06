@@ -522,6 +522,40 @@ Build systems that are:
 
 **Remember:** The goal is to support high-quality research, not to build the next enterprise software platform. Make engineering decisions that serve research objectives, not theoretical scalability requirements.
 
+## Vontology-First Work (Design Matters)
+
+Von is a knowledge system as much as it is a software system. Careful Vontology design and careful knowledge-base modification can be as important as writing code.
+
+When working on a task, do not assume “just implement the feature” is correct. First ask: *what should exist in the Vontology, how should it be represented, and what are the stable identifiers/predicates that future work will rely on?* A small modelling mistake can cause long-lived confusion, while a good concept/predicate choice can make future features trivial.
+
+### Preferred Workflow: Use MCP Tools for Vontology Changes
+
+For Vontology reads/writes, prefer the Vontology MCP tools over ad-hoc scripts or direct database access.
+
+**Where to find the Vontology MCP tools (authoritative sources):**
+
+- `.vscode/mcp.json` configures MCP servers (including the Vontology stdio server used by IDE tooling).
+- `src/backend/mcp_server/vontology_mcp.json` is the external tool manifest (schemas + descriptions).
+- `src/backend/mcp_server/mcp_stdio_server.py` implements the external stdio tool handlers.
+- `src/backend/mcp_server/mcp_server.py` implements the external HTTP tool handlers.
+- `src/backend/integrations/internal_mcp/catalogue.py` is the internal gateway used by Von’s chat/orchestrator.
+
+**How to use them (high-level):**
+
+- Search first (avoid duplicates): use the “find by name” style tool to confirm whether a concept already exists.
+- Create concepts via the MCP create tool (do not manually insert Mongo documents).
+- Add names/aliases via the MCP “add names” tool (use `en-NZ` for default language; include abbreviations as `ABBR` when appropriate).
+- Add/update descriptions, prompts, and other text via MCP text-relation tools (e.g., `hasDescription`, `hasContent`), not by editing concept documents directly.
+- Manage relationships via relationship tools (e.g., `instance_of`, `subconceptOf`), and keep identifiers stable (`#V#...`).
+
+**Consistency rule (critical):** If you change a tool (behaviour, schema, return shape), you MUST update all three MCP implementations (stdio server, HTTP server, internal catalogue) and update the manifest.
+
+### Safety Notes for Knowledge Work
+
+- Treat knowledge edits as “high-risk state changes”: reuse the single authoritative pathway (MCP + services) and avoid bypassing validation/logging.
+- Preserve provenance and auditability (use the project’s knowledge interaction logging pathways where applicable).
+- Prefer small, reversible changes and add a focused regression test when fixing knowledge-state loss/format bugs.
+
 ## JIRA and Repository Context
 
 When creating or referencing JIRA issues, please note the following primary projects:
