@@ -118,6 +118,51 @@ This is not hypothetical. The Atlassian MCP server can and does fail intermitten
 - Do not change scope (“I’ll do code changes instead”) without explicit user agreement.
 - Do not fabricate a Jira state update (if we didn’t get a success response, assume it did not happen).
 
+### Atlassian MCP broken (Copilot Agent Mode) — checklist
+
+Ordered by fastest → most invasive.
+
+1. First thing to try (often fixes it)
+  - `Ctrl + Shift + P` → **Developer: Reload Window**
+  - This restarts the extension host and often re-injects OAuth correctly.
+
+2. If it still 401s or says `invalid_token`
+  - `Ctrl + Shift + P` → **Atlassian: Open Settings**
+  - Sign out → sign in again if prompted
+
+3. If logs show `Canceled: Canceled` during token fetch
+  - Retry the action and watch the Notifications bell
+  - Explicitly **Allow / Open external website** if prompted
+  - Missing this can silently cancel OAuth → MCP connects without a token.
+
+4. If MCP keeps failing immediately
+  - Close VS Code, then in PowerShell:
+    ```powershell
+    taskkill /IM atlassian_cli_rovodev.exe /F
+    ```
+  - Optionally free the port:
+    ```powershell
+    netstat -ano | findstr 40000
+    taskkill /PID <pid> /F
+    ```
+  - Reopen VS Code → **Developer: Reload Window**
+
+5. If it’s still wedged (rare)
+  - Close VS Code and delete:
+    - `%APPDATA%\Code - Insiders\User\globalStorage\atlassian.atlascode`
+    - `%APPDATA%\Code - Insiders\User\workspaceStorage\*\atlassian.atlascode`
+  - Reopen VS Code → **Atlassian: Open Settings**
+
+6. Hardening (prevents recurrence)
+  - Keep in PowerShell profile:
+    ```powershell
+    $env:ATLASSIAN_CLOUD_ID = "b2b12142-9002-4b11-b421-83f073678fd3"
+    ```
+  - Disable Atlassian Rovo / AI features unless you actually need them.
+
+One-line memory hook:
+**Atlassian MCP 401? Reload Window → Atlassian: Open Settings.**
+
 **If the failure smells like config rather than flakiness:**
 - If the error is consistently “cloudId missing/invalid”, use the Cloud ID fast path below.
 - Cache/Data Structure Sensitivity: Never reorder or shrink tuple/dict cache structures relied upon by diagnostics (append only; update summariser accordingly).
