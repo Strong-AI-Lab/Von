@@ -7,7 +7,7 @@ Rules of thumb:
 - Prefer pointers over prose.
 - When something is no longer relevant, delete it (or move it to the archive).
 
-Last updated: 2026-01-02
+Last updated: 2026-01-06
 
 ---
 
@@ -41,5 +41,10 @@ Do not auto-start the server as part of automation unless explicitly requested.
 
 ## Recent decisions / changes worth remembering
 - Presenter “spoken vs screen” behaviour is documented in Jira (JVNAUTOSCI-894); avoid duplicating the write-up here.
+
+- 2026-01-06 diary
+	- Swift blob store: improved OpenStack cloud config error message; fixed `openstacksdk` object-store method signature compatibility; added regression tests (JVNAUTOSCI-878).
+	- Orchestrator: injected client speech-synthesis snapshot for “what voice?” questions; added regression test.
+	- Write-tool guardrail: moved write permissioning into a workflow-driven policy (`write_tool_policy`) instead of hard-coded orchestrator logic; added regression test (JVNAUTOSCI-956).
 
 

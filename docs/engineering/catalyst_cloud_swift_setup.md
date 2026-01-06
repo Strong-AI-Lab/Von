@@ -61,7 +61,16 @@ clouds:
 Then set:
 
 ```powershell
-$env:OS_CLOUD = 'catalyst'
+$env:OS_CLOUD = 'catalystcloud'
+```
+
+Important:
+- `OS_CLOUD` must match the **cloud name** defined in your `clouds.yaml`.
+  - Some Catalyst/OpenStack tooling creates an entry named `catalystcloud` by default. If your `clouds.yaml` uses that name, set `$env:OS_CLOUD = 'catalystcloud'` (or rename the entry to `catalyst`).
+- On Windows, if `openstacksdk` is not finding your `clouds.yaml`, you can force the config path:
+
+```powershell
+$env:OS_CLIENT_CONFIG_FILE = "$HOME\.config\openstack\clouds.yaml"
 ```
 
 Notes:

@@ -187,7 +187,38 @@ class SwiftBlobStore:
             ) from exc
 
         if self._cloud:
-            return openstack.connect(cloud=self._cloud)
+            try:
+                return openstack.connect(cloud=self._cloud)
+            except Exception as exc:
+                # openstacksdk raises ConfigException when OS_CLOUD doesn't match any
+                # configured clouds. Provide a more actionable error message.
+                if exc.__class__.__name__ == "ConfigException":
+                    available: list[str] = []
+                    try:
+                        config_mod = importlib.import_module("openstack.config")
+                        OpenStackConfig = getattr(config_mod, "OpenStackConfig")
+                        cfg = OpenStackConfig()
+                        clouds = cfg.get_all_clouds()
+                        names = [
+                            getattr(c, "name", None)
+                            for c in clouds
+                            if getattr(c, "name", None)
+                        ]
+                        available = sorted({n for n in names if isinstance(n, str)})
+                    except Exception:
+                        available = []
+
+                    msg = (
+                        "OpenStack cloud was not found for OS_CLOUD="
+                        f"{self._cloud!r}. "
+                        "Set OS_CLOUD to a configured cloud name in clouds.yaml "
+                        "(or set OS_CLIENT_CONFIG_FILE to point at clouds.yaml), "
+                        "or configure OS_AUTH_URL/OS_USERNAME/etc instead."
+                    )
+                    if available:
+                        msg += f" Available clouds: {available!r}."
+                    raise ValueError(msg) from exc
+                raise
 
         def _require(name: str) -> str:
             value = os.environ.get(name)
@@ -257,23 +288,48 @@ class SwiftBlobStore:
 
     def get_bytes(self, key: str) -> bytes:
         full_key = self._full_key(key)
-        # download_object returns bytes when 'outfile' is not provided.
-        return self._conn.object_store.download_object(
-            name=full_key, container=self._container
-        )
+        # openstacksdk's proxy API expects the object identifier as the first
+        # positional argument ('obj'). Some older versions also accepted 'name='
+        # keyword usage; keep a fallback for compatibility.
+        try:
+            return self._conn.object_store.download_object(
+                full_key,
+                container=self._container,
+            )
+        except TypeError:
+            return self._conn.object_store.download_object(
+                name=full_key,
+                container=self._container,
+            )
 
     def exists(self, key: str) -> bool:
         full_key = self._full_key(key)
-        obj = self._conn.object_store.get_object(
-            name=full_key, container=self._container
-        )
+        try:
+            obj = self._conn.object_store.get_object(
+                full_key,
+                container=self._container,
+            )
+        except TypeError:
+            obj = self._conn.object_store.get_object(
+                name=full_key,
+                container=self._container,
+            )
         return obj is not None
 
     def delete(self, key: str) -> None:
         full_key = self._full_key(key)
-        self._conn.object_store.delete_object(
-            name=full_key, container=self._container, ignore_missing=True
-        )
+        try:
+            self._conn.object_store.delete_object(
+                full_key,
+                container=self._container,
+                ignore_missing=True,
+            )
+        except TypeError:
+            self._conn.object_store.delete_object(
+                name=full_key,
+                container=self._container,
+                ignore_missing=True,
+            )
 
     def list(self, prefix: str = "") -> list[str]:
         safe_prefix = _normalise_key(prefix) if prefix else ""
