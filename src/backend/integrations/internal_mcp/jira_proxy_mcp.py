@@ -94,6 +94,19 @@ class JiraMCPProxy:
             "jira_transition", {"issue_key": issue_key, "transition_id": transition_id}
         )
 
+    async def create_issue(self, *, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._call("jira_create_issue", {"payload": payload})
+
+    async def update_issue(
+        self, *, issue_key: str, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "jira_update_issue", {"issue_key": issue_key, "payload": payload}
+        )
+
+    async def link_issue(self, *, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._call("jira_link_issue", {"payload": payload})
+
     async def get_myself(self) -> Dict[str, Any]:
         return await self._call("jira_get_myself", {})
 

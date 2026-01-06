@@ -1076,6 +1076,21 @@ async function loadAndDisplaySettings() {
       }
     } catch { }
 
+    // Populate Jira tool guardrails (read-only env visibility)
+    try {
+      const { allowListText, executeModeText } = __testOnly_formatJiraGuardrailSettings(settings);
+
+      const allowEl = document.getElementById('settingsJiraProjectAllowListValue');
+      if (allowEl) {
+        allowEl.textContent = allowListText || 'JVNAUTOSCI';
+      }
+
+      const executeEl = document.getElementById('settingsJiraExecuteModeValue');
+      if (executeEl) {
+        executeEl.textContent = executeModeText || 'disabled (0)';
+      }
+    } catch { }
+
     // Populate preferred language setting
     const languageSelect = document.getElementById('preferredLanguageSelect');
     if (languageSelect) {
@@ -1467,6 +1482,34 @@ export async function saveSettings(settings) {
     console.error('Error saving settings:', error);
     throw error;
   }
+}
+
+export function __testOnly_formatJiraGuardrailSettings(settings) {
+  const rawAllow = typeof settings?.jira_project_allow_list_raw === 'string'
+    ? settings.jira_project_allow_list_raw
+    : null;
+
+  let effective = settings?.jira_project_allow_list_effective;
+  if (!Array.isArray(effective) || !effective.length) {
+    effective = ['JVNAUTOSCI'];
+  }
+  const allowListText = effective.map(x => String(x)).filter(Boolean).join(', ');
+
+  const rawExecute = (settings && Object.prototype.hasOwnProperty.call(settings, 'internal_mcp_jira_execute_mode_raw'))
+    ? String(settings.internal_mcp_jira_execute_mode_raw)
+    : '0';
+
+  const enabled = !!settings?.internal_mcp_jira_execute_mode_enabled;
+  const executeModeText = enabled
+    ? `enabled (${rawExecute})`
+    : `disabled (${rawExecute})`;
+
+  return {
+    allowListText,
+    rawAllow,
+    executeModeText,
+    executeModeEnabled: enabled
+  };
 }
 
 export function validateSettings() {
