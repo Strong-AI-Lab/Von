@@ -7,7 +7,7 @@ import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Any
-from workflows.onboarding_workflow import run_onboarding_workflow  # fixed import path
+from src.workflows.onboarding_workflow import run_onboarding_workflow
 from ...languagemodels.llm_interface import get_llm_client, get_active_model_name
 from .settings_routes import get_all_settings_data
 from ...integrations.internal_mcp import ToolCallParsingError

@@ -3000,6 +3000,74 @@ def _jira_transition_input_schema() -> Schema:
     )
 
 
+def _jira_create_issue_input_schema() -> Schema:
+    return Schema(
+        required={
+            "project_key": str,
+            "issue_type": str,
+            "summary": str,
+        },
+        optional={
+            "description": (str, type(None)),
+            "parent": (str, type(None)),
+            "assignee_account_id": (str, type(None)),
+            "labels": (list, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_create_issue input: project_key, issue_type, summary (required). "
+            "Optional description/parent/assignee_account_id/labels. "
+            "Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+        ),
+    )
+
+
+def _jira_update_issue_input_schema() -> Schema:
+    return Schema(
+        required={
+            "issue_key": str,
+            "update_fields": dict,
+        },
+        optional={
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_update_issue input: issue_key (required) and update_fields (dict of Jira fields to update). "
+            "Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+        ),
+    )
+
+
+def _jira_link_issue_input_schema() -> Schema:
+    return Schema(
+        required={
+            "inward_issue_key": str,
+            "outward_issue_key": str,
+            "link_type": str,
+        },
+        optional={
+            "comment": (str, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_link_issue input: inward_issue_key, outward_issue_key, link_type (required; e.g. 'Relates'). "
+            "Optional comment. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+        ),
+    )
+
+
 def _jira_get_myself_input_schema() -> Schema:
     return Schema(
         required={},
@@ -3873,6 +3941,140 @@ def _gmail_modify_labels(**kwargs):
 
 
 # Jira MCP handlers
+
+_JIRA_WRITE_CACHE: dict[str, dict[str, Any]] = {}
+_JIRA_WRITE_CACHE_TTL_SEC = 3600.0
+_JIRA_WRITE_CACHE_MAX = 200
+
+
+def _jira_project_allow_list() -> list[str]:
+    import os
+
+    raw = (
+        os.getenv("VON_JIRA_PROJECT_ALLOW_LIST")
+        or os.getenv("VON_JIRA_PROJECT_ALLOWLIST")
+        or "JVNAUTOSCI"
+    )
+
+    projects: list[str] = []
+    for part in raw.split(","):
+        candidate = part.strip().upper()
+        if not candidate:
+            continue
+        if candidate not in projects:
+            projects.append(candidate)
+    return projects
+
+
+def _jira_project_from_issue_key(issue_key: str | None) -> str | None:
+    if not isinstance(issue_key, str):
+        return None
+    cleaned = issue_key.strip()
+    if not cleaned or "-" not in cleaned:
+        return None
+    return cleaned.split("-", 1)[0].upper() or None
+
+
+def _jira_execute_mode_enabled() -> bool:
+    import os
+
+    return os.getenv("VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", "0").lower() in {
+        "1",
+        "true",
+    }
+
+
+def _jira_write_guardrails(
+    *,
+    action: str,
+    project_keys: list[str],
+    dry_run: bool,
+    approved: bool,
+    execute: bool,
+) -> dict[str, Any] | None:
+    allowed = _jira_project_allow_list()
+    if not allowed:
+        return {
+            "success": False,
+            "error": "Jira writes are blocked: project allow-list is empty",
+            "error_code": "allowlist_missing",
+        }
+
+    for project_key in project_keys:
+        if not project_key or project_key.upper() not in allowed:
+            return {
+                "success": False,
+                "error": f"Jira writes are blocked for project '{project_key}'. Allowed: {', '.join(allowed)}",
+                "error_code": "project_not_allowlisted",
+                "project_key": project_key,
+                "allowed_projects": allowed,
+                "action": action,
+            }
+
+    if dry_run:
+        return None
+
+    if execute and _jira_execute_mode_enabled():
+        return None
+
+    if approved:
+        return None
+
+    return {
+        "success": False,
+        "error": (
+            "Approval required for Jira write. Set approved=true to confirm this write, "
+            "or run in execute mode (set VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 and pass execute=true)."
+        ),
+        "error_code": "approval_required",
+        "action": action,
+        "allowed_projects": allowed,
+    }
+
+
+def _jira_cache_get(tool: str, request_id: str) -> dict[str, Any] | None:
+    import time
+
+    key = f"{tool}:{request_id}"
+    record = _JIRA_WRITE_CACHE.get(key)
+    if not isinstance(record, dict):
+        return None
+    ts = record.get("timestamp")
+    if not isinstance(ts, (int, float)):
+        return None
+    if (time.time() - float(ts)) > _JIRA_WRITE_CACHE_TTL_SEC:
+        _JIRA_WRITE_CACHE.pop(key, None)
+        return None
+    cached_payload = record.get("payload")
+    if not isinstance(cached_payload, dict):
+        return None
+    return dict(cached_payload)
+
+
+def _jira_cache_set(tool: str, request_id: str, payload: dict[str, Any]) -> None:
+    import time
+
+    if len(_JIRA_WRITE_CACHE) >= _JIRA_WRITE_CACHE_MAX:
+        # Simple eviction: drop the oldest item.
+        oldest_key = None
+        oldest_ts = None
+        for k, v in _JIRA_WRITE_CACHE.items():
+            ts = v.get("timestamp") if isinstance(v, dict) else None
+            if not isinstance(ts, (int, float)):
+                continue
+            if oldest_ts is None or float(ts) < oldest_ts:
+                oldest_ts = float(ts)
+                oldest_key = k
+        if oldest_key:
+            _JIRA_WRITE_CACHE.pop(oldest_key, None)
+
+    key = f"{tool}:{request_id}"
+    _JIRA_WRITE_CACHE[key] = {
+        "timestamp": time.time(),
+        "payload": dict(payload),
+    }
+
+
 def _jira_search(**kwargs):
     import asyncio
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
@@ -3957,6 +4159,314 @@ def _jira_transition_issue(**kwargs):
 
     try:
         return _run_async_compat(_async_transition)
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
+def _jira_create_issue(**kwargs):
+    import asyncio
+    import logging
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    logger = logging.getLogger(__name__)
+
+    project_key = kwargs.get("project_key")
+    issue_type = kwargs.get("issue_type")
+    summary = kwargs.get("summary")
+
+    if not project_key or not issue_type or not summary:
+        return {
+            "success": False,
+            "error": "Missing required parameters: project_key, issue_type, summary",
+        }
+
+    project_key_norm = str(project_key).strip().upper()
+    dry_run = bool(kwargs.get("dry_run", True))
+    approved = bool(kwargs.get("approved", False))
+    execute = bool(kwargs.get("execute", False))
+    request_id = kwargs.get("request_id")
+
+    guardrail_error = _jira_write_guardrails(
+        action="create_issue",
+        project_keys=[project_key_norm],
+        dry_run=dry_run,
+        approved=approved,
+        execute=execute,
+    )
+    if guardrail_error is not None:
+        return guardrail_error
+
+    if isinstance(request_id, str) and request_id.strip() and not dry_run:
+        cached = _jira_cache_get("jira_create_issue", request_id.strip())
+        if cached is not None:
+            cached["reused"] = True
+            return cached
+
+    payload: dict[str, Any] = {
+        "fields": {
+            "project": {"key": project_key_norm},
+            "summary": str(summary),
+            "issuetype": {"name": str(issue_type)},
+        }
+    }
+
+    description = kwargs.get("description")
+    if isinstance(description, str) and description.strip():
+        payload["fields"]["description"] = description
+
+    parent = kwargs.get("parent")
+    if isinstance(parent, str) and parent.strip():
+        payload["fields"]["parent"] = {"key": parent.strip()}
+
+    assignee_account_id = kwargs.get("assignee_account_id")
+    if isinstance(assignee_account_id, str) and assignee_account_id.strip():
+        payload["fields"]["assignee"] = {"accountId": assignee_account_id.strip()}
+
+    labels = kwargs.get("labels")
+    if isinstance(labels, list):
+        payload["fields"]["labels"] = [str(l) for l in labels if str(l).strip()]
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "executed": False,
+            "action": "create_issue",
+            "project_key": project_key_norm,
+            "proposed_payload": payload,
+        }
+
+    async def _async_create():
+        proxy = await get_jira_proxy()
+        return await proxy.create_issue(payload=payload)
+
+    try:
+        logger.info(
+            "[jira_write] create_issue project=%s summary_preview=%r",
+            project_key_norm,
+            str(summary)[:120],
+        )
+        result = _run_async_compat(_async_create)
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("success", True)
+            result["dry_run"] = False
+            result["executed"] = True
+            result["action"] = "create_issue"
+            if isinstance(request_id, str) and request_id.strip():
+                _jira_cache_set("jira_create_issue", request_id.strip(), result)
+            return result
+        return {
+            "success": True,
+            "dry_run": False,
+            "executed": True,
+            "action": "create_issue",
+            "result": result,
+        }
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
+def _jira_update_issue(**kwargs):
+    import logging
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    logger = logging.getLogger(__name__)
+
+    issue_key = kwargs.get("issue_key")
+    update_fields = kwargs.get("update_fields")
+    if not issue_key or not isinstance(update_fields, dict):
+        return {
+            "success": False,
+            "error": "Missing required parameters: issue_key and update_fields (dict)",
+        }
+
+    issue_key_str = str(issue_key).strip()
+    project_key = _jira_project_from_issue_key(issue_key_str)
+    if not project_key:
+        return {
+            "success": False,
+            "error": "Invalid issue_key format; expected PROJECT-123",
+        }
+
+    dry_run = bool(kwargs.get("dry_run", True))
+    approved = bool(kwargs.get("approved", False))
+    execute = bool(kwargs.get("execute", False))
+    request_id = kwargs.get("request_id")
+
+    guardrail_error = _jira_write_guardrails(
+        action="update_issue",
+        project_keys=[project_key],
+        dry_run=dry_run,
+        approved=approved,
+        execute=execute,
+    )
+    if guardrail_error is not None:
+        return guardrail_error
+
+    if isinstance(request_id, str) and request_id.strip() and not dry_run:
+        cached = _jira_cache_get("jira_update_issue", request_id.strip())
+        if cached is not None:
+            cached["reused"] = True
+            return cached
+
+    # Guardrail: do not allow changing the project via this helper.
+    blocked_fields = {"project", "key", "id"}
+    safe_fields = {
+        str(k): v
+        for k, v in update_fields.items()
+        if isinstance(k, str) and k not in blocked_fields
+    }
+    if not safe_fields:
+        return {
+            "success": False,
+            "error": "No updatable fields provided (project/key/id are not allowed)",
+        }
+
+    payload: dict[str, Any] = {"fields": safe_fields}
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "executed": False,
+            "action": "update_issue",
+            "issue_key": issue_key_str,
+            "proposed_payload": payload,
+        }
+
+    async def _async_update():
+        proxy = await get_jira_proxy()
+        return await proxy.update_issue(issue_key=issue_key_str, payload=payload)
+
+    try:
+        logger.info(
+            "[jira_write] update_issue key=%s fields=%s",
+            issue_key_str,
+            sorted(safe_fields.keys())[:25],
+        )
+        result = _run_async_compat(_async_update)
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("success", True)
+            result["dry_run"] = False
+            result["executed"] = True
+            result["action"] = "update_issue"
+            result["issue_key"] = issue_key_str
+            if isinstance(request_id, str) and request_id.strip():
+                _jira_cache_set("jira_update_issue", request_id.strip(), result)
+            return result
+        return {
+            "success": True,
+            "dry_run": False,
+            "executed": True,
+            "action": "update_issue",
+            "issue_key": issue_key_str,
+            "result": result,
+        }
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
+def _jira_link_issue(**kwargs):
+    import logging
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    logger = logging.getLogger(__name__)
+
+    inward_issue_key = kwargs.get("inward_issue_key")
+    outward_issue_key = kwargs.get("outward_issue_key")
+    link_type = kwargs.get("link_type")
+    if not inward_issue_key or not outward_issue_key or not link_type:
+        return {
+            "success": False,
+            "error": "Missing required parameters: inward_issue_key, outward_issue_key, link_type",
+        }
+
+    inward_key = str(inward_issue_key).strip()
+    outward_key = str(outward_issue_key).strip()
+    inward_project = _jira_project_from_issue_key(inward_key)
+    outward_project = _jira_project_from_issue_key(outward_key)
+    if not inward_project or not outward_project:
+        return {
+            "success": False,
+            "error": "Invalid issue key format; expected PROJECT-123",
+        }
+
+    dry_run = bool(kwargs.get("dry_run", True))
+    approved = bool(kwargs.get("approved", False))
+    execute = bool(kwargs.get("execute", False))
+    request_id = kwargs.get("request_id")
+
+    guardrail_error = _jira_write_guardrails(
+        action="link_issue",
+        project_keys=[inward_project, outward_project],
+        dry_run=dry_run,
+        approved=approved,
+        execute=execute,
+    )
+    if guardrail_error is not None:
+        return guardrail_error
+
+    if isinstance(request_id, str) and request_id.strip() and not dry_run:
+        cached = _jira_cache_get("jira_link_issue", request_id.strip())
+        if cached is not None:
+            cached["reused"] = True
+            return cached
+
+    payload: dict[str, Any] = {
+        "type": {"name": str(link_type)},
+        "inwardIssue": {"key": inward_key},
+        "outwardIssue": {"key": outward_key},
+    }
+
+    comment = kwargs.get("comment")
+    if isinstance(comment, str) and comment.strip():
+        payload["comment"] = {"body": comment}
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "executed": False,
+            "action": "link_issue",
+            "inward_issue_key": inward_key,
+            "outward_issue_key": outward_key,
+            "link_type": str(link_type),
+            "proposed_payload": payload,
+        }
+
+    async def _async_link():
+        proxy = await get_jira_proxy()
+        return await proxy.link_issue(payload=payload)
+
+    try:
+        logger.info(
+            "[jira_write] link_issue %s -> %s (%s)",
+            outward_key,
+            inward_key,
+            str(link_type),
+        )
+        result = _run_async_compat(_async_link)
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("success", True)
+            result["dry_run"] = False
+            result["executed"] = True
+            result["action"] = "link_issue"
+            result["inward_issue_key"] = inward_key
+            result["outward_issue_key"] = outward_key
+            result["link_type"] = str(link_type)
+            if isinstance(request_id, str) and request_id.strip():
+                _jira_cache_set("jira_link_issue", request_id.strip(), result)
+            return result
+        return {
+            "success": True,
+            "dry_run": False,
+            "executed": True,
+            "action": "link_issue",
+            "result": result,
+        }
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -4374,6 +4884,9 @@ def build_default_catalogue() -> MethodCatalogue:
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
     jira_transition_output_schema = _jira_generic_output_schema("transition")
+    jira_create_issue_output_schema = _jira_generic_output_schema("create_issue")
+    jira_update_issue_output_schema = _jira_generic_output_schema("update_issue")
+    jira_link_issue_output_schema = _jira_generic_output_schema("link_issue")
     jira_get_myself_output_schema = _jira_generic_output_schema("get_myself")
     jira_get_auth_config_output_schema = _jira_get_auth_config_output_schema()
     gmail_list_messages_input_schema = Schema(
@@ -4969,6 +5482,45 @@ def build_default_catalogue() -> MethodCatalogue:
             category="write",
             timeout_sec=15.0,
             description="Add a comment to a Jira issue. Use to log investigation notes or status updates. Requires issue key and comment text.",
+        ),
+        MethodDefinition(
+            name="jira_create_issue",
+            handler=_jira_create_issue,
+            input_schema=_jira_create_issue_input_schema(),
+            output_schema=jira_create_issue_output_schema,
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Create a Jira issue with safety guardrails. Default dry_run=true (no mutation). "
+                "Writes are allowed only for allow-listed projects (default JVNAUTOSCI). "
+                "To execute, pass dry_run=false and either approved=true (per write) or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_update_issue",
+            handler=_jira_update_issue,
+            input_schema=_jira_update_issue_input_schema(),
+            output_schema=jira_update_issue_output_schema,
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Update a Jira issue with safety guardrails. Default dry_run=true (no mutation). "
+                "Writes are blocked unless the issue belongs to an allow-listed project. "
+                "To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_link_issue",
+            handler=_jira_link_issue,
+            input_schema=_jira_link_issue_input_schema(),
+            output_schema=jira_link_issue_output_schema,
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Create a Jira issue link (e.g. Relates) with safety guardrails. Default dry_run=true (no mutation). "
+                "Both issue projects must be allow-listed. "
+                "To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+            ),
         ),
         MethodDefinition(
             name="jira_transition",

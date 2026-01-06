@@ -1,6 +1,7 @@
 import os
 import base64
 import json
+import time
 from typing import Any, Dict, List, Sequence
 
 import anyio
@@ -85,37 +86,84 @@ def _request_json(
     params: Dict[str, Any] | None = None,
     payload: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    try:
-        if method.upper() == "GET":
-            resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
-        elif method.upper() == "POST":
-            resp = requests.post(url, headers=HEADERS, json=payload, timeout=30)
-        else:
-            return {"success": False, "error": f"Unsupported HTTP method: {method}"}
+    max_attempts = 3
+    delay_sec = 0.5
 
-        if resp.ok:
-            return resp.json()
-
-        hint = _jira_error_hint(resp.status_code, url=url)
-        response_text = None
+    for attempt in range(1, max_attempts + 1):
         try:
-            response_text = resp.text
-        except Exception:
-            response_text = None
+            resp = requests.request(
+                method.upper(),
+                url,
+                headers=HEADERS,
+                params=params,
+                json=payload,
+                timeout=30,
+            )
 
-        error: Dict[str, Any] = {
-            "success": False,
-            "status_code": resp.status_code,
-            "url": url,
-            "error": f"Jira API HTTP {resp.status_code}",
-        }
-        if response_text:
-            error["response"] = response_text[:2000]
-        if hint:
-            error["hint"] = hint
-        return error
-    except requests.exceptions.RequestException as exc:
-        return {"success": False, "error": f"Jira request failed: {exc}"}
+            if resp.ok:
+                # Jira sometimes returns 204/empty bodies for updates/links.
+                try:
+                    body_text = resp.text
+                except Exception:
+                    body_text = ""
+                if not body_text or not body_text.strip():
+                    return {
+                        "success": True,
+                        "status_code": resp.status_code,
+                        "url": url,
+                    }
+                try:
+                    return resp.json()
+                except Exception:
+                    return {
+                        "success": True,
+                        "status_code": resp.status_code,
+                        "url": url,
+                        "response": body_text[:2000],
+                    }
+
+            # Rate limiting: bounded retry/backoff.
+            if resp.status_code == 429 and attempt < max_attempts:
+                retry_after_header = resp.headers.get("Retry-After")
+                retry_after_sec: float | None = None
+                if retry_after_header:
+                    try:
+                        retry_after_sec = float(retry_after_header)
+                    except Exception:
+                        retry_after_sec = None
+                sleep_for = (
+                    retry_after_sec if retry_after_sec is not None else delay_sec
+                )
+                time.sleep(max(0.1, min(sleep_for, 10.0)))
+                delay_sec = min(delay_sec * 2.0, 8.0)
+                continue
+
+            hint = _jira_error_hint(resp.status_code, url=url)
+            response_text = None
+            try:
+                response_text = resp.text
+            except Exception:
+                response_text = None
+
+            error: Dict[str, Any] = {
+                "success": False,
+                "status_code": resp.status_code,
+                "url": url,
+                "error": f"Jira API HTTP {resp.status_code}",
+            }
+            if response_text:
+                error["response"] = response_text[:2000]
+            if hint:
+                error["hint"] = hint
+            return error
+        except requests.exceptions.RequestException as exc:
+            if attempt < max_attempts:
+                time.sleep(max(0.1, min(delay_sec, 8.0)))
+                delay_sec = min(delay_sec * 2.0, 8.0)
+                continue
+            return {"success": False, "error": f"Jira request failed: {exc}"}
+
+    return {"success": False, "error": "Jira request failed after retries"}
 
 
 def jira_get(endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -126,6 +174,11 @@ def jira_get(endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, A
 def jira_post(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{JIRA_BASE_URL}/rest/api/3/{endpoint}"
     return _request_json("POST", url, payload=payload)
+
+
+def jira_put(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    url = f"{JIRA_BASE_URL}/rest/api/3/{endpoint}"
+    return _request_json("PUT", url, payload=payload)
 
 
 # ---------------------------------------------------------
@@ -219,6 +272,61 @@ async def list_tools() -> List[types.Tool]:
                 "properties": {},
             },
         ),
+        types.Tool(
+            name="jira_create_issue",
+            description=(
+                "Create a Jira issue via POST /rest/api/3/issue. "
+                "The caller must provide the exact Jira payload dict (fields, etc.)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "payload": {
+                        "type": "object",
+                        "description": "Jira create issue payload to send as JSON body.",
+                    }
+                },
+                "required": ["payload"],
+            },
+        ),
+        types.Tool(
+            name="jira_update_issue",
+            description=(
+                "Update a Jira issue via PUT /rest/api/3/issue/{issue_key}. "
+                "The caller must provide the exact Jira payload dict (fields, update, etc.)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key, e.g. JVNAUTOSCI-371",
+                    },
+                    "payload": {
+                        "type": "object",
+                        "description": "Jira update issue payload to send as JSON body.",
+                    },
+                },
+                "required": ["issue_key", "payload"],
+            },
+        ),
+        types.Tool(
+            name="jira_link_issue",
+            description=(
+                "Create an issue link via POST /rest/api/3/issueLink. "
+                "The caller must provide the exact Jira payload dict (type, inwardIssue, outwardIssue, etc.)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "payload": {
+                        "type": "object",
+                        "description": "Jira issueLink payload to send as JSON body.",
+                    }
+                },
+                "required": ["payload"],
+            },
+        ),
     ]
 
 
@@ -288,6 +396,43 @@ async def call_tool(
 
     elif name == "jira_get_myself":
         result = jira_get("myself")
+        text = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_create_issue":
+        payload = arguments["payload"]
+        if not isinstance(payload, dict):
+            error = {
+                "success": False,
+                "error": "payload must be an object",
+            }
+            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+        result = jira_post("issue", payload)
+        text = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_update_issue":
+        issue_key = arguments["issue_key"]
+        payload = arguments["payload"]
+        if not isinstance(payload, dict):
+            error = {
+                "success": False,
+                "error": "payload must be an object",
+            }
+            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+        result = jira_put(f"issue/{issue_key}", payload)
+        text = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_link_issue":
+        payload = arguments["payload"]
+        if not isinstance(payload, dict):
+            error = {
+                "success": False,
+                "error": "payload must be an object",
+            }
+            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+        result = jira_post("issueLink", payload)
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
 
