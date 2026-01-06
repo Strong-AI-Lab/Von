@@ -123,6 +123,20 @@ def _get_context(**kwargs):
     return context
 
 
+def _get_client_capabilities(**kwargs):
+    """Return the current client-reported capabilities snapshot (if any).
+
+    Notes:
+    - Stored per server-side session.
+    - Client-reported and non-authoritative.
+    - May be None if the client has not reported yet or no request context.
+    """
+
+    from ...services.client_capabilities_service import get_client_capabilities_snapshot
+
+    return {"success": True, "capabilities": get_client_capabilities_snapshot()}
+
+
 def _get_paper_metadata(**kwargs):
     import asyncio
     from .arxiv_proxy_mcp import get_arxiv_proxy, ArxivProxyError
@@ -4955,6 +4969,34 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             category="read",
             description="Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
+        ),
+        MethodDefinition(
+            name="get_client_capabilities",
+            handler=_get_client_capabilities,
+            input_schema=Schema(
+                required={},
+                optional={},
+                allow_unknown=False,
+                description="Return the current session's last reported client capabilities snapshot (no input parameters).",
+            ),
+            output_schema=Schema(
+                required={
+                    "success": bool,
+                    "capabilities": (dict, type(None)),
+                },
+                optional={},
+                allow_unknown=True,
+                description=(
+                    "Client capability snapshot as last reported by the browser (bounded, non-authoritative). "
+                    "Returns capabilities=null if not available."
+                ),
+            ),
+            category="read",
+            description=(
+                "Get the browser-reported client capability snapshot for the current session (speech synthesis, "
+                "speech recognition, and basic audio hints). Use for debugging speech/narration behaviours without "
+                "collecting high-fidelity fingerprinting data."
+            ),
         ),
         MethodDefinition(
             name="chat_get_prompt_context",

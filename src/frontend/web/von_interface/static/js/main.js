@@ -25,6 +25,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   // where chat history loads with null user_id
   await ensureUserContext();
 
+  // JVNAUTOSCI-954: report bounded, client-reported capability hints (speech/audio)
+  import('./clientCapabilitiesReporter.js').then(module => {
+    if (module.startClientCapabilitiesReporting) {
+      try {
+        window.__vonClientCapabilitiesReporter = module.startClientCapabilitiesReporting();
+      } catch (e) {
+        console.warn('[main] Client capability reporter failed to start:', e);
+      }
+    }
+  }).catch(err => console.error('Error loading client capability reporter:', err));
+
   // Initialize chat tab since it's embedded and active by default
   console.log("Initializing chat tab...");
   import('./chatTab.js').then(module => {
