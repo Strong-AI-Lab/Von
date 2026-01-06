@@ -27,6 +27,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - For high-risk state changes (auth/org handling, DB writes, Vontology mutations), use a single authoritative pathway and reuse it consistently.
 - When uncertain, ask succinctly; do not guess or fabricate behaviour.
 - When working on a task that may involve changes, you may open a branch based on the Jira task name (e.g. `JVNAUTOSCI-956-short-title`).
+- When you start work on a task (including restarting from Done or other closed states), transition it to In Progress.
 
 ## Tooling and Automation
 - Activate required external tool categories (Jira, Vontology, MongoDB, GitHub) without asking, when clearly needed.
