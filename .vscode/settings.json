@@ -5,14 +5,14 @@
   "terminal.integrated.environmentChangesRelaunch": false,
   "terminal.integrated.showEnvironmentContributions": false,
   "terminal.integrated.automationProfile.windows": {
-    "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
     "args": [
       "-NoLogo"
     ]
   },
   "terminal.integrated.profiles.windows": {
     "PowerShell": {
-      "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
       "args": [
         "-NoLogo"
       ]
@@ -101,7 +101,7 @@
   "workbench.tree.expandMode": "singleClick",
   "files.eol": "\n",
   "jest.runMode": "on-demand",
-  "jest.shell": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+  "jest.shell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
   "github.copilot.nextEditSuggestions.enabled": true,
   "chat.instructionsFilesLocations": {
     ".github/instructions": true,
