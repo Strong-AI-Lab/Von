@@ -5,12 +5,12 @@ This document provides an overview of key files within the `docs` directory that
 **All AI agents must read this file and the `docs/engineering/security_considerations.md` file before starting any work.**
 
 > **TL;DR FOR AGENTS (READ FIRST)**
-> 1. Use **New Zealand English** spelling always (behaviour, colour, organisation, realise).
+> 1. Use **New Zealand English** spelling always (behaviour, colour, organisation, realise), correct use of macrons in Māori words and phrases.
 > 2. **PowerShell is the default shell**. Do **NOT** emit Bash heredocs (`<<EOF`), `export VAR=`, `$(cmd)` substitution, or `source venv/bin/activate` unless the user explicitly asks for a Bash variant. Provide `$env:VAR = 'value'`, here-strings, or `pdm run` patterns.
 - **Pre-commit guardrails**: enable hooks with `git config core.hooksPath .githooks` to block committing runtime data (e.g., `data/rag_storage`, `data/raw`, `logs`).
 > 2.1. **Never clobber `.env`.** Under no circumstances should an agent create or overwrite the repo-root `.env` file. Only apply minimal, targeted edits when explicitly asked, and never print `.env` contents or secrets in chat.
 > 2.2. **JIRA issues MUST be assigned on creation.** When creating any JIRA issue/subtask, you MUST set the assignee to the current user at creation time. Do NOT rely on “fixing assignee later” (Atlassian tooling can be flaky, and post-create reassignment may be unavailable).
-> 3. Never auto-start the server; wait for explicit user instruction.
+> 3. It's fine to auto-start the server; don't wait for explicit user instruction.
 > 4. Prefer clarity over clever chaining: separate lines instead of `&&` unless failure short‑circuit is required.
 > 5. Large multi-line Python → use a here-string variable then `python -c $code` (PowerShell) or propose a committed script.
 > 5.1. When providing paste-ready text (e.g., `.env` snippets, JSON tool calls, commands), wrap it in fenced code blocks so Markdown does not reformat or linkify it.
@@ -27,7 +27,7 @@ This document provides an overview of key files within the `docs` directory that
 
 ## 🇳🇿 CRITICAL: New Zealand English Only
 
-**ALL code, documentation, comments, commit messages, and user-facing text MUST be written in New Zealand English.**
+**ALL code, documentation, comments, commit messages, and user-facing text MUST be written in New Zealand English; this can included careful use of Māori words.**
 
 Key differences to remember:
 
