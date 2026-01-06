@@ -14,6 +14,7 @@ Namespace behaviour:
 """
 
 import hashlib
+import importlib
 import os
 import re
 import time
@@ -23,19 +24,84 @@ from typing import Iterable, Dict, Any, Optional, List, Tuple
 from ..rag_service import RAGService
 from ...utils.concept_id_utils import normalise_concept_id_for_compare
 
-try:
-    from llama_index import (
-        VectorStoreIndex,
-        Document,
-        ServiceContext,
-        StorageContext,
-        load_index_from_storage,
-    )
 
-    # from llama_index.llms import OpenAI
-    # from llama_index.embeddings import OpenAIEmbedding
-except ImportError as e:
-    raise ImportError(f"LlamaIndex dependencies missing: {e}")
+_LLAMAINDEX_MISSING_MESSAGE = (
+    "LlamaIndex dependencies missing. Install the optional dependency group(s) "
+    "that provide `llama-index` for this backend."
+)
+
+
+class _MissingVectorStoreIndex:
+    @classmethod
+    def from_documents(cls, *args, **kwargs):  # pragma: no cover
+        raise ImportError(_LLAMAINDEX_MISSING_MESSAGE)
+
+
+class _MissingDocument:
+    def __init__(self, *args, **kwargs):  # pragma: no cover
+        raise ImportError(_LLAMAINDEX_MISSING_MESSAGE)
+
+
+class _MissingStorageContext:
+    @classmethod
+    def from_defaults(cls, *args, **kwargs):  # pragma: no cover
+        raise ImportError(_LLAMAINDEX_MISSING_MESSAGE)
+
+
+def _missing_load_index_from_storage(*args, **kwargs):  # pragma: no cover
+    raise ImportError(_LLAMAINDEX_MISSING_MESSAGE)
+
+
+class _FallbackServiceContext:
+    """Compatibility shim.
+
+    Newer LlamaIndex releases removed ServiceContext in favour of global Settings.
+    We keep this symbol so tests can patch `ServiceContext.from_defaults`.
+    """
+
+    @classmethod
+    def from_defaults(cls, *args, **kwargs):  # pragma: no cover
+        return None
+
+
+# These are intentionally `Any` so Pylance doesn't complain when we swap in
+# the real LlamaIndex implementations at runtime.
+VectorStoreIndex: Any = _MissingVectorStoreIndex
+Document: Any = _MissingDocument
+StorageContext: Any = _MissingStorageContext
+load_index_from_storage: Any = _missing_load_index_from_storage
+ServiceContext: Any = _FallbackServiceContext
+
+
+# Attempt imports in a version-tolerant way.
+# - Newer LlamaIndex exposes most APIs under llama_index.core
+# - Older versions exposed them at the top-level llama_index package
+try:  # pragma: no cover
+    core = importlib.import_module("llama_index.core")
+    VectorStoreIndex = getattr(core, "VectorStoreIndex")
+    Document = getattr(core, "Document")
+    StorageContext = getattr(core, "StorageContext")
+    load_index_from_storage = getattr(core, "load_index_from_storage")
+
+    try:
+        service_context_mod = importlib.import_module(
+            "llama_index.core.service_context"
+        )
+        ServiceContext = getattr(service_context_mod, "ServiceContext")
+    except Exception:
+        # Keep the fallback shim.
+        pass
+except Exception:  # pragma: no cover
+    try:
+        llama_index = importlib.import_module("llama_index")
+        VectorStoreIndex = getattr(llama_index, "VectorStoreIndex")
+        Document = getattr(llama_index, "Document")
+        StorageContext = getattr(llama_index, "StorageContext")
+        load_index_from_storage = getattr(llama_index, "load_index_from_storage")
+        ServiceContext = getattr(llama_index, "ServiceContext", ServiceContext)
+    except Exception:
+        # Leave stubs in place so the module remains importable.
+        pass
 
 
 class LlamaIndexRAGService(RAGService):
@@ -48,9 +114,8 @@ class LlamaIndexRAGService(RAGService):
         # Ensure base persistence directory exists
         os.makedirs(self.persistence_dir, exist_ok=True)
 
-        # Initialize ServiceContext (can be customized with specific LLM/Embed model)
-        # For now, we rely on env vars (OPENAI_API_KEY) or defaults
-        # Note: In 0.9.x ServiceContext.from_defaults() uses OpenAI by default if key is present
+        # Initialise ServiceContext (can be customised with specific LLM/Embed model).
+        # In newer LlamaIndex releases this may return None (Settings-based).
         self.service_context = ServiceContext.from_defaults()
 
         # Best-effort diagnostics for UI/debugging.
@@ -92,25 +157,27 @@ class LlamaIndexRAGService(RAGService):
 
         try:
             storage_context = StorageContext.from_defaults(persist_dir=persist_dir)
-            index = load_index_from_storage(
-                storage_context, service_context=self.service_context
-            )
+            kwargs = {}
+            if self.service_context is not None:
+                kwargs["service_context"] = self.service_context
+            index = load_index_from_storage(storage_context, **kwargs)
         except Exception:
             return None
 
         self._indices[namespace] = index
         return index
 
-    def _get_or_create_index(self, namespace: str, documents: List[Document]) -> Any:
+    def _get_or_create_index(self, namespace: str, documents: List[Any]) -> Any:
         index = self._maybe_load_index(namespace)
         if index is not None:
             return index
 
         persist_dir = self._namespace_persist_dir(namespace)
         os.makedirs(persist_dir, exist_ok=True)
-        index = VectorStoreIndex.from_documents(
-            documents, service_context=self.service_context
-        )
+        kwargs = {}
+        if self.service_context is not None:
+            kwargs["service_context"] = self.service_context
+        index = VectorStoreIndex.from_documents(documents, **kwargs)
         index.storage_context.persist(persist_dir=persist_dir)
         self._indices[namespace] = index
         return index
@@ -129,7 +196,7 @@ class LlamaIndexRAGService(RAGService):
         """
         effective_namespace = self._resolve_effective_namespace(namespace)
 
-        llama_docs: List[Document] = []
+        llama_docs: List[Any] = []
         for doc in docs:
             # Convert dict to LlamaIndex Document
             text = doc.get("text", "")
@@ -366,6 +433,16 @@ class LlamaIndexRAGService(RAGService):
         self,
         texts: Iterable[str],
     ) -> List[List[float]]:
-        # Use the embedding model from service context
-        embed_model = self.service_context.embed_model
+        # Use the embedding model from service context (if present).
+        if self.service_context is None:
+            raise RuntimeError(
+                "Embeddings unavailable: LlamaIndex ServiceContext is not configured."
+            )
+
+        embed_model = getattr(self.service_context, "embed_model", None)
+        if embed_model is None:
+            raise RuntimeError(
+                "Embeddings unavailable: LlamaIndex embed_model is not configured."
+            )
+
         return [embed_model.get_text_embedding(t) for t in texts]
