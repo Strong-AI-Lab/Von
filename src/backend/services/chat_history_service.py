@@ -456,6 +456,62 @@ def upsert_presenter_channels_for_history_message(
         ) from e
 
 
+def update_llm_debug_data_for_request_id(
+    *,
+    user_id: str,
+    session_id: str,
+    request_id: str,
+    updates: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Update llm_debug_data fields for the assistant message matching request_id."""
+
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required")
+    if not isinstance(request_id, str) or not request_id:
+        raise ChatHistoryServiceError("request_id is required")
+    if not isinstance(updates, dict) or not updates:
+        return {"updated": False, "reason": "no_updates"}
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    set_fields = {
+        f"history.$.llm_debug_data.{key}": value for key, value in updates.items()
+    }
+
+    try:
+        result = chat_history_coll.update_one(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "history": {
+                    "$elemMatch": {
+                        "role": "assistant",
+                        "llm_debug_data.request_id": request_id,
+                    }
+                },
+            },
+            {"$set": set_fields},
+        )
+        updated = bool(getattr(result, "modified_count", 0) > 0)
+        matched = bool(getattr(result, "matched_count", 0) > 0)
+        reason = None if matched else "request_id_not_found"
+        return {"updated": updated, "matched": matched, "reason": reason}
+    except PyMongoError as e:
+        logger.error(
+            "Error updating llm_debug_data for request_id=%s: %s",
+            request_id,
+            e,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not update llm_debug_data for request_id {request_id}: {e}"
+        ) from e
+
+
 def add_message_to_history(
     user_id: str,
     session_id: str,
