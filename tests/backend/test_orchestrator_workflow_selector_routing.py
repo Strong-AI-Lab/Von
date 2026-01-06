@@ -9,6 +9,9 @@ import pytest
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.services.client_capabilities_service import (
+    set_client_capabilities_snapshot,
+)
 
 
 class _StubGateway:
@@ -38,6 +41,55 @@ class _CapturingLLM:
         if not self._responses:
             raise AssertionError("LLM called more times than expected")
         return self._responses.pop(0)
+
+
+def test_orchestrator_injects_voice_hint_when_prompt_asks_for_voice(monkeypatch):
+    """Voice queries should be grounded via client capabilities snapshot."""
+
+    from flask import Flask
+    from typing import cast
+
+    monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "1")
+
+    app = Flask(__name__)
+    app.config.update(SECRET_KEY="test")
+
+    gateway = cast(Any, _StubGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,
+        max_tool_invocations=1,
+    )
+
+    snapshot = {
+        "speech_synthesis": {
+            "supported": True,
+            "voices_count": 3,
+            "default_voice_lang": "en-NZ",
+            "settings": {"voice_name": "Test Voice"},
+        }
+    }
+
+    llm = _CapturingLLM(["Here is a reply."])
+
+    with app.test_request_context("/"):
+        set_client_capabilities_snapshot(snapshot)
+
+        orchestrator.run(
+            prompt="What voice are you using?",
+            context=[],
+            llm_client=llm,
+            model=None,
+            user_namespace="#V#user",
+        )
+
+    assert llm.calls, "Expected at least one LLM call"
+    combined_context = "\n".join(
+        str(item.get("content") or "")
+        for item in (llm.calls[0].get("context") or [])
+        if isinstance(item, dict)
+    )
+    assert "Client-reported speech synthesis settings" in combined_context
+    assert "voice_name='Test Voice'" in combined_context
 
 
 def test_workflow_selector_routes_to_narration_workflow(monkeypatch):

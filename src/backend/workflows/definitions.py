@@ -17,6 +17,7 @@ MISSING_TOOL_CALL_WORKFLOW_ID = "#V#missing_tool_call_workflow"
 CHAT_NARRATION_WORKFLOW_ID = "#V#chat_narration_workflow"
 CHAT_ASSISTANT_WORKFLOW_ID = "#V#chat_assistant_workflow"
 TODO_REFRESH_WORKFLOW_ID = "#V#todo_refresh_workflow"
+WRITE_TOOL_POLICY_WORKFLOW_ID = "#V#write_tool_policy_workflow"
 
 
 def _transition_if_flag_set(
@@ -253,6 +254,38 @@ def build_todo_refresh_workflow() -> WorkflowDefinition:
     )
 
 
+def build_write_tool_policy_workflow() -> WorkflowDefinition:
+    decide = WorkflowStateSpec(
+        state_id="decide",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="write_policy.decide",
+                description="Decide which write-category tools are allowed for this user prompt.",
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda ctx: True,
+                reason="decided",
+            ),
+        ),
+    )
+
+    completed = WorkflowStateSpec(state_id="completed", terminal=True)
+
+    return WorkflowDefinition(
+        workflow_id=WRITE_TOOL_POLICY_WORKFLOW_ID,
+        initial_state="decide",
+        states={
+            "decide": decide,
+            "completed": completed,
+        },
+        termination_states=("completed",),
+        purpose="Determine which write tools are allowed for a chat prompt.",
+    )
+
+
 def register_default_workflows(registry: WorkflowRegistry) -> None:
     for registration in (
         WorkflowRegistration(
@@ -285,6 +318,12 @@ def register_default_workflows(registry: WorkflowRegistry) -> None:
             workflow_id=TODO_REFRESH_WORKFLOW_ID,
             definition=build_todo_refresh_workflow(),
             purpose="Refresh to-dos using Gmail and KB data.",
+            source="built_in",
+        ),
+        WorkflowRegistration(
+            workflow_id=WRITE_TOOL_POLICY_WORKFLOW_ID,
+            definition=build_write_tool_policy_workflow(),
+            purpose="Write-tool policy decision pipeline.",
             source="built_in",
         ),
     ):

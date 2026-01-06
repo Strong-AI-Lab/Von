@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import asdict, dataclass
 from typing import (
@@ -42,11 +43,14 @@ from ...workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
     MISSING_TOOL_CALL_WORKFLOW_ID,
+    WRITE_TOOL_POLICY_WORKFLOW_ID,
     register_default_workflows,
 )
 from ...workflows.engine import WorkflowExecutor
 from ...workflows.workflow_registry import WorkflowRegistry
 from ...workflows.workflow_selector import WorkflowSelector
+
+from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
 
 
 @dataclass(frozen=True)
@@ -348,6 +352,14 @@ class InternalMCPChatOrchestrator:
                     description="Placeholder action; real implementation to be bound via MCP.",
                 )
             )
+
+        registry.register(
+            ActionSpec(
+                action_id="write_policy.decide",
+                handler=self._action_write_policy_decide,
+                description="Decide which write-category tools are allowed for this prompt.",
+            )
+        )
         return registry
 
     @staticmethod
@@ -421,6 +433,28 @@ class InternalMCPChatOrchestrator:
                     "classifier_verdict": assessment.classifier_verdict,
                 }
             )
+
+        return WorkflowActionResult(outputs=outputs)
+
+    def _action_write_policy_decide(self, request: Any) -> WorkflowActionResult:
+        prompt = request.data.get("prompt")
+        requested_tools = request.data.get("requested_write_tools")
+        if not isinstance(prompt, str):
+            prompt = ""
+        if not isinstance(requested_tools, list):
+            requested_tools = []
+
+        decision = compute_allowed_write_tools(
+            prompt=prompt,
+            requested_tools=[str(tool) for tool in requested_tools if tool],
+        )
+
+        return WorkflowActionResult(
+            outputs={
+                "allowed_write_tools": sorted(decision.allowed_tools),
+                "write_policy_reason": decision.reason,
+            }
+        )
 
         return WorkflowActionResult(outputs=outputs)
 
@@ -1982,6 +2016,88 @@ class InternalMCPChatOrchestrator:
         base.insert(0, {"role": "system", "content": instruction_msg})
         return self._limit_context_for_llm(base)
 
+    @staticmethod
+    def _prompt_requests_tts_voice(prompt: str) -> bool:
+        if not isinstance(prompt, str):
+            return False
+        text = prompt.strip().lower()
+        if not text:
+            return False
+
+        # Require an explicit voice/speech hint to avoid spurious matches.
+        if not any(
+            token in text for token in ("voice", "tts", "text to speech", "speech")
+        ):
+            return False
+
+        # Typical phrasings users use when asking what voice is active.
+        patterns = (
+            r"\bwhat\s+voice\b",
+            r"\bwhich\s+voice\b",
+            r"\bcurrent\s+voice\b",
+            r"\btts\s+voice\b",
+            r"\bvoice\s+are\s+you\s+using\b",
+            r"\bvoice\s+am\s+i\s+using\b",
+            r"\bwhat\s+tts\b",
+        )
+
+        return any(re.search(p, text) for p in patterns)
+
+    def _build_client_capabilities_voice_hint(self) -> str | None:
+        """Return a small, safe system hint about the current TTS voice.
+
+        Uses the per-session client capability snapshot (client-reported and
+        non-authoritative).
+        """
+
+        try:
+            from flask import has_request_context
+
+            if not has_request_context():
+                return None
+        except Exception:
+            return None
+
+        try:
+            from ...services.client_capabilities_service import (
+                get_client_capabilities_snapshot,
+            )
+
+            snapshot = get_client_capabilities_snapshot()
+        except Exception:
+            snapshot = None
+
+        speech = (
+            snapshot.get("speech_synthesis") if isinstance(snapshot, dict) else None
+        )
+        speech = speech if isinstance(speech, dict) else {}
+        raw_settings = speech.get("settings")
+        settings = raw_settings if isinstance(raw_settings, dict) else {}
+
+        voice_name = settings.get("voice_name")
+        default_voice_lang = speech.get("default_voice_lang")
+        supported = speech.get("supported")
+        voices_count = speech.get("voices_count")
+
+        def _clean(value: Any, *, max_chars: int = 140) -> str | None:
+            if value is None:
+                return None
+            text = str(value).strip()
+            if not text:
+                return None
+            return text[:max_chars]
+
+        voice_name = _clean(voice_name)
+        default_voice_lang = _clean(default_voice_lang, max_chars=40)
+
+        # Keep this as a short, deterministic summary so it doesn't bloat context.
+        return (
+            "Client-reported speech synthesis settings (non-authoritative): "
+            f"supported={supported!r}, voices_count={voices_count!r}, "
+            f"default_voice_lang={default_voice_lang!r}, voice_name={voice_name!r}. "
+            "If voice_name is None, the browser has not reported a selected voice yet."
+        )
+
     def _interpret_model_turn(self, response: Any) -> _ModelTurnInterpretation:
         """Parse and classify a single model response.
 
@@ -2145,74 +2261,44 @@ class InternalMCPChatOrchestrator:
         return (
             "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
             "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects. "
-            "Choose a tool that matches the user's request; do NOT call write tools unless the user explicitly asked to create/update/delete Vontology data. "
+            "Choose a tool that matches the user's request; do NOT call write tools unless the user explicitly asked for the write-side effect (e.g., Vontology changes or downloading/storing an artefact). "
             "No prose. No Markdown. Do NOT wrap the JSON in ``` fences (including ```json). "
             "The first character MUST be an opening curly brace or an opening square bracket, and the response must contain only valid JSON."
         )
 
-    @staticmethod
-    def _prompt_allows_write_tools(prompt: str) -> bool:
-        """Return True when the user explicitly requests a Vontology mutation.
-
-        This guard prevents accidental writes when the model emits an unrelated
-        write tool call (often after a missing-tool-call retry).
-
-        Keep this conservative: require both a write verb and an ontology/concept
-        reference so unrelated "create" requests (e.g., "create a file") do not
-        enable write-category tools.
-        """
-
-        if not isinstance(prompt, str):
-            return False
-
-        lowered = prompt.lower()
-
-        mentions_vontology = any(
-            token in lowered
-            for token in (
-                "#v#",
-                "vontology",
-                "ontology",
-                "concept",
-                "relationship",
-                "predicate",
-                "text relation",
-            )
+    def _resolve_allowed_write_tools(
+        self,
+        *,
+        prompt: str,
+        requested_write_tools: list[str],
+        llm_client: Any,
+        model: str | None,
+        user_namespace: str | None,
+        auxiliary_system_prompt: str | None,
+        trace: Any | None,
+    ) -> tuple[set[str], str]:
+        workflow_result = self.execute_workflow(
+            WRITE_TOOL_POLICY_WORKFLOW_ID,
+            data={
+                "prompt": prompt,
+                "requested_write_tools": list(requested_write_tools),
+            },
+            llm_client=llm_client,
+            model=model,
+            user_namespace=user_namespace,
+            auxiliary_system_prompt=auxiliary_system_prompt,
+            trace=trace,
         )
-        if not mentions_vontology:
-            return False
-
-        import re
-
-        verbs = (
-            "create",
-            "add",
-            "insert",
-            "upsert",
-            "update",
-            "edit",
-            "change",
-            "delete",
-            "remove",
-            "rename",
-            "merge",
-            "link",
-            "unlink",
-            "set",
-        )
-
-        negated = {
-            match.group(1)
-            for match in re.finditer(
-                r"\b(?:do not|don't|dont|never)\s+(create|add|insert|upsert|update|edit|change|delete|remove|rename|merge|link|unlink|set)\b",
-                lowered,
-            )
-        }
-
-        for verb in verbs:
-            if re.search(rf"\b{re.escape(verb)}\b", lowered) and verb not in negated:
-                return True
-        return False
+        if workflow_result is None:
+            return set(), "workflow_unavailable"
+        allowed = workflow_result.data.get("allowed_write_tools")
+        reason = workflow_result.data.get("write_policy_reason")
+        allowed_set: set[str] = set()
+        if isinstance(allowed, list):
+            allowed_set = {
+                str(item) for item in allowed if isinstance(item, str) and item
+            }
+        return allowed_set, str(reason or "")
 
     def execute_workflow(
         self,
@@ -2439,6 +2525,14 @@ class InternalMCPChatOrchestrator:
             user_namespace=user_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
         )
+
+        # If the user asks which TTS voice is being used, attach a small session
+        # snapshot so the assistant can answer reliably without guessing.
+        if self._prompt_requests_tts_voice(prompt):
+            hint = self._build_client_capabilities_voice_hint()
+            if isinstance(hint, str) and hint.strip():
+                # Place immediately after the main instruction message.
+                augmented_context.insert(1, {"role": "system", "content": hint.strip()})
 
         selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
         presenter_mode_requested = False
@@ -2779,7 +2873,8 @@ class InternalMCPChatOrchestrator:
             if isinstance(category, str):
                 tool_categories[name] = category
 
-        write_allowed = self._prompt_allows_write_tools(prompt)
+        allowed_write_tools: set[str] = set()
+        write_policy_reason = ""
 
         # Support chained tool calls up to max_tool_invocations limit (JVNAUTOSCI-699)
         iteration_count = 0
@@ -2860,8 +2955,10 @@ class InternalMCPChatOrchestrator:
             batch_cap = max(1, int(getattr(self, "_tool_batch_cap", 4)))
             allowed = min(remaining, batch_cap)
             if len(tool_calls) > allowed:
-                remaining_tool_calls = tool_calls[allowed:]
-                tool_calls = tool_calls[:allowed]
+                remaining_tool_calls = cast(
+                    list[_ToolCallRequest], tool_calls[allowed:]
+                )
+                tool_calls = cast(list[_ToolCallRequest], tool_calls[:allowed])
 
             current_batch_size = len(tool_calls)
 
@@ -2922,10 +3019,24 @@ class InternalMCPChatOrchestrator:
                 # This is intentionally enforced at execution time so it applies to both legacy and
                 # structured tool-calling paths, including retry flows.
                 tool_category = tool_categories.get(tool_name)
-                if tool_category == "write" and not write_allowed:
+                if tool_category == "write":
+                    if tool_name not in allowed_write_tools:
+                        allowed_write_tools, write_policy_reason = (
+                            self._resolve_allowed_write_tools(
+                                prompt=prompt,
+                                requested_write_tools=[tool_name],
+                                llm_client=llm_client,
+                                model=model,
+                                user_namespace=user_namespace,
+                                auxiliary_system_prompt=auxiliary_system_prompt,
+                                trace=trace if trace_enabled else None,
+                            )
+                        )
+
+                if tool_category == "write" and tool_name not in allowed_write_tools:
                     message = (
                         f"Blocked write tool {tool_name!r}: the user request appears read-only. "
-                        "If you intended to modify the Vontology, restate the request explicitly."
+                        "If you intended to perform a write (Vontology changes or artefact storage), restate the request explicitly."
                     )
                     tool_payload = self._format_tool_result(
                         tool_name, None, None, "error", message
@@ -2937,6 +3048,8 @@ class InternalMCPChatOrchestrator:
                         "error": message,
                         "blocked": True,
                     }
+                    if write_policy_reason:
+                        blocked_record["write_policy_reason"] = write_policy_reason
                     if call_id:
                         blocked_record["call_id"] = call_id
                     invocations.append(blocked_record)
