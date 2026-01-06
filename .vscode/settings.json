@@ -4,6 +4,12 @@
   "terminal.integrated.shellIntegration.suggestEnabled": true,
   "terminal.integrated.environmentChangesRelaunch": false,
   "terminal.integrated.showEnvironmentContributions": false,
+  "terminal.integrated.automationProfile.windows": {
+    "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    "args": [
+      "-NoLogo"
+    ]
+  },
   "terminal.integrated.profiles.windows": {
     "PowerShell": {
       "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
