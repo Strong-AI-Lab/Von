@@ -668,6 +668,98 @@ function submitChatPromptImmediately() {
     }
 }
 
+function formatBytesForUi(sizeBytes) {
+    const size = Number(sizeBytes);
+    if (!Number.isFinite(size) || size < 0) return '';
+    if (size < 1024) return `${size} B`;
+    const kb = size / 1024;
+    if (kb < 1024) return `${kb.toFixed(1)} KB`;
+    const mb = kb / 1024;
+    if (mb < 1024) return `${mb.toFixed(1)} MB`;
+    const gb = mb / 1024;
+    return `${gb.toFixed(2)} GB`;
+}
+
+function isFileDragEvent(event) {
+    const dt = event?.dataTransfer;
+    if (!dt) return false;
+    try {
+        const types = Array.from(dt.types || []);
+        return types.includes('Files');
+    } catch (_) {
+        return false;
+    }
+}
+
+async function uploadSingleFileToVon(file) {
+    if (!file) {
+        throw new Error('No file provided');
+    }
+
+    const formData = new FormData();
+    formData.append('file', file, file.name || 'uploaded_file');
+
+    const response = await fetch('/von/api/files/upload', {
+        method: 'POST',
+        body: formData
+    });
+
+    let data = null;
+    try {
+        data = await response.json();
+    } catch (_) {
+        data = null;
+    }
+
+    if (!response.ok || !data || data.success !== true) {
+        const detail = data?.message || data?.error || `HTTP ${response.status}`;
+        throw new Error(`Upload failed: ${detail}`);
+    }
+
+    return data;
+}
+
+async function uploadFilesToVon(files) {
+    const list = Array.from(files || []).filter(Boolean);
+    if (!list.length) return;
+
+    for (const file of list) {
+        const sizeLabel = formatBytesForUi(file.size);
+        appendMessage('User', `Uploading file: ${file.name}${sizeLabel ? ` (${sizeLabel})` : ''}`);
+
+        try {
+            const result = await uploadSingleFileToVon(file);
+            const conceptId = result?.uploaded?.concept_id;
+            const blobUri = result?.storage?.uri;
+            const blobKey = result?.storage?.key;
+            const blobBackend = result?.storage?.backend;
+            const historyRecorded = result?.chat_history_recorded === true;
+
+            const downloadUrl = conceptId
+                ? `/von/api/files/${encodeURIComponent(conceptId)}/download`
+                : null;
+
+            const details = [];
+            if (blobUri) details.push(`Blob: ${blobUri}`);
+            if (blobBackend || blobKey) details.push(`Blob key: ${String(blobBackend || '')}:${String(blobKey || '')}`.replace(/^:/, ''));
+            if (historyRecorded) details.push('Recorded in chat history.');
+            if (downloadUrl) details.push(`[Download attachment](${downloadUrl})`);
+
+            appendMessage(
+                'Von',
+                `File uploaded and registered as ${conceptId || '(unknown)'}${details.length ? `\n${details.join('\n')}` : ''}`
+            );
+
+            if (conceptId) {
+                insertTextIntoChatPrompt(`Attached file concept: ${conceptId}`);
+            }
+        } catch (error) {
+            console.error('[chatTab] file upload error', error);
+            appendMessage('Error', `File upload failed: ${String(error?.message || error)}`);
+        }
+    }
+}
+
 function convertJustSayInstructionsToButtons(root) {
     if (!root || !root.querySelectorAll) return;
 
@@ -2858,10 +2950,65 @@ export function initializeChatTab() {
     const ttsToggle = document.getElementById('ttsToggle');
     const exportConversationJsonBtn = document.getElementById('exportConversationJsonBtn');
     const exportConversationMarkdownBtn = document.getElementById('exportConversationMarkdownBtn');
+    const uploadFileButton = document.getElementById('uploadFileButton');
+    const uploadFileInput = document.getElementById('uploadFileInput');
+    const chatTab = document.getElementById('chatTab');
 
     if (!sendButton || !resetButton || !promptInput) {
         console.error("Chat tab elements not found");
         return;
+    }
+
+    if (uploadFileButton && uploadFileInput) {
+        uploadFileButton.addEventListener('click', () => {
+            try {
+                uploadFileInput.click();
+            } catch (_) {
+                // Ignore.
+            }
+        });
+
+        uploadFileInput.addEventListener('change', async () => {
+            const files = uploadFileInput.files;
+            // Clear the input so selecting the same file again triggers change.
+            uploadFileInput.value = '';
+            await uploadFilesToVon(files);
+        });
+    }
+
+    if (chatTab && scrollableField) {
+        // Prevent the browser navigating away when dropping files.
+        const preventIfFiles = (event) => {
+            if (!isFileDragEvent(event)) return;
+            event.preventDefault();
+            event.stopPropagation();
+        };
+
+        // Global guards
+        document.addEventListener('dragover', preventIfFiles);
+        document.addEventListener('drop', preventIfFiles);
+
+        // Local UI + drop handling
+        chatTab.addEventListener('dragover', (event) => {
+            if (!isFileDragEvent(event)) return;
+            preventIfFiles(event);
+            scrollableField.classList.add('drag-over');
+        });
+
+        chatTab.addEventListener('dragleave', (event) => {
+            if (!isFileDragEvent(event)) return;
+            scrollableField.classList.remove('drag-over');
+        });
+
+        chatTab.addEventListener('drop', async (event) => {
+            if (!isFileDragEvent(event)) return;
+            preventIfFiles(event);
+            scrollableField.classList.remove('drag-over');
+
+            const dt = event.dataTransfer;
+            const files = dt ? dt.files : null;
+            await uploadFilesToVon(files);
+        });
     }
 
     // Initialize LLM debug popup handlers

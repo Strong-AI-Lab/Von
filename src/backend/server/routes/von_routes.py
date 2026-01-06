@@ -1,4 +1,12 @@
-from flask import Blueprint, request, jsonify, render_template, current_app, session
+from flask import (
+    Blueprint,
+    request,
+    jsonify,
+    render_template,
+    current_app,
+    session,
+    send_file,
+)
 import os
 import re
 import time
@@ -46,6 +54,15 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _slugify_concept_id_for_key(concept_id: str) -> str:
+    cleaned = (concept_id or "").strip()
+    if cleaned.startswith("#V#"):
+        cleaned = cleaned[3:]
+    cleaned = cleaned.strip().lower()
+    cleaned = re.sub(r"[^a-z0-9]+", "_", cleaned).strip("_")
+    return cleaned or "unknown"
+
+
 def _get_tool_progress_scope_key() -> str:
     """Return a stable scope key for tool-progress lookup.
 
@@ -68,6 +85,461 @@ def _get_tool_progress_scope_key() -> str:
         session["tool_progress_scope"] = secrets.token_urlsafe(16)
 
     return f"anon:{session.get('tool_progress_scope')}"
+
+
+@von_bp.route("/api/files/upload", methods=["POST"])
+def upload_file_to_blob_store_and_vontology():
+    """Upload a user-provided file into the configured blob store and register it in Vontology.
+
+    Security: user identity is derived server-side via get_effective_user_concept_id().
+
+    Multipart form-data:
+      - file: the uploaded file
+
+    Returns JSON:
+      - success
+      - uploaded: { concept_id, type_concept_id, sha256, size_bytes, content_type, original_filename }
+      - storage: { backend, key, uri, content_type, size_bytes, metadata }
+    """
+
+    from werkzeug.utils import secure_filename
+
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "missing_user_context",
+                    "message": "Missing user context: establish an authenticated session first.",
+                }
+            ),
+            401,
+        )
+
+    # Ensure the upload is associated with a stable chat session so it becomes part
+    # of the same persisted history that /von/generate uses.
+    if "session_id" not in session:
+        session["session_id"] = str(uuid.uuid4())
+    session_id = session["session_id"]
+
+    if "file" not in request.files:
+        return jsonify({"success": False, "error": "missing_file"}), 400
+
+    uploaded = request.files.get("file")
+    if not uploaded or not getattr(uploaded, "filename", None):
+        return jsonify({"success": False, "error": "empty_upload"}), 400
+
+    original_filename = str(uploaded.filename)
+    safe_filename = secure_filename(original_filename) or "uploaded_file"
+    content_type = getattr(uploaded, "mimetype", None) or None
+
+    try:
+        data = uploaded.read()
+    except Exception as exc:
+        current_app.logger.warning(f"[files/upload] Failed to read upload: {exc}")
+        return jsonify({"success": False, "error": "read_failed"}), 400
+
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return jsonify({"success": False, "error": "empty_bytes"}), 400
+
+    data_bytes = bytes(data)
+
+    import hashlib
+
+    sha256 = hashlib.sha256(data_bytes).hexdigest()
+    size_bytes = len(data_bytes)
+
+    from ...services.blob_store import get_blob_store_from_env
+
+    store = get_blob_store_from_env()
+    user_slug = _slugify_concept_id_for_key(user_concept_id)
+    blob_key = f"uploads/{user_slug}/{sha256}/{safe_filename}"
+
+    blob_ref = store.put_bytes(
+        blob_key,
+        data_bytes,
+        content_type=content_type,
+        metadata={
+            "original_filename": original_filename,
+            "sha256": sha256,
+            "user_concept_id": user_concept_id.strip(),
+            "uploaded_at": _now_utc_iso(),
+        },
+    )
+
+    # --- Ensure KR infrastructure exists ---
+    type_concept_id = "#V#computer_file_copy"
+
+    try:
+        from ...db.repositories.concepts_repository import ConceptsRepository
+        from ...vontology.utils_vontology import (
+            THING_PRIMARY_ID,
+            create_vontology_concept,
+            ensure_thing_exists_and_link_orphans,
+        )
+
+        if not ConceptsRepository.find_one({"concept_id": type_concept_id}):
+            # Prefer a store-of-information parent if present; otherwise fall back to Thing.
+            parent_id = (
+                "#V#store_of_information"
+                if ConceptsRepository.find_one(
+                    {"concept_id": "#V#store_of_information"}
+                )
+                else THING_PRIMARY_ID
+            )
+            if parent_id == THING_PRIMARY_ID:
+                # Best-effort: ensure Thing exists.
+                ensure_thing_exists_and_link_orphans()
+
+            created = create_vontology_concept(
+                parent_id=parent_id,
+                new_concept_name="Computer File Copy",
+                create_as_instance=False,
+                description=(
+                    "A computer file copy is an information-bearing artefact representing a specific stored byte sequence "
+                    "(for example an uploaded file stored in Von's blob store)."
+                ),
+                notes=(
+                    "Created on-demand by Von's chat file upload flow. Instances typically have blob store metadata "
+                    "(URI, key, content type, size, and hash) recorded as text relations."
+                ),
+            )
+            if not created.get("success"):
+                current_app.logger.warning(
+                    "[files/upload] Failed to create Computer File Copy type: %s",
+                    created.get("message"),
+                )
+    except Exception as exc:
+        current_app.logger.warning(
+            f"[files/upload] KR type ensure failed (continuing): {exc}"
+        )
+
+    # --- Create the file-copy instance concept ---
+    instance_concept_id = f"#V#uploaded_file_copy_{uuid.uuid4().hex}"
+
+    try:
+        from ...services import concept_service
+        from ...db.repositories.concepts_repository import ConceptsRepository
+        from ...services.text_value_service import upsert_text_for_concept
+
+        instance = concept_service.create_concept(
+            name=original_filename,
+            concept_id=instance_concept_id,
+            parent_concept_ids=[type_concept_id],
+            create_as_instance=True,
+            system_tags=["uploaded", "file", "blob_store"],
+            attributes={
+                "sha256": sha256,
+                "size_bytes": size_bytes,
+                "content_type": content_type,
+                "blob_backend": blob_ref.backend,
+                "blob_key": blob_ref.key,
+                "blob_uri": blob_ref.uri,
+            },
+        )
+
+        # Scope visibility to the current user.
+        ConceptsRepository.update_one(
+            {"concept_id": instance_concept_id},
+            {"$set": {"relationships.specific_to_user": [user_concept_id.strip()]}},
+        )
+
+        # Attach blob + metadata as text relations (authoritative)
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="hasOriginalFilename",
+            text=original_filename,
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="hasSha256",
+            text=sha256,
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="hasSizeBytes",
+            text=str(size_bytes),
+            lang="en-NZ",
+        )
+        if content_type:
+            upsert_text_for_concept(
+                subject_concept_id=instance_concept_id,
+                predicate="hasMimeType",
+                text=content_type,
+                lang="en-NZ",
+            )
+
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="hasBlobBackend",
+            text=str(blob_ref.backend),
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="hasBlobKey",
+            text=str(blob_ref.key),
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="hasBlobUri",
+            text=str(blob_ref.uri),
+            lang="en-NZ",
+        )
+    except Exception as exc:
+        current_app.logger.error(
+            f"[files/upload] Failed to register uploaded file in Vontology: {exc}",
+            exc_info=True,
+        )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "vontology_register_failed",
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+    chat_history_recorded = _record_file_upload_in_chat_history(
+        user_concept_id=user_concept_id.strip(),
+        session_id=session_id,
+        original_filename=original_filename,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        sha256=sha256,
+        blob_backend=str(blob_ref.backend),
+        blob_key=str(blob_ref.key),
+        blob_uri=str(blob_ref.uri),
+        file_copy_concept_id=instance_concept_id,
+    )
+
+    return (
+        jsonify(
+            {
+                "success": True,
+                "uploaded": {
+                    "concept_id": instance_concept_id,
+                    "type_concept_id": type_concept_id,
+                    "sha256": sha256,
+                    "size_bytes": size_bytes,
+                    "content_type": content_type,
+                    "original_filename": original_filename,
+                },
+                "storage": {
+                    "backend": blob_ref.backend,
+                    "key": blob_ref.key,
+                    "uri": blob_ref.uri,
+                    "content_type": blob_ref.content_type,
+                    "size_bytes": blob_ref.size_bytes,
+                    "metadata": blob_ref.metadata,
+                },
+                "chat_history_recorded": bool(chat_history_recorded),
+            }
+        ),
+        200,
+    )
+
+
+def _record_file_upload_in_chat_history(
+    *,
+    user_concept_id: str,
+    session_id: str,
+    original_filename: str,
+    content_type: str | None,
+    size_bytes: int,
+    sha256: str,
+    blob_backend: str,
+    blob_key: str,
+    blob_uri: str,
+    file_copy_concept_id: str,
+) -> bool:
+    """Persist a durable upload record in chat history.
+
+    We store human-readable text plus a compact JSON payload. This ensures the
+    attachment can be rediscovered later (including the blob key/URI), assuming
+    the user is authorised.
+    """
+
+    try:
+        import json
+
+        upload_summary = f"[UPLOAD] {original_filename} ({size_bytes} bytes)"
+        assistant_lines: list[str] = [
+            f"Attachment uploaded: {original_filename}",
+            f"File copy concept: {file_copy_concept_id}",
+            f"Blob URI: {blob_uri}",
+            "(Blob access is subject to authorisation.)",
+        ]
+
+        payload = {
+            "kind": "file_upload",
+            "original_filename": original_filename,
+            "content_type": content_type,
+            "size_bytes": size_bytes,
+            "sha256": sha256,
+            "file_copy_concept_id": file_copy_concept_id,
+            "blob": {
+                "backend": blob_backend,
+                "key": blob_key,
+                "uri": blob_uri,
+            },
+        }
+
+        assistant_text = (
+            "\n".join(assistant_lines)
+            + "\n\n"
+            + json.dumps(payload, ensure_ascii=False)
+        )
+
+        chat_history_service.add_message_to_history(
+            user_concept_id,
+            session_id,
+            {"role": "user", "content": upload_summary},
+        )
+        chat_history_service.add_message_to_history(
+            user_concept_id,
+            session_id,
+            {"role": "assistant", "content": assistant_text},
+        )
+        return True
+    except Exception as exc:
+        current_app.logger.warning(
+            "[files/upload] Failed to record upload in chat history: %s", exc
+        )
+        return False
+
+
+@von_bp.route("/api/files/<path:file_copy_concept_id>/download", methods=["GET"])
+def download_file_copy(file_copy_concept_id: str):
+    """Download an uploaded file-copy by its Vontology concept id.
+
+    Security: user identity is derived server-side via get_effective_user_concept_id().
+    Access is restricted using relationships.specific_to_user on the file-copy concept.
+
+    Path params:
+      - file_copy_concept_id: URL-encoded concept id (e.g. %23V%23uploaded_file_copy_...)
+    Query params:
+      - concept_id: optional override (for callers that prefer query param)
+    """
+
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "missing_user_context",
+                    "message": "Missing user context: establish an authenticated session first.",
+                }
+            ),
+            401,
+        )
+
+    # Allow query-parameter override so callers don't need to place the full id in the path.
+    concept_id = request.args.get("concept_id") or file_copy_concept_id
+    concept_id = str(concept_id or "").strip()
+    if not concept_id:
+        return jsonify({"success": False, "error": "missing_concept_id"}), 400
+
+    try:
+        from ...db.repositories.concepts_repository import ConceptsRepository
+
+        concept_doc = ConceptsRepository.find_one({"concept_id": concept_id})
+    except Exception as exc:
+        current_app.logger.warning("[files/download] Concept lookup failed: %s", exc)
+        concept_doc = None
+
+    if not isinstance(concept_doc, dict):
+        # Avoid leaking which concept IDs exist.
+        return jsonify({"success": False, "error": "not_found"}), 404
+
+    relationships = (
+        concept_doc.get("relationships") if isinstance(concept_doc, dict) else None
+    )
+    specific = (
+        relationships.get("specific_to_user")
+        if isinstance(relationships, dict)
+        else None
+    )
+    if isinstance(specific, list) and user_concept_id.strip() not in {
+        str(x).strip() for x in specific if x is not None
+    }:
+        # Avoid leaking which concept IDs exist.
+        return jsonify({"success": False, "error": "not_found"}), 404
+
+    def _first_text(subject_id: str, predicate: str) -> str | None:
+        try:
+            from ...services.text_value_service import get_texts_for_concept
+
+            rows = get_texts_for_concept(subject_id, predicate=predicate, limit=5)
+            for row in rows or []:
+                text = row.get("text") if isinstance(row, dict) else None
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+            return None
+        except Exception:
+            return None
+
+    blob_key = _first_text(concept_id, "hasBlobKey")
+    blob_backend = _first_text(concept_id, "hasBlobBackend")
+    content_type = _first_text(concept_id, "hasMimeType")
+    original_filename = _first_text(concept_id, "hasOriginalFilename")
+
+    if not blob_key:
+        return jsonify({"success": False, "error": "missing_blob_key"}), 404
+
+    from ...services.blob_store import get_blob_store_from_env
+
+    store = get_blob_store_from_env()
+    env_backend = (os.environ.get("VON_BLOB_STORE_BACKEND") or "local").strip().lower()
+    if blob_backend and str(blob_backend).strip().lower() != env_backend:
+        current_app.logger.warning(
+            "[files/download] Blob backend mismatch for %s: concept=%s env=%s",
+            concept_id,
+            blob_backend,
+            env_backend,
+        )
+        # Proceed anyway: the configured store may still be able to fetch the key,
+        # and we avoid failing downloads in test/mocked environments.
+
+    try:
+        data_bytes = store.get_bytes(blob_key)
+    except Exception as exc:
+        current_app.logger.warning("[files/download] Blob fetch failed: %s", exc)
+        return jsonify({"success": False, "error": "blob_fetch_failed"}), 404
+
+    import io
+
+    download_name = original_filename or concept_doc.get("name") or "download"
+    mimetype = content_type or "application/octet-stream"
+    resp = send_file(
+        io.BytesIO(data_bytes),
+        mimetype=mimetype,
+        as_attachment=True,
+        download_name=download_name,
+        max_age=0,
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 def _prune_tool_progress() -> None:
