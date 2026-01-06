@@ -102,6 +102,7 @@
   "files.eol": "\n",
   "jest.runMode": "on-demand",
   "jest.shell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  "jest.debugMode": true,
   "github.copilot.nextEditSuggestions.enabled": true,
   "chat.instructionsFilesLocations": {
     ".github/instructions": true,
