@@ -49,6 +49,7 @@ from .routes.predicate_routes import predicate_bp
 from .routes.workflows_routes import workflows_bp
 from .routes.room_device_routes import room_device_bp
 from .routes.client_capabilities_routes import client_capabilities_bp
+from .routes.speech_routes import speech_bp
 from ..db.connection_manager import (
     ensure_monitor_started,
     get_db,
@@ -196,6 +197,7 @@ def create_flask_app(
     app.register_blueprint(workflows_bp)  # /api/workflows/*
     app.register_blueprint(room_device_bp)
     app.register_blueprint(client_capabilities_bp)
+    app.register_blueprint(speech_bp)
     app.register_blueprint(admin_bp, url_prefix="/admin")
     app.register_blueprint(
         auth_bp, url_prefix="/von"
