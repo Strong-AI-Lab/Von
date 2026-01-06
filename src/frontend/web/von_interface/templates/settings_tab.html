@@ -178,6 +178,27 @@
             </div>
             <small id="showToolUseDuringThinkingHelp" class="settings-note">Default: enabled. Shows last tool name,
                 batch size, and remaining tool-call budget.</small>
+
+            <h3 class="mt-3">Jira Tool Guardrails</h3>
+            <p class="settings-note">Read-only visibility into the environment guardrails used by the internal MCP Jira
+                write tools. To change these values, update your environment and restart Von.</p>
+
+            <div class="inline-form inline-form-tight">
+                <span class="settings-note"><strong>Allowed Jira projects:</strong></span>
+                <button id="settingsJiraProjectAllowListValue" class="runtime-copy-button ml-2" type="button"
+                    title="Copy project allow-list">—</button>
+            </div>
+            <small class="settings-note">From <code>VON_JIRA_PROJECT_ALLOW_LIST</code>. Default:
+                <code>JVNAUTOSCI</code>.
+                Comma-separated project keys.</small>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <span class="settings-note"><strong>Jira execute mode:</strong></span>
+                <button id="settingsJiraExecuteModeValue" class="runtime-copy-button ml-2" type="button"
+                    title="Copy execute-mode state">—</button>
+            </div>
+            <small class="settings-note">From <code>VON_INTERNAL_MCP_JIRA_EXECUTE_MODE</code>. When enabled, callers may
+                pass <code>execute=true</code> to run writes without per-call <code>approved=true</code>.</small>
         </section>
 
         <section id="current-user-settings">
