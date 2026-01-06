@@ -2130,6 +2130,36 @@ function deriveLlmDebugWarnings(debugData) {
         }
     }
 
+    const speechPlayback = debugData.speech_playback;
+    if (speechPlayback && typeof speechPlayback === 'object' && speechPlayback.duration_suspect_too_long) {
+        const actualMs = Number.isFinite(speechPlayback.actual_duration_ms)
+            ? speechPlayback.actual_duration_ms
+            : null;
+        const expectedMs = Number.isFinite(speechPlayback.expected_duration_ms)
+            ? speechPlayback.expected_duration_ms
+            : null;
+        const thresholdSec = Number.isFinite(speechPlayback.duration_threshold_sec)
+            ? speechPlayback.duration_threshold_sec
+            : null;
+
+        const actualSec = actualMs !== null ? (actualMs / 1000) : null;
+        const expectedSec = expectedMs !== null ? (expectedMs / 1000) : null;
+
+        const details = [];
+        if (actualSec !== null) {
+            details.push(`actual ${actualSec.toFixed(1)}s`);
+        } else if (expectedSec !== null) {
+            details.push(`expected ${expectedSec.toFixed(1)}s`);
+        }
+        if (thresholdSec !== null) {
+            details.push(`threshold ${thresholdSec}s`);
+        }
+
+        warnings.push(
+            `Narration playback duration exceeded long-duration threshold${details.length ? ` (${details.join(', ')})` : ''}.`
+        );
+    }
+
     return Array.from(new Set(warnings));
 }
 
@@ -2185,6 +2215,8 @@ const CHAT_TTS_LANGUAGE_STORAGE_KEY = 'chatTtsLanguage';
 const CHAT_TTS_RATE_STORAGE_KEY = 'chatTtsRate';
 const CHAT_TTS_PITCH_STORAGE_KEY = 'chatTtsPitch';
 const CHAT_TTS_VOLUME_STORAGE_KEY = 'chatTtsVolume';
+const CHAT_TTS_LONG_DURATION_THRESHOLD_KEY = 'chatTtsLongDurationThresholdSec';
+const DEFAULT_TTS_LONG_DURATION_THRESHOLD_SEC = 30;
 
 const CHAT_STT_LANGUAGE_STORAGE_KEY = 'chatSttLanguage';
 const CHAT_STT_CONTINUOUS_STORAGE_KEY = 'chatSttContinuous';
@@ -2195,6 +2227,7 @@ let dictationState = null;
 
 let activeTtsTurnId = null;
 let activeTtsButton = null;
+let activeTtsPlaybackState = null;
 
 function safeLocalStorageGet(key) {
     try {
@@ -2242,6 +2275,153 @@ function parseBoolSetting(value, fallbackValue) {
         return fallbackValue;
     }
     return String(value) === 'true';
+}
+
+function getTtsLongDurationThresholdSec() {
+    const raw = safeLocalStorageGet(CHAT_TTS_LONG_DURATION_THRESHOLD_KEY);
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.min(Math.max(parsed, 5), 300);
+    }
+    return DEFAULT_TTS_LONG_DURATION_THRESHOLD_SEC;
+}
+
+function estimateSpeechDurationMs(text, rate) {
+    const cleaned = String(text ?? '').trim();
+    const chars = cleaned.length;
+    const words = cleaned ? cleaned.split(/\s+/).filter(Boolean).length : 0;
+    if (!chars) {
+        return { expectedMs: null, estimateMethod: null, words: 0, chars: 0 };
+    }
+
+    const safeRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    const baseWpm = 180;
+    if (words > 0) {
+        const wpm = baseWpm * safeRate;
+        return {
+            expectedMs: Math.round((words / wpm) * 60 * 1000),
+            estimateMethod: 'words_per_minute',
+            words,
+            chars
+        };
+    }
+
+    const charsPerSec = 12 * safeRate;
+    return {
+        expectedMs: Math.round((chars / charsPerSec) * 1000),
+        estimateMethod: 'chars_per_sec',
+        words,
+        chars
+    };
+}
+
+function resolveSpeechVoiceInfo(voiceUri) {
+    const uri = String(voiceUri || '').trim();
+    if (!uri) {
+        return { voice_uri: null, voice_name: null };
+    }
+
+    const voices = getSpeechSynthesisVoices();
+    const match = voices.find((voice) => voice && String(voice.voiceURI || '') === uri) || null;
+    const voiceName = match && match.name ? String(match.name).trim() : null;
+
+    return {
+        voice_uri: uri,
+        voice_name: voiceName || null
+    };
+}
+
+function buildSpeechPlaybackTelemetry(state, stopReason) {
+    if (!state || typeof state !== 'object') {
+        return null;
+    }
+
+    const startedAtMs = Number.isFinite(state.startedAtMs) ? state.startedAtMs : null;
+    const endedAtMs = Number.isFinite(state.endedAtMs) ? state.endedAtMs : null;
+    const actualDurationMs = (startedAtMs !== null && endedAtMs !== null)
+        ? Math.max(0, endedAtMs - startedAtMs)
+        : null;
+
+    const expectedMs = Number.isFinite(state.expectedDurationMs) ? state.expectedDurationMs : null;
+    const thresholdSec = Number.isFinite(state.thresholdSec) ? state.thresholdSec : null;
+
+    const actualSec = actualDurationMs !== null ? actualDurationMs / 1000 : null;
+    const expectedSec = expectedMs !== null ? expectedMs / 1000 : null;
+
+    const durationTooLong = (actualSec !== null && thresholdSec !== null)
+        ? actualSec > thresholdSec
+        : (expectedSec !== null && thresholdSec !== null ? expectedSec > thresholdSec : false);
+
+    return {
+        request_id: state.requestId || null,
+        turn_id: state.turnId || null,
+        started_at: state.startedAt || null,
+        ended_at: state.endedAt || null,
+        actual_duration_ms: actualDurationMs,
+        expected_duration_ms: expectedMs,
+        estimate_method: state.estimateMethod || null,
+        duration_threshold_sec: thresholdSec,
+        duration_suspect_too_long: durationTooLong,
+        tts_source: state.ttsSource || null,
+        tts_chars: Number.isFinite(state.ttsChars) ? state.ttsChars : null,
+        tts_words: Number.isFinite(state.ttsWords) ? state.ttsWords : null,
+        stop_reason: stopReason || null,
+        tts_settings: {
+            language: state.ttsLanguage || null,
+            rate: state.ttsRate ?? null,
+            pitch: state.ttsPitch ?? null,
+            volume: state.ttsVolume ?? null,
+            voice_uri: state.voiceUri || null,
+            voice_name: state.voiceName || null
+        }
+    };
+}
+
+async function postSpeechPlaybackTelemetry(turnId, telemetry) {
+    if (!telemetry || typeof telemetry !== 'object') {
+        return;
+    }
+
+    const payload = {
+        conversation_id: elements.conversationId || 'local',
+        turn_id: turnId,
+        request_id: telemetry.request_id || null,
+        speech_playback: telemetry,
+        context: getUserContext()
+    };
+
+    try {
+        await fetch('/api/speech/telemetry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+    } catch (err) {
+        console.warn('[speech] Telemetry post failed:', err);
+    }
+}
+
+function recordSpeechPlaybackTelemetry(turnId, telemetry) {
+    if (!telemetry || typeof telemetry !== 'object') {
+        return;
+    }
+
+    const debugData = turnId ? llmDebugData.get(turnId) : null;
+    if (debugData && typeof debugData === 'object') {
+        const updated = {
+            ...debugData,
+            speech_playback: telemetry
+        };
+        llmDebugData.set(turnId, updated);
+    }
+
+    if (telemetry.duration_suspect_too_long) {
+        console.warn('[speech] Long narration duration detected:', telemetry);
+    } else {
+        console.info('[speech] Narration playback telemetry:', telemetry);
+    }
+
+    void postSpeechPlaybackTelemetry(turnId, telemetry);
 }
 
 function getChatSpeechSettings() {
@@ -2360,6 +2540,9 @@ function toggleSpeakTurn(turnId, text, button) {
 
     const isAlreadyActive = activeTtsTurnId === turnId;
     if (isAlreadyActive) {
+        if (activeTtsPlaybackState && activeTtsPlaybackState.turnId === turnId) {
+            activeTtsPlaybackState.stopRequested = true;
+        }
         stopSpeaking();
         clearActiveTtsUi();
         return;
@@ -2379,6 +2562,34 @@ function toggleSpeakTurn(turnId, text, button) {
     let utterance = null;
     try {
         const settings = getChatSpeechSettings();
+        const debugData = llmDebugData.get(turnId);
+        const estimate = estimateSpeechDurationMs(trimmed, settings.tts.rate);
+        const voiceInfo = resolveSpeechVoiceInfo(settings.tts.voiceUri);
+        const thresholdSec = getTtsLongDurationThresholdSec();
+        const ttsSource = debugData?.speech_planning?.tts_source || null;
+
+        activeTtsPlaybackState = {
+            turnId,
+            requestId: debugData?.request_id || null,
+            expectedDurationMs: estimate.expectedMs,
+            estimateMethod: estimate.estimateMethod,
+            ttsChars: estimate.chars,
+            ttsWords: estimate.words,
+            thresholdSec,
+            ttsSource,
+            ttsLanguage: settings.tts.language,
+            ttsRate: settings.tts.rate,
+            ttsPitch: settings.tts.pitch,
+            ttsVolume: settings.tts.volume,
+            voiceUri: voiceInfo.voice_uri,
+            voiceName: voiceInfo.voice_name,
+            startedAtMs: null,
+            endedAtMs: null,
+            startedAt: null,
+            endedAt: null,
+            stopRequested: false
+        };
+
         utterance = speakText(trimmed, {
             language: settings.tts.language,
             rate: settings.tts.rate,
@@ -2392,15 +2603,29 @@ function toggleSpeakTurn(turnId, text, button) {
         return;
     }
 
-    const finish = () => {
+    const finish = (reason) => {
+        if (activeTtsPlaybackState && activeTtsPlaybackState.turnId === turnId) {
+            activeTtsPlaybackState.endedAtMs = Date.now();
+            activeTtsPlaybackState.endedAt = new Date(activeTtsPlaybackState.endedAtMs).toISOString();
+            const stopReason = activeTtsPlaybackState.stopRequested ? 'cancelled' : reason;
+            const telemetry = buildSpeechPlaybackTelemetry(activeTtsPlaybackState, stopReason);
+            recordSpeechPlaybackTelemetry(turnId, telemetry);
+            activeTtsPlaybackState = null;
+        }
         if (activeTtsTurnId === turnId) {
             clearActiveTtsUi();
         }
     };
 
     try {
-        utterance.onend = finish;
-        utterance.onerror = finish;
+        utterance.onstart = () => {
+            if (activeTtsPlaybackState && activeTtsPlaybackState.turnId === turnId) {
+                activeTtsPlaybackState.startedAtMs = Date.now();
+                activeTtsPlaybackState.startedAt = new Date(activeTtsPlaybackState.startedAtMs).toISOString();
+            }
+        };
+        utterance.onend = () => finish('ended');
+        utterance.onerror = () => finish('error');
     } catch (_) {
         // Ignore.
     }
@@ -4057,6 +4282,9 @@ function buildLlmDebugMetadata(debugData) {
         metadata.speech_planning = debugData.speech_planning || null;
         metadata.presenter_channels = debugData.presenter_channels || null;
     }
+    if (debugData?.speech_playback) {
+        metadata.speech_playback = debugData.speech_playback;
+    }
 
     // LLM interaction telemetry (JVNAUTOSCI-877)
     const llmInteraction = (debugData && typeof debugData === 'object') ? debugData.llm_interaction : null;
@@ -4464,6 +4692,11 @@ export function __testOnly_resetChatTtsState() {
     }
     try {
         clearActiveTtsUi();
+    } catch (_) {
+        // Ignore.
+    }
+    try {
+        activeTtsPlaybackState = null;
     } catch (_) {
         // Ignore.
     }
