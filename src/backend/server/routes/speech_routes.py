@@ -1,0 +1,191 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
+from flask import Blueprint, current_app, jsonify, request, session
+
+from ...services.chat_history_service import (
+    ChatHistoryServiceError,
+    update_llm_debug_data_for_request_id,
+)
+
+
+speech_bp = Blueprint("speech_bp", __name__, url_prefix="/api/speech")
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except Exception:
+            return None
+    return None
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value.strip()))
+        except Exception:
+            return None
+    return None
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return None
+
+
+def _coerce_text(value: Any, *, max_chars: int = 120) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > max_chars:
+        return cleaned[:max_chars]
+    return cleaned
+
+
+def _normalise_timestamp(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        value = value.strip()
+        if value:
+            return value
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value) / 1000.0, tz=timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            )
+        except Exception:
+            return None
+    return None
+
+
+def _sanitise_playback(payload: Dict[str, Any]) -> Dict[str, Any]:
+    playback = payload.get("speech_playback") or {}
+    if not isinstance(playback, dict):
+        return {}
+
+    settings = playback.get("tts_settings") or {}
+    settings = settings if isinstance(settings, dict) else {}
+
+    return {
+        "request_id": _coerce_text(payload.get("request_id") or playback.get("request_id")),
+        "turn_id": _coerce_text(payload.get("turn_id")),
+        "conversation_id": _coerce_text(payload.get("conversation_id")),
+        "started_at": _normalise_timestamp(playback.get("started_at")),
+        "ended_at": _normalise_timestamp(playback.get("ended_at")),
+        "actual_duration_ms": _coerce_int(playback.get("actual_duration_ms")),
+        "expected_duration_ms": _coerce_int(playback.get("expected_duration_ms")),
+        "estimate_method": _coerce_text(playback.get("estimate_method")),
+        "duration_threshold_sec": _coerce_float(playback.get("duration_threshold_sec")),
+        "duration_suspect_too_long": _coerce_bool(
+            playback.get("duration_suspect_too_long")
+        ),
+        "tts_source": _coerce_text(playback.get("tts_source")),
+        "tts_chars": _coerce_int(playback.get("tts_chars")),
+        "tts_words": _coerce_int(playback.get("tts_words")),
+        "stop_reason": _coerce_text(playback.get("stop_reason")),
+        "tts_settings": {
+            "language": _coerce_text(settings.get("language")),
+            "rate": _coerce_float(settings.get("rate")),
+            "pitch": _coerce_float(settings.get("pitch")),
+            "volume": _coerce_float(settings.get("volume")),
+            "voice_uri": _coerce_text(settings.get("voice_uri"), max_chars=200),
+            "voice_name": _coerce_text(settings.get("voice_name"), max_chars=200),
+        },
+    }
+
+
+@speech_bp.route("/telemetry", methods=["POST"])
+def record_speech_telemetry():
+    payload = request.get_json(silent=True) or {}
+
+    if not isinstance(payload, dict):
+        return jsonify({"success": False, "error": "payload_invalid"}), 400
+
+    playback = _sanitise_playback(payload)
+    if not playback:
+        return jsonify({"success": False, "error": "missing_speech_playback"}), 400
+
+    suspect = bool(playback.get("duration_suspect_too_long"))
+    log_fn = current_app.logger.warning if suspect else current_app.logger.info
+
+    try:
+        log_fn(
+            "[speech_telemetry] request_id=%s turn=%s duration_ms=%s expected_ms=%s threshold_sec=%s suspect=%s source=%s voice=%s rate=%s pitch=%s volume=%s start=%s end=%s",
+            playback.get("request_id"),
+            playback.get("turn_id"),
+            playback.get("actual_duration_ms"),
+            playback.get("expected_duration_ms"),
+            playback.get("duration_threshold_sec"),
+            playback.get("duration_suspect_too_long"),
+            playback.get("tts_source"),
+            (playback.get("tts_settings") or {}).get("voice_name"),
+            (playback.get("tts_settings") or {}).get("rate"),
+            (playback.get("tts_settings") or {}).get("pitch"),
+            (playback.get("tts_settings") or {}).get("volume"),
+            playback.get("started_at"),
+            playback.get("ended_at"),
+        )
+    except Exception:
+        pass
+
+    # Best-effort: attach telemetry to the stored llm_debug_data entry.
+    user_concept_id = session.get("user_concept_id")
+    session_id = session.get("session_id")
+    request_id = playback.get("request_id")
+
+    updated = False
+    update_reason = None
+    if (
+        isinstance(user_concept_id, str)
+        and user_concept_id.strip()
+        and isinstance(session_id, str)
+        and session_id.strip()
+        and isinstance(request_id, str)
+        and request_id.strip()
+    ):
+        try:
+            update_result = update_llm_debug_data_for_request_id(
+                user_id=user_concept_id.strip(),
+                session_id=session_id.strip(),
+                request_id=request_id.strip(),
+                updates={
+                    "speech_playback": playback,
+                    "speech_playback_updated_at": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                },
+            )
+            updated = bool(update_result.get("updated"))
+            update_reason = update_result.get("reason")
+        except ChatHistoryServiceError as exc:
+            update_reason = str(exc)
+        except Exception as exc:
+            update_reason = str(exc)
+
+    return jsonify(
+        {
+            "success": True,
+            "stored": playback,
+            "history_update": {"updated": updated, "reason": update_reason},
+        }
+    )
