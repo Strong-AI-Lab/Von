@@ -439,14 +439,20 @@ class InternalMCPChatOrchestrator:
     def _action_write_policy_decide(self, request: Any) -> WorkflowActionResult:
         prompt = request.data.get("prompt")
         requested_tools = request.data.get("requested_write_tools")
+        recent_user_prompts = request.data.get("recent_user_prompts")
         if not isinstance(prompt, str):
             prompt = ""
         if not isinstance(requested_tools, list):
             requested_tools = []
+        if not isinstance(recent_user_prompts, list):
+            recent_user_prompts = []
 
         decision = compute_allowed_write_tools(
             prompt=prompt,
             requested_tools=[str(tool) for tool in requested_tools if tool],
+            recent_user_prompts=[
+                str(item) for item in recent_user_prompts if isinstance(item, str)
+            ],
         )
 
         return WorkflowActionResult(
@@ -2017,6 +2023,30 @@ class InternalMCPChatOrchestrator:
         return self._limit_context_for_llm(base)
 
     @staticmethod
+    def _extract_recent_user_prompts(
+        context: Optional[Sequence[Mapping[str, Any]]],
+        *,
+        max_count: int = 5,
+    ) -> list[str]:
+        if not context:
+            return []
+        prompts: list[str] = []
+        for msg in context:
+            if not isinstance(msg, Mapping):
+                continue
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+            cleaned = content.strip()
+            if cleaned:
+                prompts.append(cleaned)
+        if max_count > 0 and len(prompts) > max_count:
+            return prompts[-max_count:]
+        return prompts
+
+    @staticmethod
     def _prompt_requests_tts_voice(prompt: str) -> bool:
         if not isinstance(prompt, str):
             return False
@@ -2271,6 +2301,7 @@ class InternalMCPChatOrchestrator:
         *,
         prompt: str,
         requested_write_tools: list[str],
+        recent_user_prompts: list[str] | None,
         llm_client: Any,
         model: str | None,
         user_namespace: str | None,
@@ -2282,6 +2313,7 @@ class InternalMCPChatOrchestrator:
             data={
                 "prompt": prompt,
                 "requested_write_tools": list(requested_write_tools),
+                "recent_user_prompts": list(recent_user_prompts or []),
             },
             llm_client=llm_client,
             model=model,
@@ -2344,6 +2376,7 @@ class InternalMCPChatOrchestrator:
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
         orchestrator_start = time.perf_counter()
+        recent_user_prompts = self._extract_recent_user_prompts(context, max_count=5)
 
         def _record_llm_call(
             *,
@@ -3025,6 +3058,7 @@ class InternalMCPChatOrchestrator:
                             self._resolve_allowed_write_tools(
                                 prompt=prompt,
                                 requested_write_tools=[tool_name],
+                                recent_user_prompts=recent_user_prompts,
                                 llm_client=llm_client,
                                 model=model,
                                 user_namespace=user_namespace,
