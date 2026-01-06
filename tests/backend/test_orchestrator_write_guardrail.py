@@ -90,3 +90,38 @@ def test_write_guard_allows_download_paper_when_user_requests_artefact_download(
         for record in result.tool_invocations
         if record.get("tool") == "download_paper"
     )
+
+
+def test_write_guard_blocks_download_paper_without_explicit_request():
+    """download_paper should be blocked when the user does not ask for storage."""
+
+    gateway = _WriteToolGateway()
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=cast(Any, gateway),
+        max_tool_invocations=1,
+    )
+
+    llm = _CapturingLLM(
+        [
+            '{"action":"call_tool","tool":"download_paper","payload":{"arxiv_id":"2506.16596"}}',
+            "Done.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Summarise arXiv:2506.16596.",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert gateway.invocations == []
+    blocked = [
+        record
+        for record in result.tool_invocations
+        if record.get("tool") == "download_paper"
+    ]
+    assert blocked, "Expected blocked download_paper invocation"
+    assert all(record.get("blocked") for record in blocked)
+    assert all("read-only" in record.get("error", "") for record in blocked)
