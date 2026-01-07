@@ -38,3 +38,19 @@ def test_extract_download_file_path_from_resource_uri():
     assert _assert_extract(arxiv_proxy_mcp, payload).endswith(
         "data/arxiv_cache/2506.16596.pdf"
     )
+
+
+def test_extract_download_file_path_from_item_list():
+    payload = {
+        "items": [
+            {"type": "text", "text": "downloaded"},
+            {"type": "resource", "resource": {"uri": "file:///data/arxiv_cache/2506.16596.pdf"}},
+        ]
+    }
+
+    assert _assert_extract(arxiv_proxy, payload).endswith(
+        "data/arxiv_cache/2506.16596.pdf"
+    )
+    assert _assert_extract(arxiv_proxy_mcp, payload).endswith(
+        "data/arxiv_cache/2506.16596.pdf"
+    )
