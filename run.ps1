@@ -313,6 +313,30 @@ function Read-AdminToken {
     return $gen
 }
 
+function Get-MongoConnectionSummary {
+    param([int]$Port)
+    try {
+        $resp = Invoke-RestMethod -Uri "http://localhost:$Port/api/system/db_status" -TimeoutSec 5
+        if ($null -eq $resp) { return "Mongo: unknown" }
+        $usingFallback = $resp.using_fallback
+        $atlasDetected = $resp.atlas_detected
+        $host = $resp.effective_host
+        if ($usingFallback -eq $true) {
+            if ($host) { return "Mongo: local fallback ($host)" }
+            return "Mongo: local fallback"
+        }
+        if ($atlasDetected -eq $true) {
+            if ($host) { return "Mongo: Atlas ($host)" }
+            return "Mongo: Atlas"
+        }
+        if ($host) { return "Mongo: $host" }
+        return "Mongo: unknown"
+    }
+    catch {
+        return "Mongo: status unavailable"
+    }
+}
+
 function Invoke-VonLogRotation {
     # was Rotate-Logs
     # Keep a fixed number of logs per port
@@ -993,6 +1017,7 @@ function Start-VonServer {
         }
         if ($healthy) {
             Write-LauncherLog "Server healthy (http://localhost:$Port)"
+            Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
             if (-not $NoBrowser) {
                 $shouldOpen = $false
                 if ($ForceBrowser) { $shouldOpen = $true }
@@ -1032,6 +1057,7 @@ function Start-VonServer {
         }
         elseif ($listeningLogged) {
             Write-LauncherLog "WARNING: Port is listening but /health did not respond in ${HealthTimeoutSec + $HealthGraceSec}s; continuing (service may still be initializing)."
+            Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
         }
         else {
             Write-LauncherLog "WARNING: Server not healthy after initial ${HealthTimeoutSec}s (port not listening); check logs: $CurrentLog"
@@ -1138,6 +1164,7 @@ function Get-VonStatus {
     $startTime = $null; if ($startLine -and $startLine -match 'START=(.*)') { $startTime = Get-Date $Matches[1] }
     $uptime = if ($startTime) { (Get-Date) - $startTime } else { [timespan]::Zero }
     Write-LauncherLog ("RUNNING PID={0} Uptime={1} Healthy={2}" -f $proc.Id, [int]$uptime.TotalMinutes, $healthy)
+    Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
     Write-LauncherLog "Log: $CurrentLog"
     try { Invoke-DailyGovernanceScan -Port $Port -StartupHealthy $healthy } catch { Write-LauncherLog "[governance-scan] ERROR: $($_.Exception.Message)" }
     try { Invoke-ConceptDataAbsenceCheck } catch { Write-LauncherLog "[concept-data-check] ERROR: $($_.Exception.Message)" }

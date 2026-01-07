@@ -29,14 +29,18 @@ def mock_get_collection(mock_collection):
 
 
 def test_get_chat_history_segments_empty(mock_collection, mock_get_collection):
-    mock_collection.find.return_value = []
+    mock_collection.find_one.return_value = None
 
     segments = get_chat_history_segments("user1", "session1")
     assert segments == []
 
 
 def test_get_chat_history_segments_no_history(mock_collection, mock_get_collection):
-    mock_collection.find.return_value = [{"user_id": "user1", "history": []}]
+    mock_collection.find_one.return_value = {
+        "user_id": "user1",
+        "session_id": "session1",
+        "history": [],
+    }
 
     segments = get_chat_history_segments("user1", "session1")
     assert segments == []
@@ -47,7 +51,11 @@ def test_get_chat_history_segments_single_segment(mock_collection, mock_get_coll
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
-    mock_collection.find.return_value = [{"user_id": "user1", "history": history}]
+    mock_collection.find_one.return_value = {
+        "user_id": "user1",
+        "session_id": "session1",
+        "history": history,
+    }
 
     segments = get_chat_history_segments("user1", "session1")
     assert len(segments) == 1
@@ -60,7 +68,11 @@ def test_get_chat_history_segments_with_reset(mock_collection, mock_get_collecti
         {"role": "system", "content": "__RESET__"},
         {"role": "user", "content": "msg2"},
     ]
-    mock_collection.find.return_value = [{"user_id": "user1", "history": history}]
+    mock_collection.find_one.return_value = {
+        "user_id": "user1",
+        "session_id": "session1",
+        "history": history,
+    }
 
     segments = get_chat_history_segments("user1", "session1")
 
@@ -81,7 +93,11 @@ def test_get_chat_history_segments_multiple_resets(
         {"role": "system", "content": "__RESET__"},
         {"role": "user", "content": "msg3"},
     ]
-    mock_collection.find.return_value = [{"user_id": "user1", "history": history}]
+    mock_collection.find_one.return_value = {
+        "user_id": "user1",
+        "session_id": "session1",
+        "history": history,
+    }
 
     segments = get_chat_history_segments("user1", "session1")
 
@@ -100,7 +116,11 @@ def test_get_chat_history_segments_consecutive_resets(
         {"role": "system", "content": "__RESET__"},
         {"role": "user", "content": "msg2"},
     ]
-    mock_collection.find.return_value = [{"user_id": "user1", "history": history}]
+    mock_collection.find_one.return_value = {
+        "user_id": "user1",
+        "session_id": "session1",
+        "history": history,
+    }
 
     segments = get_chat_history_segments("user1", "session1")
 
@@ -117,7 +137,11 @@ def test_get_chat_history_segments_ends_with_reset(
         {"role": "user", "content": "msg1"},
         {"role": "system", "content": "__RESET__"},
     ]
-    mock_collection.find.return_value = [{"user_id": "user1", "history": history}]
+    mock_collection.find_one.return_value = {
+        "user_id": "user1",
+        "session_id": "session1",
+        "history": history,
+    }
 
     segments = get_chat_history_segments("user1", "session1")
 

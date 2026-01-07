@@ -415,7 +415,7 @@ def _normalise_path_candidate(value: str) -> str | None:
 
 def _extract_download_file_path(result: Dict[str, Any]) -> str | None:
     keys = {"file_path", "path", "filepath", "filename", "uri", "text"}
-    stack = [result]
+    stack: list[Any] = [result]
     seen: set[int] = set()
 
     while stack:
@@ -449,7 +449,7 @@ def _extract_download_file_path(result: Dict[str, Any]) -> str | None:
 
 
 def _extract_download_blob_bytes(result: Dict[str, Any]) -> bytes | None:
-    stack = [result]
+    stack: list[Any] = [result]
     seen: set[int] = set()
 
     while stack:

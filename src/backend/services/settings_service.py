@@ -31,6 +31,7 @@ ACTIVE_OLLAMA_HOST_SETTING_NAME = "active_ollama_host"
 # Removed: CURRENT_USER_PERSON_CONCEPT_SETTING_NAME, CURRENT_ORGANISATION_* constants (client localStorage authority)
 PREFERRED_LANGUAGE_SETTING_NAME = "preferred_language"
 FETCH_COUNTS_ON_LOAD_SETTING_NAME = "fetch_counts_on_load"
+PRELOAD_VONTOLOGY_TREE_SETTING_NAME = "preload_vontology_tree"
 DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME = "disable_remote_ollama_scan"
 
 # Internal MCP orchestrator caps (Settings → Agent Configuration)
@@ -645,6 +646,31 @@ def set_fetch_counts_on_load(enabled: bool) -> bool:
         # Coerce permissively but persist canonical bool
         enabled = bool(enabled)
     return update_setting(FETCH_COUNTS_ON_LOAD_SETTING_NAME, enabled)
+
+
+def get_preload_vontology_tree() -> bool:
+    """Return whether the frontend should preload the Vontology tree on page load.
+
+    Defaults to False when unset or invalid.
+    """
+    val = get_setting(PRELOAD_VONTOLOGY_TREE_SETTING_NAME)
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("1", "true", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "no", "n", "off"):
+            return False
+    if isinstance(val, (int, float)):
+        return val != 0
+    return False
+
+
+def set_preload_vontology_tree(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        enabled = bool(enabled)
+    return update_setting(PRELOAD_VONTOLOGY_TREE_SETTING_NAME, enabled)
 
 
 def get_disable_remote_ollama_scan() -> bool:

@@ -14,13 +14,29 @@ import {
 } from './speech.js';
 import { selectBestNameForContext } from './utils/nameSelection.js';
 import { cartouchifyElementText, cartouchifyVontologyTokensInElement } from './utils/textDecorator.js';
+import { showToast } from './utils/toast.js';
 
 // Store LLM debug data for each turn
 const llmDebugData = new Map();
+const llmDebugFetchInFlight = new Map();
 // Track conversation turns for Markdown export and state resets
 const transcriptTurns = [];
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
+let activeChatSessionId = null;
+let activeChatSessionName = null;
+let sessionTabsCache = [];
+const sessionHistoryCache = new Map();
+let loadingChatSessionId = null;
+const SESSION_TABS_REFRESH_COOLDOWN_MS = 15_000;
+let lastSessionTabsRefreshMs = 0;
+let pendingSessionTabsRefresh = null;
+let lastRenderedSessionCount = 0;
+let chatSessionMenuEl = null;
+let activeHistoryRequest = null;
+let historyRequestCounter = 0;
+const HISTORY_SEGMENT_SIZE = 200;
+const HISTORY_TAIL_SEGMENT_SIZE = 30;
 
 // JVNAUTOSCI-942: Tool-use progress while "Thinking..."
 const DEFAULT_THINKING_TEXT = 'Thinking...';
@@ -78,6 +94,73 @@ function createClientRequestId() {
         // Ignore.
     }
     return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function updateSessionHistoryCache(sessionId, history, meta = {}) {
+    const sid = String(sessionId || '').trim();
+    if (!sid || !Array.isArray(history)) {
+        return;
+    }
+    sessionHistoryCache.set(sid, {
+        session_id: sid,
+        history,
+        message_count: meta.message_count ?? null,
+        last_message_at: meta.last_message_at ?? null,
+        segments: meta.segments ?? null,
+        total_segments: meta.total_segments ?? null,
+        cached_at_ms: Date.now()
+    });
+}
+
+function getSessionHistoryCache(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        return null;
+    }
+    return sessionHistoryCache.get(sid) || null;
+}
+
+function canReuseSessionHistory(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        return false;
+    }
+    const cached = getSessionHistoryCache(sid);
+    if (!cached) {
+        return false;
+    }
+    const sessionMeta = sessionTabsCache.find(
+        session => String(session?.session_id || '') === sid
+    );
+    if (!sessionMeta) {
+        return false;
+    }
+    const cachedCount = cached.message_count;
+    const cachedLast = cached.last_message_at;
+    const currentCount = sessionMeta.message_count;
+    const currentLast = sessionMeta.last_message_at;
+    if (cachedCount == null || cachedLast == null || currentCount == null || currentLast == null) {
+        return false;
+    }
+    return cachedCount === currentCount && cachedLast === currentLast;
+}
+
+function rehydrateFromCache(scrollableField, cached) {
+    if (!scrollableField || !cached || !Array.isArray(cached.history)) {
+        return false;
+    }
+    historySegmentsShown = Number.isInteger(cached.segments) && cached.segments > 0 ? cached.segments : 1;
+    totalHistorySegments = Number.isInteger(cached.total_segments) && cached.total_segments > 0
+        ? cached.total_segments
+        : historySegmentsShown;
+    rehydrateHistory(scrollableField, cached.history, {
+        scrollToBottom: true,
+        preserveScroll: false,
+        showResetNotice: false,
+        forceScrollToBottom: true
+    });
+    updateHistoryBanner();
+    return true;
 }
 
 async function refreshToolUseDuringThinkingSetting(force = false) {
@@ -2216,7 +2299,9 @@ const CHAT_TTS_RATE_STORAGE_KEY = 'chatTtsRate';
 const CHAT_TTS_PITCH_STORAGE_KEY = 'chatTtsPitch';
 const CHAT_TTS_VOLUME_STORAGE_KEY = 'chatTtsVolume';
 const CHAT_TTS_LONG_DURATION_THRESHOLD_KEY = 'chatTtsLongDurationThresholdSec';
-const DEFAULT_TTS_LONG_DURATION_THRESHOLD_SEC = 40;
+const DEFAULT_TTS_LONG_DURATION_THRESHOLD_SEC = 30;
+const CHAT_TTS_MAX_SPEAKING_SECONDS_KEY = 'chatTtsMaxSpeakingSeconds';
+const DEFAULT_TTS_MAX_SPEAKING_SECONDS = 40;
 
 const CHAT_STT_LANGUAGE_STORAGE_KEY = 'chatSttLanguage';
 const CHAT_STT_CONTINUOUS_STORAGE_KEY = 'chatSttContinuous';
@@ -2228,6 +2313,7 @@ let dictationState = null;
 let activeTtsTurnId = null;
 let activeTtsButton = null;
 let activeTtsPlaybackState = null;
+let activeTtsTimeoutId = null;
 
 function safeLocalStorageGet(key) {
     try {
@@ -2284,6 +2370,23 @@ function getTtsLongDurationThresholdSec() {
         return Math.min(Math.max(parsed, 5), 300);
     }
     return DEFAULT_TTS_LONG_DURATION_THRESHOLD_SEC;
+}
+
+function getTtsMaxSpeakingSeconds() {
+    const raw = safeLocalStorageGet(CHAT_TTS_MAX_SPEAKING_SECONDS_KEY);
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.min(Math.max(parsed, 10), 600);
+    }
+    return DEFAULT_TTS_MAX_SPEAKING_SECONDS;
+}
+
+function clearActiveTtsTimeout() {
+    if (!activeTtsTimeoutId) {
+        return;
+    }
+    try { clearTimeout(activeTtsTimeoutId); } catch (_) { }
+    activeTtsTimeoutId = null;
 }
 
 function estimateSpeechDurationMs(text, rate) {
@@ -2522,6 +2625,7 @@ function clearActiveTtsUi() {
     }
     activeTtsTurnId = null;
     activeTtsButton = null;
+    clearActiveTtsTimeout();
 }
 
 function toggleSpeakTurn(turnId, text, button) {
@@ -2566,6 +2670,7 @@ function toggleSpeakTurn(turnId, text, button) {
         const estimate = estimateSpeechDurationMs(trimmed, settings.tts.rate);
         const voiceInfo = resolveSpeechVoiceInfo(settings.tts.voiceUri);
         const thresholdSec = getTtsLongDurationThresholdSec();
+        const maxSpeakingSeconds = getTtsMaxSpeakingSeconds();
         const ttsSource = debugData?.speech_planning?.tts_source || null;
 
         activeTtsPlaybackState = {
@@ -2576,6 +2681,7 @@ function toggleSpeakTurn(turnId, text, button) {
             ttsChars: estimate.chars,
             ttsWords: estimate.words,
             thresholdSec,
+            maxSpeakingSeconds,
             ttsSource,
             ttsLanguage: settings.tts.language,
             ttsRate: settings.tts.rate,
@@ -2616,6 +2722,18 @@ function toggleSpeakTurn(turnId, text, button) {
             clearActiveTtsUi();
         }
     };
+
+    const maxSeconds = getTtsMaxSpeakingSeconds();
+    if (Number.isFinite(maxSeconds) && maxSeconds >= 10) {
+        clearActiveTtsTimeout();
+        activeTtsTimeoutId = setTimeout(() => {
+            if (activeTtsPlaybackState && activeTtsPlaybackState.turnId === turnId) {
+                activeTtsPlaybackState.stopRequested = true;
+            }
+            stopSpeaking();
+            finish('timeout');
+        }, Math.round(maxSeconds * 1000));
+    }
 
     try {
         utterance.onstart = () => {
@@ -2677,6 +2795,734 @@ function updateHistoryBanner() {
     } else {
         banner.classList.add('hidden');
         loadButton.disabled = true;
+    }
+}
+
+function setActiveChatSession(sessionId, sessionName) {
+    activeChatSessionId = (typeof sessionId === 'string' && sessionId.trim())
+        ? sessionId.trim()
+        : null;
+    activeChatSessionName = (typeof sessionName === 'string' && sessionName.trim())
+        ? sessionName.trim()
+        : null;
+}
+
+function getChatSessionTabsContainer() {
+    return document.getElementById('chatSessionTabs');
+}
+
+function getChatTabButton() {
+    return document.querySelector('.tab-button[data-tab="chatTab"]');
+}
+
+function getChatSessionTabById(sessionId) {
+    const container = getChatSessionTabsContainer();
+    const sid = String(sessionId || '').trim();
+    if (!container || !sid) {
+        return null;
+    }
+    const escaped = (typeof CSS !== 'undefined' && typeof CSS.escape === 'function')
+        ? CSS.escape(sid)
+        : sid.replace(/"/g, '\\"');
+    return container.querySelector(`.chat-session-tab[data-session-id="${escaped}"]`);
+}
+
+function setChatSessionTabLoading(sessionId, isLoading) {
+    const sid = String(sessionId || '').trim();
+    const container = getChatSessionTabsContainer();
+    if (!container) {
+        if (!isLoading && loadingChatSessionId === sid) {
+            loadingChatSessionId = null;
+        } else if (isLoading && sid) {
+            loadingChatSessionId = sid;
+        }
+        return;
+    }
+
+    if (loadingChatSessionId && loadingChatSessionId !== sid) {
+        const previousTab = getChatSessionTabById(loadingChatSessionId);
+        if (previousTab) {
+            previousTab.classList.remove('is-loading');
+        }
+    }
+
+    if (!isLoading) {
+        if (loadingChatSessionId === sid) {
+            const targetTab = getChatSessionTabById(sid);
+            if (targetTab) {
+                targetTab.classList.remove('is-loading');
+            }
+            loadingChatSessionId = null;
+        }
+        return;
+    }
+
+    if (sid) {
+        loadingChatSessionId = sid;
+        const targetTab = getChatSessionTabById(sid);
+        if (targetTab) {
+            targetTab.classList.add('is-loading');
+        }
+    }
+}
+
+function getShortSessionId(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        return 'session';
+    }
+    return sid.length > 10 ? `${sid.slice(0, 8)}.` : sid;
+}
+
+function getSessionDisplayName(session) {
+    const rawName = (typeof session?.session_name === 'string' && session.session_name.trim())
+        ? session.session_name.trim()
+        : '';
+    if (rawName) {
+        return rawName;
+    }
+    return getShortSessionId(session?.session_id);
+}
+
+function formatCompletedLabel(isoString) {
+    if (!isoString) {
+        return 'completed';
+    }
+    const parsed = new Date(isoString);
+    if (Number.isNaN(parsed.getTime())) {
+        return 'completed';
+    }
+    const formatted = parsed.toLocaleString('en-NZ', {
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+    return `completed ${formatted}`;
+}
+
+function formatSessionTimestamp(isoString) {
+    if (!isoString) {
+        return '';
+    }
+    const parsed = new Date(isoString);
+    if (Number.isNaN(parsed.getTime())) {
+        return '';
+    }
+
+    const now = new Date();
+    const isToday = now.getFullYear() === parsed.getFullYear()
+        && now.getMonth() === parsed.getMonth()
+        && now.getDate() === parsed.getDate();
+
+    if (isToday) {
+        return parsed.toLocaleTimeString('en-NZ', {
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    }
+
+    return parsed.toLocaleDateString('en-NZ', {
+        day: '2-digit',
+        month: 'short'
+    });
+}
+
+function scheduleChatSessionTabsRefresh(force = false) {
+    if (force) {
+        void refreshChatSessionTabs();
+        return;
+    }
+
+    const now = Date.now();
+    const elapsed = now - lastSessionTabsRefreshMs;
+    if (elapsed >= SESSION_TABS_REFRESH_COOLDOWN_MS) {
+        void refreshChatSessionTabs();
+        return;
+    }
+
+    if (pendingSessionTabsRefresh) {
+        return;
+    }
+
+    pendingSessionTabsRefresh = setTimeout(() => {
+        pendingSessionTabsRefresh = null;
+        void refreshChatSessionTabs();
+    }, Math.max(500, SESSION_TABS_REFRESH_COOLDOWN_MS - elapsed));
+}
+
+async function refreshChatSessionTabs() {
+    const container = getChatSessionTabsContainer();
+    if (!container) {
+        return;
+    }
+
+    if (pendingSessionTabsRefresh) {
+        clearTimeout(pendingSessionTabsRefresh);
+        pendingSessionTabsRefresh = null;
+    }
+
+    lastSessionTabsRefreshMs = Date.now();
+
+    try {
+        const response = await fetch('/von/history/sessions?limit=50&summary=light', { cache: 'no-store' });
+        const data = await response.json();
+
+        if (!response.ok || data?.authenticated === false) {
+            container.innerHTML = '';
+            container.hidden = true;
+            lastRenderedSessionCount = 0;
+            sessionTabsCache = [];
+            return;
+        }
+
+        const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+        sessionTabsCache = sessions;
+        const activeSessionId = (typeof data?.active_session_id === 'string' && data.active_session_id.trim())
+            ? data.active_session_id.trim()
+            : null;
+
+        if (activeSessionId) {
+            const activeSession = sessions.find(
+                s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
+            );
+            setActiveChatSession(activeSessionId, activeSession?.session_name);
+        }
+
+        renderChatSessionTabs(sessions, activeChatSessionId || activeSessionId);
+    } catch (err) {
+        console.error('Failed to load chat sessions:', err);
+    }
+}
+
+function renderChatSessionTabs(sessions, activeSessionId) {
+    const container = getChatSessionTabsContainer();
+    if (!container) {
+        return;
+    }
+
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+        container.innerHTML = '';
+        container.hidden = true;
+        lastRenderedSessionCount = 0;
+        sessionTabsCache = [];
+        return;
+    }
+
+    container.hidden = false;
+    container.innerHTML = '';
+    lastRenderedSessionCount = sessions.length;
+
+    const fragment = document.createDocumentFragment();
+    const hasMultiple = sessions.length > 1;
+
+    if (hasMultiple) {
+        const newTab = document.createElement('button');
+        newTab.type = 'button';
+        newTab.className = 'chat-session-tab chat-session-tab-new';
+        newTab.title = 'New chat';
+        newTab.setAttribute('aria-label', 'New chat');
+        newTab.textContent = '+';
+        newTab.addEventListener('click', () => {
+            void promptAndCreateChatSession();
+        });
+        fragment.appendChild(newTab);
+    }
+
+    sessions.forEach((session) => {
+        const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+        if (!sid) {
+            return;
+        }
+
+        const displayName = getSessionDisplayName(session);
+        const timestampSource = (typeof session?.last_message_at === 'string' && session.last_message_at.trim())
+            ? session.last_message_at.trim()
+            : (typeof session?.created_at === 'string' && session.created_at.trim())
+                ? session.created_at.trim()
+                : '';
+        const timestampLabel = formatSessionTimestamp(timestampSource) || '-';
+        const tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = 'chat-session-tab';
+        tab.setAttribute('role', 'tab');
+        tab.setAttribute('aria-selected', sid === activeSessionId ? 'true' : 'false');
+        tab.dataset.sessionId = sid;
+        if (typeof session?.session_name === 'string') {
+            tab.dataset.sessionName = session.session_name;
+        }
+
+        if (sid === activeSessionId) {
+        tab.classList.add('is-active');
+    }
+
+        if (sid === loadingChatSessionId) {
+            tab.classList.add('is-loading');
+        }
+
+        if (session?.is_completed === true) {
+            tab.classList.add('is-completed');
+            const completedLabel = formatCompletedLabel(session?.completed_at);
+            tab.title = `${displayName} • ${timestampLabel} (${completedLabel})`;
+        } else {
+            tab.classList.add('is-open');
+            tab.title = `${displayName} • ${timestampLabel}`;
+        }
+
+        const label = document.createElement('span');
+        label.className = 'chat-session-tab-label';
+        label.textContent = displayName;
+
+        const meta = document.createElement('span');
+        meta.className = 'chat-session-tab-meta';
+        meta.textContent = timestampLabel;
+
+        tab.appendChild(label);
+        tab.appendChild(meta);
+        tab.addEventListener('click', () => {
+            if (sid === activeChatSessionId) {
+                return;
+            }
+            void switchToChatSession(sid);
+        });
+        tab.addEventListener('dblclick', () => {
+            void promptRenameChatSession(sid, session?.session_name || displayName);
+        });
+        tab.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+            openChatSessionMenu(event.clientX, event.clientY, [
+                {
+                    label: 'Rename chat',
+                    onClick: () => {
+                        void promptRenameChatSession(sid, session?.session_name || displayName);
+                    }
+                }
+            ]);
+        });
+
+        fragment.appendChild(tab);
+    });
+
+    container.appendChild(fragment);
+}
+
+function shouldShowChatTabMenu() {
+    const container = getChatSessionTabsContainer();
+    if (!container || container.hidden) {
+        return false;
+    }
+    return lastRenderedSessionCount <= 1;
+}
+
+function ensureChatSessionMenu() {
+    if (chatSessionMenuEl) {
+        return chatSessionMenuEl;
+    }
+
+    const menu = document.createElement('div');
+    menu.className = 'chat-session-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(menu);
+
+    document.addEventListener('click', (event) => {
+        if (menu.classList.contains('open') && !menu.contains(event.target)) {
+            closeChatSessionMenu();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closeChatSessionMenu();
+        }
+    });
+
+    chatSessionMenuEl = menu;
+    return menu;
+}
+
+function populateChatSessionMenu(items) {
+    const menu = ensureChatSessionMenu();
+    menu.innerHTML = '';
+    items.forEach((item) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = item.label;
+        button.setAttribute('role', 'menuitem');
+        button.addEventListener('click', () => {
+            closeChatSessionMenu();
+            item.onClick();
+        });
+        menu.appendChild(button);
+    });
+    return menu;
+}
+
+function openChatSessionMenu(x, y, items) {
+    if (!Array.isArray(items) || items.length === 0) {
+        return;
+    }
+
+    const menu = populateChatSessionMenu(items);
+    const padding = 8;
+    menu.classList.add('open');
+    menu.setAttribute('aria-hidden', 'false');
+    const maxX = window.innerWidth - menu.offsetWidth - padding;
+    const maxY = window.innerHeight - menu.offsetHeight - padding;
+    const left = Math.max(padding, Math.min(x, maxX));
+    const top = Math.max(padding, Math.min(y, maxY));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+}
+
+function closeChatSessionMenu() {
+    if (!chatSessionMenuEl) {
+        return;
+    }
+    chatSessionMenuEl.classList.remove('open');
+    chatSessionMenuEl.setAttribute('aria-hidden', 'true');
+}
+
+function setupChatTabContextMenu() {
+    const chatTabButton = getChatTabButton();
+    if (!chatTabButton) {
+        return;
+    }
+    chatTabButton.addEventListener('contextmenu', (event) => {
+        if (!shouldShowChatTabMenu()) {
+            return;
+        }
+        event.preventDefault();
+        openChatSessionMenu(event.clientX, event.clientY, [
+            {
+                label: 'New chat',
+                onClick: () => {
+                    void promptAndCreateChatSession();
+                }
+            }
+        ]);
+    });
+}
+
+async function promptAndCreateChatSession() {
+    const proposed = window.prompt('Name this chat (optional)', '');
+    if (proposed === null) {
+        return;
+    }
+    try {
+        await createChatSession(proposed);
+        scheduleChatSessionTabsRefresh(true);
+    } catch (err) {
+        const msg = err?.message ? String(err.message) : 'Unable to create chat.';
+        alert(msg);
+    }
+}
+
+async function promptRenameChatSession(sessionId, currentName) {
+    const proposed = window.prompt('Rename chat', currentName || '');
+    if (proposed === null) {
+        return;
+    }
+    const trimmed = String(proposed || '').trim();
+    if (!trimmed) {
+        alert('Chat name is required.');
+        return;
+    }
+    try {
+        await renameChatSession(sessionId, trimmed);
+        scheduleChatSessionTabsRefresh(true);
+    } catch (err) {
+        const msg = err?.message ? String(err.message) : 'Unable to rename chat.';
+        alert(msg);
+    }
+}
+
+async function createChatSession(sessionName) {
+    abortActiveChatRequest();
+
+    const payload = {};
+    if (typeof sessionName === 'string' && sessionName.trim()) {
+        payload.session_name = sessionName.trim();
+    }
+
+    const response = await fetch('/von/api/session/create_chat_session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+        const msg = data?.error ? String(data.error) : 'Unable to create chat session.';
+        throw new Error(msg);
+    }
+
+    setActiveChatSession(data?.session_id, data?.session_name);
+
+    const nowIso = new Date().toISOString();
+    const effectiveSessionId = (typeof data?.session_id === 'string' && data.session_id.trim())
+        ? data.session_id.trim()
+        : activeChatSessionId;
+    const effectiveName = (typeof data?.session_name === 'string' && data.session_name.trim())
+        ? data.session_name.trim()
+        : (typeof sessionName === 'string' && sessionName.trim())
+            ? sessionName.trim()
+            : '';
+
+    if (effectiveSessionId) {
+        const newSession = {
+            session_id: effectiveSessionId,
+            session_name: effectiveName || null,
+            message_count: 0,
+            last_message_at: nowIso,
+            created_at: nowIso,
+            is_completed: false,
+            completed_at: null
+        };
+        sessionTabsCache = [
+            newSession,
+            ...sessionTabsCache.filter(s => String(s?.session_id || '') !== effectiveSessionId)
+        ];
+        renderChatSessionTabs(sessionTabsCache, effectiveSessionId);
+    }
+
+    const history = Array.isArray(data?.history) ? data.history : [];
+    const scrollableField = document.getElementById('scrollableField');
+    if (scrollableField) {
+        historySegmentsShown = history.length ? 1 : 0;
+        totalHistorySegments = history.length ? 1 : 0;
+        updateHistoryBanner();
+        rehydrateHistory(scrollableField, history, {
+            scrollToBottom: true,
+            preserveScroll: false,
+            showResetNotice: false,
+            forceScrollToBottom: true
+        });
+    }
+
+    const promptInput = document.getElementById('promptInput');
+    if (promptInput) {
+        promptInput.value = '';
+        promptInput.focus();
+    }
+
+    document.dispatchEvent(new CustomEvent('von:contextReset', {
+        detail: { trigger: 'chat_new_session', session_id: effectiveSessionId, session_name: effectiveName || null }
+    }));
+
+    scheduleChatSessionTabsRefresh(true);
+    return data;
+}
+
+async function renameChatSession(sessionId, sessionName) {
+    const sid = (typeof sessionId === 'string') ? sessionId.trim() : '';
+    if (!sid) {
+        throw new Error('session_id required');
+    }
+
+    const name = (typeof sessionName === 'string') ? sessionName.trim() : '';
+    if (!name) {
+        throw new Error('session_name required');
+    }
+
+    const response = await fetch('/von/api/session/rename_chat_session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid, session_name: name })
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+        const msg = data?.error ? String(data.error) : 'Unable to rename chat session.';
+        throw new Error(msg);
+    }
+
+    if (sid === activeChatSessionId) {
+        setActiveChatSession(sid, data?.session_name);
+    }
+
+    if (sid) {
+        const updatedName = (typeof data?.session_name === 'string' && data.session_name.trim())
+            ? data.session_name.trim()
+            : name;
+        sessionTabsCache = sessionTabsCache.map((session) => {
+            if (String(session?.session_id || '') !== sid) {
+                return session;
+            }
+            return {
+                ...session,
+                session_name: updatedName
+            };
+        });
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId || sid);
+    }
+
+    scheduleChatSessionTabsRefresh(true);
+    return data;
+}
+
+async function switchToChatSession(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        return { ok: false, error: 'session_id required' };
+    }
+
+    const previousSessionId = activeChatSessionId;
+    const previousSessionName = activeChatSessionName;
+    const cachedSession = sessionTabsCache.find(
+        session => String(session?.session_id || '') === sid
+    );
+    const targetName = cachedSession?.session_name || null;
+    const shouldReuseCachedHistory = canReuseSessionHistory(sid);
+    const switchStart = performance.now();
+    console.log('[chatTab] switchToChatSession start', {
+        from_session_id: previousSessionId || null,
+        from_session_name: previousSessionName || null,
+        to_session_id: sid,
+        to_session_name: targetName,
+        cache_reuse: shouldReuseCachedHistory
+    });
+
+    setActiveChatSession(sid, cachedSession?.session_name);
+    if (sessionTabsCache.length > 0) {
+        renderChatSessionTabs(sessionTabsCache, sid);
+    }
+    setChatSessionTabLoading(sid, true);
+
+    abortActiveHistoryRequest();
+    abortActiveChatRequest();
+
+    const scrollableField = document.getElementById('scrollableField');
+    if (!scrollableField) {
+        setChatSessionTabLoading(sid, false);
+        return { ok: false, error: 'Chat panel unavailable.' };
+    }
+
+    scrollableField.innerHTML = '<div class="chat-session-loading">Switching chat…</div>';
+    historySegmentsShown = 0;
+    totalHistorySegments = 0;
+    updateHistoryBanner();
+
+    try {
+        const setSessionStart = performance.now();
+        const response = await fetch('/von/api/session/set_chat_session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sid, include_history: false })
+        });
+        const data = await response.json();
+        const setSessionMs = Math.round(performance.now() - setSessionStart);
+        console.log('[chatTab] switchToChatSession set_chat_session', {
+            ok: response.ok,
+            status: response.status,
+            duration_ms: setSessionMs,
+            session_id: data?.session_id || sid
+        });
+
+        if (!response.ok) {
+            const msg = data?.error ? String(data.error) : 'Unable to switch session.';
+            setActiveChatSession(previousSessionId, previousSessionName);
+            if (sessionTabsCache.length > 0) {
+                renderChatSessionTabs(sessionTabsCache, previousSessionId || sid);
+            }
+            setChatSessionTabLoading(sid, false);
+            scrollableField.innerHTML = `<div class="chat-session-loading">${escapeHtml(msg)}</div>`;
+            void loadChatHistory({
+                segments: 1,
+                scrollToBottom: true,
+                showResetNotice: false,
+                forceScrollToBottom: true
+            });
+            return { ok: false, error: msg };
+        }
+
+        setActiveChatSession(data?.session_id, data?.session_name);
+
+        if (shouldReuseCachedHistory) {
+            const cached = getSessionHistoryCache(sid);
+            const reused = rehydrateFromCache(scrollableField, cached);
+            console.log('[chatTab] switchToChatSession cache reuse', {
+                loaded: reused,
+                cached_messages: cached?.history?.length ?? 0,
+                session_id: sid
+            });
+            if (!reused) {
+                scrollableField.innerHTML = '';
+            }
+            setChatSessionTabLoading(sid, false);
+        } else {
+            const recentStart = performance.now();
+            const loaded = await loadRecentChatPair({
+                scrollToBottom: true,
+                preserveScroll: false,
+                showResetNotice: false,
+                forceScrollToBottom: true
+            });
+            const recentMs = Math.round(performance.now() - recentStart);
+            console.log('[chatTab] switchToChatSession recent pair', {
+                loaded,
+                duration_ms: recentMs,
+                session_id: sid
+            });
+            if (!loaded) {
+                scrollableField.innerHTML = '';
+            }
+
+            setTimeout(() => {
+                if (activeChatSessionId !== sid) {
+                    setChatSessionTabLoading(sid, false);
+                    return;
+                }
+                console.log('[chatTab] switchToChatSession backfill start', { session_id: sid });
+                const backfillPromise = loadChatHistory({
+                    segments: 1,
+                    scrollToBottom: false,
+                    preserveScroll: true,
+                    showResetNotice: false
+                });
+                backfillPromise.finally(() => {
+                    if (activeChatSessionId === sid) {
+                        setChatSessionTabLoading(sid, false);
+                    }
+                });
+            }, 250);
+        }
+
+        document.dispatchEvent(new CustomEvent('von:contextReset', {
+            detail: { trigger: 'history_session_switch', session_id: sid, session_name: data?.session_name || targetName }
+        }));
+
+        const promptInput = document.getElementById('promptInput');
+        if (promptInput) {
+            promptInput.focus();
+        }
+
+        scheduleChatSessionTabsRefresh(true);
+        console.log('[chatTab] switchToChatSession done', {
+            session_id: sid,
+            duration_ms: Math.round(performance.now() - switchStart)
+        });
+        return { ok: true, data };
+    } catch (err) {
+        console.error('Error switching chat session:', err);
+        setActiveChatSession(previousSessionId, previousSessionName);
+        if (sessionTabsCache.length > 0) {
+            renderChatSessionTabs(sessionTabsCache, previousSessionId || sid);
+        }
+        setChatSessionTabLoading(sid, false);
+        scrollableField.innerHTML = '<div class="chat-session-loading">Unable to switch session.</div>';
+        void loadChatHistory({
+            segments: 1,
+            scrollToBottom: true,
+            showResetNotice: false,
+            forceScrollToBottom: true
+        });
+        console.log('[chatTab] switchToChatSession failed', {
+            session_id: sid,
+            duration_ms: Math.round(performance.now() - switchStart)
+        });
+        return { ok: false, error: 'Unable to switch session.' };
     }
 }
 
@@ -2845,6 +3691,15 @@ async function updateHistoryLength() {
                             }
 
                             const sessions = Array.isArray(js?.sessions) ? js.sessions : [];
+                            const activeSessionId = (typeof js?.active_session_id === 'string')
+                                ? js.active_session_id
+                                : null;
+                            if (activeSessionId) {
+                                const activeSession = sessions.find(
+                                    s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
+                                );
+                                setActiveChatSession(activeSessionId, activeSession?.session_name);
+                            }
                             if (sessions.length === 0) {
                                 body.innerHTML = '<p>No saved sessions.</p>';
                                 return;
@@ -2859,38 +3714,52 @@ async function updateHistoryLength() {
 
                             const rows = sessions.map((s) => {
                                 const sidRaw = s?.session_id ? String(s.session_id) : '(unknown session)';
-                                const sidShort = (sidRaw.length > 10) ? `${sidRaw.slice(0, 8)}…` : sidRaw;
+                                const sidShort = (sidRaw.length > 10) ? `${sidRaw.slice(0, 8)}.` : sidRaw;
                                 const count = (typeof s?.message_count === 'number') ? s.message_count : 0;
 
                                 const lastAt = (typeof s?.last_message_at === 'string') ? s.last_message_at : null;
-                                const lastAtShort = lastAt ? lastAt.replace('T', ' ').replace('Z', '') : '—';
-                                const preview = (typeof s?.preview === 'string' && s.preview.trim()) ? s.preview.trim() : '—';
+                                const lastAtShort = lastAt ? lastAt.replace('T', ' ').replace('Z', '') : '-';
+                                const preview = (typeof s?.preview === 'string' && s.preview.trim()) ? s.preview.trim() : '-';
+
+                                const nameRaw = (typeof s?.session_name === 'string' && s.session_name.trim())
+                                    ? s.session_name.trim()
+                                    : null;
+                                const displayName = nameRaw || sidShort;
+                                const nameTitle = nameRaw || sidRaw;
 
                                 const ns = (typeof s?.namespace === 'string' && s.namespace.trim()) ? s.namespace.trim() : null;
-                                const nsShort = ns ? (ns.length > 48 ? `${ns.slice(0, 46)}…` : ns) : null;
+                                const nsShort = ns ? (ns.length > 48 ? `${ns.slice(0, 46)}.` : ns) : null;
 
                                 const sessionAttr = escapeHtml(sidRaw);
+                                const nameAttr = nameRaw ? escapeHtml(nameRaw) : '';
+                                const isActive = activeSessionId && sidRaw === activeSessionId;
+                                const isCompleted = s?.is_completed === true;
+                                const rowClass = `history-session-row${isActive ? ' is-active' : ''}${isCompleted ? ' is-completed' : ''}`;
+                                const idSnippet = nameRaw ? `  id ${escapeHtml(sidShort)}` : '';
+                                const completionSnippet = isCompleted
+                                    ? `  ${escapeHtml(formatCompletedLabel(s?.completed_at))}`
+                                    : '';
 
                                 return [
-                                    `<li class="history-session-row" role="button" tabindex="0" data-session-id="${sessionAttr}">`,
+                                    `<li class="${rowClass}" role="button" tabindex="0" data-session-id="${sessionAttr}" data-session-name="${nameAttr}">`,
                                     '<div class="history-session-content">',
-                                    `<strong class="history-session-id" title="${escapeHtml(sidRaw)}">${escapeHtml(sidShort)}</strong>`,
-                                    `<span class="history-session-meta">${count} msgs • last ${escapeHtml(lastAtShort)}${nsShort ? ` • ns ${escapeHtml(nsShort)}` : ''}</span>`,
-                                    `<span class="history-session-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</span>`,
-                                    '</div>',
-                                    '</li>'
+                                    `<strong class="history-session-id" title="${escapeHtml(nameTitle)}">${escapeHtml(displayName)}<\/strong>`,
+                                    `<span class="history-session-meta">${count} msgs  last ${escapeHtml(lastAtShort)}${completionSnippet}${idSnippet}${nsShort ? `  ns ${escapeHtml(nsShort)}` : ''}<\/span>`,
+                                    `<span class="history-session-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}<\/span>`,
+                                    '<\/div>',
+                                    '<\/li>'
                                 ].join('');
                             });
 
                             const summaryLine = `Showing ${sessions.length} most recent sessions (sorted by last message time)`;
 
                             body.innerHTML = [
-                                `<p class="history-session-summary">${escapeHtml(summaryLine)}</p>`,
+                                `<p class="history-session-summary">${escapeHtml(summaryLine)}<\/p>`,
                                 '<div class="history-session-scroll">',
                                 '<ul class="history-session-list">',
                                 ...rows,
-                                '</ul>',
-                                '</div>'
+                                '<\/ul>',
+                                '<\/div>'
                             ].join('');
 
                             const switchToSession = async (sessionId) => {
@@ -2899,57 +3768,15 @@ async function updateHistoryLength() {
                                     return;
                                 }
 
-                                abortActiveChatRequest();
-
-                                const scrollableField2 = document.getElementById('scrollableField');
-                                if (!scrollableField2) {
+                                body.innerHTML = '<p>Switching session.</p>';
+                                const result = await switchToChatSession(sid);
+                                if (!result.ok) {
+                                    body.innerHTML = `<p>${escapeHtml(result.error || 'Unable to switch session.')}</p>`;
                                     return;
                                 }
 
-                                try {
-                                    body.innerHTML = '<p>Switching session…</p>';
-
-                                    const setRes = await fetch('/von/api/session/set_chat_session', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ session_id: sid })
-                                    });
-                                    const setJs = await setRes.json();
-                                    if (!setRes.ok) {
-                                        const msg = setJs?.error ? String(setJs.error) : 'Unable to switch session.';
-                                        body.innerHTML = `<p>${escapeHtml(msg)}</p>`;
-                                        return;
-                                    }
-
-                                    const history = Array.isArray(setJs?.history) ? setJs.history : [];
-
-                                    historySegmentsShown = 1;
-                                    totalHistorySegments = 1;
-                                    updateHistoryBanner();
-
-                                    rehydrateHistory(scrollableField2, history, {
-                                        scrollToBottom: true,
-                                        preserveScroll: false,
-                                        showResetNotice: false,
-                                        forceScrollToBottom: true
-                                    });
-
-                                    modal.classList.remove('open');
-                                    modal.setAttribute('aria-hidden', 'true');
-
-                                    // Trigger immediate health poll to update RAG status with new session context.
-                                    document.dispatchEvent(new CustomEvent('von:contextReset', {
-                                        detail: { trigger: 'history_session_switch' }
-                                    }));
-
-                                    const promptInput = document.getElementById('promptInput');
-                                    if (promptInput) {
-                                        promptInput.focus();
-                                    }
-                                } catch (err) {
-                                    console.error('Error switching chat session:', err);
-                                    body.innerHTML = '<p>Unable to switch session.</p>';
-                                }
+                                modal.classList.remove('open');
+                                modal.setAttribute('aria-hidden', 'true');
                             };
 
                             const list = body.querySelector('.history-session-list');
@@ -2976,6 +3803,7 @@ async function updateHistoryLength() {
                                     }
                                 });
                             }
+
                         } catch (err) {
                             console.error('Error loading history sessions:', err);
                             body.innerHTML = '<p>Unable to load history sessions.</p>';
@@ -2983,6 +3811,8 @@ async function updateHistoryLength() {
                     });
                 }
             }
+
+            scheduleChatSessionTabsRefresh();
         } else {
             console.error('Failed to load chat history length:', data.error);
         }
@@ -2997,7 +3827,10 @@ async function loadChatHistory(options = {}) {
         scrollToBottom = true,
         preserveScroll = false,
         showResetNotice = false,
-        forceScrollToBottom = false
+        forceScrollToBottom = false,
+        segmentSizeOverride = null,
+        tailLimit = null,
+        filterRecentPair = false
     } = options;
 
     const scrollableField = document.getElementById('scrollableField');
@@ -3009,23 +3842,72 @@ async function loadChatHistory(options = {}) {
     const requestedSegments = Number.isInteger(segments) && segments > 0 ? segments : historySegmentsShown;
     const segmentCount = Math.max(requestedSegments || 1, 1);
 
+    const requestedSessionId = activeChatSessionId;
+    abortActiveHistoryRequest();
+    const requestId = ++historyRequestCounter;
+    const abortController = new AbortController();
+    activeHistoryRequest = {
+        id: requestId,
+        sessionId: requestedSessionId,
+        abortController,
+        aborted: false
+    };
+
     // Get user context to ensure we can load history even if session is new
     const userContext = getUserContext();
     const params = new URLSearchParams({ segments: segmentCount.toString() });
     if (userContext && userContext.user_id) {
         params.append('user_id', userContext.user_id);
     }
+    if (requestedSessionId) {
+        params.append('session_id', requestedSessionId);
+    }
+    const effectiveSegmentSize = Number.isInteger(segmentSizeOverride) && segmentSizeOverride > 0
+        ? segmentSizeOverride
+        : HISTORY_SEGMENT_SIZE;
+    if (effectiveSegmentSize > 0) {
+        params.append('segment_size', effectiveSegmentSize.toString());
+    }
+    if (Number.isInteger(tailLimit) && tailLimit > 0) {
+        params.append('tail_limit', tailLimit.toString());
+    }
+    params.append('include_debug', '0');
     try {
-        const response = await fetch(`/von/history?${params.toString()}`);
+        console.log('[chatTab] loadChatHistory request', {
+            session_id: requestedSessionId || null,
+            segments: segmentCount,
+            segment_size: effectiveSegmentSize,
+            tail_limit: Number.isInteger(tailLimit) ? tailLimit : null,
+            filter_recent_pair: !!filterRecentPair
+        });
+        const response = await fetch(`/von/history?${params.toString()}`, {
+            signal: abortController.signal
+        });
         const data = await response.json();
+
+        if (!activeHistoryRequest || activeHistoryRequest.id !== requestId) {
+            return false;
+        }
+        if (requestedSessionId && activeChatSessionId && requestedSessionId !== activeChatSessionId) {
+            return false;
+        }
 
         console.log(`[chatTab] loadChatHistory response: ok=${response.ok}, segments=${data.segments_returned}, total=${data.total_segments}, history_len=${data.history ? data.history.length : 'undefined'}`);
 
         if (response.ok && data.history && Array.isArray(data.history)) {
-            historySegmentsShown = Math.max(data.segments_returned || segmentCount, 0);
-            totalHistorySegments = Math.max(data.total_segments || historySegmentsShown, historySegmentsShown);
+            const historyMessages = filterRecentPair
+                ? selectRecentChatPair(data.history)
+                : data.history;
+            const hasMoreHistory = data?.has_more_history === true;
+            const segmentsReturned = Math.max(data.segments_returned || segmentCount, 0);
+            let totalSegments = Math.max(data.total_segments || segmentsReturned, segmentsReturned);
+            if (hasMoreHistory && totalSegments <= segmentsReturned) {
+                totalSegments = segmentsReturned + 1;
+            }
+            historySegmentsShown = segmentsReturned;
+            totalHistorySegments = totalSegments;
 
-            rehydrateHistory(scrollableField, data.history, {
+            rehydrateHistory(scrollableField, historyMessages, {
                 scrollToBottom,
                 preserveScroll,
                 showResetNotice,
@@ -3033,18 +3915,45 @@ async function loadChatHistory(options = {}) {
             });
 
             updateHistoryBanner();
+            const sessionMeta = sessionTabsCache.find(
+                session => String(session?.session_id || '') === String(requestedSessionId || '')
+            );
+            updateSessionHistoryCache(requestedSessionId, historyMessages, {
+                message_count: sessionMeta?.message_count ?? null,
+                last_message_at: sessionMeta?.last_message_at ?? null,
+                segments: historySegmentsShown,
+                total_segments: totalHistorySegments
+            });
             console.log(`Loaded ${data.history.length} historical messages across ${historySegmentsShown} segment(s)`);
+            if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
+                activeHistoryRequest = null;
+            }
             return true;
         }
 
-        historySegmentsShown = Math.max(data?.segments_returned || 0, 0);
-        totalHistorySegments = Math.max(data?.total_segments || historySegmentsShown, historySegmentsShown);
+        const hasMoreHistory = data?.has_more_history === true;
+        const segmentsReturned = Math.max(data?.segments_returned || 0, 0);
+        let totalSegments = Math.max(data?.total_segments || segmentsReturned, segmentsReturned);
+        if (hasMoreHistory && totalSegments <= segmentsReturned) {
+            totalSegments = segmentsReturned + 1;
+        }
+        historySegmentsShown = segmentsReturned;
+        totalHistorySegments = totalSegments;
         updateHistoryBanner();
         console.log('No chat history to load or empty history');
+        if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
+            activeHistoryRequest = null;
+        }
         return false;
     } catch (error) {
+        if (error?.name === 'AbortError') {
+            return false;
+        }
         console.error('Error loading chat history:', error);
         updateHistoryBanner();
+        if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
+            activeHistoryRequest = null;
+        }
         return false;
     }
 }
@@ -3072,6 +3981,55 @@ function forceScrollToBottomWithRetries(scrollableField, options = {}) {
     requestFrame(tick);
 }
 
+async function loadRecentChatPair(options = {}) {
+    return loadChatHistory({
+        ...options,
+        segments: 1,
+        segmentSizeOverride: HISTORY_TAIL_SEGMENT_SIZE,
+        tailLimit: HISTORY_TAIL_SEGMENT_SIZE,
+        filterRecentPair: true
+    });
+}
+
+function selectRecentChatPair(historyMessages) {
+    if (!Array.isArray(historyMessages) || historyMessages.length === 0) {
+        return [];
+    }
+
+    const eligible = historyMessages.filter(
+        (msg) => msg && (msg.role === 'user' || msg.role === 'assistant')
+    );
+    if (eligible.length === 0) {
+        return [];
+    }
+
+    let lastAssistantIndex = -1;
+    for (let i = eligible.length - 1; i >= 0; i -= 1) {
+        if (eligible[i].role === 'assistant') {
+            lastAssistantIndex = i;
+            break;
+        }
+    }
+
+    if (lastAssistantIndex === -1) {
+        return eligible.slice(-1);
+    }
+
+    let lastUserIndex = -1;
+    for (let i = lastAssistantIndex - 1; i >= 0; i -= 1) {
+        if (eligible[i].role === 'user') {
+            lastUserIndex = i;
+            break;
+        }
+    }
+
+    if (lastUserIndex === -1) {
+        return eligible.slice(lastAssistantIndex);
+    }
+
+    return eligible.slice(lastUserIndex);
+}
+
 function rehydrateHistory(scrollableField, historyMessages, options = {}) {
     const {
         scrollToBottom = true,
@@ -3093,7 +4051,8 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             const label = msg.role === 'user' ? 'User' : 'Von';
 
             // Restore debug data before rendering so markdown gating can see model info.
-            const hasDebugData = msg.role === 'assistant' && !!msg.llm_debug_data;
+            const hasDebugData = msg.role === 'assistant'
+                && (!!msg.llm_debug_data || !!msg.history_location);
             if (msg.role === 'assistant') {
                 const merged = {
                     ...(msg.llm_debug_data && typeof msg.llm_debug_data === 'object' ? msg.llm_debug_data : {}),
@@ -3240,6 +4199,7 @@ export function initializeChatTab() {
     initializeLlmDebugPopup();
     initializeHistoryControls();
     updateHistoryBanner();
+    setupChatTabContextMenu();
 
     // Initialize export conversation button
     if (exportConversationJsonBtn) {
@@ -3385,8 +4345,9 @@ export function initializeChatTab() {
     // Render non-trigger (#V\u200B#...) concept tokens as cartouches in the prompt.
     initializePromptCartoucheOverlay(promptInput);
 
-    loadChatHistory();
+    loadRecentChatPair();
     updateHistoryLength();
+    void refreshChatSessionTabs();
     void refreshToolUseDuringThinkingSetting();
     console.log("Chat tab initialized successfully");
 }
@@ -3462,6 +4423,22 @@ function abortActiveChatRequest() {
 
     setThinkingState(false);
     restorePromptEditingState(request);
+}
+
+function abortActiveHistoryRequest() {
+    if (!activeHistoryRequest) {
+        return;
+    }
+
+    const request = activeHistoryRequest;
+    activeHistoryRequest = null;
+    request.aborted = true;
+
+    try {
+        request.abortController?.abort();
+    } catch (_) {
+        // Ignore abort errors.
+    }
 }
 
 function ensureAbortButtonBound() {
@@ -3687,11 +4664,12 @@ async function handleResetContext() {
             transcriptTurns.length = 0;
             llmDebugData.clear();
             updateHistoryLength();
+            scheduleChatSessionTabsRefresh(true);
 
             // Trigger immediate health poll to update RAG cartouche with new session context
             // Dispatch custom event that main.js health polling can listen for
             document.dispatchEvent(new CustomEvent('von:contextReset', {
-                detail: { trigger: 'chat_reset' }
+                detail: { trigger: 'chat_reset', session_id: activeChatSessionId || null, session_name: activeChatSessionName || null }
             }));
         } else {
             alert('Error resetting context: ' + (data.error || 'Unknown error'));
@@ -3895,12 +4873,16 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             let copyButtonAppended = false;
 
-            // Add LLM debug button if debug data available
-            if (hasLlmDebug && turnId) {
-                const debugData = llmDebugData.get(turnId);
+            const debugData = turnId ? llmDebugData.get(turnId) : null;
+            const hasHistoryLocation = !!debugData?.history_location;
+            const shouldShowDebug = !!turnId && (hasLlmDebug || hasHistoryLocation);
+
+            // Add LLM debug button if debug data is available or can be loaded on demand.
+            if (shouldShowDebug) {
+                const hasPayload = hasLlmDebugPayload(debugData);
 
                 // Compact model badge (visible at-a-glance)
-                if (debugData && debugData.model) {
+                if (hasPayload && debugData && debugData.model) {
                     const modelBadge = document.createElement('span');
                     modelBadge.className = 'chat-llm-model-badge';
                     modelBadge.textContent = String(debugData.model);
@@ -3910,22 +4892,27 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
                 const llmDebugButton = document.createElement('button');
                 llmDebugButton.className = 'btn-mini llm-debug-button';
-                llmDebugButton.textContent = 'LLM ⓘ';
-                llmDebugButton.title = 'Show LLM interaction details';
+                llmDebugButton.textContent = 'LLM ℹ';
+                llmDebugButton.title = hasPayload
+                    ? 'Show LLM interaction details'
+                    : 'Load LLM interaction details';
                 llmDebugButton.dataset.turnId = turnId;
-                llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
+                llmDebugButton.addEventListener('click', () => {
+                    void showLlmDebugPopup(turnId, { button: llmDebugButton });
+                });
                 messageHeader.appendChild(llmDebugButton);
 
                 messageHeader.appendChild(copyMarkdownButton);
                 copyButtonAppended = true;
 
-                const warnings = deriveLlmDebugWarnings(debugData);
-                const warningIndicator = createChatDebugWarningIndicator(warnings);
-                if (warningIndicator) {
-                    messageHeader.appendChild(warningIndicator);
+                if (hasPayload) {
+                    const warnings = deriveLlmDebugWarnings(debugData);
+                    const warningIndicator = createChatDebugWarningIndicator(warnings);
+                    if (warningIndicator) {
+                        messageHeader.appendChild(warningIndicator);
+                    }
                 }
             }
-
             if (!copyButtonAppended) {
                 messageHeader.appendChild(copyMarkdownButton);
             }
@@ -4155,10 +5142,12 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             if (sender === 'Error' && hasLlmDebug && turnId) {
                 const llmDebugButton = document.createElement('button');
                 llmDebugButton.className = 'btn-mini llm-debug-button';
-                llmDebugButton.textContent = 'LLM ⓘ';
+                llmDebugButton.textContent = 'LLM ℹ';
                 llmDebugButton.title = 'Show what was sent to LLM before error';
                 llmDebugButton.dataset.turnId = turnId;
-                llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
+                llmDebugButton.addEventListener('click', () => {
+                    void showLlmDebugPopup(turnId, { button: llmDebugButton });
+                });
                 messageHeader.appendChild(llmDebugButton);
 
                 const debugData = llmDebugData.get(turnId);
@@ -4389,9 +5378,109 @@ export function __testOnly_buildLlmDebugMetadata(debugData) {
     return buildLlmDebugMetadata(debugData);
 }
 
+function hasLlmDebugPayload(debugData) {
+    if (!debugData || typeof debugData !== 'object') {
+        return false;
+    }
+    return Boolean(
+        debugData.model
+        || debugData.response
+        || debugData.error !== undefined
+        || (Array.isArray(debugData.messages) && debugData.messages.length > 0)
+        || (Array.isArray(debugData.tool_invocations) && debugData.tool_invocations.length > 0)
+        || (Array.isArray(debugData.aux_llm_calls) && debugData.aux_llm_calls.length > 0)
+        || debugData.llm_interaction
+        || debugData.context_stats
+    );
+}
+
+async function loadLlmDebugDataForTurn(turnId, options = {}) {
+    const existing = llmDebugData.get(turnId);
+    if (hasLlmDebugPayload(existing)) {
+        return existing;
+    }
+
+    const historyLocation = existing?.history_location;
+    if (!historyLocation || !historyLocation.session_id || historyLocation.history_index === undefined || historyLocation.history_index === null) {
+        return null;
+    }
+
+    if (llmDebugFetchInFlight.has(turnId)) {
+        return llmDebugFetchInFlight.get(turnId);
+    }
+
+    const button = options.button;
+    const originalText = button?.textContent;
+    const originalTitle = button?.title;
+    if (button) {
+        button.disabled = true;
+        button.classList.add('loading');
+        button.textContent = 'LLM ...';
+        button.title = 'Loading LLM interaction details';
+    }
+
+    const fetchPromise = (async () => {
+        try {
+            const params = new URLSearchParams({
+                session_id: historyLocation.session_id,
+                history_index: String(historyLocation.history_index)
+            });
+            const response = await fetch(`/von/history/debug?${params.toString()}`, { cache: 'no-store' });
+            let data = null;
+            try {
+                data = await response.json();
+            } catch (_) {
+                data = null;
+            }
+            if (!response.ok) {
+                if (response.status === 404 && data?.error === 'debug_not_available') {
+                    showToast('No LLM debug data stored for this turn.');
+                }
+                return null;
+            }
+            if (data?.success === false && data?.error === 'debug_not_available') {
+                showToast('No LLM debug data stored for this turn.');
+                return null;
+            }
+            if (!data || typeof data.llm_debug_data !== 'object') {
+                return null;
+            }
+            const merged = {
+                ...data.llm_debug_data,
+                history_location: historyLocation
+            };
+            llmDebugData.set(turnId, merged);
+            return merged;
+        } catch (err) {
+            console.warn('[chatTab] Failed to load LLM debug data:', err);
+            return null;
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.classList.remove('loading');
+                button.textContent = originalText || 'LLM ℹ';
+                if (originalTitle) {
+                    button.title = originalTitle;
+                } else {
+                    button.title = 'Load LLM interaction details';
+                }
+            }
+        }
+    })();
+
+    llmDebugFetchInFlight.set(turnId, fetchPromise);
+    fetchPromise.finally(() => {
+        llmDebugFetchInFlight.delete(turnId);
+    });
+    return fetchPromise;
+}
+
 // Show LLM debug popup for a specific turn
-function showLlmDebugPopup(turnId) {
-    const debugDataRaw = llmDebugData.get(turnId);
+async function showLlmDebugPopup(turnId, options = {}) {
+    let debugDataRaw = llmDebugData.get(turnId);
+    if (!hasLlmDebugPayload(debugDataRaw)) {
+        debugDataRaw = await loadLlmDebugDataForTurn(turnId, options);
+    }
     const debugData = enrichDebugDataWithSpeechPlanning(debugDataRaw, { turnId });
     if (!debugData) {
         console.warn('[chatTab] No debug data for turn:', turnId);

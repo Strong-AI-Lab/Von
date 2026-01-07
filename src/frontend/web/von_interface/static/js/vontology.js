@@ -4064,6 +4064,7 @@ export function initializeVontologyTab() {
 
   // Initialize DOM elements since the tab content is loaded dynamically
   initializeVontologyTabDomElements();
+  const loadTreeButton = document.getElementById('loadVontologyTreeButton');
 
   // Wire up show only key concepts checkbox
   if (elements.showOnlyKeyConceptsCheckbox) {
@@ -4110,9 +4111,30 @@ export function initializeVontologyTab() {
     console.log('[initializeVontologyTab] Refresh Tree button wired up');
   }
 
+  if (loadTreeButton) {
+    loadTreeButton.addEventListener('click', async () => {
+      let loadedOk = false;
+      loadTreeButton.disabled = true;
+      loadTreeButton.textContent = 'Loading...';
+      try {
+        await fetchAndRenderVontologyTree();
+        loadedOk = true;
+        updateManualLoadUi(false);
+      } finally {
+        if (loadedOk) {
+          try { loadTreeButton.classList.add('hidden'); } catch (_) { }
+        } else {
+          try { loadTreeButton.classList.remove('hidden'); } catch (_) { }
+        }
+        loadTreeButton.disabled = false;
+        loadTreeButton.textContent = 'Load Vontology Tree';
+      }
+    });
+  }
+
   if (elements.vontologyTreeContainer) {
-    console.log("Calling fetchAndRenderVontologyTree...");
-    fetchAndRenderVontologyTree();
+    console.log("Calling maybeLoadVontologyTree...");
+    void maybeLoadVontologyTree();
   } else {
     console.error("vontologyTreeContainer not found during initialization!");
   }
@@ -4139,12 +4161,12 @@ export function preloadVontologyData() {
   if (__vontologyPreloadInFlight) {
     return __vontologyPreloadInFlight;
   }
-  console.log('[preloadVontologyData] Starting background preload of Vontology tree (and counts if enabled)...');
-  try { if (typeof window !== 'undefined') window.__VONTOLOGY_BUSY = true; } catch (_) { }
+  console.log('[preloadVontologyData] Checking whether to preload Vontology tree...');
   __vontologyPreloadInFlight = (async () => {
     try {
       // Fetch settings to determine if counts should be fetched on load
       let fetchCountsOnLoad = true;
+      let preloadVontologyTree = false;
       try {
 
         const settingsRes = await fetch('/api/settings');
@@ -4153,14 +4175,27 @@ export function preloadVontologyData() {
           if (settingsJson && Object.prototype.hasOwnProperty.call(settingsJson, 'fetch_counts_on_load')) {
             fetchCountsOnLoad = !!settingsJson.fetch_counts_on_load;
           }
+          if (settingsJson && Object.prototype.hasOwnProperty.call(settingsJson, 'preload_vontology_tree')) {
+            preloadVontologyTree = !!settingsJson.preload_vontology_tree;
+          }
         }
       } catch (e) {
         // Default to true if settings fetch fails (safe fallback)
         fetchCountsOnLoad = true;
+        preloadVontologyTree = false;
       }
       // Set a global flag to be read by tree render to decide decoupling
       try { if (typeof window !== 'undefined') window.__VONTOLOGY_DECOUPLE_COUNTS__ = !fetchCountsOnLoad; } catch (_) { }
-      try { window.dispatchEvent(new CustomEvent('von:settingsLoaded', { detail: { fetchCountsOnLoad } })); } catch (_) { }
+      try { if (typeof window !== 'undefined') window.__VONTOLOGY_PRELOAD_ENABLED__ = !!preloadVontologyTree; } catch (_) { }
+      try { window.dispatchEvent(new CustomEvent('von:settingsLoaded', { detail: { fetchCountsOnLoad, preloadVontologyTree } })); } catch (_) { }
+
+      if (!preloadVontologyTree) {
+        console.log('[preloadVontologyData] Preload disabled by settings.');
+        return null;
+      }
+
+      console.log('[preloadVontologyData] Starting background preload of Vontology tree (and counts if enabled)...');
+      try { if (typeof window !== 'undefined') window.__VONTOLOGY_BUSY = true; } catch (_) { }
 
       const treePromise = fetch('/vontology/api/vontology/tree').then(r => r.ok ? r.json() : Promise.reject(`HTTP error! status: ${r.status}`));
       let countsJson = null;
@@ -4191,6 +4226,79 @@ export function preloadVontologyData() {
 // Helper for other modules to query busy status without touching window directly
 export function isVontologyBusy() {
   try { return typeof window !== 'undefined' && !!window.__VONTOLOGY_BUSY; } catch (_) { return false; }
+}
+
+function getCachedPreloadSetting() {
+  try {
+    if (typeof window !== 'undefined' && typeof window.__VONTOLOGY_PRELOAD_ENABLED__ === 'boolean') {
+      return window.__VONTOLOGY_PRELOAD_ENABLED__;
+    }
+  } catch (_) { }
+  return null;
+}
+
+async function resolveVontologyPreloadSetting() {
+  const cached = getCachedPreloadSetting();
+  if (cached !== null) {
+    return cached;
+  }
+
+  try {
+    const settingsRes = await fetch('/api/settings');
+    if (settingsRes.ok) {
+      const settingsJson = await settingsRes.json();
+      const preloadFlag = !!settingsJson?.preload_vontology_tree;
+      try { if (typeof window !== 'undefined') window.__VONTOLOGY_PRELOAD_ENABLED__ = preloadFlag; } catch (_) { }
+      return preloadFlag;
+    }
+  } catch (_) { }
+
+  return false;
+}
+
+function updateManualLoadUi(enabled) {
+  const loadTreeButton = document.getElementById('loadVontologyTreeButton');
+  const badge = document.getElementById('vontologyPreloadOffBadge');
+  const helper = document.getElementById('vontologyPreloadOffHelp');
+  const refreshButton = elements.refreshTreeButton || document.getElementById('refreshTreeButton');
+  if (loadTreeButton) {
+    loadTreeButton.classList.toggle('hidden', !enabled);
+    loadTreeButton.disabled = false;
+    loadTreeButton.textContent = 'Load Vontology Tree';
+  }
+  if (badge) {
+    badge.classList.toggle('hidden', !enabled);
+  }
+  if (helper) {
+    helper.classList.toggle('hidden', !enabled);
+  }
+  if (refreshButton) {
+    refreshButton.disabled = !!enabled;
+  }
+
+  if (enabled && elements.vontologyTreeContainer) {
+    elements.vontologyTreeContainer.innerHTML = '<p>Vontology tree preload is off. Click "Load Vontology Tree" to fetch.</p>';
+  }
+}
+
+export async function maybeLoadVontologyTree() {
+  const autoLoad = await resolveVontologyPreloadSetting();
+  if (!autoLoad) {
+    updateManualLoadUi(true);
+    return false;
+  }
+  updateManualLoadUi(false);
+  if (elements.refreshTreeButton) {
+    elements.refreshTreeButton.disabled = true;
+  }
+  try {
+    await fetchAndRenderVontologyTree();
+  } finally {
+    if (elements.refreshTreeButton) {
+      elements.refreshTreeButton.disabled = false;
+    }
+  }
+  return true;
 }
 
 export function renderVontologyTree(concepts) {

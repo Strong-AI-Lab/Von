@@ -159,6 +159,20 @@ def sanitise_client_capabilities(
                 max_chars=120,
             )
             or None,
+            "max_speaking_seconds": (
+                _clamp_int(
+                    (
+                        speech.get("settings", {})
+                        if isinstance(speech.get("settings"), dict)
+                        else {}
+                    ).get("max_speaking_seconds"),
+                    minimum=10,
+                    maximum=600,
+                )
+                if isinstance(speech.get("settings"), dict)
+                and (speech.get("settings", {}).get("max_speaking_seconds") is not None)
+                else None
+            ),
         },
     }
 

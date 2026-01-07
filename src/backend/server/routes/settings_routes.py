@@ -18,6 +18,8 @@ from ...services.settings_service import (
     set_openai_env_var,
     get_fetch_counts_on_load,
     set_fetch_counts_on_load,
+    get_preload_vontology_tree,
+    set_preload_vontology_tree,
     get_ollama_hosts_list,
     set_ollama_hosts_list,
     get_active_ollama_host,
@@ -510,6 +512,7 @@ def get_all_settings_data():
             "active_llm": get_active_llm_setting(),
             "openai_api_key_env_var": get_openai_env_var(),
             "fetch_counts_on_load": get_fetch_counts_on_load(),
+            "preload_vontology_tree": get_preload_vontology_tree(),
             "disable_remote_ollama_scan": get_disable_remote_ollama_scan(),
             "internal_mcp_max_tool_invocations": get_internal_mcp_max_tool_invocations(),
             "internal_mcp_tool_batch_cap": get_internal_mcp_tool_batch_cap(),
@@ -593,6 +596,14 @@ def save_all_settings():
                 enabled = True
             set_fetch_counts_on_load(enabled)
             current_app.logger.info(f"fetch_counts_on_load set to: {enabled}")
+
+        if "preload_vontology_tree" in data:
+            try:
+                enabled = bool(data.get("preload_vontology_tree"))
+            except Exception:
+                enabled = False
+            set_preload_vontology_tree(enabled)
+            current_app.logger.info("preload_vontology_tree set to: %s", enabled)
 
         if "disable_remote_ollama_scan" in data:
             try:
