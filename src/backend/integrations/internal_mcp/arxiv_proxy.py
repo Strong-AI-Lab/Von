@@ -5,6 +5,7 @@ Manages subprocess communication with external arxiv-mcp-server.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
@@ -237,18 +238,24 @@ class ArxivMCPProxy:
         if not path.exists():
             raise ArxivProxyError(f"Downloaded PDF not found at: {path}")
 
+        size_bytes = path.stat().st_size
+
         blob_store = get_blob_store_from_env()
         storage_key = _arxiv_pdf_blob_key(arxiv_id)
 
         try:
+            data = path.read_bytes()
+            sha256 = hashlib.sha256(data).hexdigest()
             ref = blob_store.put_bytes(
                 storage_key,
-                path.read_bytes(),
+                data,
                 content_type="application/pdf",
                 metadata={
                     "source": "arxiv",
                     "arxiv_id": _normalise_arxiv_id(arxiv_id),
                     "original_path": str(path),
+                    "sha256": sha256,
+                    "size_bytes": str(size_bytes),
                 },
             )
         except Exception as exc:
@@ -257,12 +264,44 @@ class ArxivMCPProxy:
         stored = dict(result)
         stored["arxiv_id"] = arxiv_id
         stored["file_path"] = str(path)
+        stored["size_bytes"] = size_bytes
+        stored["sha256"] = sha256
+        stored["version"] = _extract_arxiv_version(arxiv_id)
         stored["storage"] = {
             "backend": ref.backend,
             "key": ref.key,
             "uri": ref.uri,
         }
         return stored
+
+    def list_papers(self) -> Dict[str, Any]:
+        """List cached PDFs without calling upstream arXiv.
+
+        Some arxiv-mcp-server versions issue an invalid arXiv API request when
+        listing with no filters; this local listing avoids that failure.
+        """
+        self._ensure_storage_path()
+
+        papers: list[Dict[str, Any]] = []
+        for path in sorted(self._config.storage_path.rglob("*.pdf")):
+            if not path.is_file():
+                continue
+            arxiv_id = _guess_arxiv_id_from_filename(path.name)
+            papers.append(
+                {
+                    "file_path": str(path),
+                    "filename": path.name,
+                    "size_bytes": path.stat().st_size,
+                    "arxiv_id": arxiv_id,
+                    "version": _extract_arxiv_version(arxiv_id) if arxiv_id else None,
+                }
+            )
+
+        return {
+            "success": True,
+            "total_papers": len(papers),
+            "papers": papers,
+        }
 
     def shutdown(self) -> None:
         """Terminate the subprocess gracefully."""
@@ -355,3 +394,40 @@ def _extract_download_file_path(result: Dict[str, Any]) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _guess_arxiv_id_from_filename(filename: str) -> str | None:
+    name = filename.strip()
+    if not name:
+        return None
+
+    if name.lower().endswith(".pdf"):
+        name = name[:-4]
+
+    for prefix in ("arxiv_", "arxiv-", "arxiv:"):
+        if name.lower().startswith(prefix):
+            name = name[len(prefix) :]
+            break
+
+    name = name.strip()
+    return name or None
+
+
+def _extract_arxiv_version(arxiv_id: str | None) -> int | None:
+    if not arxiv_id:
+        return None
+
+    value = _normalise_arxiv_id(arxiv_id)
+    lower = value.lower()
+    idx = lower.rfind("v")
+    if idx <= 0:
+        return None
+
+    suffix = value[idx + 1 :]
+    if not suffix.isdigit():
+        return None
+
+    try:
+        return int(suffix)
+    except Exception:
+        return None

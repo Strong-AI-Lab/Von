@@ -1755,6 +1755,9 @@ def _download_paper_output_schema() -> Schema:
             "success": (bool, type(None)),
             "file_path": (str, type(None)),
             "arxiv_id": (str, type(None)),
+            "version": (int, type(None)),
+            "size_bytes": (int, type(None)),
+            "sha256": (str, type(None)),
             "storage": (dict, type(None)),
             "error": (str, type(None)),
         },
@@ -1762,6 +1765,7 @@ def _download_paper_output_schema() -> Schema:
         description=(
             "download_paper output: success (bool), file_path (str, local cache path), "
             "storage (dict with backend/key/uri for durable blob-store location), arxiv_id (str), "
+            "version (int, optional), size_bytes (int, optional), sha256 (str, optional), "
             "or error (str) if failed"
         ),
     )
@@ -1786,7 +1790,11 @@ def _list_papers_output_schema() -> Schema:
             "success": (bool, type(None)),
         },
         allow_unknown=True,
-        description="list_papers output: total_papers (int), papers (list of paper objects with title, summary, authors, links, pdf_url), or error (str) if failed",
+        description=(
+            "list_papers output: total_papers (int), papers (list of cached paper objects; "
+            "typically includes file_path, filename, size_bytes, arxiv_id, version), "
+            "or error (str) if failed"
+        ),
     )
 
 
