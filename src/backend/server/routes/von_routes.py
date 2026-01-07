@@ -161,6 +161,7 @@ def upload_file_to_blob_store_and_vontology():
     store = get_blob_store_from_env()
     user_slug = _slugify_concept_id_for_key(user_concept_id)
     blob_key = f"uploads/{user_slug}/{sha256}/{safe_filename}"
+    uploaded_at = _now_utc_iso()
 
     blob_ref = store.put_bytes(
         blob_key,
@@ -170,7 +171,7 @@ def upload_file_to_blob_store_and_vontology():
             "original_filename": original_filename,
             "sha256": sha256,
             "user_concept_id": user_concept_id.strip(),
-            "uploaded_at": _now_utc_iso(),
+            "uploaded_at": uploaded_at,
         },
     )
 
@@ -254,45 +255,51 @@ def upload_file_to_blob_store_and_vontology():
         # Attach blob + metadata as text relations (authoritative)
         upsert_text_for_concept(
             subject_concept_id=instance_concept_id,
-            predicate="hasOriginalFilename",
+            predicate="#V#has_original_filename",
             text=original_filename,
             lang="en-NZ",
         )
         upsert_text_for_concept(
             subject_concept_id=instance_concept_id,
-            predicate="hasSha256",
+            predicate="#V#has_sha256",
             text=sha256,
             lang="en-NZ",
         )
         upsert_text_for_concept(
             subject_concept_id=instance_concept_id,
-            predicate="hasSizeBytes",
+            predicate="#V#has_size_bytes",
             text=str(size_bytes),
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="#V#has_upload_timestamp",
+            text=str(uploaded_at),
             lang="en-NZ",
         )
         if content_type:
             upsert_text_for_concept(
                 subject_concept_id=instance_concept_id,
-                predicate="hasMimeType",
+                predicate="#V#has_mime_type",
                 text=content_type,
                 lang="en-NZ",
             )
 
         upsert_text_for_concept(
             subject_concept_id=instance_concept_id,
-            predicate="hasBlobBackend",
+            predicate="#V#has_blob_backend",
             text=str(blob_ref.backend),
             lang="en-NZ",
         )
         upsert_text_for_concept(
             subject_concept_id=instance_concept_id,
-            predicate="hasBlobKey",
+            predicate="#V#has_blob_key",
             text=str(blob_ref.key),
             lang="en-NZ",
         )
         upsert_text_for_concept(
             subject_concept_id=instance_concept_id,
-            predicate="hasBlobUri",
+            predicate="#V#has_blob_uri",
             text=str(blob_ref.uri),
             lang="en-NZ",
         )
@@ -498,10 +505,10 @@ def download_file_copy(file_copy_concept_id: str):
         except Exception:
             return None
 
-    blob_key = _first_text(concept_id, "hasBlobKey")
-    blob_backend = _first_text(concept_id, "hasBlobBackend")
-    content_type = _first_text(concept_id, "hasMimeType")
-    original_filename = _first_text(concept_id, "hasOriginalFilename")
+    blob_key = _first_text(concept_id, "#V#has_blob_key")
+    blob_backend = _first_text(concept_id, "#V#has_blob_backend")
+    content_type = _first_text(concept_id, "#V#has_mime_type")
+    original_filename = _first_text(concept_id, "#V#has_original_filename")
 
     if not blob_key:
         return jsonify({"success": False, "error": "missing_blob_key"}), 404
