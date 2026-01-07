@@ -30,6 +30,7 @@ const LS_TTS_LANGUAGE = 'chatTtsLanguage';
 const LS_TTS_RATE = 'chatTtsRate';
 const LS_TTS_PITCH = 'chatTtsPitch';
 const LS_TTS_VOLUME = 'chatTtsVolume';
+const LS_TTS_MAX_SPEAKING_SECONDS = 'chatTtsMaxSpeakingSeconds';
 const LS_STT_LANGUAGE = 'chatSttLanguage';
 const LS_STT_CONTINUOUS = 'chatSttContinuous';
 const LS_STT_INTERIM_RESULTS = 'chatSttInterimResults';
@@ -39,6 +40,7 @@ const RUNTIME_REFRESH_MS = 12000;
 
 let runtimeIntervalId = null;
 let runtimeAbortController = null;
+let runtimeStatusInFlight = false;
 
 function formatUptime(ms) {
   const totalSec = Math.floor(ms / 1000);
@@ -73,6 +75,7 @@ function wireCopyButton(btn) {
 }
 
 function safeLocalStorageGet(key) {
+  runtimeStatusInFlight = true;
   try {
     if (typeof localStorage === 'undefined') return null;
     return localStorage.getItem(key);
@@ -151,6 +154,7 @@ function getSpeechSettingsFromStorage() {
   const ttsRate = clampNumber(safeLocalStorageGet(LS_TTS_RATE), 0.5, 2, 1);
   const ttsPitch = clampNumber(safeLocalStorageGet(LS_TTS_PITCH), 0, 2, 1);
   const ttsVolume = clampNumber(safeLocalStorageGet(LS_TTS_VOLUME), 0, 1, 1);
+  const ttsMaxSeconds = clampNumber(safeLocalStorageGet(LS_TTS_MAX_SPEAKING_SECONDS), 10, 600, 40);
 
   const sttLanguage = normaliseLanguageSetting(safeLocalStorageGet(LS_STT_LANGUAGE)) || preferredLanguage;
   const sttContinuous = parseBoolSetting(safeLocalStorageGet(LS_STT_CONTINUOUS), true);
@@ -162,7 +166,8 @@ function getSpeechSettingsFromStorage() {
       language: ttsLanguage,
       rate: ttsRate,
       pitch: ttsPitch,
-      volume: ttsVolume
+      volume: ttsVolume,
+      maxSpeakingSeconds: ttsMaxSeconds
     },
     stt: {
       language: sttLanguage,
@@ -219,6 +224,7 @@ function setupSpeechSettingsSection() {
   const ttsRateRange = document.getElementById('settingsTtsRateRange');
   const ttsPitchRange = document.getElementById('settingsTtsPitchRange');
   const ttsVolumeRange = document.getElementById('settingsTtsVolumeRange');
+  const ttsMaxSecondsInput = document.getElementById('settingsTtsMaxSecondsInput');
   const ttsRateValue = document.getElementById('settingsTtsRateValue');
   const ttsPitchValue = document.getElementById('settingsTtsPitchValue');
   const ttsVolumeValue = document.getElementById('settingsTtsVolumeValue');
@@ -251,6 +257,14 @@ function setupSpeechSettingsSection() {
     }
     if (ttsVolumeRange) {
       ttsVolumeRange.value = String(settings.tts.volume);
+    }
+    if (ttsMaxSecondsInput) {
+      const existingRaw = safeLocalStorageGet(LS_TTS_MAX_SPEAKING_SECONDS);
+      const currentValue = settings.tts.maxSpeakingSeconds ?? 40;
+      ttsMaxSecondsInput.value = String(currentValue);
+      if (existingRaw === null || existingRaw === undefined || String(existingRaw).trim() === '') {
+        safeLocalStorageSet(LS_TTS_MAX_SPEAKING_SECONDS, String(currentValue));
+      }
     }
     if (ttsRateValue) {
       ttsRateValue.textContent = String(settings.tts.rate.toFixed(1));
@@ -299,6 +313,7 @@ function setupSpeechSettingsSection() {
     if (ttsRateRange) ttsRateRange.disabled = true;
     if (ttsPitchRange) ttsPitchRange.disabled = true;
     if (ttsVolumeRange) ttsVolumeRange.disabled = true;
+    if (ttsMaxSecondsInput) ttsMaxSecondsInput.disabled = true;
     if (ttsPreviewButton) {
       ttsPreviewButton.disabled = true;
       ttsPreviewButton.title = 'Text-to-speech is not supported in this browser.';
@@ -355,6 +370,14 @@ function setupSpeechSettingsSection() {
       const value = clampNumber(e.target.value, 0, 1, 1);
       safeLocalStorageSet(LS_TTS_VOLUME, String(value));
       if (ttsVolumeValue) ttsVolumeValue.textContent = String(value.toFixed(2));
+    });
+  }
+
+  if (ttsMaxSecondsInput) {
+    ttsMaxSecondsInput.addEventListener('change', (e) => {
+      const value = clampNumber(e.target.value, 10, 600, 40);
+      safeLocalStorageSet(LS_TTS_MAX_SPEAKING_SECONDS, String(value));
+      ttsMaxSecondsInput.value = String(value);
     });
   }
 
@@ -569,11 +592,16 @@ async function loadRuntimeStatus(manualRefresh = false) {
   const uptimeEl = document.getElementById('settingsUptimeValue');
   const refreshBtn = document.getElementById('refreshRuntimeButton');
 
+  if (runtimeStatusInFlight && !manualRefresh) {
+    return;
+  }
+
   if (refreshBtn && manualRefresh) {
     refreshBtn.disabled = true;
     refreshBtn.textContent = 'Refreshing…';
   }
 
+  runtimeStatusInFlight = true
   try {
     try { runtimeAbortController?.abort(); } catch { }
     const controller = new AbortController();
@@ -613,6 +641,7 @@ async function loadRuntimeStatus(manualRefresh = false) {
     if (uptimeEl) uptimeEl.textContent = '—';
     renderRagSummary(null, null);
   } finally {
+    runtimeStatusInFlight = false;
     if (refreshBtn && manualRefresh) {
       refreshBtn.disabled = false;
       refreshBtn.textContent = 'Refresh';
@@ -858,6 +887,24 @@ if (countsToggle) {
   });
 }
 
+// Preload Vontology tree toggle (server-persisted)
+const preloadVontologyToggle = document.getElementById('preloadVontologyTreeToggle');
+if (preloadVontologyToggle) {
+  try {
+    // Load current server value via existing loadAndDisplaySettings pipeline
+  } catch { }
+  preloadVontologyToggle.addEventListener('change', async () => {
+    try {
+      await saveAllSettings();
+      showStatusMessage('vontologyPerformanceStatus', 'Saved. Reload the page to apply.', false);
+      if (window.parent) { window.parent.document.dispatchEvent(new CustomEvent('von:settingsChanged')); }
+    } catch (e) {
+      console.warn('Failed to save preload toggle', e);
+      showStatusMessage('vontologyPerformanceStatus', 'Failed to save setting', true);
+    }
+  });
+}
+
 // Salient inheritance recompute controls
 document.getElementById('salientDryRunButton')?.addEventListener('click', () => triggerSalientRecompute({ dry_run: true }));
 document.getElementById('salientRecomputeButton')?.addEventListener('click', () => triggerSalientRecompute({}));
@@ -1035,6 +1082,15 @@ async function loadAndDisplaySettings() {
       if (countsToggleEl) {
         const flag = Object.prototype.hasOwnProperty.call(settings, 'fetch_counts_on_load') ? !!settings.fetch_counts_on_load : true;
         countsToggleEl.checked = !!flag;
+      }
+    } catch { }
+
+    // Populate preload_vontology_tree toggle
+    try {
+      const preloadToggleEl = document.getElementById('preloadVontologyTreeToggle');
+      if (preloadToggleEl) {
+        const flag = Object.prototype.hasOwnProperty.call(settings, 'preload_vontology_tree') ? !!settings.preload_vontology_tree : false;
+        preloadToggleEl.checked = !!flag;
       }
     } catch { }
 
@@ -1274,6 +1330,7 @@ async function saveAllSettings(changedProvider = null) {
   const settings = {
     active_llm: activeLlm,
     openai_api_key_env_var: document.getElementById('openaiApiKeyEnvVar')?.value,
+    preload_vontology_tree: !!document.getElementById('preloadVontologyTreeToggle')?.checked,
     fetch_counts_on_load: !!document.getElementById('fetchCountsOnLoadToggle')?.checked,
     disable_remote_ollama_scan: !!document.getElementById('disableRemoteOllamaScanToggle')?.checked,
     internal_mcp_max_tool_invocations: clampNumber(

@@ -3068,10 +3068,14 @@ def history():
     # Try to get user_id from session first, then query param
     user_concept_id = session.get("user_concept_id") or request.args.get("user_id")
 
-    # Ensure session_id exists (create if needed for the current session context)
-    if "session_id" not in session:
-        session["session_id"] = str(uuid.uuid4())
-    session_id = session["session_id"]
+    requested_session_id = request.args.get("session_id")
+    if isinstance(requested_session_id, str) and requested_session_id.strip():
+        session_id = requested_session_id.strip()
+    else:
+        # Ensure session_id exists (create if needed for the current session context)
+        if "session_id" not in session:
+            session["session_id"] = str(uuid.uuid4())
+        session_id = session["session_id"]
 
     if not user_concept_id:
         return jsonify(
@@ -3085,11 +3089,43 @@ def history():
 
     requested_segments = request.args.get("segments", default=1, type=int)
     segment_count = max(1, requested_segments)
+    segment_size = request.args.get("segment_size", default=None, type=int)
+    if not segment_size or segment_size <= 0:
+        segment_size = None
+    tail_limit = request.args.get("tail_limit", default=None, type=int)
+    if tail_limit is not None and tail_limit <= 0:
+        tail_limit = None
+    include_debug_raw = request.args.get("include_debug")
+    include_debug = True
+    if isinstance(include_debug_raw, str):
+        parsed = include_debug_raw.strip().lower()
+        if parsed in ("0", "false", "no", "n", "off"):
+            include_debug = False
+        elif parsed in ("1", "true", "yes", "y", "on"):
+            include_debug = True
+    history_tail_limit = None
+    if isinstance(tail_limit, int) and tail_limit > 0:
+        history_tail_limit = tail_limit
+    elif isinstance(segment_size, int) and segment_size > 0:
+        history_tail_limit = segment_size * max(segment_count, 1)
 
     try:
-        segments = chat_history_service.get_chat_history_segments(
-            user_concept_id, session_id, include_locations=True
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        segments_result = chat_history_service.get_chat_history_segments(
+            user_concept_id,
+            session_id,
+            include_locations=True,
+            namespace=namespace,
+            segment_size=segment_size,
+            include_debug=include_debug,
+            history_tail_limit=history_tail_limit,
+            return_meta=True,
         )
+        if isinstance(segments_result, tuple):
+            segments, meta = segments_result
+        else:
+            segments = segments_result
+            meta = {"history_truncated": False}
         total_segments = len(segments)
 
         if total_segments == 0:
@@ -3105,19 +3141,77 @@ def history():
         segment_count = min(segment_count, total_segments)
         selected_segments = segments[-segment_count:]
         flattened_history = [msg for segment in selected_segments for msg in segment]
-
-        has_more = segment_count < total_segments
+        segments_returned = len(selected_segments)
+        history_truncated = bool(meta.get("history_truncated"))
+        has_more = history_truncated or segments_returned < total_segments
+        if history_truncated and total_segments <= segments_returned:
+            total_segments = segments_returned + 1
 
         return jsonify(
             {
                 "history": flattened_history,
-                "segments_returned": segment_count,
+                "segments_returned": segments_returned,
                 "total_segments": total_segments,
                 "has_more_history": has_more,
             }
         )
     except Exception as e:
         print(f"Error retrieving history: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/history/debug", methods=["GET"])
+def history_debug():
+    """Retrieve stored LLM debug data for a specific history entry."""
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return jsonify({"error": "Not authenticated"}), 401
+
+    session_id = request.args.get("session_id") or session.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return jsonify({"error": "session_id required"}), 400
+
+    history_index = request.args.get("history_index", default=None, type=int)
+    if history_index is None or history_index < 0:
+        return jsonify({"error": "history_index required"}), 400
+
+    try:
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        debug_data = chat_history_service.get_chat_history_debug_entry(
+            user_id=user_concept_id,
+            session_id=session_id.strip(),
+            history_index=history_index,
+            namespace=namespace,
+        )
+        if not debug_data:
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "debug_not_available",
+                    "history_location": {
+                        "session_id": session_id.strip(),
+                        "history_index": history_index,
+                    },
+                }
+            )
+        return jsonify(
+            {
+                "success": True,
+                "history_location": {
+                    "session_id": session_id.strip(),
+                    "history_index": history_index,
+                },
+                "llm_debug_data": debug_data,
+            }
+        )
+    except Exception as e:
+        print(f"Error retrieving history debug data: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -3340,9 +3434,12 @@ def history_length():
         return jsonify({"history_length": 0, "authenticated": False})
 
     try:
-        length = chat_history_service.get_chat_history_length(user_concept_id)
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        length = chat_history_service.get_chat_history_length(
+            user_concept_id, namespace=namespace
+        )
         session_count = chat_history_service.get_chat_history_session_count(
-            user_concept_id
+            user_concept_id, namespace=namespace
         )
         return jsonify(
             {
@@ -3365,11 +3462,24 @@ def history_sessions():
         return jsonify({"authenticated": False, "sessions": []})
 
     limit = request.args.get("limit", default=50, type=int)
+    summary_mode = request.args.get("summary", default="full")
+    if not isinstance(summary_mode, str) or not summary_mode.strip():
+        summary_mode = "full"
     try:
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
         sessions = chat_history_service.get_chat_history_session_summaries(
-            user_concept_id, limit=limit
+            user_concept_id,
+            limit=limit,
+            namespace=namespace,
+            summary_mode=summary_mode,
         )
-        return jsonify({"authenticated": True, "sessions": sessions})
+        return jsonify(
+            {
+                "authenticated": True,
+                "sessions": sessions,
+                "active_session_id": session.get("session_id"),
+            }
+        )
     except Exception as e:
         print(f"Error retrieving history sessions: {e}")
         return jsonify({"error": str(e)}), 500
@@ -3784,8 +3894,8 @@ def get_session_context():
 def set_chat_session():
     """Set the active chat session_id for the current authenticated user.
 
-    Request body: {session_id: str}
-    Returns: {status, session_id, history}
+    Request body: {session_id: str, include_history?: bool}
+    Returns: {status, session_id, session_name, history}
 
     This enables the frontend to switch to a prior session and continue it.
     """
@@ -3799,22 +3909,41 @@ def set_chat_session():
         if not isinstance(session_id, str) or not session_id.strip():
             return jsonify({"error": "session_id required"}), 400
         session_id = session_id.strip()
+        include_history = data.get("include_history", True)
+        if isinstance(include_history, bool):
+            pass
+        elif isinstance(include_history, str):
+            parsed = include_history.strip().lower()
+            if parsed in ("0", "false", "no", "n", "off"):
+                include_history = False
+            elif parsed in ("1", "true", "yes", "y", "on"):
+                include_history = True
+            else:
+                include_history = True
+        elif isinstance(include_history, (int, float)):
+            include_history = include_history != 0
+        else:
+            include_history = True
 
         # Verify the session belongs to this user.
         coll = chat_history_service.get_chat_history_collection_service()
         if coll is None:
             return jsonify({"error": "Chat history unavailable"}), 503
 
-        doc = coll.find_one(
-            {"user_id": user_concept_id, "session_id": session_id},
-            {"history": 1},
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        query = chat_history_service.build_chat_history_query(
+            user_id=user_concept_id,
+            session_id=session_id,
+            namespace=namespace,
         )
+        projection = {"session_name": 1}
+        if include_history:
+            projection["history"] = 1
+        doc = coll.find_one(query, projection)
         if not doc:
             return jsonify({"error": "Session not found"}), 404
 
-        history = doc.get("history") or []
-        if not isinstance(history, list):
-            history = []
+        session_name = doc.get("session_name")
 
         def _normalise_timestamp(value):
             if isinstance(value, datetime):
@@ -3824,13 +3953,17 @@ def set_chat_session():
             return value
 
         normalised_history = []
-        for msg in history:
-            if not isinstance(msg, dict):
-                continue
-            out = dict(msg)
-            if "timestamp" in out:
-                out["timestamp"] = _normalise_timestamp(out.get("timestamp"))
-            normalised_history.append(out)
+        if include_history:
+            history = doc.get("history") or []
+            if not isinstance(history, list):
+                history = []
+            for msg in history:
+                if not isinstance(msg, dict):
+                    continue
+                out = dict(msg)
+                if "timestamp" in out:
+                    out["timestamp"] = _normalise_timestamp(out.get("timestamp"))
+                normalised_history.append(out)
 
         # Switch active session.
         session["session_id"] = session_id
@@ -3847,6 +3980,7 @@ def set_chat_session():
                 {
                     "status": "updated",
                     "session_id": session_id,
+                    "session_name": session_name,
                     "history": normalised_history,
                 }
             ),
@@ -3854,6 +3988,110 @@ def set_chat_session():
         )
     except Exception as e:
         print(f"Error setting chat session: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/session/create_chat_session", methods=["POST"])
+def create_chat_session():
+    """Create and switch to a new named chat session for the current user."""
+    try:
+        user_concept_id = session.get("user_concept_id")
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        session_name = data.get("session_name") or data.get("name") or data.get(
+            "chat_name"
+        )
+
+        session_id = str(uuid.uuid4())
+
+        result = chat_history_service.create_chat_session(
+            user_id=user_concept_id,
+            session_id=session_id,
+            session_name=session_name,
+        )
+
+        session["session_id"] = session_id
+        session.modified = True
+
+        try:
+            current_app.config["CONTEXT"] = []
+        except Exception:
+            pass
+
+        return (
+            jsonify(
+                {
+                    "status": "created",
+                    "session_id": session_id,
+                    "session_name": result.get("session_name"),
+                    "history": [],
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error creating chat session: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/session/rename_chat_session", methods=["POST"])
+def rename_chat_session():
+    """Rename an existing chat session for the current user."""
+    try:
+        user_concept_id = session.get("user_concept_id")
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return jsonify({"error": "session_id required"}), 400
+        session_id = session_id.strip()
+        include_history = data.get("include_history", True)
+        if isinstance(include_history, bool):
+            pass
+        elif isinstance(include_history, str):
+            parsed = include_history.strip().lower()
+            if parsed in ("0", "false", "no", "n", "off"):
+                include_history = False
+            elif parsed in ("1", "true", "yes", "y", "on"):
+                include_history = True
+            else:
+                include_history = True
+        elif isinstance(include_history, (int, float)):
+            include_history = include_history != 0
+        else:
+            include_history = True
+
+        session_name = data.get("session_name") or data.get("name")
+        if not isinstance(session_name, str) or not session_name.strip():
+            return jsonify({"error": "session_name required"}), 400
+
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        result = chat_history_service.rename_chat_session(
+            user_id=user_concept_id,
+            session_id=session_id,
+            session_name=session_name,
+            namespace=namespace,
+        )
+
+        if not result.get("matched"):
+            return jsonify({"error": "Session not found"}), 404
+
+        return (
+            jsonify(
+                {
+                    "status": "updated",
+                    "session_id": session_id,
+                    "session_name": result.get("session_name"),
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error renaming chat session: {e}")
         return jsonify({"error": str(e)}), 500
 
 

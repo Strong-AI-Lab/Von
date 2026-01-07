@@ -434,6 +434,9 @@ function startHealthPolling() {
     requestAnimationFrame(() => setTimeout(updateUptimeLoop, 1000));
   }
   let failureCount = 0;
+  let healthPollInFlight = false;
+  let healthPollQueuedImmediate = false;
+  let healthPollTimerId = null;
   const busyEl = document.getElementById('vontologyBusyIndicator');
   const busySr = document.getElementById('vontologyBusySrStatus');
   let lastBusyState = null;
@@ -456,7 +459,23 @@ function startHealthPolling() {
       }
     } catch (_) { }
   }
+  function scheduleHealthPoll(delayMs) {
+    if (healthPollTimerId) {
+      clearTimeout(healthPollTimerId);
+    }
+    healthPollTimerId = setTimeout(() => {
+      healthPollTimerId = null;
+      void poll();
+    }, delayMs);
+  }
+
   async function poll() {
+    if (healthPollInFlight) {
+      healthPollQueuedImmediate = true;
+      return;
+    }
+
+    healthPollInFlight = true;
     updateBusyIndicator();
     const busy = isVontologyBusy();
     let nextDelay = 5000; // base
@@ -1541,7 +1560,7 @@ function startHealthPolling() {
       failureCount = 0; // reset on success
     } catch (e) {
       failureCount++;
-      pidSpan.textContent = '—';
+      pidSpan.textContent = '-';
       pidSpan.parentElement.classList.add('pid-error');
       // Exponential backoff on failures (5s,10s,20s,30s cap)
       nextDelay = Math.min(30000, 5000 * Math.pow(2, Math.min(failureCount - 1, 3)));
@@ -1550,7 +1569,13 @@ function startHealthPolling() {
     if (busy) {
       nextDelay = Math.min(15000, Math.max(nextDelay, 10000));
     }
-    setTimeout(poll, nextDelay);
+    healthPollInFlight = false;
+    if (healthPollQueuedImmediate) {
+      healthPollQueuedImmediate = false;
+      scheduleHealthPoll(250);
+      return;
+    }
+    scheduleHealthPoll(nextDelay);
   }
   poll();
   // Also update busy indicator more responsively
@@ -1558,9 +1583,19 @@ function startHealthPolling() {
   updateUptimeLoop();
 
   // Listen for context reset events to trigger immediate RAG status refresh
-  document.addEventListener('von:contextReset', () => {
-    console.log('[health_poll] Context reset detected, triggering immediate RAG status refresh');
+  document.addEventListener('von:contextReset', (event) => {
+    const detail = event?.detail || {};
+    if (detail?.trigger !== 'chat_reset') {
+      console.log('[health_poll] Context reset ignored (trigger not chat_reset)', detail);
+      return;
+    }
+    console.log('[health_poll] Context reset detected, triggering immediate RAG status refresh', detail);
     // Force an immediate poll (will use current localStorage namespace)
+    if (healthPollInFlight) {
+      healthPollQueuedImmediate = true;
+      scheduleHealthPoll(250);
+      return;
+    }
     poll().catch(err => console.warn('[health_poll] Immediate poll failed:', err));
   });
 

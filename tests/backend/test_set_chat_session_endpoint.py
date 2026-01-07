@@ -137,3 +137,76 @@ def test_set_chat_session_returns_history_and_updates_session(monkeypatch, app_c
 
     with client.session_transaction() as sess:
         assert sess.get("session_id") == "s1"
+
+
+def test_set_chat_session_skips_history_when_requested(monkeypatch, app_client):
+    _, client = app_client
+
+    class _FakeColl:
+        def __init__(self):
+            self.projections = []
+
+        def find_one(self, query, projection=None):
+            self.projections.append(projection)
+            return {
+                "history": [
+                    {"role": "user", "content": "hi", "timestamp": "2025-01-01T00:00:00Z"},
+                    {"role": "assistant", "content": "ok", "timestamp": "2025-01-01T00:00:01Z"},
+                ],
+                "session_name": "Session One",
+            }
+
+    coll = _FakeColl()
+
+    import src.backend.services.chat_history_service as chat_history_service
+
+    monkeypatch.setattr(
+        chat_history_service, "get_chat_history_collection_service", lambda: coll
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#u"
+
+    resp = client.post(
+        "/von/api/session/set_chat_session",
+        json={"session_id": "s1", "include_history": False},
+    )
+
+    assert resp.status_code == 200
+    js = resp.get_json()
+    assert js["history"] == []
+    assert coll.projections
+    assert "history" not in (coll.projections[-1] or {})
+
+    with client.session_transaction() as sess:
+        assert sess.get("session_id") == "s1"
+
+
+def test_history_uses_query_session_id(monkeypatch, app_client):
+    _, client = app_client
+    captured: dict[str, str] = {}
+
+    def fake_get_segments(user_id, session_id, **kwargs):
+        captured["user_id"] = user_id
+        captured["session_id"] = session_id
+        return [[{"role": "user", "content": "hi"}]]
+
+    import src.backend.services.chat_history_service as chat_history_service
+
+    monkeypatch.setattr(
+        chat_history_service, "get_chat_history_segments", fake_get_segments
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#u"
+        sess["session_id"] = "session-from-cookie"
+
+    resp = client.get("/von/history?segments=1&session_id=session-from-query")
+
+    assert resp.status_code == 200
+    js = resp.get_json()
+    assert js["history"] == [{"role": "user", "content": "hi"}]
+    assert captured["session_id"] == "session-from-query"
+
+    with client.session_transaction() as sess:
+        assert sess.get("session_id") == "session-from-cookie"

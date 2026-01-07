@@ -122,6 +122,7 @@ MONGO_LOCAL_URI = (
     _get_nonempty_env_value("MONGO_LOCAL_URI")
     or "mongodb://127.0.0.1:27017/?directConnection=true"
 )
+MONGO_DNS_FALLBACK_URI = _get_nonempty_env_value("MONGO_DNS_FALLBACK_URI")
 MONGO_ALLOW_LOCAL_FALLBACK = os.environ.get("MONGO_ALLOW_LOCAL_FALLBACK", "1") in (
     "1",
     "true",
@@ -342,33 +343,40 @@ def get_db() -> Database | None:
                 "An unexpected error occurred during MongoDB client initialisation: %s",
                 e,
             )
-            # Attempt local fallback for DNS resolution errors (common with SRV)
+            # Attempt fallback for DNS resolution errors (common with SRV)
             if MONGO_ALLOW_LOCAL_FALLBACK and (
                 "resolution" in str(e).lower()
                 or "dns" in str(e).lower()
                 or MONGO_URI.startswith("mongodb+srv://")
             ):
                 try:
+                    fallback_uri = MONGO_DNS_FALLBACK_URI or MONGO_LOCAL_URI
+                    fallback_label = (
+                        "dns fallback" if MONGO_DNS_FALLBACK_URI else "local fallback"
+                    )
                     logger.warning(
-                        "[mongo_fallback] Attempting local MongoDB fallback due to DNS/SRV error."
+                        "[mongo_fallback] Attempting %s MongoDB fallback due to DNS/SRV error.",
+                        fallback_label,
                     )
                     _mongo_client_real = MongoClient(
-                        MONGO_LOCAL_URI, serverSelectionTimeoutMS=3000
+                        fallback_uri, serverSelectionTimeoutMS=3000
                     )
                     _mongo_client_real.admin.command("ismaster")
-                    _effective_uri_real = MONGO_LOCAL_URI
+                    _effective_uri_real = fallback_uri
                     _using_fallback_real = True
                     try:
                         logger.warning(
-                            "[mongo_fallback] Using local fallback Mongo URI instead of primary (DNS/SRV error)."
+                            "[mongo_fallback] Using %s Mongo URI instead of primary (DNS/SRV error).",
+                            fallback_label,
                         )
                     except Exception:
                         pass
                     if _debug_mongo_enabled():
                         try:
                             logger.debug(
-                                "[MongoConnect] Local fallback host: %s",
-                                _host_display_from_uri(MONGO_LOCAL_URI),
+                                "[MongoConnect] %s host: %s",
+                                fallback_label,
+                                _host_display_from_uri(fallback_uri),
                             )
                         except Exception:
                             pass

@@ -229,8 +229,8 @@ export async function loadTabData(tabId) {
       break;
     case 'vontologyTab':
       // Load vontology tree data
-      const { fetchAndRenderVontologyTree } = await import('./vontology.js');
-      await fetchAndRenderVontologyTree();
+      const { maybeLoadVontologyTree } = await import('./vontology.js');
+      await maybeLoadVontologyTree();
       break;
     case 'chatTab':
     case 'settingsTab':

@@ -85,6 +85,11 @@ function findDefaultVoiceLang(voices) {
     return lang;
 }
 
+function getMaxSpeakingSecondsSetting() {
+    const raw = safeLocalStorageGet('chatTtsMaxSpeakingSeconds');
+    return clampNumber(raw, 10, 600);
+}
+
 export function __testOnly_buildClientCapabilitiesPayload() {
     const root = getRoot();
     const documentEl = root?.document || null;
@@ -106,7 +111,8 @@ export function __testOnly_buildClientCapabilitiesPayload() {
                 rate: clampNumber(safeLocalStorageGet('chatTtsRate'), 0.5, 2),
                 pitch: clampNumber(safeLocalStorageGet('chatTtsPitch'), 0, 2),
                 volume: clampNumber(safeLocalStorageGet('chatTtsVolume'), 0, 1),
-                voice_name: voiceName
+                voice_name: voiceName,
+                max_speaking_seconds: getMaxSpeakingSecondsSetting()
             }
         },
         audio_output: {
