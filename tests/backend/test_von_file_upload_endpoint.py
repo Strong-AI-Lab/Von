@@ -243,10 +243,13 @@ def test_upload_stores_bytes_and_registers_concept(app):
 
     upserts = app.config["TEST_UPSERTS"]
     predicates = {u["predicate"] for u in upserts}
-    assert "hasBlobUri" in predicates
-    assert "hasBlobKey" in predicates
-    assert "hasSha256" in predicates
-    assert "hasSizeBytes" in predicates
+    assert "#V#has_blob_uri" in predicates
+    assert "#V#has_blob_key" in predicates
+    assert "#V#has_blob_backend" in predicates
+    assert "#V#has_original_filename" in predicates
+    assert "#V#has_sha256" in predicates
+    assert "#V#has_size_bytes" in predicates
+    assert "#V#has_upload_timestamp" in predicates
 
     history_calls = app.config["TEST_HISTORY_CALLS"]
     assert len(history_calls) == 2
