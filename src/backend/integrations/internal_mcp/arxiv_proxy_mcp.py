@@ -98,25 +98,48 @@ class ArxivMCPProxy:
                     self._call_count += 1
 
                     # Extract content from response
-                    if result.content:
-                        for item in result.content:
-                            if isinstance(item, mcp_types.TextContent):
-                                # Try to parse as JSON if it looks like structured data
-                                text_data = item.text
-                                if text_data.strip().startswith("{"):
-                                    try:
-                                        import json
+                    if not result.content:
+                        return {}
 
-                                        return json.loads(text_data)
-                                    except json.JSONDecodeError:
-                                        return {"text": text_data}
+                    payloads: list[dict[str, Any]] = []
+                    first_text: str | None = None
+                    for item in result.content:
+                        if isinstance(item, mcp_types.TextContent):
+                            text_data = item.text
+                            if first_text is None:
+                                first_text = text_data
+                            payloads.append({"type": "text", "text": text_data})
+                        elif isinstance(item, mcp_types.ImageContent):
+                            payloads.append(
+                                {
+                                    "type": "image",
+                                    "image": item.data,
+                                    "mimeType": item.mimeType,
+                                }
+                            )
+                        elif isinstance(item, mcp_types.EmbeddedResource):
+                            payloads.append(
+                                {
+                                    "type": "resource",
+                                    "resource": item.resource,
+                                }
+                            )
+
+                    if len(payloads) == 1 and payloads[0].get("type") == "text":
+                        text_data = payloads[0].get("text") or ""
+                        if str(text_data).strip().startswith("{"):
+                            try:
+                                import json
+
+                                return json.loads(text_data)
+                            except json.JSONDecodeError:
                                 return {"text": text_data}
-                            elif isinstance(item, mcp_types.ImageContent):
-                                return {"image": item.data, "mimeType": item.mimeType}
-                            elif isinstance(item, mcp_types.EmbeddedResource):
-                                return {"resource": item.resource, "type": item.type}
+                        return {"text": text_data}
 
-                    return {}
+                    combined: dict[str, Any] = {"items": payloads}
+                    if first_text is not None:
+                        combined["text"] = first_text
+                    return combined
 
         except Exception as e:
             self._error_count += 1
