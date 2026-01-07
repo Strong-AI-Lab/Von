@@ -43,6 +43,97 @@ export function initializeConceptTabState() {
 // Global interaction state
 let currentInteractionId = null;
 
+// Browser-local preference: show CODE names in Names section (default: true)
+const LS_SHOW_CODE_NAMES = 'von_show_code_names';
+// Browser-local preference: filter NL names to preferred language (default: false)
+const LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE = 'von_filter_nl_names_to_preferred_language';
+// Browser-local preferred language key (used by settings page)
+const LS_PREFERRED_LANGUAGE = 'von_preferred_language';
+function getShowCodeNamesSetting() {
+  try {
+    const raw = localStorage.getItem(LS_SHOW_CODE_NAMES);
+    if (raw === null || raw === undefined) {
+      return true;
+    }
+    return String(raw) === 'true';
+  } catch {
+    return true;
+  }
+}
+
+function getFilterNlNamesToPreferredLanguageSetting() {
+  try {
+    const raw = localStorage.getItem(LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE);
+    if (raw === null || raw === undefined) {
+      return false;
+    }
+    return String(raw) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function getSelectedConceptIdForSuffix(suffix) {
+  try {
+    const containerId = suffix ? `conceptTab_${suffix}` : 'conceptTab';
+    const container = document.getElementById(containerId) || document;
+    const expectedRadioName = suffix ? `selectedconcept_${suffix}` : 'selectedconcept';
+    const radios = container.querySelectorAll('input[type="radio"]');
+    for (const radio of radios) {
+      if (radio?.name === expectedRadioName && radio.checked) {
+        return radio.value;
+      }
+    }
+  } catch (_) {
+    // ignore
+  }
+  return getCurrentlySelectedConceptId();
+}
+
+function listOpenConceptTabSuffixes() {
+  const suffixes = new Set(['']);
+  try {
+    document.querySelectorAll('.tab-content').forEach((el) => {
+      const id = String(el?.id || '');
+      if (!id) return;
+      if (id === 'conceptTab') {
+        suffixes.add('');
+        return;
+      }
+      if (id.startsWith('conceptTab_')) {
+        suffixes.add(id.replace('conceptTab_', ''));
+      }
+    });
+  } catch (_) {
+    // ignore
+  }
+  return Array.from(suffixes);
+}
+
+function refreshNamesForAllOpenConceptTabs() {
+  const suffixes = listOpenConceptTabSuffixes();
+  for (const suffix of suffixes) {
+    const conceptId = getSelectedConceptIdForSuffix(suffix);
+    if (!conceptId) {
+      continue;
+    }
+    void loadConceptNames(conceptId, suffix);
+  }
+}
+
+// If settings change while a concept is open, refresh names in all open concept tabs (incl. suffix tabs).
+try {
+  window.addEventListener('von-preferences-changed', (evt) => {
+    const key = evt?.detail?.key;
+    if (![LS_SHOW_CODE_NAMES, LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE, LS_PREFERRED_LANGUAGE].includes(key)) {
+      return;
+    }
+    refreshNamesForAllOpenConceptTabs();
+  });
+} catch (_) {
+  // ignore
+}
+
 // Save button state management
 let originalNotes = '';
 let updateSaveButtonStateTimeout = null;
@@ -2481,11 +2572,54 @@ export async function fetchInstancesWithSuffix(conceptId, suffix) {
 // Names Management Functions
 let currentConceptNames = [];
 
+function isUuidLike(text) {
+  const t = (text || '').toString().trim();
+  if (!t) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t);
+}
+
+function isHexObjectIdLike(text) {
+  const t = (text || '').toString().trim();
+  if (!t) return false;
+  // MongoDB ObjectId-ish (24 hex chars).
+  return /^[0-9a-f]{24}$/i.test(t);
+}
+
+function isVonConceptIdLike(text) {
+  const t = (text || '').toString().trim();
+  return t.startsWith('#V#');
+}
+
+function getDisplayLanguageForName(nameObj) {
+  const type = (nameObj?.type || '').toString().trim().toUpperCase();
+  const language = (nameObj?.language || '').toString().trim();
+  const text = (nameObj?.name || nameObj?.text || '').toString().trim();
+
+  // JVNAUTOSCI-937: GUID-like CODE values are not natural-language text.
+  // This is display-only; we do not rewrite stored language codes.
+  if (type === 'VONGUID') return 'guid';
+  if (type === 'CODE' && (isUuidLike(text) || isHexObjectIdLike(text))) return 'guid';
+  if (type === 'CODE' && language.toLowerCase() === 'vonguid') return 'guid';
+
+  // JVNAUTOSCI-937: Von concept IDs are CODE identifiers (display-only language `id-von`).
+  if (type === 'CODE' && isVonConceptIdLike(text)) return 'id-von';
+
+  return language || 'en-NZ';
+}
+
 /**
  * Get the preferred language from settings
  * @returns {Promise<string>} The preferred language code
  */
 async function getPreferredLanguage() {
+  try {
+    const local = String(localStorage.getItem(LS_PREFERRED_LANGUAGE) || '').trim();
+    if (local) {
+      return local;
+    }
+  } catch (_) {
+    // ignore
+  }
   try {
     const response = await fetch('/api/settings/');
     if (response.ok) {
@@ -2600,8 +2734,6 @@ export async function displayConceptNames(names = [], suffix = '') {
   if (currentConceptNames.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'names-empty-state';
-    empty.style.color = '#6b7280';
-    empty.style.fontStyle = 'italic';
     empty.textContent = 'No names yet. Add one below.';
     namesList.appendChild(empty);
     return;
@@ -2654,8 +2786,10 @@ export async function displayConceptNames(names = [], suffix = '') {
       return spaced;
     };
 
-    // Inline edit behavior
-    nameText.addEventListener('click', () => {
+    const isCodeName = (nameObj.type || '').toString().trim().toUpperCase() === 'CODE';
+
+    // Inline edit behaviour (JVNAUTOSCI-937): CODE names are read-only (for now).
+    if (!isCodeName) nameText.addEventListener('click', () => {
       try {
         const original = nameObj.name || nameObj.text || '';
         // Only propose CamelCase spacing for Latin languages and when text looks Latin-script
@@ -2718,7 +2852,7 @@ export async function displayConceptNames(names = [], suffix = '') {
 
     const languageBadge = document.createElement('span');
     languageBadge.className = 'name-language-badge';
-    languageBadge.textContent = nameObj.language || 'en-NZ';
+    languageBadge.textContent = getDisplayLanguageForName(nameObj);
 
     nameMeta.appendChild(typeBadge);
     nameMeta.appendChild(languageBadge);
@@ -2728,7 +2862,11 @@ export async function displayConceptNames(names = [], suffix = '') {
     deleteBtn.className = 'name-delete-button';
     deleteBtn.innerHTML = '×';
     deleteBtn.title = 'Remove this name';
-    deleteBtn.disabled = currentConceptNames.length === 1;
+    deleteBtn.disabled = currentConceptNames.length === 1 || isCodeName;
+
+    if (isCodeName) {
+      deleteBtn.title = 'CODE names are read-only and cannot be removed';
+    }
 
     if (!deleteBtn.disabled) {
       deleteBtn.addEventListener('click', () => deleteName(index, suffix));
@@ -2837,6 +2975,11 @@ export async function deleteName(index, suffix = '') {
   }
 
   const nameToDelete = currentConceptNames[index];
+
+  if ((nameToDelete?.type || '').toString().trim().toUpperCase() === 'CODE') {
+    setNamesStatusMessage(suffix, 'CODE names are read-only and cannot be removed', 'red', true);
+    return;
+  }
 
   try {
     setNamesStatusMessage(suffix, 'Deleting...', 'blue');
@@ -2956,7 +3099,25 @@ export async function loadConceptNames(conceptId, suffix = '') {
     const concept = await response.json();
     console.log('Loaded concept data:', concept);
 
-    const names = concept.names || [];
+    let names = concept.names || [];
+    if (!getShowCodeNamesSetting() && Array.isArray(names)) {
+      names = names.filter((n) => {
+        const type = (n?.type ?? n?.context?.name_type ?? 'NL');
+        return String(type || '').trim().toUpperCase() !== 'CODE';
+      });
+    }
+
+    if (getFilterNlNamesToPreferredLanguageSetting() && Array.isArray(names)) {
+      const preferredLanguage = await getPreferredLanguage();
+      names = names.filter((n) => {
+        const type = String(n?.type ?? n?.context?.name_type ?? 'NL').trim().toUpperCase();
+        if (type !== 'NL') {
+          return true;
+        }
+        const lang = String(n?.language ?? n?.lang ?? 'en-NZ').trim() || 'en-NZ';
+        return lang === preferredLanguage;
+      });
+    }
     console.log('Extracted names array:', names);
 
     await displayConceptNames(names, suffix);

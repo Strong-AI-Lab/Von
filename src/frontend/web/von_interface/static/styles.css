@@ -147,6 +147,16 @@ body {
     cursor: pointer;
 }
 
+.history-session-row.is-active {
+    background: #eaf4ff;
+    border-left: 3px solid #2684ff;
+    padding-left: 8px;
+}
+
+.history-session-row.is-completed {
+    opacity: 0.75;
+}
+
 .history-session-row:hover {
     background: #f2f4f7;
 }
@@ -170,6 +180,18 @@ body {
     gap: 2px;
     flex: 1;
     min-width: 0;
+}
+
+.history-session-actions {
+    display: flex;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.history-session-actions-bar {
+    display: flex;
+    justify-content: flex-end;
+    margin: 0 0 8px 0;
 }
 
 .history-session-meta {
@@ -3046,6 +3068,159 @@ footer {
     min-width: 0;
 }
 
+#vontologyPreloadOffBadge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background-color: #f4f4f4;
+    border: 1px solid #c9c9c9;
+    font-size: 12px;
+    color: #555;
+}
+
+#vontologyPreloadOffHelp {
+    display: block;
+    margin-top: 4px;
+    color: #666;
+    font-size: 12px;
+}
+
+.chat-session-tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 12px;
+    padding: 6px 0 10px;
+    border-bottom: 1px solid #e5e7eb;
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+
+.chat-session-tab {
+    border: 1px solid #cbd5e1;
+    background: #f8fafc;
+    color: #1f2937;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    line-height: 1.1;
+    cursor: pointer;
+    white-space: nowrap;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    flex: 0 0 auto;
+    max-width: 160px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.chat-session-tab:hover {
+    border-color: #94a3b8;
+    background: #f1f5f9;
+}
+
+.chat-session-tab.is-open {
+    background: #ecfdf5;
+    border-color: #86efac;
+    color: #065f46;
+}
+
+.chat-session-tab.is-completed {
+    background: #f1f5f9;
+    border-color: #cbd5e1;
+    color: #475569;
+}
+
+.chat-session-tab.is-active {
+    border-color: #2563eb;
+    box-shadow: inset 0 -2px 0 #1d4ed8;
+}
+
+.chat-session-tab.is-loading::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
+    width: 40%;
+    background: linear-gradient(90deg, transparent, #2563eb, transparent);
+    animation: chatSessionLoadingBar 0.9s ease-in-out infinite;
+}
+
+.chat-session-tab-new {
+    font-weight: 700;
+    padding: 6px 10px;
+    align-items: center;
+    justify-content: center;
+}
+
+.chat-session-tab-label {
+    font-weight: 600;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+}
+
+.chat-session-tab-meta {
+    font-size: 11px;
+    color: #64748b;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-session-loading {
+    text-align: center;
+    padding: 16px;
+    color: #475569;
+    font-weight: 600;
+}
+
+@keyframes chatSessionLoadingBar {
+    0% {
+        transform: translateX(-120%);
+    }
+    100% {
+        transform: translateX(220%);
+    }
+}
+
+.chat-session-menu {
+    position: fixed;
+    z-index: 20050;
+    min-width: 160px;
+    background: #fff;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    padding: 6px;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+    display: none;
+}
+
+.chat-session-menu.open {
+    display: block;
+}
+
+.chat-session-menu button {
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: #111827;
+}
+
+.chat-session-menu button:hover {
+    background: #e5e7eb;
+}
+
 .chat-export-btn {
     padding: 6px 10px;
     font-size: 14px;
@@ -3230,6 +3405,13 @@ footer {
     /* prevent over-expanding */
     box-sizing: border-box;
     background-color: white;
+}
+
+.scrollable-field.drag-over {
+    border-color: #2b7fff;
+    outline: 2px dashed #2b7fff;
+    outline-offset: -6px;
+    background-color: rgba(43, 127, 255, 0.06);
 }
 
 /* Chat variant (legacy class) updated for parity */
@@ -4559,6 +4741,30 @@ button.prompt-vontology-cartouche {
     background-color: #f9f9f9;
 }
 
+.names-empty-state {
+    color: #6b7280;
+    font-style: italic;
+    padding: 6px 8px;
+}
+
+.names-technical-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 4px 8px 4px;
+    font-size: 12px;
+    color: #6b7280;
+}
+
+.names-technical-toggle-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
 /* NUCLEAR OPTION - Maximum specificity cartouche rules */
 html body div[id^="namesList_"] .name-cartouche,
 html body .names-list-container .name-cartouche,
@@ -5281,6 +5487,15 @@ body.settings-body {
     font-size: 0.9em;
     color: #666;
     margin-bottom: 10px;
+}
+
+/* Tool Execution Caps inputs (settings_tab) */
+#internalMcpMaxToolInvocations {
+    width: 110px;
+}
+
+#internalMcpToolBatchCap {
+    width: 90px;
 }
 
 #dbInfoContent {

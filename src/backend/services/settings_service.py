@@ -31,7 +31,15 @@ ACTIVE_OLLAMA_HOST_SETTING_NAME = "active_ollama_host"
 # Removed: CURRENT_USER_PERSON_CONCEPT_SETTING_NAME, CURRENT_ORGANISATION_* constants (client localStorage authority)
 PREFERRED_LANGUAGE_SETTING_NAME = "preferred_language"
 FETCH_COUNTS_ON_LOAD_SETTING_NAME = "fetch_counts_on_load"
+PRELOAD_VONTOLOGY_TREE_SETTING_NAME = "preload_vontology_tree"
 DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME = "disable_remote_ollama_scan"
+
+# Internal MCP orchestrator caps (Settings → Agent Configuration)
+INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME = "internal_mcp_max_tool_invocations"
+INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME = "internal_mcp_tool_batch_cap"
+
+# Chat UI: show tool use during the “Thinking…” indicator (JVNAUTOSCI-942)
+SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME = "show_tool_use_during_thinking"
 
 # Prefixes for contextual (scoped) LLM settings (Phase 2 scaffold)
 _ACTIVE_LLM_USER_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:user:"
@@ -640,6 +648,31 @@ def set_fetch_counts_on_load(enabled: bool) -> bool:
     return update_setting(FETCH_COUNTS_ON_LOAD_SETTING_NAME, enabled)
 
 
+def get_preload_vontology_tree() -> bool:
+    """Return whether the frontend should preload the Vontology tree on page load.
+
+    Defaults to False when unset or invalid.
+    """
+    val = get_setting(PRELOAD_VONTOLOGY_TREE_SETTING_NAME)
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("1", "true", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "no", "n", "off"):
+            return False
+    if isinstance(val, (int, float)):
+        return val != 0
+    return False
+
+
+def set_preload_vontology_tree(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        enabled = bool(enabled)
+    return update_setting(PRELOAD_VONTOLOGY_TREE_SETTING_NAME, enabled)
+
+
 def get_disable_remote_ollama_scan() -> bool:
     """Return whether remote Ollama host scanning should be disabled.
 
@@ -665,6 +698,100 @@ def set_disable_remote_ollama_scan(disabled: bool) -> bool:
         # Coerce permissively but persist canonical bool
         disabled = bool(disabled)
     return update_setting(DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME, disabled)
+
+
+def get_show_tool_use_during_thinking() -> bool:
+    """Return whether the chat UI should show tool use while Von is thinking.
+
+    Defaults to True when unset or invalid.
+    """
+
+    val = get_setting(SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME)
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("1", "true", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "no", "n", "off"):
+            return False
+    if isinstance(val, (int, float)):
+        return val != 0
+    return True
+
+
+def set_show_tool_use_during_thinking(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        enabled = bool(enabled)
+    return update_setting(SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME, enabled)
+
+
+def _coerce_int_setting(
+    value: Any,
+    *,
+    default: int,
+    min_value: int,
+    max_value: int,
+) -> int:
+    if value is None:
+        return default
+
+    parsed: int | None = None
+    if isinstance(value, bool):
+        # Avoid treating True/False as 1/0 for numeric settings.
+        parsed = None
+    elif isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float):
+        try:
+            parsed = int(value)
+        except Exception:
+            parsed = None
+    elif isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except Exception:
+            parsed = None
+
+    if parsed is None:
+        return default
+
+    return max(min_value, min(max_value, parsed))
+
+
+def get_internal_mcp_max_tool_invocations() -> int:
+    """Return the maximum number of internal MCP tool calls per chat turn.
+
+    Defaults to 30 when unset/invalid.
+    """
+
+    val = get_setting(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME)
+    return _coerce_int_setting(val, default=30, min_value=0, max_value=50)
+
+
+def set_internal_mcp_max_tool_invocations(value: Any) -> bool:
+    """Persist the max internal MCP tool invocations (canonical int, clamped)."""
+
+    coerced = _coerce_int_setting(value, default=30, min_value=0, max_value=50)
+    return update_setting(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME, coerced)
+
+
+def get_internal_mcp_tool_batch_cap() -> int:
+    """Return the maximum number of tool calls executed per batch.
+
+    This is a guardrail against very large tool-call lists per iteration.
+    Defaults to 10 when unset/invalid.
+    """
+
+    val = get_setting(INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME)
+    return _coerce_int_setting(val, default=10, min_value=1, max_value=50)
+
+
+def set_internal_mcp_tool_batch_cap(value: Any) -> bool:
+    """Persist the tool-call batch cap (canonical int, clamped)."""
+
+    coerced = _coerce_int_setting(value, default=10, min_value=1, max_value=50)
+    return update_setting(INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME, coerced)
 
 
 # Ollama hosts settings functions

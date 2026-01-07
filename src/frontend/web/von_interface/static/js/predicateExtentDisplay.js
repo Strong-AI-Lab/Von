@@ -7,6 +7,7 @@
 
 import { createOrActivateConceptTab } from './dynamicTabs.js';
 import { fetchPredicateExtent } from './predicateUtils.js';
+import { selectBestNameForContext } from './utils/nameSelection.js';
 
 /**
  * Cache for concept display names to avoid repeated fetches.
@@ -46,7 +47,6 @@ async function getConceptMetadata(conceptId) {
         }
 
         const doc = await resp.json();
-        const currentLang = document.documentElement.lang || 'en';
 
         // Use kind from backend (type, predicate, or individual)
         const kind = doc.kind || 'unknown';
@@ -67,42 +67,7 @@ async function getConceptMetadata(conceptId) {
             return metadata;
         }
 
-        // Filter by language
-        let filtered = names.filter(n => n && n.language === currentLang);
-        if (filtered.length === 0) {
-            // Try base language
-            const langBase = currentLang.split('-')[0];
-            filtered = names.filter(n => n && (n.language === langBase || (n.language || '').startsWith(langBase + '-')));
-        }
-        if (filtered.length === 0) {
-            filtered = names;
-        }
-
-        // Collect candidates (prefer abbrev, then text, then name)
-        const candidates = [];
-        for (const n of filtered) {
-            if (n) {
-                if (typeof n.abbrev === 'string' && n.abbrev.trim()) {
-                    candidates.push(n.abbrev.trim());
-                }
-                if (typeof n.text === 'string' && n.text.trim()) {
-                    candidates.push(n.text.trim());
-                }
-                if (typeof n.name === 'string' && n.name.trim()) {
-                    candidates.push(n.name.trim());
-                }
-            }
-        }
-
-        if (candidates.length === 0) {
-            const metadata = { displayName: conceptId, kind };
-            conceptMetadataCache.set(conceptId, metadata);
-            return metadata;
-        }
-
-        // Choose shortest
-        candidates.sort((a, b) => a.length - b.length || a.localeCompare(b));
-        const displayName = candidates[0];
+        const displayName = selectBestNameForContext(names) || doc.name || doc.display_name || conceptId;
         const metadata = { displayName, kind };
         conceptMetadataCache.set(conceptId, metadata);
         return metadata;

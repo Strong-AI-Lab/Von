@@ -18,6 +18,8 @@ from ...services.settings_service import (
     set_openai_env_var,
     get_fetch_counts_on_load,
     set_fetch_counts_on_load,
+    get_preload_vontology_tree,
+    set_preload_vontology_tree,
     get_ollama_hosts_list,
     set_ollama_hosts_list,
     get_active_ollama_host,
@@ -26,7 +28,13 @@ from ...services.settings_service import (
     set_user_llm_setting,
     set_org_llm_setting,
     get_disable_remote_ollama_scan,
+    get_show_tool_use_during_thinking,
     set_disable_remote_ollama_scan,
+    set_show_tool_use_during_thinking,
+    get_internal_mcp_max_tool_invocations,
+    set_internal_mcp_max_tool_invocations,
+    get_internal_mcp_tool_batch_cap,
+    set_internal_mcp_tool_batch_cap,
 )
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...languagemodels.llm_interface import OpenAIClient
@@ -481,11 +489,38 @@ def _get_entity_with_fallback(
 def get_all_settings_data():
     """Get all settings (user/org/language now excluded - browser-local)."""
     try:
+        # Jira internal MCP guardrail environment settings (read-only; surfaced for visibility).
+        jira_allow_list_raw = os.getenv("VON_JIRA_PROJECT_ALLOW_LIST") or os.getenv(
+            "VON_JIRA_PROJECT_ALLOWLIST"
+        )
+        jira_allow_list_effective_raw = jira_allow_list_raw or "JVNAUTOSCI"
+        jira_allow_list_effective: list[str] = []
+        for part in jira_allow_list_effective_raw.split(","):
+            candidate = part.strip().upper()
+            if not candidate:
+                continue
+            if candidate not in jira_allow_list_effective:
+                jira_allow_list_effective.append(candidate)
+
+        jira_execute_mode_raw = os.getenv("VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", "0")
+        jira_execute_mode_enabled = str(jira_execute_mode_raw).strip().lower() in {
+            "1",
+            "true",
+        }
+
         return {
             "active_llm": get_active_llm_setting(),
             "openai_api_key_env_var": get_openai_env_var(),
             "fetch_counts_on_load": get_fetch_counts_on_load(),
+            "preload_vontology_tree": get_preload_vontology_tree(),
             "disable_remote_ollama_scan": get_disable_remote_ollama_scan(),
+            "internal_mcp_max_tool_invocations": get_internal_mcp_max_tool_invocations(),
+            "internal_mcp_tool_batch_cap": get_internal_mcp_tool_batch_cap(),
+            "show_tool_use_during_thinking": get_show_tool_use_during_thinking(),
+            "jira_project_allow_list_raw": jira_allow_list_raw,
+            "jira_project_allow_list_effective": jira_allow_list_effective,
+            "internal_mcp_jira_execute_mode_raw": jira_execute_mode_raw,
+            "internal_mcp_jira_execute_mode_enabled": jira_execute_mode_enabled,
         }
     except Exception as e:
         current_app.logger.error(f"Error retrieving settings data: {e}", exc_info=True)
@@ -562,6 +597,14 @@ def save_all_settings():
             set_fetch_counts_on_load(enabled)
             current_app.logger.info(f"fetch_counts_on_load set to: {enabled}")
 
+        if "preload_vontology_tree" in data:
+            try:
+                enabled = bool(data.get("preload_vontology_tree"))
+            except Exception:
+                enabled = False
+            set_preload_vontology_tree(enabled)
+            current_app.logger.info("preload_vontology_tree set to: %s", enabled)
+
         if "disable_remote_ollama_scan" in data:
             try:
                 disabled = bool(data.get("disable_remote_ollama_scan"))
@@ -569,6 +612,27 @@ def save_all_settings():
                 disabled = False
             set_disable_remote_ollama_scan(disabled)
             current_app.logger.info(f"disable_remote_ollama_scan set to: {disabled}")
+
+        if "internal_mcp_max_tool_invocations" in data:
+            set_internal_mcp_max_tool_invocations(
+                data.get("internal_mcp_max_tool_invocations")
+            )
+            current_app.logger.info("internal_mcp_max_tool_invocations updated")
+
+        if "internal_mcp_tool_batch_cap" in data:
+            set_internal_mcp_tool_batch_cap(data.get("internal_mcp_tool_batch_cap"))
+            current_app.logger.info("internal_mcp_tool_batch_cap updated")
+
+        if "show_tool_use_during_thinking" in data:
+            try:
+                enabled = bool(data.get("show_tool_use_during_thinking"))
+            except Exception:
+                enabled = True
+            set_show_tool_use_during_thinking(enabled)
+            current_app.logger.info(
+                "show_tool_use_during_thinking updated: %s",
+                enabled,
+            )
 
         # user/org/language fields intentionally ignored (browser-local)
 
@@ -786,7 +850,9 @@ def get_user_prefs(user_concept_id: str):
     try:
         if not user_concept_id:
             return jsonify({"error": "Missing user_concept_id"}), 400
-        concept = ConceptsRepository.find_one({"concept_id": user_concept_id})
+        from ...services.concept_service import get_concept_by_concept_id
+
+        concept = get_concept_by_concept_id(concept_id=user_concept_id)
         if not concept:
             return jsonify({"error": "User concept not found"}), 404
         rel = _normalize_relationships(concept.get("relationships", {}))
@@ -827,7 +893,12 @@ def set_user_prefs(user_concept_id: str):
         data = request.get_json(silent=True) or {}
         preferred_language = data.get("preferred_language")
         organisation_concept_id = data.get("organisation_concept_id")
-        concept = ConceptsRepository.find_one({"concept_id": user_concept_id})
+        from ...services.concept_service import (
+            get_concept_by_concept_id,
+            update_concept,
+        )
+
+        concept = get_concept_by_concept_id(concept_id=user_concept_id)
         if not concept:
             return jsonify({"error": "User concept not found"}), 404
         rel = _normalize_relationships(concept.get("relationships", {}))
@@ -846,42 +917,7 @@ def set_user_prefs(user_concept_id: str):
         )
         desired_lang = desired_lang or None
 
-        for current_lang in list(existing_lang):
-            if desired_lang and current_lang == desired_lang:
-                continue
-            try:
-                ConceptsRepository.mutate_relationship_edge(
-                    user_concept_id,
-                    USER_PREF_LANG_PREDICATE,
-                    current_lang,
-                    action="remove",
-                    maintain_inverse=False,
-                )
-            except ValueError:
-                current_app.logger.debug(
-                    f"preferred_language remove skipped for {user_concept_id}: missing concept",
-                    exc_info=False,
-                )
-            existing_lang.remove(current_lang)
-
-        if desired_lang:
-            if desired_lang not in existing_lang:
-                try:
-                    ConceptsRepository.mutate_relationship_edge(
-                        user_concept_id,
-                        USER_PREF_LANG_PREDICATE,
-                        desired_lang,
-                        action="add",
-                        maintain_inverse=False,
-                    )
-                    existing_lang.append(desired_lang)
-                except ValueError:
-                    current_app.logger.warning(
-                        f"Failed to set preferred_language for {user_concept_id}"
-                    )
-        else:
-            rel.pop(USER_PREF_LANG_PREDICATE, None)
-
+        existing_lang = [desired_lang] if desired_lang else []
         if existing_lang:
             rel[USER_PREF_LANG_PREDICATE] = existing_lang
         else:
@@ -896,46 +932,14 @@ def set_user_prefs(user_concept_id: str):
         )
         desired_org = desired_org or None
 
-        for current_org in list(existing_org):
-            if desired_org and current_org == desired_org:
-                continue
-            try:
-                ConceptsRepository.mutate_relationship_edge(
-                    user_concept_id,
-                    USER_PREF_ORG_PREDICATE,
-                    current_org,
-                    action="remove",
-                    maintain_inverse=False,
-                )
-            except ValueError:
-                current_app.logger.debug(
-                    f"organisation remove skipped for {user_concept_id}: missing concept",
-                    exc_info=False,
-                )
-            existing_org.remove(current_org)
-
-        if desired_org:
-            if desired_org not in existing_org:
-                try:
-                    ConceptsRepository.mutate_relationship_edge(
-                        user_concept_id,
-                        USER_PREF_ORG_PREDICATE,
-                        desired_org,
-                        action="add",
-                        maintain_inverse=False,
-                    )
-                    existing_org.append(desired_org)
-                except ValueError:
-                    current_app.logger.warning(
-                        f"Failed to set organisation preference for {user_concept_id}"
-                    )
-        else:
-            rel.pop(USER_PREF_ORG_PREDICATE, None)
-
+        existing_org = [desired_org] if desired_org else []
         if existing_org:
             rel[USER_PREF_ORG_PREDICATE] = existing_org
         else:
             rel.pop(USER_PREF_ORG_PREDICATE, None)
+
+        # Persist updated relationships via the normal concept service update path.
+        update_concept(user_concept_id, {"relationships": rel})
 
         return (
             jsonify(
@@ -1253,7 +1257,7 @@ def get_available_organisations():
         organisation_options = []
         for concept in unique_concepts:
             from ...services.concept_service import enrich_concept_with_text_relations
-            from backend.vontology.utils_vontology import (
+            from ...vontology.utils_vontology import (
                 get_concept_display_name_with_names_fallback,
             )
 

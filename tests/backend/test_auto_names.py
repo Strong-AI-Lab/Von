@@ -1,15 +1,13 @@
-import sys
-import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-from backend.services.concept_service import create_concept
-from backend.vontology.utils_vontology import import_ontology_nodes
+from src.backend.services.concept_service import create_concept
+from src.backend.vontology.utils_vontology import import_ontology_nodes
 
 
 class TestAutoNames(unittest.TestCase):
-    @patch("backend.services.concept_service.ConceptsRepository")
-    @patch("backend.services.text_value_service.upsert_text_for_concept")
+    @patch("src.backend.services.concept_service.ConceptsRepository")
+    @patch("src.backend.services.text_value_service.upsert_text_for_concept")
     def test_create_concept_auto_names(self, mock_upsert, mock_repo):
         print("Testing create_concept_auto_names...")
         # Setup mock
@@ -62,12 +60,12 @@ class TestAutoNames(unittest.TestCase):
         self.assertTrue(guid_call, "GUID not registered as CODE name")
 
     @patch(
-        "backend.vontology.utils_vontology.ConceptsRepository"
+        "src.backend.vontology.utils_vontology.ConceptsRepository"
     )  # Patch global import in utils_vontology
     @patch(
-        "backend.db.repositories.concepts_repository.ConceptsRepository"
+        "src.backend.db.repositories.concepts_repository.ConceptsRepository"
     )  # Patch for local import
-    @patch("backend.services.text_value_service.upsert_text_for_concept")
+    @patch("src.backend.services.text_value_service.upsert_text_for_concept")
     def test_import_ontology_nodes_auto_names(
         self, mock_upsert, mock_repo_local, mock_repo_global
     ):

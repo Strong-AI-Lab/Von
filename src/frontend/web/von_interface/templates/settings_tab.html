@@ -153,6 +153,52 @@
             </div>
             <div id="agentGmailOauthStatus" class="settings-note mt-1">Agent Gmail OAuth: unknown</div>
             <div id="gmailProfileStatus" class="settings-note">Gmail profile target: unknown</div>
+
+            <h3 class="mt-3">Tool Execution Caps</h3>
+            <p class="settings-note">Controls internal MCP tool chaining. Changes apply immediately for new chat turns.
+                Larger values can increase latency and tool load.</p>
+
+            <div class="inline-form inline-form-tight">
+                <label for="internalMcpMaxToolInvocations" class="mr-1">Max tool invocations per turn:</label>
+                <input type="number" id="internalMcpMaxToolInvocations" min="0" max="50" step="1" value="30"
+                    class="mr-2" />
+
+                <label for="internalMcpToolBatchCap" class="mr-1">Tool calls per batch:</label>
+                <input type="number" id="internalMcpToolBatchCap" min="1" max="50" step="1" value="10" />
+            </div>
+            <small class="settings-note">Defaults: 30 invocations, batch cap 10. Set invocations to 0 to disable tool
+                calls (chat still works).</small>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <input type="checkbox" id="showToolUseDuringThinkingToggle"
+                    aria-describedby="showToolUseDuringThinkingHelp" />
+                <label for="showToolUseDuringThinkingToggle" class="ml-1"
+                    title="When enabled, the Chat tab shows which internal MCP tool is being used while Von is thinking.">Show
+                    tool use during thinking</label>
+            </div>
+            <small id="showToolUseDuringThinkingHelp" class="settings-note">Default: enabled. Shows last tool name,
+                batch size, and remaining tool-call budget.</small>
+
+            <h3 class="mt-3">Jira Tool Guardrails</h3>
+            <p class="settings-note">Read-only visibility into the environment guardrails used by the internal MCP Jira
+                write tools. To change these values, update your environment and restart Von.</p>
+
+            <div class="inline-form inline-form-tight">
+                <span class="settings-note"><strong>Allowed Jira projects:</strong></span>
+                <button id="settingsJiraProjectAllowListValue" class="runtime-copy-button ml-2" type="button"
+                    title="Copy project allow-list">—</button>
+            </div>
+            <small class="settings-note">From <code>VON_JIRA_PROJECT_ALLOW_LIST</code>. Default:
+                <code>JVNAUTOSCI</code>.
+                Comma-separated project keys.</small>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <span class="settings-note"><strong>Jira execute mode:</strong></span>
+                <button id="settingsJiraExecuteModeValue" class="runtime-copy-button ml-2" type="button"
+                    title="Copy execute-mode state">—</button>
+            </div>
+            <small class="settings-note">From <code>VON_INTERNAL_MCP_JIRA_EXECUTE_MODE</code>. When enabled, callers may
+                pass <code>execute=true</code> to run writes without per-call <code>approved=true</code>.</small>
         </section>
 
         <section id="current-user-settings">
@@ -178,6 +224,24 @@
                 <!-- Options populated by languageConfig.js -->
             </select>
             <small>This will be the default language for new names and text entries.</small>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <input type="checkbox" id="settingsShowCodeNamesToggle" />
+                <label for="settingsShowCodeNamesToggle" class="ml-1"
+                    title="When enabled, CODE names (e.g., concept ids, GUIDs) are shown in the Names section.">Show
+                    CODE names in concepts</label>
+            </div>
+            <small class="settings-note">Stored only in this browser (localStorage). Default: enabled.</small>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <input type="checkbox" id="settingsFilterNlNamesToPreferredLanguageToggle" />
+                <label for="settingsFilterNlNamesToPreferredLanguageToggle" class="ml-1"
+                    title="When enabled, Natural Language (NL) names are filtered to only show those in your preferred language.">Only
+                    show [NL] names in preferred language (<span
+                        id="settingsPreferredLanguageForNlFilter">en-NZ</span>)</label>
+            </div>
+            <small class="settings-note">Non-NL names (e.g., ABBR/CODE) are not filtered. Stored only in this browser.
+                Default: disabled.</small>
             <div class="inline-form inline-form-tight mt-8-align-center">
                 <button type="button" id="resetLocalPrefsButton" class="btn-danger"
                     title="Clear stored user/org/language preferences for this browser">Reset Local Preferences</button>
@@ -255,6 +319,11 @@
                                 max="1" step="0.05" />
                             <span id="settingsTtsVolumeValue" class="speech-settings-value"
                                 aria-label="Text-to-speech volume"></span>
+                        </div>
+                        <div class="speech-settings-row">
+                            <label class="speech-settings-label" for="settingsTtsMaxSecondsInput">Max speaking (s)</label>
+                            <input id="settingsTtsMaxSecondsInput" class="speech-settings-input" type="number" min="10"
+                                step="5" inputmode="numeric" />
                         </div>
 
                         <div class="speech-settings-actions">
@@ -340,6 +409,16 @@
 
         <section id="vontology-performance">
             <h2>Vontology UI & Performance</h2>
+            <div class="inline-form inline-form-tight mb-2">
+                <input type="checkbox" id="preloadVontologyTreeToggle" aria-describedby="preloadVontologyTreeHelp" />
+                <label for="preloadVontologyTreeToggle" class="ml-1"
+                    title="When enabled, the Vontology tree preloads in the background while chat is active.">Preload
+                    Vontology tree in the background on page load</label>
+            </div>
+            <div>
+                <small id="preloadVontologyTreeHelp" class="settings-note">Default is off to avoid contention. When
+                    enabled, the Vontology tree loads early so the Vontology tab opens faster.</small>
+            </div>
             <div class="inline-form inline-form-tight mb-2">
                 <input type="checkbox" id="fetchCountsOnLoadToggle" aria-describedby="fetchCountsOnLoadHelp" />
                 <label for="fetchCountsOnLoadToggle" class="ml-1"

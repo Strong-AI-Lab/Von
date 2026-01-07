@@ -2,13 +2,17 @@ import importlib
 
 import pytest
 
+pytest.importorskip(
+    "mongomock", reason="mongomock is required for workflow trace tests"
+)
+
 
 @pytest.fixture()
 def mock_db_env(monkeypatch):
     # Must be set before importing mongo_client so USE_MOCK_DB is computed correctly.
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
 
-    import backend.db.mongo_client as mongo_client
+    import src.backend.db.mongo_client as mongo_client
 
     importlib.reload(mongo_client)
 
@@ -18,8 +22,8 @@ def mock_db_env(monkeypatch):
 
 
 def test_trace_store_roundtrip_and_redaction(mock_db_env):
-    from backend.workflows.trace_model import WorkflowExecutionTrace
-    from backend.workflows.trace_store import (
+    from src.backend.workflows.trace_model import WorkflowExecutionTrace
+    from src.backend.workflows.trace_store import (
         get_workflow_execution_trace,
         insert_workflow_execution_trace,
         list_recent_workflow_execution_traces,

@@ -512,6 +512,55 @@
             }
         },
         {
+            "name": "resolve_concept_by_name",
+            "description": "Resolve a Vontology concept deterministically from a user-provided surface form. Read-only (no mutation). Returns resolved/ambiguous/not_found with an audit trail.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The surface form / name to resolve"
+                    },
+                    "preferred_languages": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Preferred languages (ordered) used as a tie-breaker"
+                    },
+                    "allowed_languages": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Restrict candidate name matching to these languages"
+                    },
+                    "instance_of": {
+                        "type": "string",
+                        "description": "Restrict matches to concepts that are instances of this type (includes descendants)"
+                    },
+                    "match_code_strings": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "If true, allow resolving '#V#...' and code-style identifiers"
+                    },
+                    "normalisation_level": {
+                        "type": "string",
+                        "default": "default",
+                        "description": "Normalisation aggressiveness (currently informational)"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "default": 5,
+                        "description": "Maximum candidates returned when ambiguous"
+                    }
+                },
+                "required": [
+                    "name"
+                ]
+            }
+        },
+        {
             "name": "vontology_concept_search",
             "description": "Namespaced alias for concept search used by the MCP orchestrator. Same behaviour as search_concepts (query required; use empty string when combining with instance_of filters).",
             "inputSchema": {

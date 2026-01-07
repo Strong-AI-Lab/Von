@@ -19,7 +19,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 try:  # Optional dependency: agent Gmail OAuth token store.
-    from backend.services.agent_gmail_token_store import (
+    from ...services.agent_gmail_token_store import (
         get_agent_gmail_token_payload as _get_agent_gmail_token_payload,
         get_agent_gmail_token_status as _get_agent_gmail_token_status,
         upsert_agent_gmail_tokens as _upsert_agent_gmail_tokens,

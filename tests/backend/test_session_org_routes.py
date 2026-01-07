@@ -182,6 +182,36 @@ def test_get_session_context_derives_role_and_namespace_with_org(app_client):
     )
 
 
+def test_set_user_concept_updates_session_context_and_org_listing(app_client):
+    _, client = app_client
+
+    with client.session_transaction() as sess:
+        sess["user_email"] = "jeremyluyunli123@gmail.com"
+
+    resp = client.post(
+        "/von/api/session/set_user_concept", json={"user_concept_id": "#V#lu_yunli"}
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["user_id"] == "#V#lu_yunli"
+    assert data["organisation_id"] is None
+    assert data["role"] is None
+    assert data["namespace"] == "#V#lu_yunli"
+
+    ctx = client.get("/von/api/session/context")
+    assert ctx.status_code == 200
+    ctx_data = ctx.get_json()
+    assert ctx_data["user_id"] == "#V#lu_yunli"
+    assert ctx_data["namespace"] == "#V#lu_yunli"
+
+    orgs = client.get("/von/api/organisations/my_organisations")
+    assert orgs.status_code == 200
+    orgs_data = orgs.get_json()
+    assert orgs_data["total_count"] == 1
+    assert orgs_data["organisations"][0]["concept_id"] == "#V#the_lu_witbrock_household"
+
+
 def test_get_my_organisations_requires_authentication(app_client):
     _, client = app_client
 
@@ -206,3 +236,78 @@ def test_get_my_organisations_returns_stubbed_memberships(app_client):
     assert org["concept_id"] == "#V#university_of_auckland_strong_ai_lab"
     assert org["role"] == "admin"
     assert org["name"] == "University Of Auckland Strong Ai Lab"
+
+
+def test_get_my_organisations_uses_user_email_for_stub_memberships(app_client):
+    _, client = app_client
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = "opaque-oauth-subject"
+        sess["user_email"] = "lu.yunli@example.com"
+
+    resp = client.get("/von/api/organisations/my_organisations")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 1
+    org = data["organisations"][0]
+    assert org["concept_id"] == "#V#the_lu_witbrock_household"
+    assert org["role"] == "member"
+    assert org["name"] == "The Lu Witbrock Household"
+
+
+def test_get_my_organisations_allows_selected_user_concept_id_override(app_client):
+    _, client = app_client
+
+    # Authenticated session identity does not match stub mapping.
+    with client.session_transaction() as sess:
+        sess["user_id"] = "jeremyluyunli123@gmail.com"
+
+    resp = client.get(
+        "/von/api/organisations/my_organisations?user_concept_id=%23V%23lu_yunli"
+    )
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 1
+    org = data["organisations"][0]
+    assert org["concept_id"] == "#V#the_lu_witbrock_household"
+    assert org["role"] == "member"
+    assert org["name"] == "The Lu Witbrock Household"
+
+
+def test_get_my_organisations_prefers_memberships_from_user_concept_relationships(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    # Stub concept lookup via the normal concept service path.
+    import src.backend.services.concept_service as concept_service
+
+    def _fake_get_concept_by_concept_id(concept_id: str, **_kwargs):
+        if concept_id == "#V#lu_yunli":
+            return {
+                "concept_id": "#V#lu_yunli",
+                "relationships": {
+                    "#V#member_of_organisation": ["#V#the_lu_witbrock_household"]
+                },
+            }
+        return None
+
+    monkeypatch.setattr(
+        concept_service, "get_concept_by_concept_id", _fake_get_concept_by_concept_id
+    )
+
+    with client.session_transaction() as sess:
+        sess["user_id"] = "lu_yunli"
+        sess["user_concept_id"] = "#V#lu_yunli"
+
+    resp = client.get("/von/api/organisations/my_organisations")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 1
+    org = data["organisations"][0]
+    assert org["concept_id"] == "#V#the_lu_witbrock_household"
+    assert org["role"] == "member"
+    assert org["name"] == "The Lu Witbrock Household"

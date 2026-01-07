@@ -1,9 +1,12 @@
 """Chat history service for persistent conversation storage."""
 
+import hashlib
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional, Iterable, Tuple
+from typing import List, Dict, Any, Optional, Iterable
+from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
 from ..db.mongo_client import get_db
 from ..models.chat_history_model import chat_history_collection_name
@@ -18,6 +21,70 @@ logger = logging.getLogger(__name__)
 
 
 _DETERMINISTIC_RAG_DOC_NAMESPACE = uuid.UUID("8c5a7fa9-9a7c-4f0f-8c1f-f4ad7f9f6fd7")
+_SESSION_NAME_MAX_LEN = 80
+_CHAT_HISTORY_INDEXES_READY = False
+_CHAT_HISTORY_INDEXES_LOCK = threading.Lock()
+
+
+def _ensure_chat_history_indexes(collection) -> None:
+    global _CHAT_HISTORY_INDEXES_READY
+    if _CHAT_HISTORY_INDEXES_READY:
+        return
+
+    with _CHAT_HISTORY_INDEXES_LOCK:
+        if _CHAT_HISTORY_INDEXES_READY:
+            return
+        try:
+            existing_indexes = [idx.get("name") for idx in collection.list_indexes()]
+            if "user_id_1_session_id_1" not in existing_indexes:
+                collection.create_index(
+                    [("user_id", ASCENDING), ("session_id", ASCENDING)],
+                    name="user_id_1_session_id_1",
+                )
+            if "user_id_1_session_id_1_namespace_1" not in existing_indexes:
+                collection.create_index(
+                    [
+                        ("user_id", ASCENDING),
+                        ("session_id", ASCENDING),
+                        ("namespace", ASCENDING),
+                    ],
+                    name="user_id_1_session_id_1_namespace_1",
+                )
+            if "user_id_1_updated_at_-1" not in existing_indexes:
+                collection.create_index(
+                    [("user_id", ASCENDING), ("updated_at", DESCENDING)],
+                    name="user_id_1_updated_at_-1",
+                )
+        except Exception as exc:
+            logger.warning(
+                "Index creation skipped for chat_history collection: %s", exc
+            )
+        _CHAT_HISTORY_INDEXES_READY = True
+
+
+def _normalise_session_name(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if not name:
+        return None
+    if len(name) > _SESSION_NAME_MAX_LEN:
+        name = name[: _SESSION_NAME_MAX_LEN - 3].rstrip() + "..."
+    return name
+
+
+def _default_session_name(now: Optional[datetime] = None) -> str:
+    timestamp = now or datetime.now(timezone.utc)
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone()
+    return timestamp.strftime("Chat %Y-%m-%d %H:%M")
+
+
+def _session_name_from_message(content: Any) -> Optional[str]:
+    if not isinstance(content, str):
+        return None
+    first_line = content.splitlines()[0].strip()
+    return _normalise_session_name(first_line)
 
 
 def _derive_rag_namespace(
@@ -117,6 +184,42 @@ def get_session_context() -> Dict[str, Any]:
         }
 
 
+def resolve_chat_history_namespace(user_id: str) -> Optional[str]:
+    if not isinstance(user_id, str) or not user_id:
+        return None
+    session_context = get_session_context()
+    return _derive_rag_namespace(session_context=session_context, user_id=user_id)
+
+
+def build_chat_history_query(
+    *,
+    user_id: str,
+    session_id: Optional[str] = None,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Dict[str, Any]:
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+
+    query: Dict[str, Any] = {"user_id": user_id}
+    if isinstance(session_id, str) and session_id.strip():
+        query["session_id"] = session_id.strip()
+
+    if isinstance(namespace, str) and namespace.strip():
+        ns = namespace.strip()
+        if include_legacy:
+            query["$or"] = [
+                {"namespace": ns},
+                {"namespace": {"$exists": False}},
+                {"namespace": {"$eq": None}},
+                {"namespace": {"$in": ["", " "]}},
+            ]
+        else:
+            query["namespace"] = ns
+
+    return query
+
+
 class ChatHistoryServiceError(Exception):
     """Exception raised for chat history service errors."""
 
@@ -128,7 +231,9 @@ def get_chat_history_collection_service():
     db = get_db()
     if db is None:
         return None
-    return db[chat_history_collection_name]
+    coll = db[chat_history_collection_name]
+    _ensure_chat_history_indexes(coll)
+    return coll
 
 
 def _coerce_datetime(value: Any) -> Optional[datetime]:
@@ -166,6 +271,83 @@ def _iter_non_reset_messages(
     for msg in history:
         if isinstance(msg, dict) and not _is_reset_marker(msg):
             yield msg
+
+
+def _compute_rag_history_signature(
+    history: List[Dict[str, Any]],
+) -> tuple[int, str]:
+    indexable_total = 0
+    last_index: Optional[int] = None
+    last_ts_iso = ""
+    last_content_hash = ""
+
+    for idx, msg in enumerate(history):
+        if not isinstance(msg, dict) or _is_reset_marker(msg):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        indexable_total += 1
+        last_index = idx
+        last_ts = _coerce_datetime(msg.get("timestamp"))
+        if last_ts:
+            last_ts_iso = last_ts.isoformat()
+        last_content_hash = hashlib.sha256(content.strip().encode("utf-8")).hexdigest()
+
+    if indexable_total == 0:
+        return 0, ""
+
+    signature = f"{indexable_total}|{last_index}|{last_ts_iso}|{last_content_hash}"
+    return indexable_total, signature
+
+
+def _should_skip_rag_reindex(
+    doc: Dict[str, Any],
+    signature: str,
+    indexable_total: int,
+) -> bool:
+    if not signature:
+        return False
+    if doc.get("rag_history_signature") != signature:
+        return False
+
+    try:
+        rag_failed = int(doc.get("rag_indexed_failed") or 0)
+    except (TypeError, ValueError):
+        rag_failed = 0
+    if rag_failed > 0:
+        return False
+
+    try:
+        rag_success = int(doc.get("rag_indexed_success") or 0)
+    except (TypeError, ValueError):
+        rag_success = 0
+    if rag_success < indexable_total:
+        return False
+
+    return True
+
+
+def _update_rag_history_signature(
+    collection,
+    doc_id: Any,
+    signature: str,
+    indexable_total: int,
+) -> None:
+    if not signature:
+        return
+    try:
+        collection.update_one(
+            {"_id": doc_id},
+            {
+                "$set": {
+                    "rag_history_signature": signature,
+                    "rag_history_indexable_total": indexable_total,
+                }
+            },
+        )
+    except Exception:
+        pass
 
 
 def _infer_last_message_timestamp(doc: Dict[str, Any]) -> Optional[datetime]:
@@ -213,6 +395,7 @@ def _split_history_into_segments_with_locations(
     history: List[Dict[str, Any]],
     *,
     session_id: str,
+    include_debug: bool = True,
 ) -> List[List[Dict[str, Any]]]:
     """Split history into segments, attaching stable location metadata.
 
@@ -236,18 +419,59 @@ def _split_history_into_segments_with_locations(
             current = []
             continue
 
-        # Copy to avoid mutating the stored dict.
-        copied = dict(entry)
-        copied["history_location"] = {
-            "session_id": session_id,
-            "history_index": idx,
+        copied = {
+            "role": entry.get("role"),
+            "content": entry.get("content"),
+            "timestamp": entry.get("timestamp"),
         }
+        if include_debug and "llm_debug_data" in entry:
+            copied["llm_debug_data"] = entry.get("llm_debug_data")
+        existing_location = entry.get("history_location")
+        if isinstance(existing_location, dict):
+            existing_index = existing_location.get("history_index")
+            existing_session = existing_location.get("session_id") or session_id
+            if isinstance(existing_index, int) and existing_index >= 0:
+                copied["history_location"] = {
+                    "session_id": existing_session,
+                    "history_index": existing_index,
+                }
+            else:
+                copied["history_location"] = {
+                    "session_id": session_id,
+                    "history_index": idx,
+                }
+        else:
+            copied["history_location"] = {
+                "session_id": session_id,
+                "history_index": idx,
+            }
         current.append(copied)
 
     if current:
         segments.append(current)
 
     return segments
+
+
+def _chunk_history_segments(
+    segments: List[List[Dict[str, Any]]],
+    segment_size: Optional[int],
+) -> List[List[Dict[str, Any]]]:
+    if not segment_size or segment_size <= 0:
+        return segments
+
+    chunked: List[List[Dict[str, Any]]] = []
+    for segment in segments:
+        if not isinstance(segment, list) or not segment:
+            continue
+        if len(segment) <= segment_size:
+            chunked.append(segment)
+            continue
+        for idx in range(0, len(segment), segment_size):
+            chunk = segment[idx : idx + segment_size]
+            if chunk:
+                chunked.append(chunk)
+    return chunked
 
 
 def get_chat_history(user_id: str, session_id: str) -> List[Dict[str, Any]]:
@@ -284,52 +508,133 @@ def get_chat_history_segments(
     session_id: str,
     *,
     include_locations: bool = False,
-) -> List[List[Dict[str, Any]]]:
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    segment_size: Optional[int] = None,
+    include_debug: bool = True,
+    history_tail_limit: Optional[int] = None,
+    return_meta: bool = False,
+) -> List[List[Dict[str, Any]]] | tuple[List[List[Dict[str, Any]]], Dict[str, Any]]:
     """
     Return chat history split into segments separated by reset markers.
-    Retrieves history from ALL sessions for the user, sorted chronologically.
+    Retrieves history from the requested session only.
+
+    When return_meta is True, returns (segments, {"history_truncated": bool}).
     """
     if not user_id:
         raise ChatHistoryServiceError("user_id is required.")
+    if not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
 
     chat_history_coll = get_chat_history_collection_service()
     if chat_history_coll is None:
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
     try:
-        docs = list(chat_history_coll.find({"user_id": user_id}))
+        query = build_chat_history_query(
+            user_id=user_id,
+            session_id=session_id,
+            namespace=namespace,
+            include_legacy=include_legacy,
+        )
+        projection = None
+        if isinstance(history_tail_limit, int) and history_tail_limit > 0:
+            projection = {"history": {"$slice": -history_tail_limit}}
+        doc = chat_history_coll.find_one(query, projection)
+        if not doc:
+            return ([], {"history_truncated": False}) if return_meta else []
 
-        # Sort sessions by inferred last-message timestamp so “recent” really means recent.
-        def _sort_key(d: Dict[str, Any]) -> Tuple[int, datetime]:
-            ts = _infer_last_message_timestamp(d)
-            if ts is None:
-                # Stable, but always first
-                return (0, datetime(1970, 1, 1, tzinfo=timezone.utc))
-            return (1, ts)
+        history = doc.get("history") or []
+        if not isinstance(history, list) or not history:
+            return ([], {"history_truncated": False}) if return_meta else []
+        history_truncated = bool(
+            isinstance(history_tail_limit, int)
+            and history_tail_limit > 0
+            and len(history) >= history_tail_limit
+        )
 
-        docs.sort(key=_sort_key)
+        if include_locations:
+            segments = _split_history_into_segments_with_locations(
+                history, session_id=session_id, include_debug=include_debug
+            )
+        else:
+            segments = _split_history_into_segments(history)
 
-        all_segments: List[List[Dict[str, Any]]] = []
-        for doc in docs:
-            history = doc.get("history") or []
-            if not isinstance(history, list) or not history:
-                continue
+        if not include_debug and segments:
+            stripped: List[List[Dict[str, Any]]] = []
+            for segment in segments:
+                cleaned_segment: List[Dict[str, Any]] = []
+                for entry in segment:
+                    if not isinstance(entry, dict):
+                        continue
+                    cleaned = dict(entry)
+                    cleaned.pop("llm_debug_data", None)
+                    cleaned_segment.append(cleaned)
+                if cleaned_segment:
+                    stripped.append(cleaned_segment)
+            segments = stripped
 
-            sid = doc.get("session_id")
-            sid = sid if isinstance(sid, str) else ""
-
-            if include_locations:
-                all_segments.extend(
-                    _split_history_into_segments_with_locations(history, session_id=sid)
-                )
-            else:
-                all_segments.extend(_split_history_into_segments(history))
-
-        return all_segments
+        result = _chunk_history_segments(segments, segment_size)
+        if return_meta:
+            return result, {"history_truncated": history_truncated}
+        return result
     except PyMongoError as e:
         logger.error(f"Error retrieving segmented chat history: {e}", exc_info=True)
         raise ChatHistoryServiceError(
             f"Could not retrieve segmented chat history: {e}"
+        ) from e
+
+
+def get_chat_history_debug_entry(
+    *,
+    user_id: str,
+    session_id: str,
+    history_index: int,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Return stored llm_debug_data for a specific history entry."""
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+    if not isinstance(history_index, int) or history_index < 0:
+        raise ChatHistoryServiceError("history_index must be a non-negative integer.")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    try:
+        query = build_chat_history_query(
+            user_id=user_id,
+            session_id=session_id,
+            namespace=namespace,
+            include_legacy=include_legacy,
+        )
+        projection = {"history": {"$slice": [history_index, 1]}}
+        doc = chat_history_coll.find_one(query, projection)
+        if not doc:
+            return None
+        history = doc.get("history") or []
+        if not isinstance(history, list) or not history:
+            return None
+        entry = history[0]
+        if not isinstance(entry, dict):
+            return None
+        debug_data = entry.get("llm_debug_data")
+        if not isinstance(debug_data, dict):
+            return None
+        return debug_data
+    except PyMongoError as e:
+        logger.error(
+            "Error retrieving llm_debug_data at history index %s: %s",
+            history_index,
+            e,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not retrieve llm_debug_data at history index {history_index}: {e}"
         ) from e
 
 
@@ -456,6 +761,62 @@ def upsert_presenter_channels_for_history_message(
         ) from e
 
 
+def update_llm_debug_data_for_request_id(
+    *,
+    user_id: str,
+    session_id: str,
+    request_id: str,
+    updates: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Update llm_debug_data fields for the assistant message matching request_id."""
+
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required")
+    if not isinstance(request_id, str) or not request_id:
+        raise ChatHistoryServiceError("request_id is required")
+    if not isinstance(updates, dict) or not updates:
+        return {"updated": False, "reason": "no_updates"}
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    set_fields = {
+        f"history.$.llm_debug_data.{key}": value for key, value in updates.items()
+    }
+
+    try:
+        result = chat_history_coll.update_one(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "history": {
+                    "$elemMatch": {
+                        "role": "assistant",
+                        "llm_debug_data.request_id": request_id,
+                    }
+                },
+            },
+            {"$set": set_fields},
+        )
+        updated = bool(getattr(result, "modified_count", 0) > 0)
+        matched = bool(getattr(result, "matched_count", 0) > 0)
+        reason = None if matched else "request_id_not_found"
+        return {"updated": updated, "matched": matched, "reason": reason}
+    except PyMongoError as e:
+        logger.error(
+            "Error updating llm_debug_data for request_id=%s: %s",
+            request_id,
+            e,
+            exc_info=True,
+        )
+        raise ChatHistoryServiceError(
+            f"Could not update llm_debug_data for request_id {request_id}: {e}"
+        ) from e
+
+
 def add_message_to_history(
     user_id: str,
     session_id: str,
@@ -497,13 +858,27 @@ def add_message_to_history(
         if isinstance(ns, str) and ns.strip():
             set_fields["namespace"] = ns.strip()
 
+        session_name = None
+        if message.get("role") == "user":
+            session_name = _session_name_from_message(message.get("content"))
+
+        set_on_insert: Dict[str, Any] = {"created_at": datetime.now(timezone.utc)}
+        if session_name:
+            set_on_insert["session_name"] = session_name
+        org_concept_id = session_context.get("organisation_concept_id")
+        if isinstance(org_concept_id, str) and org_concept_id.strip():
+            set_on_insert["organisation_concept_id"] = org_concept_id.strip()
+        role_in_org = session_context.get("role_in_org")
+        if isinstance(role_in_org, str) and role_in_org.strip():
+            set_on_insert["role_in_org"] = role_in_org.strip()
+
         # Update or insert the session document
         result = chat_history_coll.update_one(
             {"user_id": user_id, "session_id": session_id},
             {
                 "$push": {"history": message_with_timestamp},
                 "$set": set_fields,
-                "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
+                "$setOnInsert": set_on_insert,
             },
             upsert=True,
         )
@@ -660,7 +1035,12 @@ def delete_chat_history(user_id: str, session_id: str) -> None:
         raise ChatHistoryServiceError(f"Could not delete chat history: {e}") from e
 
 
-def get_chat_history_length(user_id: str) -> int:
+def get_chat_history_length(
+    user_id: str,
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> int:
     """
     Retrieves the total number of chat turns across ALL sessions for a user.
     Used to display "History: NNN" in the footer.
@@ -680,7 +1060,10 @@ def get_chat_history_length(user_id: str) -> int:
 
     try:
         total_turns = 0
-        for doc in chat_history_coll.find({"user_id": user_id}):
+        query = build_chat_history_query(
+            user_id=user_id, namespace=namespace, include_legacy=include_legacy
+        )
+        for doc in chat_history_coll.find(query):
             history = doc.get("history", [])
             if not isinstance(history, list):
                 continue
@@ -693,8 +1076,13 @@ def get_chat_history_length(user_id: str) -> int:
         ) from e
 
 
-def get_chat_history_session_count(user_id: str) -> int:
-    """Return number of sessions for a user that contain any non-reset messages."""
+def get_chat_history_session_count(
+    user_id: str,
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> int:
+    """Return number of sessions for a user that contain messages or an explicit name."""
     if not user_id:
         raise ChatHistoryServiceError("user_id is required.")
 
@@ -704,11 +1092,17 @@ def get_chat_history_session_count(user_id: str) -> int:
 
     try:
         count = 0
-        for doc in chat_history_coll.find({"user_id": user_id}, {"history": 1}):
+        query = build_chat_history_query(
+            user_id=user_id, namespace=namespace, include_legacy=include_legacy
+        )
+        for doc in chat_history_coll.find(query, {"history": 1, "session_name": 1}):
             history = doc.get("history") or []
-            if not isinstance(history, list) or not history:
-                continue
-            if any(True for _ in _iter_non_reset_messages(history)):
+            if not isinstance(history, list):
+                history = []
+            has_messages = any(True for _ in _iter_non_reset_messages(history))
+            session_name = doc.get("session_name")
+            has_name = isinstance(session_name, str) and session_name.strip()
+            if has_messages or has_name:
                 count += 1
         return count
     except PyMongoError as e:
@@ -719,9 +1113,17 @@ def get_chat_history_session_count(user_id: str) -> int:
 
 
 def get_chat_history_session_summaries(
-    user_id: str, limit: int = 50
+    user_id: str,
+    limit: int = 50,
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    summary_mode: str = "full",
 ) -> List[Dict[str, Any]]:
-    """Return per-session summaries ordered by inferred last message timestamp desc."""
+    """Return per-session summaries ordered by inferred last message timestamp desc.
+
+    summary_mode="light" avoids loading full histories and omits message_count/preview.
+    """
     if not user_id:
         raise ChatHistoryServiceError("user_id is required.")
 
@@ -733,19 +1135,57 @@ def get_chat_history_session_summaries(
     if isinstance(limit, int) and limit > 0:
         safe_limit = min(limit, 500)
 
+    mode = summary_mode.strip().lower() if isinstance(summary_mode, str) else "full"
+    light_mode = mode in ("light", "minimal", "summary")
+
     try:
-        docs = list(
-            chat_history_coll.find(
-                {"user_id": user_id},
-                {
-                    "session_id": 1,
-                    "history": 1,
-                    "created_at": 1,
-                    "updated_at": 1,
-                    "namespace": 1,
-                },
-            )
+        query = build_chat_history_query(
+            user_id=user_id, namespace=namespace, include_legacy=include_legacy
         )
+        docs: List[Dict[str, Any]]
+        history_field = "history"
+        if light_mode:
+            history_field = "history_tail"
+            pipeline = [
+                {"$match": query},
+                {
+                    "$project": {
+                        "session_id": 1,
+                        "session_name": 1,
+                        "created_at": 1,
+                        "updated_at": 1,
+                        "namespace": 1,
+                        "history_tail": {"$slice": ["$history", -1]},
+                        "message_count": {
+                            "$size": {
+                                "$filter": {
+                                    "input": "$history",
+                                    "as": "msg",
+                                    "cond": {
+                                        "$not": {
+                                            "$and": [
+                                                {"$eq": ["$$msg.role", "system"]},
+                                                {"$eq": ["$$msg.content", "__RESET__"]},
+                                            ]
+                                        }
+                                    },
+                                }
+                            }
+                        },
+                    }
+                },
+            ]
+            docs = list(chat_history_coll.aggregate(pipeline))
+        else:
+            projection: Dict[str, Any] = {
+                "session_id": 1,
+                "history": 1,
+                "created_at": 1,
+                "updated_at": 1,
+                "namespace": 1,
+                "session_name": 1,
+            }
+            docs = list(chat_history_coll.find(query, projection))
 
         summaries: List[Dict[str, Any]] = []
         for doc in docs:
@@ -753,34 +1193,59 @@ def get_chat_history_session_summaries(
             if not isinstance(session_id, str) or not session_id:
                 continue
 
-            history = doc.get("history") or []
-            if not isinstance(history, list) or not history:
+            history = doc.get(history_field) or []
+            if not isinstance(history, list):
+                history = []
+
+            session_name = _normalise_session_name(doc.get("session_name"))
+            non_reset = list(_iter_non_reset_messages(history))
+            has_messages = bool(history) if light_mode else bool(non_reset)
+            if not has_messages and not session_name:
                 continue
 
-            non_reset = list(_iter_non_reset_messages(history))
-            if not non_reset:
-                continue
+            last_entry = None
+            for entry in reversed(history):
+                if isinstance(entry, dict):
+                    last_entry = entry
+                    break
+
+            is_completed = bool(last_entry and _is_reset_marker(last_entry))
+            completed_at_dt = None
+            if is_completed and isinstance(last_entry, dict):
+                completed_at_dt = _coerce_datetime(last_entry.get("timestamp"))
 
             last_ts = _infer_last_message_timestamp(doc)
             created_ts = _infer_created_timestamp(doc)
 
-            last_user_msg = None
-            for msg in reversed(non_reset):
-                if msg.get("role") == "user":
-                    content = msg.get("content")
-                    if isinstance(content, str) and content.strip():
-                        last_user_msg = content.strip()
-                        break
+            message_count = None
+            preview = None
+            if light_mode:
+                if isinstance(doc.get("message_count"), int):
+                    message_count = doc.get("message_count")
+            else:
+                message_count = len(non_reset)
+                last_user_msg = None
+                for msg in reversed(non_reset):
+                    if msg.get("role") == "user":
+                        content = msg.get("content")
+                        if isinstance(content, str) and content.strip():
+                            last_user_msg = content.strip()
+                            break
 
-            preview = last_user_msg
-            if isinstance(preview, str) and len(preview) > 140:
-                preview = preview[:140] + "…"
+                preview = last_user_msg
+                if isinstance(preview, str) and len(preview) > 140:
+                    preview = preview[:140] + "."
 
             summaries.append(
                 {
                     "session_id": session_id,
-                    "message_count": len(non_reset),
+                    "session_name": session_name,
+                    "message_count": message_count,
                     "last_message_at": last_ts.isoformat() if last_ts else None,
+                    "is_completed": is_completed,
+                    "completed_at": (
+                        completed_at_dt.isoformat() if completed_at_dt else None
+                    ),
                     "created_at": created_ts.isoformat() if created_ts else None,
                     "namespace": doc.get("namespace"),
                     "preview": preview,
@@ -800,6 +1265,104 @@ def get_chat_history_session_summaries(
         raise ChatHistoryServiceError(
             f"Could not retrieve chat history session summaries: {e}"
         ) from e
+
+
+def create_chat_session(
+    *,
+    user_id: str,
+    session_id: str,
+    session_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a new chat session document if it does not already exist."""
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    now = datetime.now(timezone.utc)
+    session_context = get_session_context()
+    ns = _derive_rag_namespace(session_context=session_context, user_id=user_id)
+    name = _normalise_session_name(session_name) or _default_session_name(now)
+
+    set_on_insert: Dict[str, Any] = {
+        "created_at": now,
+        "updated_at": now,
+        "session_name": name,
+    }
+    if isinstance(ns, str) and ns.strip():
+        set_on_insert["namespace"] = ns.strip()
+    org_concept_id = session_context.get("organisation_concept_id")
+    if isinstance(org_concept_id, str) and org_concept_id.strip():
+        set_on_insert["organisation_concept_id"] = org_concept_id.strip()
+    role_in_org = session_context.get("role_in_org")
+    if isinstance(role_in_org, str) and role_in_org.strip():
+        set_on_insert["role_in_org"] = role_in_org.strip()
+
+    try:
+        chat_history_coll.update_one(
+            {"user_id": user_id, "session_id": session_id},
+            {"$setOnInsert": set_on_insert},
+            upsert=True,
+        )
+        doc = chat_history_coll.find_one(
+            {"user_id": user_id, "session_id": session_id},
+            {"session_name": 1, "namespace": 1},
+        )
+        return {
+            "session_id": session_id,
+            "session_name": _normalise_session_name(
+                (doc or {}).get("session_name") or name
+            ),
+            "namespace": (doc or {}).get("namespace") or ns,
+        }
+    except PyMongoError as e:
+        logger.error(f"Error creating chat session: {e}", exc_info=True)
+        raise ChatHistoryServiceError(f"Could not create chat session: {e}") from e
+
+
+def rename_chat_session(
+    *,
+    user_id: str,
+    session_id: str,
+    session_name: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Dict[str, Any]:
+    """Rename an existing chat session without changing its recency ordering."""
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+
+    new_name = _normalise_session_name(session_name)
+    if not new_name:
+        raise ChatHistoryServiceError("session_name is required.")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    try:
+        query = build_chat_history_query(
+            user_id=user_id,
+            session_id=session_id,
+            namespace=namespace,
+            include_legacy=include_legacy,
+        )
+        result = chat_history_coll.update_one(
+            query,
+            {"$set": {"session_name": new_name}},
+        )
+        updated = bool(getattr(result, "modified_count", 0) > 0)
+        matched = bool(getattr(result, "matched_count", 0) > 0)
+        return {"updated": updated, "matched": matched, "session_name": new_name}
+    except PyMongoError as e:
+        logger.error(f"Error renaming chat session: {e}", exc_info=True)
+        raise ChatHistoryServiceError(f"Could not rename chat session: {e}") from e
 
 
 def backfill_chat_history_for_user(
@@ -1034,6 +1597,7 @@ def reindex_chat_history_for_user_namespace(
 
     sessions_examined = 0
     sessions_reindexed = 0
+    sessions_skipped = 0
     messages_indexed_attempted = 0
     messages_indexed_success = 0
     messages_indexed_failed = 0
@@ -1053,6 +1617,15 @@ def reindex_chat_history_for_user_namespace(
             if not isinstance(session_id, str) or not session_id:
                 continue
 
+            history = doc.get("history") or []
+            if not isinstance(history, list) or not history:
+                continue
+
+            indexable_total, signature = _compute_rag_history_signature(history)
+            if _should_skip_rag_reindex(doc, signature, indexable_total):
+                sessions_skipped += 1
+                continue
+
             if reset_counters and not dry_run:
                 try:
                     chat_history_coll.update_one(
@@ -1063,11 +1636,9 @@ def reindex_chat_history_for_user_namespace(
                     # Best-effort only.
                     pass
 
-            history = doc.get("history") or []
-            if not isinstance(history, list) or not history:
-                continue
-
             did_any = False
+            session_success = 0
+            session_failed = 0
             for idx, msg in enumerate(history):
                 if messages_indexed_attempted >= safe_max_messages:
                     break
@@ -1083,6 +1654,7 @@ def reindex_chat_history_for_user_namespace(
 
                 if rag is None or dry_run:
                     messages_indexed_success += 1
+                    session_success += 1
                     continue
 
                 try:
@@ -1113,6 +1685,7 @@ def reindex_chat_history_for_user_namespace(
                         namespace=target_namespace,
                     )
                     messages_indexed_success += 1
+                    session_success += 1
 
                     try:
                         chat_history_coll.update_one(
@@ -1123,6 +1696,7 @@ def reindex_chat_history_for_user_namespace(
                         pass
                 except Exception as e:
                     messages_indexed_failed += 1
+                    session_failed += 1
                     errors.append(
                         {
                             "type": "index_failed",
@@ -1141,6 +1715,18 @@ def reindex_chat_history_for_user_namespace(
 
             if did_any:
                 sessions_reindexed += 1
+                if (
+                    rag is not None
+                    and not dry_run
+                    and session_failed == 0
+                    and session_success >= indexable_total
+                ):
+                    _update_rag_history_signature(
+                        chat_history_coll,
+                        doc.get("_id"),
+                        signature,
+                        indexable_total,
+                    )
 
         return {
             "status": "ok",
@@ -1150,6 +1736,7 @@ def reindex_chat_history_for_user_namespace(
             "reset_counters": bool(reset_counters),
             "sessions_examined": sessions_examined,
             "sessions_reindexed": sessions_reindexed,
+            "sessions_skipped": sessions_skipped,
             "messages_indexed_attempted": messages_indexed_attempted,
             "messages_indexed_success": messages_indexed_success,
             "messages_indexed_failed": messages_indexed_failed,
@@ -1214,7 +1801,13 @@ def reindex_chat_history_session_chunk(
             "namespace": target_namespace,
             "session_id": session_id,
         },
-        {"history": 1, "_id": 1},
+        {
+            "history": 1,
+            "_id": 1,
+            "rag_history_signature": 1,
+            "rag_indexed_success": 1,
+            "rag_indexed_failed": 1,
+        },
     )
     if not doc:
         return {
@@ -1247,14 +1840,26 @@ def reindex_chat_history_session_chunk(
         }
 
     history_len = len(history)
-    indexable_total = 0
-    for msg in history:
-        if not isinstance(msg, dict) or _is_reset_marker(msg):
-            continue
-        content = msg.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-        indexable_total += 1
+    indexable_total, signature = _compute_rag_history_signature(history)
+
+    if safe_chunk_start == 0 and _should_skip_rag_reindex(doc, signature, indexable_total):
+        return {
+            "status": "ok",
+            "user_concept_id": user_concept_id,
+            "target_namespace": target_namespace,
+            "session_id": session_id,
+            "chunk_start": safe_chunk_start,
+            "chunk_size": safe_chunk_size,
+            "history_len": history_len,
+            "indexable_total": indexable_total,
+            "messages_indexed_attempted": 0,
+            "messages_indexed_success": 0,
+            "messages_indexed_failed": 0,
+            "errors": [],
+            "next_chunk_start": history_len,
+            "done": True,
+            "skipped": True,
+        }
 
     if reset_counters and not dry_run:
         try:
@@ -1369,6 +1974,31 @@ def reindex_chat_history_session_chunk(
             pass
 
     done = next_chunk_start >= history_len
+    if (
+        done
+        and rag is not None
+        and not dry_run
+        and messages_indexed_failed == 0
+        and signature
+    ):
+        previous_success = 0
+        previous_failed = 0
+        if not reset_counters:
+            try:
+                previous_success = int(doc.get("rag_indexed_success") or 0)
+            except (TypeError, ValueError):
+                previous_success = 0
+            try:
+                previous_failed = int(doc.get("rag_indexed_failed") or 0)
+            except (TypeError, ValueError):
+                previous_failed = 0
+        if previous_failed == 0 and (previous_success + messages_indexed_success) >= indexable_total:
+            _update_rag_history_signature(
+                chat_history_coll,
+                doc.get("_id"),
+                signature,
+                indexable_total,
+            )
 
     return {
         "status": "ok",

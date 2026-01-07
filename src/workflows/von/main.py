@@ -19,11 +19,11 @@ import faulthandler
 import traceback
 import time
 import threading
-from backend.server.utils_flask import create_flask_app
-from backend.server.routes.von_routes import von_bp  # type: ignore
-from backend.server.routes.vontology_routes import vontology_bp  # type: ignore
-from backend.server.routes.settings_routes import settings_bp  # type: ignore
-from backend.languagemodels.llm_interface import OllamaClient  # type: ignore
+from src.backend.server.utils_flask import create_flask_app
+from src.backend.server.routes.von_routes import von_bp  # type: ignore
+from src.backend.server.routes.vontology_routes import vontology_bp  # type: ignore
+from src.backend.server.routes.settings_routes import settings_bp  # type: ignore
+from src.backend.languagemodels.llm_interface import OllamaClient  # type: ignore
 
 
 # Add src directory to Python path FIRST, before any backend imports
@@ -244,7 +244,7 @@ def main():
     # --- Instantiate the LLM Client ---
     # Use the unified LLM client factory that respects user settings
     try:
-        from backend.languagemodels.llm_interface import get_llm_client  # type: ignore
+        from src.backend.languagemodels.llm_interface import get_llm_client  # type: ignore
 
         llm_client = get_llm_client()
         logger.info(f"Using {type(llm_client).__name__} for LLM interactions.")

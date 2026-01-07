@@ -16,7 +16,7 @@ def mock_db_env(monkeypatch):
     )
 
     # Ensure fresh module state after env var changes
-    import backend.db.mongo_client as mongo_client
+    import src.backend.db.mongo_client as mongo_client
 
     importlib.reload(mongo_client)
 
@@ -28,7 +28,7 @@ def mock_db_env(monkeypatch):
 
 
 def test_roundtrip_store_and_load(mock_db_env):
-    import backend.services.agent_gmail_token_store as store
+    import src.backend.services.agent_gmail_token_store as store
 
     importlib.reload(store)
 
@@ -54,7 +54,7 @@ def test_roundtrip_store_and_load(mock_db_env):
 
 
 def test_revoke_deletes_tokens(mock_db_env):
-    import backend.services.agent_gmail_token_store as store
+    import src.backend.services.agent_gmail_token_store as store
 
     importlib.reload(store)
 
@@ -72,11 +72,11 @@ def test_revoke_deletes_tokens(mock_db_env):
 def test_missing_key_raises(monkeypatch):
     monkeypatch.setenv("VON_USE_MOCK_DB", "1")
 
-    import backend.db.mongo_client as mongo_client
+    import src.backend.db.mongo_client as mongo_client
 
     importlib.reload(mongo_client)
 
-    import backend.services.agent_gmail_token_store as store
+    import src.backend.services.agent_gmail_token_store as store
 
     importlib.reload(store)
 

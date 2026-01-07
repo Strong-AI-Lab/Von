@@ -226,9 +226,19 @@ class ArxivMCPProxy:
     ) -> Dict[str, Any]:
         file_path = _extract_download_file_path(result)
         if not file_path:
-            raise ArxivProxyError(
-                "arXiv download succeeded but no file path was returned by arxiv-mcp-server"
-            )
+            blob_bytes = _extract_download_blob_bytes(result)
+            if blob_bytes:
+                safe_id = _normalise_arxiv_id(arxiv_id).replace("/", "_")
+                path = self._config.storage_path / f"{safe_id}.pdf"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(blob_bytes)
+                file_path = str(path)
+                result = dict(result)
+                result["file_path"] = file_path
+            else:
+                raise ArxivProxyError(
+                    "arXiv download succeeded but no file path was returned by arxiv-mcp-server"
+                )
 
         path = Path(file_path)
         if not path.is_absolute():
@@ -388,11 +398,125 @@ def _arxiv_pdf_blob_key(arxiv_id: str) -> str:
     return f"arxiv/papers/{safe}.pdf"
 
 
+def _coerce_mapping(value: Any) -> Dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        try:
+            return value.model_dump()
+        except Exception:
+            return None
+    if hasattr(value, "dict"):
+        try:
+            return value.dict()
+        except Exception:
+            return None
+    return None
+
+
+def _normalise_path_candidate(value: str) -> str | None:
+    candidate = value.strip()
+    if not candidate:
+        return None
+
+    if candidate.startswith("file://"):
+        import re
+        from urllib.parse import urlparse, unquote
+
+        parsed = urlparse(candidate)
+        if parsed.scheme != "file":
+            return None
+        path = unquote(parsed.path or "")
+        if parsed.netloc and parsed.netloc not in {"", "localhost"}:
+            path = f"//{parsed.netloc}{path}"
+        if re.match(r"^/[A-Za-z]:/", path):
+            path = path[1:]
+        return path or None
+
+    if "://" in candidate:
+        return None
+
+    if candidate.lower().endswith(".pdf"):
+        return candidate
+
+    if ".pdf" in candidate:
+        import re
+
+        match = re.search(
+            r"([A-Za-z]:[\\\\/][^\\s]+\\.pdf|/[^\\s]+\\.pdf|[^\\s]+\\.pdf)",
+            candidate,
+        )
+        if match:
+            return match.group(1)
+
+    return None
+
+
 def _extract_download_file_path(result: Dict[str, Any]) -> str | None:
-    for key in ("file_path", "path", "filepath", "filename"):
-        value = result.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+    keys = {"file_path", "path", "filepath", "filename", "uri", "text"}
+    stack: list[Any] = [result]
+    seen: set[int] = set()
+
+    while stack:
+        item = stack.pop()
+        item_id = id(item)
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+
+        if isinstance(item, str):
+            maybe = _normalise_path_candidate(item)
+            if maybe:
+                return maybe
+            continue
+
+        mapping = _coerce_mapping(item)
+        if mapping is not None:
+            for key, value in mapping.items():
+                if key in keys and isinstance(value, str):
+                    maybe = _normalise_path_candidate(value)
+                    if maybe:
+                        return maybe
+                if isinstance(value, (dict, list, tuple)) or _coerce_mapping(value):
+                    stack.append(value)
+            continue
+
+        if isinstance(item, (list, tuple)):
+            stack.extend(item)
+
+    return None
+
+
+def _extract_download_blob_bytes(result: Dict[str, Any]) -> bytes | None:
+    stack: list[Any] = [result]
+    seen: set[int] = set()
+
+    while stack:
+        item = stack.pop()
+        item_id = id(item)
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+
+        mapping = _coerce_mapping(item)
+        if mapping is not None:
+            blob_value = mapping.get("blob")
+            if isinstance(blob_value, str) and blob_value.strip():
+                import base64
+
+                try:
+                    return base64.b64decode(blob_value)
+                except Exception:
+                    return None
+
+            for value in mapping.values():
+                if isinstance(value, (dict, list, tuple)) or _coerce_mapping(value):
+                    stack.append(value)
+            continue
+
+        if isinstance(item, (list, tuple)):
+            stack.extend(item)
+
     return None
 
 

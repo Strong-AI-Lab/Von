@@ -433,17 +433,18 @@ export { getOpenInstanceIdsForType, getOpenSubtypeTypeIds };
 export function createOrActivateConceptTab(conceptId, conceptName, activate = true, options = {}) {
     console.log(`[dynamicTabs] Creating/activating concept tab for: ${conceptId} (${conceptName})`);
 
-    // Generate a unique tab ID based on the concept ID
-    const tabId = generateTabId(conceptId);
-
     // Check if tab already exists
-    if (dynamicConceptTabs.has(conceptId)) {
+    const existing = dynamicConceptTabs.get(conceptId);
+    if (existing) {
         console.log(`[dynamicTabs] Tab already exists for ${conceptId}${activate ? ', activating it' : ', not activating (per flag)'}`);
         if (activate) {
-            activateTab(tabId);
+            activateTab(existing.tabId);
         }
-        return tabId;
+        return existing.tabId;
     }
+
+    // Generate a unique tab ID based on the concept ID
+    const tabId = generateTabId(conceptId);
 
     // Create new dynamic concept tab
     createDynamicConceptTab(conceptId, conceptName, tabId, options.kind, { newlyCreated: options.newlyCreated });
@@ -986,8 +987,10 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
 
         const html = await response.text();
 
-        // Make IDs unique for this dynamic tab
-        const uniqueIdSuffix = conceptId.replace(/[^a-zA-Z0-9]/g, '_');
+        // Make IDs unique for this dynamic tab.
+        // IMPORTANT: Do not rely solely on a non-alnum scrub of conceptId, as that can collide
+        // for IDs that differ only by punctuation (e.g., hyphen vs underscore).
+        const uniqueIdSuffix = makeUniqueDomSuffix(conceptId);
         let modifiedHtml = html.replace(/id="([^"]+)"/g, `id="$1_${uniqueIdSuffix}"`);
         // Inject data attribute on the header span without duplicating the suffix
         const headerIdWithSuffix = `conceptTypeDisplayNamePluralElement_${uniqueIdSuffix}`;
@@ -1156,9 +1159,26 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
  * @returns {string} A safe tab ID (e.g., "conceptTab_Person")
  */
 function generateTabId(conceptId) {
-    // Remove special characters and create a safe ID
-    const safeName = conceptId.replace(/[^a-zA-Z0-9]/g, '_');
-    return `conceptTab_${safeName}`;
+    const suffix = makeUniqueDomSuffix(conceptId);
+    return `conceptTab_${suffix}`;
+}
+
+function stableDomHash(value) {
+    // FNV-1a 32-bit hash: fast, deterministic, good enough for DOM ID suffixing.
+    const text = String(value ?? '');
+    let hash = 2166136261;
+    for (let i = 0; i < text.length; i++) {
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+}
+
+function makeUniqueDomSuffix(conceptId) {
+    const raw = String(conceptId ?? '');
+    const base = raw.startsWith('#V#') ? raw.slice(3) : raw;
+    const safeBase = base.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 40) || 'concept';
+    return `${safeBase}_${stableDomHash(raw)}`;
 }
 
 /**
@@ -1309,7 +1329,7 @@ async function reloadConceptTab(conceptId) {
 
     try {
         // Calculate the suffix used for this tab's DOM elements
-        const suffix = conceptId.replace(/[^a-zA-Z0-9]/g, '_');
+        const suffix = makeUniqueDomSuffix(conceptId);
 
         // Show loading state on both tab button and refresh icon
         const tabButton = document.querySelector(`[data-tab-id="${conceptId}"] .tab-name`);
@@ -1395,7 +1415,7 @@ async function reloadConceptTab(conceptId) {
         }
 
         // Remove loading animation from refresh button on error
-        const suffix = conceptId.replace(/[^a-zA-Z0-9]/g, '_');
+        const suffix = makeUniqueDomSuffix(conceptId);
         const refreshButton = document.getElementById(`refreshConceptButton_${suffix}`);
         if (refreshButton) {
             refreshButton.classList.remove('loading');

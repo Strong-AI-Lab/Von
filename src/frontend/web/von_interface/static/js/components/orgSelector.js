@@ -5,7 +5,7 @@
  * Integrates with session management to switch RAG namespace on org change.
  */
 
-import { getJson, postJson } from '../apiService.js';
+import { getJson, getUserContext, postJson } from '../apiService.js';
 
 const LS_ORG_CONTEXT = 'von_org_context';
 const LS_ORG_ROLE = 'von_org_role';
@@ -15,7 +15,13 @@ const LS_ORG_ROLE = 'von_org_role';
  */
 export async function loadMyOrganisations() {
     try {
-        const response = await getJson('/von/api/organisations/my_organisations');
+        const ctx = getUserContext();
+        const userConceptId = ctx?.user_id;
+        const url = userConceptId
+            ? `/von/api/organisations/my_organisations?user_concept_id=${encodeURIComponent(userConceptId)}`
+            : '/von/api/organisations/my_organisations';
+
+        const response = await getJson(url);
         return response.organisations || [];
     } catch (err) {
         console.error('Error loading organisations:', err);

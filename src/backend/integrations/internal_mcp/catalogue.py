@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import Any, List
 
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema
+from .orchestrator import InternalMCPChatOrchestrator
+from src.backend.services.prompt_template_service import PromptTemplateService
 
 
 def _run_async_compat(async_fn):
@@ -119,6 +121,20 @@ def _get_context(**kwargs):
         context["organisation"] = {"id": org_id}
 
     return context
+
+
+def _get_client_capabilities(**kwargs):
+    """Return the current client-reported capabilities snapshot (if any).
+
+    Notes:
+    - Stored per server-side session.
+    - Client-reported and non-authoritative.
+    - May be None if the client has not reported yet or no request context.
+    """
+
+    from ...services.client_capabilities_service import get_client_capabilities_snapshot
+
+    return {"success": True, "capabilities": get_client_capabilities_snapshot()}
 
 
 def _get_paper_metadata(**kwargs):
@@ -590,30 +606,67 @@ def _add_relationship(**kwargs):
     from ...db.repositories.concepts_repository import ConceptsRepository
     from ...services.text_value_service import upsert_text_for_concept
 
+    def _err(
+        code: str,
+        message: str,
+        *,
+        details: dict | None = None,
+    ) -> dict:
+        # Keep backward compatibility: preserve the top-level 'error' string.
+        return {
+            "success": False,
+            "error": message,
+            "error_code": code,
+            "error_details": details or {},
+        }
+
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
     target = kwargs.get("target")
 
     if not source_id:
-        return {"success": False, "error": "Missing 'source_id' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'source_id' parameter",
+            details={"missing": ["source_id"]},
+        )
     if not predicate:
-        return {"success": False, "error": "Missing 'predicate' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'predicate' parameter",
+            details={"missing": ["predicate"]},
+        )
     if not target:
-        return {"success": False, "error": "Missing 'target' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'target' parameter",
+            details={"missing": ["target"]},
+        )
 
     if source_id == target:
-        return {"success": False, "error": "Source and target cannot be the same"}
+        return _err(
+            "relationship_self_reference",
+            "Source and target cannot be the same",
+            details={"source_id": source_id, "target": target},
+        )
 
     try:
         repo = ConceptsRepository
 
+        from ...vontology.code_concepts_registry import (
+            build_virtual_concept_doc,
+            is_code_concept_id,
+        )
+        from ...vontology.utils_vontology import is_predicate
+
         # Check if source exists
         src = repo.find_one({"concept_id": source_id})
         if not src:
-            return {
-                "success": False,
-                "error": f"Source concept '{source_id}' not found",
-            }
+            return _err(
+                "source_concept_not_found",
+                f"Source concept '{source_id}' not found",
+                details={"role": "source", "concept_id": source_id},
+            )
 
         # Common text predicates are frequently provided either as plain predicate IDs
         # (e.g. 'hasContent') or V-prefixed IDs (e.g. '#V#hasContent'). Treat these
@@ -647,9 +700,9 @@ def _add_relationship(**kwargs):
 
         # Determine if this is a text predicate (binary_text_predicate instance)
         is_text_predicate = False
-        if predicate.startswith("#V#"):
+        if predicate_str.startswith("#V#"):
             pred_doc = repo.find_one(
-                {"concept_id": predicate}, {"relationships.is_an_instance_of": 1}
+                {"concept_id": predicate_str}, {"relationships.is_an_instance_of": 1}
             )
             if pred_doc:
                 instance_of = pred_doc.get("relationships", {}).get(
@@ -663,7 +716,7 @@ def _add_relationship(**kwargs):
         if is_text_predicate:
             result = upsert_text_for_concept(
                 subject_concept_id=source_id,
-                predicate=predicate,
+                predicate=predicate_str,
                 text=target,
                 lang="en",
                 provenance={"source": "add_relationship"},
@@ -672,7 +725,7 @@ def _add_relationship(**kwargs):
                 "success": True,
                 "relationship_type": "text_relation",
                 "source_id": source_id,
-                "predicate": predicate,
+                "predicate": predicate_str,
                 "target": target,
                 "text_value_id": str(result.get("text_value_id")),
                 "relation_id": str(result.get("relation_id")),
@@ -682,7 +735,11 @@ def _add_relationship(**kwargs):
         # Check if target concept exists
         tgt = repo.find_one({"concept_id": target})
         if not tgt:
-            return {"success": False, "error": f"Target concept '{target}' not found"}
+            return _err(
+                "target_concept_not_found",
+                f"Target concept '{target}' not found",
+                details={"role": "target", "concept_id": target},
+            )
 
         # Map common predicate names to database field names
         predicate_map = {
@@ -693,80 +750,312 @@ def _add_relationship(**kwargs):
             "subtype": "has_subtype",
             "instance": "has_instance",
         }
-        rel_kind = predicate_map.get(predicate, predicate)
+        rel_kind = predicate_map.get(predicate_str, predicate_str)
 
-        # Read current relationships
+        # Guardrail: concept-to-concept relationship predicates must be either:
+        # - one of the structural relationship kinds (is_a_type_of, has_subtype, ...), or
+        # - a Vontology predicate concept id (starts with #V# and exists as a predicate).
+        from ...db.repositories.concepts_repository import RELATIONSHIP_KINDS
+
+        if isinstance(rel_kind, str) and rel_kind in RELATIONSHIP_KINDS:
+            pass
+        elif isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
+            pred_doc = repo.find_one(
+                {"concept_id": rel_kind}, {"concept_id": 1, "relationships": 1}
+            )
+            if pred_doc is None and is_code_concept_id(rel_kind):
+                pred_doc = build_virtual_concept_doc(rel_kind)
+            if pred_doc is None:
+                return _err(
+                    "predicate_concept_not_found",
+                    (
+                        f"Predicate concept '{rel_kind}' not found. "
+                        "Create it as a predicate in the Vontology (e.g. as an instance of #V#predicate) "
+                        "before using it as a relationship."
+                    ),
+                    details={
+                        "role": "predicate",
+                        "predicate": rel_kind,
+                        "predicate_input": predicate,
+                    },
+                )
+            if not is_predicate(pred_doc):
+                return _err(
+                    "predicate_concept_not_typed",
+                    (
+                        f"Concept '{rel_kind}' exists but is not typed as a predicate. "
+                        "Predicates must be instances of #V#predicate (or a predicate subtype)."
+                    ),
+                    details={
+                        "role": "predicate",
+                        "predicate": rel_kind,
+                        "predicate_input": predicate,
+                        "required_instance_of": "#V#predicate",
+                    },
+                )
+        else:
+            return _err(
+                "invalid_relationship_predicate",
+                (
+                    "Invalid relationship predicate. For concept-to-concept relationships, "
+                    "use a structural predicate (e.g. 'typeOf', 'instance_of') or a '#V#...' predicate concept id."
+                ),
+                details={"predicate_input": predicate, "predicate_canonical": rel_kind},
+            )
+
+        # For structural predicates, maintain inverse consistency like the HTTP API.
+        inverse_map = {
+            "is_a_type_of": ("has_subtype", target, source_id),
+            "has_subtype": ("is_a_type_of", target, source_id),
+            "is_an_instance_of": ("has_instance", target, source_id),
+            "has_instance": ("is_an_instance_of", target, source_id),
+            "related_to": ("related_to", target, source_id),
+        }
+        has_inverse = isinstance(rel_kind, str) and rel_kind in inverse_map
+
+        # Ensure relationship storage is list-typed for the forward predicate.
+        # This prevents $addToSet failures when legacy data stored a single string.
+        repo._ensure_relationship_array(source_id, rel_kind)
+
+        forward_exists_before = False
         existing = (
             repo.find_one({"concept_id": source_id}, {f"relationships.{rel_kind}": 1})
             or {}
         )
         rels = existing.get("relationships") or {}
         curr = rels.get(rel_kind)
+        if isinstance(curr, list):
+            forward_exists_before = target in curr
+        elif isinstance(curr, str):
+            forward_exists_before = target == curr
 
-        # Normalize to array
-        if isinstance(curr, str):
-            curr_list = [curr] if curr else []
-        elif isinstance(curr, list):
-            curr_list = curr
-        else:
-            curr_list = []
-
-        # Check if already exists
-        if target in curr_list:
-            return {
-                "success": True,
-                "message": "Relationship already exists",
-                "source_id": source_id,
-                "predicate": rel_kind,
-                "target": target,
-                "already_existed": True,
-            }
-
-        # Add the relationship
-        update_result = repo.update_one(
+        forward_update = repo.update_one(
             {"concept_id": source_id},
             {"$addToSet": {f"relationships.{rel_kind}": target}},
         )
 
-        if update_result.modified_count > 0 or update_result.matched_count > 0:
-            return {
-                "success": True,
-                "source_id": source_id,
-                "predicate": rel_kind,
-                "target": target,
-                "added": update_result.modified_count > 0,
-            }
-        else:
-            return {"success": False, "error": "Failed to add relationship"}
+        inverse_payload = None
+        inverse_failed = None
+        if has_inverse:
+            inv_kind, inv_src, inv_tgt = inverse_map[rel_kind]
+            try:
+                repo._ensure_relationship_array(inv_src, inv_kind)
+                inverse_update = repo.update_one(
+                    {"concept_id": inv_src},
+                    {"$addToSet": {f"relationships.{inv_kind}": inv_tgt}},
+                )
+                if (
+                    inverse_update.matched_count > 0
+                    and inverse_update.modified_count == 0
+                ):
+                    # Defensive verification: if we didn't modify anything, ensure the
+                    # inverse edge is actually present (it may have already existed or
+                    # been added concurrently).
+                    inv_existing = (
+                        repo.find_one(
+                            {"concept_id": inv_src},
+                            {f"relationships.{inv_kind}": 1},
+                        )
+                        or {}
+                    )
+                    inv_rels = inv_existing.get("relationships") or {}
+                    inv_curr = inv_rels.get(inv_kind)
+                    inverse_present_after = False
+                    if isinstance(inv_curr, list):
+                        inverse_present_after = inv_tgt in inv_curr
+                    elif isinstance(inv_curr, str):
+                        inverse_present_after = inv_tgt == inv_curr
+                    if not inverse_present_after:
+                        inverse_failed = {
+                            "predicate": inv_kind,
+                            "source_id": inv_src,
+                            "target": inv_tgt,
+                            "exception_type": "InverseNoOp",
+                            "error": "Inverse relationship update did not persist",
+                        }
+                inverse_payload = {
+                    "predicate": inv_kind,
+                    "source_id": inv_src,
+                    "target": inv_tgt,
+                    "added": inverse_update.modified_count > 0,
+                    "matched": inverse_update.matched_count > 0,
+                }
+            except Exception as exc:
+                inverse_failed = {
+                    "predicate": inv_kind,
+                    "source_id": inv_src,
+                    "target": inv_tgt,
+                    "exception_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+
+        forward_ok = forward_update.matched_count > 0
+        forward_added = forward_update.modified_count > 0
+
+        if forward_ok and not forward_added and not forward_exists_before:
+            # Defensive verification: if we didn't modify anything and the edge did
+            # not appear to exist pre-write, confirm the edge exists post-write.
+            # This prevents returning success when the update is effectively a no-op.
+            verify = (
+                repo.find_one(
+                    {"concept_id": source_id},
+                    {f"relationships.{rel_kind}": 1},
+                )
+                or {}
+            )
+            verify_rels = verify.get("relationships") or {}
+            verify_curr = verify_rels.get(rel_kind)
+            present_after = False
+            if isinstance(verify_curr, list):
+                present_after = target in verify_curr
+            elif isinstance(verify_curr, str):
+                present_after = target == verify_curr
+            if present_after:
+                forward_exists_before = True
+            else:
+                return _err(
+                    "relationship_add_noop",
+                    "Relationship update did not persist",
+                    details={
+                        "source_id": source_id,
+                        "predicate": rel_kind,
+                        "target": target,
+                        "matched": forward_update.matched_count > 0,
+                        "modified": forward_update.modified_count > 0,
+                    },
+                )
+
+        if not forward_ok:
+            return _err(
+                "relationship_add_failed",
+                "Failed to add relationship",
+                details={
+                    "source_id": source_id,
+                    "predicate": rel_kind,
+                    "target": target,
+                },
+            )
+
+        if inverse_failed:
+            return _err(
+                "relationship_add_partial_failure",
+                "Relationship added, but inverse relationship update failed",
+                details={
+                    "forward": {
+                        "source_id": source_id,
+                        "predicate": rel_kind,
+                        "target": target,
+                        "added": forward_added,
+                        "already_existed": bool(
+                            forward_exists_before and not forward_added
+                        ),
+                    },
+                    "inverse_failed": inverse_failed,
+                },
+            )
+
+        response: dict[str, Any] = {
+            "success": True,
+            "source_id": source_id,
+            "predicate": rel_kind,
+            "target": target,
+            "added": forward_added,
+            "already_existed": bool(forward_exists_before and not forward_added),
+        }
+        if inverse_payload:
+            response["inverse"] = inverse_payload
+        return response
 
     except Exception as e:
-        return {"success": False, "error": f"Exception: {str(e)}"}
+        return _err(
+            "exception",
+            f"Exception: {str(e)}",
+            details={
+                "source_id": source_id,
+                "predicate": predicate,
+                "target": target,
+                "exception_type": type(e).__name__,
+            },
+        )
 
 
 def _remove_relationship(**kwargs):
     """Remove a relationship between two concepts. Text relations removal is not supported here."""
     from ...db.repositories.concepts_repository import ConceptsRepository
 
+    def _err(
+        code: str,
+        message: str,
+        *,
+        details: dict | None = None,
+    ) -> dict:
+        # Keep backward compatibility: preserve the top-level 'error' string.
+        return {
+            "success": False,
+            "error": message,
+            "error_code": code,
+            "error_details": details or {},
+        }
+
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
     target = kwargs.get("target")
 
     if not source_id:
-        return {"success": False, "error": "Missing 'source_id' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'source_id' parameter",
+            details={"missing": ["source_id"]},
+        )
     if not predicate:
-        return {"success": False, "error": "Missing 'predicate' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'predicate' parameter",
+            details={"missing": ["predicate"]},
+        )
     if not target:
-        return {"success": False, "error": "Missing 'target' parameter"}
+        return _err(
+            "missing_parameter",
+            "Missing 'target' parameter",
+            details={"missing": ["target"]},
+        )
 
     try:
         repo = ConceptsRepository
+
+        from ...vontology.code_concepts_registry import (
+            build_virtual_concept_doc,
+            is_code_concept_id,
+        )
+        from ...vontology.utils_vontology import is_predicate
+
         # Verify source concept exists
         src = repo.find_one({"concept_id": source_id})
         if not src:
-            return {
-                "success": False,
-                "error": f"Source concept '{source_id}' not found",
-            }
+            return _err(
+                "source_concept_not_found",
+                f"Source concept '{source_id}' not found",
+                details={"role": "source", "concept_id": source_id},
+            )
+
+        # This tool only supports concept-to-concept relationships. Provide an
+        # explicit, agent-readable error when users attempt to remove text relations.
+        predicate_str = (
+            predicate.strip() if isinstance(predicate, str) else str(predicate)
+        )
+        predicate_normalised = (
+            predicate_str[3:] if predicate_str.startswith("#V#") else predicate_str
+        )
+        well_known_text_predicates = {"hasContent", "hasDescription", "hasName"}
+        if predicate_normalised in well_known_text_predicates:
+            return _err(
+                "unsupported_text_relation_removal",
+                "Text relation removal is not supported by remove_relationship",
+                details={
+                    "predicate_input": predicate,
+                    "predicate": predicate_normalised,
+                },
+            )
 
         # Map common predicate aliases to stored field names
         predicate_map = {
@@ -778,6 +1067,75 @@ def _remove_relationship(**kwargs):
             "instance": "has_instance",
         }
         rel_kind = predicate_map.get(predicate, predicate)
+
+        # Determine if this is a text predicate (binary_text_predicate instance)
+        if isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
+            pred_doc = repo.find_one(
+                {"concept_id": rel_kind}, {"relationships.is_an_instance_of": 1}
+            )
+            if pred_doc:
+                instance_of = pred_doc.get("relationships", {}).get(
+                    "is_an_instance_of", []
+                )
+                if isinstance(instance_of, str):
+                    instance_of = [instance_of]
+                if "#V#binary_text_predicate" in instance_of:
+                    return _err(
+                        "unsupported_text_relation_removal",
+                        "Text relation removal is not supported by remove_relationship",
+                        details={"predicate": rel_kind, "predicate_input": predicate},
+                    )
+
+        # Guardrail: concept-to-concept relationship predicates must be either:
+        # - one of the structural relationship kinds (is_a_type_of, has_subtype, ...), or
+        # - a Vontology predicate concept id (starts with #V# and exists as a predicate).
+        from ...db.repositories.concepts_repository import RELATIONSHIP_KINDS
+
+        if isinstance(rel_kind, str) and rel_kind in RELATIONSHIP_KINDS:
+            pass
+        elif isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
+            pred_doc = repo.find_one(
+                {"concept_id": rel_kind}, {"concept_id": 1, "relationships": 1}
+            )
+            if pred_doc is None and is_code_concept_id(rel_kind):
+                pred_doc = build_virtual_concept_doc(rel_kind)
+            if pred_doc is None:
+                return _err(
+                    "predicate_concept_not_found",
+                    (
+                        f"Predicate concept '{rel_kind}' not found. "
+                        "Create it as a predicate in the Vontology (e.g. as an instance of #V#predicate) "
+                        "before using it as a relationship."
+                    ),
+                    details={
+                        "role": "predicate",
+                        "predicate": rel_kind,
+                        "predicate_input": predicate,
+                    },
+                )
+            if not is_predicate(pred_doc):
+                return _err(
+                    "predicate_concept_not_typed",
+                    (
+                        f"Concept '{rel_kind}' exists but is not typed as a predicate. "
+                        "Predicates must be instances of #V#predicate (or a predicate subtype)."
+                    ),
+                    details={
+                        "role": "predicate",
+                        "predicate": rel_kind,
+                        "predicate_input": predicate,
+                        "required_instance_of": "#V#predicate",
+                    },
+                )
+        else:
+            return _err(
+                "invalid_relationship_predicate",
+                (
+                    "Invalid relationship predicate. For concept-to-concept relationships, "
+                    "use a structural predicate (e.g. 'typeOf', 'instance_of') or a '#V#...' predicate concept id."
+                ),
+                details={"predicate_input": predicate, "predicate_canonical": rel_kind},
+            )
 
         # Ensure the relationship field exists (optional sanity)
         existing = (
@@ -827,7 +1185,16 @@ def _remove_relationship(**kwargs):
                 "removed": False,
             }
     except Exception as e:
-        return {"success": False, "error": f"Exception: {str(e)}"}
+        return _err(
+            "exception",
+            f"Exception: {str(e)}",
+            details={
+                "source_id": source_id,
+                "predicate": predicate,
+                "target": target,
+                "exception_type": type(e).__name__,
+            },
+        )
 
 
 # arXiv MCP proxy handlers
@@ -1052,6 +1419,7 @@ def _resilient_extract_url(**kwargs):
     def _truncate(text: str) -> str:
         if max_chars <= 0:
             return text
+
         if len(text) <= max_chars:
             return text
         return text[:max_chars]
@@ -1639,6 +2007,73 @@ def _add_names_output_schema() -> Schema:
     )
 
 
+def _resolve_concept_by_name(**kwargs):
+    from ...services.concept_resolution_service import resolve_concept_by_name
+
+    name = kwargs.get("name")
+    if name is None or not str(name).strip():
+        return {
+            "success": False,
+            "status": "not_found",
+            "error": "Missing 'name' parameter",
+            "resolved_concept_id": None,
+            "candidates": [],
+            "audit": [],
+        }
+
+    return resolve_concept_by_name(
+        name=str(name),
+        preferred_languages=kwargs.get("preferred_languages"),
+        allowed_languages=kwargs.get("allowed_languages"),
+        instance_of=kwargs.get("instance_of"),
+        match_code_strings=bool(kwargs.get("match_code_strings", True)),
+        normalisation_level=str(kwargs.get("normalisation_level", "default")),
+        max_results=int(kwargs.get("max_results", 5)),
+    )
+
+
+def _resolve_concept_by_name_input_schema() -> Schema:
+    return Schema(
+        required={
+            "name": str,
+        },
+        optional={
+            "preferred_languages": (list, type(None)),
+            "allowed_languages": (list, type(None)),
+            "instance_of": (str, type(None)),
+            "match_code_strings": (bool, type(None)),
+            "normalisation_level": (str, type(None)),
+            "max_results": (int, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "resolve_concept_by_name input: name (str) plus optional language preferences/constraints, "
+            "instance_of restriction, code-string matching toggle, normalisation_level, max_results"
+        ),
+    )
+
+
+def _resolve_concept_by_name_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "status": str,
+            "resolved_concept_id": (str, type(None)),
+            "candidates": list,
+            "audit": list,
+        },
+        optional={
+            "match": (dict, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "resolve_concept_by_name output: status in {resolved, ambiguous, not_found} with "
+            "resolved_concept_id, optional match info, candidates (for ambiguous), and audit steps"
+        ),
+    )
+
+
 def _add_relationship_input_schema() -> Schema:
     return Schema(
         required={
@@ -1668,9 +2103,11 @@ def _add_relationship_output_schema() -> Schema:
             "text_value_id": (str, type(None)),
             "relation_id": (str, type(None)),
             "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
         },
         allow_unknown=True,
-        description="add_relationship output: success (bool), relationship_type (str), message (str), source_id (str), predicate (str), target (str), already_existed (bool), added (bool), text_value_id (str), relation_id (str), error (str)",
+        description="add_relationship output: success (bool), relationship_type (str), message (str), source_id (str), predicate (str), target (str), already_existed (bool), added (bool), text_value_id (str), relation_id (str), error (str), error_code (str), error_details (dict)",
     )
 
 
@@ -1700,9 +2137,11 @@ def _remove_relationship_output_schema() -> Schema:
             "already_absent": (bool, type(None)),
             "message": (str, type(None)),
             "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
         },
         allow_unknown=True,
-        description="remove_relationship output: success (bool), source_id, predicate, target, removed (bool), already_absent (bool when relation was not present), message, error",
+        description="remove_relationship output: success (bool), source_id, predicate, target, removed (bool), already_absent (bool when relation was not present), message, error, error_code (str), error_details (dict)",
     )
 
 
@@ -2583,6 +3022,74 @@ def _jira_transition_input_schema() -> Schema:
     )
 
 
+def _jira_create_issue_input_schema() -> Schema:
+    return Schema(
+        required={
+            "project_key": str,
+            "issue_type": str,
+            "summary": str,
+        },
+        optional={
+            "description": (str, type(None)),
+            "parent": (str, type(None)),
+            "assignee_account_id": (str, type(None)),
+            "labels": (list, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_create_issue input: project_key, issue_type, summary (required). "
+            "Optional description/parent/assignee_account_id/labels. "
+            "Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+        ),
+    )
+
+
+def _jira_update_issue_input_schema() -> Schema:
+    return Schema(
+        required={
+            "issue_key": str,
+            "update_fields": dict,
+        },
+        optional={
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_update_issue input: issue_key (required) and update_fields (dict of Jira fields to update). "
+            "Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+        ),
+    )
+
+
+def _jira_link_issue_input_schema() -> Schema:
+    return Schema(
+        required={
+            "inward_issue_key": str,
+            "outward_issue_key": str,
+            "link_type": str,
+        },
+        optional={
+            "comment": (str, type(None)),
+            "dry_run": (bool,),
+            "approved": (bool,),
+            "execute": (bool,),
+            "request_id": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_link_issue input: inward_issue_key, outward_issue_key, link_type (required; e.g. 'Relates'). "
+            "Optional comment. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+        ),
+    )
+
+
 def _jira_get_myself_input_schema() -> Schema:
     return Schema(
         required={},
@@ -3456,6 +3963,140 @@ def _gmail_modify_labels(**kwargs):
 
 
 # Jira MCP handlers
+
+_JIRA_WRITE_CACHE: dict[str, dict[str, Any]] = {}
+_JIRA_WRITE_CACHE_TTL_SEC = 3600.0
+_JIRA_WRITE_CACHE_MAX = 200
+
+
+def _jira_project_allow_list() -> list[str]:
+    import os
+
+    raw = (
+        os.getenv("VON_JIRA_PROJECT_ALLOW_LIST")
+        or os.getenv("VON_JIRA_PROJECT_ALLOWLIST")
+        or "JVNAUTOSCI"
+    )
+
+    projects: list[str] = []
+    for part in raw.split(","):
+        candidate = part.strip().upper()
+        if not candidate:
+            continue
+        if candidate not in projects:
+            projects.append(candidate)
+    return projects
+
+
+def _jira_project_from_issue_key(issue_key: str | None) -> str | None:
+    if not isinstance(issue_key, str):
+        return None
+    cleaned = issue_key.strip()
+    if not cleaned or "-" not in cleaned:
+        return None
+    return cleaned.split("-", 1)[0].upper() or None
+
+
+def _jira_execute_mode_enabled() -> bool:
+    import os
+
+    return os.getenv("VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", "0").lower() in {
+        "1",
+        "true",
+    }
+
+
+def _jira_write_guardrails(
+    *,
+    action: str,
+    project_keys: list[str],
+    dry_run: bool,
+    approved: bool,
+    execute: bool,
+) -> dict[str, Any] | None:
+    allowed = _jira_project_allow_list()
+    if not allowed:
+        return {
+            "success": False,
+            "error": "Jira writes are blocked: project allow-list is empty",
+            "error_code": "allowlist_missing",
+        }
+
+    for project_key in project_keys:
+        if not project_key or project_key.upper() not in allowed:
+            return {
+                "success": False,
+                "error": f"Jira writes are blocked for project '{project_key}'. Allowed: {', '.join(allowed)}",
+                "error_code": "project_not_allowlisted",
+                "project_key": project_key,
+                "allowed_projects": allowed,
+                "action": action,
+            }
+
+    if dry_run:
+        return None
+
+    if execute and _jira_execute_mode_enabled():
+        return None
+
+    if approved:
+        return None
+
+    return {
+        "success": False,
+        "error": (
+            "Approval required for Jira write. Set approved=true to confirm this write, "
+            "or run in execute mode (set VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1 and pass execute=true)."
+        ),
+        "error_code": "approval_required",
+        "action": action,
+        "allowed_projects": allowed,
+    }
+
+
+def _jira_cache_get(tool: str, request_id: str) -> dict[str, Any] | None:
+    import time
+
+    key = f"{tool}:{request_id}"
+    record = _JIRA_WRITE_CACHE.get(key)
+    if not isinstance(record, dict):
+        return None
+    ts = record.get("timestamp")
+    if not isinstance(ts, (int, float)):
+        return None
+    if (time.time() - float(ts)) > _JIRA_WRITE_CACHE_TTL_SEC:
+        _JIRA_WRITE_CACHE.pop(key, None)
+        return None
+    cached_payload = record.get("payload")
+    if not isinstance(cached_payload, dict):
+        return None
+    return dict(cached_payload)
+
+
+def _jira_cache_set(tool: str, request_id: str, payload: dict[str, Any]) -> None:
+    import time
+
+    if len(_JIRA_WRITE_CACHE) >= _JIRA_WRITE_CACHE_MAX:
+        # Simple eviction: drop the oldest item.
+        oldest_key = None
+        oldest_ts = None
+        for k, v in _JIRA_WRITE_CACHE.items():
+            ts = v.get("timestamp") if isinstance(v, dict) else None
+            if not isinstance(ts, (int, float)):
+                continue
+            if oldest_ts is None or float(ts) < oldest_ts:
+                oldest_ts = float(ts)
+                oldest_key = k
+        if oldest_key:
+            _JIRA_WRITE_CACHE.pop(oldest_key, None)
+
+    key = f"{tool}:{request_id}"
+    _JIRA_WRITE_CACHE[key] = {
+        "timestamp": time.time(),
+        "payload": dict(payload),
+    }
+
+
 def _jira_search(**kwargs):
     import asyncio
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
@@ -3540,6 +4181,314 @@ def _jira_transition_issue(**kwargs):
 
     try:
         return _run_async_compat(_async_transition)
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
+def _jira_create_issue(**kwargs):
+    import asyncio
+    import logging
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    logger = logging.getLogger(__name__)
+
+    project_key = kwargs.get("project_key")
+    issue_type = kwargs.get("issue_type")
+    summary = kwargs.get("summary")
+
+    if not project_key or not issue_type or not summary:
+        return {
+            "success": False,
+            "error": "Missing required parameters: project_key, issue_type, summary",
+        }
+
+    project_key_norm = str(project_key).strip().upper()
+    dry_run = bool(kwargs.get("dry_run", True))
+    approved = bool(kwargs.get("approved", False))
+    execute = bool(kwargs.get("execute", False))
+    request_id = kwargs.get("request_id")
+
+    guardrail_error = _jira_write_guardrails(
+        action="create_issue",
+        project_keys=[project_key_norm],
+        dry_run=dry_run,
+        approved=approved,
+        execute=execute,
+    )
+    if guardrail_error is not None:
+        return guardrail_error
+
+    if isinstance(request_id, str) and request_id.strip() and not dry_run:
+        cached = _jira_cache_get("jira_create_issue", request_id.strip())
+        if cached is not None:
+            cached["reused"] = True
+            return cached
+
+    payload: dict[str, Any] = {
+        "fields": {
+            "project": {"key": project_key_norm},
+            "summary": str(summary),
+            "issuetype": {"name": str(issue_type)},
+        }
+    }
+
+    description = kwargs.get("description")
+    if isinstance(description, str) and description.strip():
+        payload["fields"]["description"] = description
+
+    parent = kwargs.get("parent")
+    if isinstance(parent, str) and parent.strip():
+        payload["fields"]["parent"] = {"key": parent.strip()}
+
+    assignee_account_id = kwargs.get("assignee_account_id")
+    if isinstance(assignee_account_id, str) and assignee_account_id.strip():
+        payload["fields"]["assignee"] = {"accountId": assignee_account_id.strip()}
+
+    labels = kwargs.get("labels")
+    if isinstance(labels, list):
+        payload["fields"]["labels"] = [str(l) for l in labels if str(l).strip()]
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "executed": False,
+            "action": "create_issue",
+            "project_key": project_key_norm,
+            "proposed_payload": payload,
+        }
+
+    async def _async_create():
+        proxy = await get_jira_proxy()
+        return await proxy.create_issue(payload=payload)
+
+    try:
+        logger.info(
+            "[jira_write] create_issue project=%s summary_preview=%r",
+            project_key_norm,
+            str(summary)[:120],
+        )
+        result = _run_async_compat(_async_create)
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("success", True)
+            result["dry_run"] = False
+            result["executed"] = True
+            result["action"] = "create_issue"
+            if isinstance(request_id, str) and request_id.strip():
+                _jira_cache_set("jira_create_issue", request_id.strip(), result)
+            return result
+        return {
+            "success": True,
+            "dry_run": False,
+            "executed": True,
+            "action": "create_issue",
+            "result": result,
+        }
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
+def _jira_update_issue(**kwargs):
+    import logging
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    logger = logging.getLogger(__name__)
+
+    issue_key = kwargs.get("issue_key")
+    update_fields = kwargs.get("update_fields")
+    if not issue_key or not isinstance(update_fields, dict):
+        return {
+            "success": False,
+            "error": "Missing required parameters: issue_key and update_fields (dict)",
+        }
+
+    issue_key_str = str(issue_key).strip()
+    project_key = _jira_project_from_issue_key(issue_key_str)
+    if not project_key:
+        return {
+            "success": False,
+            "error": "Invalid issue_key format; expected PROJECT-123",
+        }
+
+    dry_run = bool(kwargs.get("dry_run", True))
+    approved = bool(kwargs.get("approved", False))
+    execute = bool(kwargs.get("execute", False))
+    request_id = kwargs.get("request_id")
+
+    guardrail_error = _jira_write_guardrails(
+        action="update_issue",
+        project_keys=[project_key],
+        dry_run=dry_run,
+        approved=approved,
+        execute=execute,
+    )
+    if guardrail_error is not None:
+        return guardrail_error
+
+    if isinstance(request_id, str) and request_id.strip() and not dry_run:
+        cached = _jira_cache_get("jira_update_issue", request_id.strip())
+        if cached is not None:
+            cached["reused"] = True
+            return cached
+
+    # Guardrail: do not allow changing the project via this helper.
+    blocked_fields = {"project", "key", "id"}
+    safe_fields = {
+        str(k): v
+        for k, v in update_fields.items()
+        if isinstance(k, str) and k not in blocked_fields
+    }
+    if not safe_fields:
+        return {
+            "success": False,
+            "error": "No updatable fields provided (project/key/id are not allowed)",
+        }
+
+    payload: dict[str, Any] = {"fields": safe_fields}
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "executed": False,
+            "action": "update_issue",
+            "issue_key": issue_key_str,
+            "proposed_payload": payload,
+        }
+
+    async def _async_update():
+        proxy = await get_jira_proxy()
+        return await proxy.update_issue(issue_key=issue_key_str, payload=payload)
+
+    try:
+        logger.info(
+            "[jira_write] update_issue key=%s fields=%s",
+            issue_key_str,
+            sorted(safe_fields.keys())[:25],
+        )
+        result = _run_async_compat(_async_update)
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("success", True)
+            result["dry_run"] = False
+            result["executed"] = True
+            result["action"] = "update_issue"
+            result["issue_key"] = issue_key_str
+            if isinstance(request_id, str) and request_id.strip():
+                _jira_cache_set("jira_update_issue", request_id.strip(), result)
+            return result
+        return {
+            "success": True,
+            "dry_run": False,
+            "executed": True,
+            "action": "update_issue",
+            "issue_key": issue_key_str,
+            "result": result,
+        }
+    except JiraProxyError as exc:
+        return {"error": str(exc), "success": False}
+
+
+def _jira_link_issue(**kwargs):
+    import logging
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    logger = logging.getLogger(__name__)
+
+    inward_issue_key = kwargs.get("inward_issue_key")
+    outward_issue_key = kwargs.get("outward_issue_key")
+    link_type = kwargs.get("link_type")
+    if not inward_issue_key or not outward_issue_key or not link_type:
+        return {
+            "success": False,
+            "error": "Missing required parameters: inward_issue_key, outward_issue_key, link_type",
+        }
+
+    inward_key = str(inward_issue_key).strip()
+    outward_key = str(outward_issue_key).strip()
+    inward_project = _jira_project_from_issue_key(inward_key)
+    outward_project = _jira_project_from_issue_key(outward_key)
+    if not inward_project or not outward_project:
+        return {
+            "success": False,
+            "error": "Invalid issue key format; expected PROJECT-123",
+        }
+
+    dry_run = bool(kwargs.get("dry_run", True))
+    approved = bool(kwargs.get("approved", False))
+    execute = bool(kwargs.get("execute", False))
+    request_id = kwargs.get("request_id")
+
+    guardrail_error = _jira_write_guardrails(
+        action="link_issue",
+        project_keys=[inward_project, outward_project],
+        dry_run=dry_run,
+        approved=approved,
+        execute=execute,
+    )
+    if guardrail_error is not None:
+        return guardrail_error
+
+    if isinstance(request_id, str) and request_id.strip() and not dry_run:
+        cached = _jira_cache_get("jira_link_issue", request_id.strip())
+        if cached is not None:
+            cached["reused"] = True
+            return cached
+
+    payload: dict[str, Any] = {
+        "type": {"name": str(link_type)},
+        "inwardIssue": {"key": inward_key},
+        "outwardIssue": {"key": outward_key},
+    }
+
+    comment = kwargs.get("comment")
+    if isinstance(comment, str) and comment.strip():
+        payload["comment"] = {"body": comment}
+
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "executed": False,
+            "action": "link_issue",
+            "inward_issue_key": inward_key,
+            "outward_issue_key": outward_key,
+            "link_type": str(link_type),
+            "proposed_payload": payload,
+        }
+
+    async def _async_link():
+        proxy = await get_jira_proxy()
+        return await proxy.link_issue(payload=payload)
+
+    try:
+        logger.info(
+            "[jira_write] link_issue %s -> %s (%s)",
+            outward_key,
+            inward_key,
+            str(link_type),
+        )
+        result = _run_async_compat(_async_link)
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("success", True)
+            result["dry_run"] = False
+            result["executed"] = True
+            result["action"] = "link_issue"
+            result["inward_issue_key"] = inward_key
+            result["outward_issue_key"] = outward_key
+            result["link_type"] = str(link_type)
+            if isinstance(request_id, str) and request_id.strip():
+                _jira_cache_set("jira_link_issue", request_id.strip(), result)
+            return result
+        return {
+            "success": True,
+            "dry_run": False,
+            "executed": True,
+            "action": "link_issue",
+            "result": result,
+        }
     except JiraProxyError as exc:
         return {"error": str(exc), "success": False}
 
@@ -3657,6 +4606,46 @@ def _chat_get_prompt_context(
     behaviour_prompt_concepts = _format_fragments(behaviour_fragments)
     narration_prompt_concepts = _format_fragments(narration_fragments)
 
+    template_service = PromptTemplateService()
+    classifier_prompt_id, classifier_prompt_text = template_service.resolve_prompt_text(
+        InternalMCPChatOrchestrator._MISSING_TOOL_CLASSIFIER_PROMPTS,
+        fallback=InternalMCPChatOrchestrator._FALLBACK_MISSING_TOOL_CALL_PROMPT,
+        max_chars=max_chars_int,
+    )
+    retry_prompt_id, retry_prompt_text = template_service.resolve_prompt_text(
+        InternalMCPChatOrchestrator._MISSING_TOOL_RETRY_PROMPTS,
+        fallback=None,
+        max_chars=max_chars_int,
+    )
+    classifier_preview = (
+        classifier_prompt_text[:max_chars_int] if classifier_prompt_text else ""
+    )
+    retry_preview = retry_prompt_text[:max_chars_int] if retry_prompt_text else ""
+    narration_preview = ""
+    if narration_fragments and isinstance(narration_fragments[0], dict):
+        content = narration_fragments[0].get("content")
+        if isinstance(content, str):
+            narration_preview = content[:max_chars_int]
+    resolved_templates = {
+        "missing_tool_call_classifier": {
+            "prompt_id": classifier_prompt_id,
+            "preview": classifier_preview,
+        },
+        "missing_tool_call_retry": {
+            "prompt_id": retry_prompt_id,
+            "preview": retry_preview,
+        },
+        "behaviour_prompt": {"prompt_id": None, "preview": prompt_text or ""},
+        "narration_prompt": {
+            "prompt_id": (
+                narration_prompt_concept_ids[0]
+                if narration_prompt_concept_ids
+                else None
+            ),
+            "preview": narration_preview,
+        },
+    }
+
     return {
         "success": True,
         "namespace": namespace,
@@ -3670,6 +4659,7 @@ def _chat_get_prompt_context(
         "narration_prompt_concepts": narration_prompt_concepts,
         "prompt_text": prompt_text or "",
         "prompt_count": len(behaviour_prompt_concept_ids),
+        "resolved_templates": resolved_templates,
     }
 
 
@@ -3824,6 +4814,7 @@ def _chat_introspect(
 
     gateway_enabled = None
     orchestrator_max_tool_invocations = None
+    orchestrator_tool_batch_cap = None
     if include_runtime_status:
         try:
             from flask import current_app
@@ -3834,9 +4825,11 @@ def _chat_introspect(
             orchestrator_max_tool_invocations = getattr(
                 orchestrator, "_max_tool_invocations", None
             )
+            orchestrator_tool_batch_cap = getattr(orchestrator, "_tool_batch_cap", None)
         except Exception:
             gateway_enabled = None
             orchestrator_max_tool_invocations = None
+            orchestrator_tool_batch_cap = None
 
     # Tool-guidance fingerprint (stable-ish) without dumping full text by default
     tool_guidance_text = ""
@@ -3899,6 +4892,7 @@ def _chat_introspect(
         "tool_guidance_preview": tool_guidance_preview,
         "gateway_enabled": gateway_enabled,
         "orchestrator_max_tool_invocations": orchestrator_max_tool_invocations,
+        "orchestrator_tool_batch_cap": orchestrator_tool_batch_cap,
     }
 
 
@@ -3912,6 +4906,9 @@ def build_default_catalogue() -> MethodCatalogue:
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
     jira_transition_output_schema = _jira_generic_output_schema("transition")
+    jira_create_issue_output_schema = _jira_generic_output_schema("create_issue")
+    jira_update_issue_output_schema = _jira_generic_output_schema("update_issue")
+    jira_link_issue_output_schema = _jira_generic_output_schema("link_issue")
     jira_get_myself_output_schema = _jira_generic_output_schema("get_myself")
     jira_get_auth_config_output_schema = _jira_get_auth_config_output_schema()
     gmail_list_messages_input_schema = Schema(
@@ -3982,6 +4979,34 @@ def build_default_catalogue() -> MethodCatalogue:
             description="Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
         ),
         MethodDefinition(
+            name="get_client_capabilities",
+            handler=_get_client_capabilities,
+            input_schema=Schema(
+                required={},
+                optional={},
+                allow_unknown=False,
+                description="Return the current session's last reported client capabilities snapshot (no input parameters).",
+            ),
+            output_schema=Schema(
+                required={
+                    "success": bool,
+                    "capabilities": (dict, type(None)),
+                },
+                optional={},
+                allow_unknown=True,
+                description=(
+                    "Client capability snapshot as last reported by the browser (bounded, non-authoritative). "
+                    "Returns capabilities=null if not available."
+                ),
+            ),
+            category="read",
+            description=(
+                "Get the browser-reported client capability snapshot for the current session (speech synthesis, "
+                "speech recognition, and basic audio hints). Use for debugging speech/narration behaviours without "
+                "collecting high-fidelity fingerprinting data."
+            ),
+        ),
+        MethodDefinition(
             name="chat_get_prompt_context",
             handler=_chat_get_prompt_context,
             input_schema=Schema(
@@ -4006,7 +5031,14 @@ def build_default_catalogue() -> MethodCatalogue:
                     "prompt_text": str,
                     "prompt_count": int,
                 },
-                optional={"error": str},
+                optional={
+                    "error": str,
+                    "behaviour_prompt_concept_ids": list,
+                    "behaviour_prompt_concepts": list,
+                    "narration_prompt_concept_ids": list,
+                    "narration_prompt_concepts": list,
+                    "resolved_templates": dict,
+                },
                 allow_unknown=False,
                 description="User-specific chat prompt context for debugging and transparency.",
             ),
@@ -4050,6 +5082,7 @@ def build_default_catalogue() -> MethodCatalogue:
                     "tool_guidance_preview": (str, type(None)),
                     "gateway_enabled": (bool, type(None)),
                     "orchestrator_max_tool_invocations": (int, type(None)),
+                    "orchestrator_tool_batch_cap": (int, type(None)),
                 },
                 optional={"error": str},
                 allow_unknown=False,
@@ -4135,6 +5168,18 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=concept_search_output_schema,
             category="read",
             description="Namespaced alias for concept search used by the MCP orchestrator. Same parameters as search_concepts (query required; pass empty string when using instance_of filters).",
+        ),
+        MethodDefinition(
+            name="resolve_concept_by_name",
+            handler=_resolve_concept_by_name,
+            input_schema=_resolve_concept_by_name_input_schema(),
+            output_schema=_resolve_concept_by_name_output_schema(),
+            category="read",
+            description=(
+                "Resolve a Vontology concept deterministically from a user-provided surface form. "
+                "Read-only: does not mutate concepts. Returns resolved/ambiguous/not_found with an audit trail. "
+                "Supports language preferences, instance_of restriction, and optional code-string matching."
+            ),
         ),
         MethodDefinition(
             name="upsert_text_relation",
@@ -4487,6 +5532,45 @@ def build_default_catalogue() -> MethodCatalogue:
             category="write",
             timeout_sec=15.0,
             description="Add a comment to a Jira issue. Use to log investigation notes or status updates. Requires issue key and comment text.",
+        ),
+        MethodDefinition(
+            name="jira_create_issue",
+            handler=_jira_create_issue,
+            input_schema=_jira_create_issue_input_schema(),
+            output_schema=jira_create_issue_output_schema,
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Create a Jira issue with safety guardrails. Default dry_run=true (no mutation). "
+                "Writes are allowed only for allow-listed projects (default JVNAUTOSCI). "
+                "To execute, pass dry_run=false and either approved=true (per write) or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_update_issue",
+            handler=_jira_update_issue,
+            input_schema=_jira_update_issue_input_schema(),
+            output_schema=jira_update_issue_output_schema,
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Update a Jira issue with safety guardrails. Default dry_run=true (no mutation). "
+                "Writes are blocked unless the issue belongs to an allow-listed project. "
+                "To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+            ),
+        ),
+        MethodDefinition(
+            name="jira_link_issue",
+            handler=_jira_link_issue,
+            input_schema=_jira_link_issue_input_schema(),
+            output_schema=jira_link_issue_output_schema,
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Create a Jira issue link (e.g. Relates) with safety guardrails. Default dry_run=true (no mutation). "
+                "Both issue projects must be allow-listed. "
+                "To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1."
+            ),
         ),
         MethodDefinition(
             name="jira_transition",

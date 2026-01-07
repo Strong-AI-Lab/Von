@@ -193,26 +193,14 @@ Then open a **Pull Request (PR)** on GitHub:
 1. Go to the [Von repository](https://github.com/Strong-AI-Lab/Von)
 2. Click **"New Pull Request"**
 3. Select your branch from the dropdown
-4. **Write a detailed description** (see template below)
+4. **Write a detailed description** (the repository includes a PR template at `.github/PULL_REQUEST_TEMPLATE.md`)
 
 **PR Description should include:**
 - **What** changes were made
 - **Why** the changes were necessary
 - Reference any related issues (e.g., "Fixes #123")
 
-**Example PR description:**
-
-```markdown
-## Description
-Adds integration with the arXiv API to allow users to import papers directly into their knowledge base.
-
-## Changes
-- Added `arxiv_client.py` with search and fetch methods
-- Created new route `/api/papers/import-arxiv`
-- Updated concept service to link papers to concepts
-- Added tests for arXiv integration
-
-```
+Use the repository’s PR template to keep reviews consistent: `.github/PULL_REQUEST_TEMPLATE.md`.
 
 ### 7. PR Review Process
 

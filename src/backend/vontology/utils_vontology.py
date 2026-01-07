@@ -1317,13 +1317,25 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
         return {"error": "Identifier cannot be empty."}
     # Use repository for read
 
+    from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+
     query = {}
     try:
         if ObjectId.is_valid(identifier):
             # Try both ObjectId and string formats since the database might store IDs as strings
             query = {"_id": identifier}  # Try as real ObjectId first
         elif identifier.startswith("#V#"):
-            query = {"concept_id": identifier}
+            # Canonicalise punctuation variants (e.g. hyphen vs underscore).
+            # Prefer the canonical ID if it differs; fall back to the original if needed.
+            canonical_id = canonicalise_vontology_concept_id(identifier)
+            if canonical_id and canonical_id != identifier:
+                doc = ConceptsRepository.find_one({"concept_id": canonical_id})
+                if doc is None:
+                    query = {"concept_id": identifier}
+                else:
+                    query = {"concept_id": canonical_id}
+            else:
+                query = {"concept_id": identifier}
         else:
             query = {"path": identifier}
             # DEPRECATION WARNING
@@ -1589,16 +1601,41 @@ def get_vontology_node_and_descendant_ids(
     except bson_errors.InvalidId:
         start_node_query = {"name": identifier}
 
+    def _manual_descendants(start_concept_id: str) -> list[str]:
+        if not include_descendants:
+            return [start_concept_id]
+        visited: set[str] = {start_concept_id}
+        queue: list[str] = [start_concept_id]
+
+        while queue:
+            current = queue.pop(0)
+            cursor = ConceptsRepository.find(
+                {"relationships.is_a_type_of": current},
+                {"concept_id": 1},
+            )
+            for doc in cursor:
+                cid = doc.get("concept_id")
+                if isinstance(cid, str) and cid and cid not in visited:
+                    visited.add(cid)
+                    queue.append(cid)
+
+        return list(visited)
+
+    start_doc = ConceptsRepository.find_one(start_node_query, {"concept_id": 1})
+    if not start_doc or not isinstance(start_doc.get("concept_id"), str):
+        return []
+    start_concept_id = str(start_doc.get("concept_id"))
+
     # Phase 3: Updated pipeline to work with unified concepts collection
-    # and relationships.is_a_type_of structure using concept_id strings
+    # and relationships.is_a_type_of structure using concept_id strings.
     pipeline = [
-        {"$match": start_node_query},
+        {"$match": {"concept_id": start_concept_id}},
         {
             "$graphLookup": {
-                "from": CONCEPTS_COLLECTION_NAME,  # Updated to use concepts collection
-                "startWith": "$concept_id",  # Start with the concept_id string
-                "connectFromField": "concept_id",  # Connect from concept_id string
-                "connectToField": "relationships.is_a_type_of",  # Connect to Phase 3 relationship structure
+                "from": CONCEPTS_COLLECTION_NAME,
+                "startWith": "$concept_id",
+                "connectFromField": "concept_id",
+                "connectToField": "relationships.is_a_type_of",
                 "as": "descendants",
             }
         },
@@ -1606,8 +1643,8 @@ def get_vontology_node_and_descendant_ids(
             "$project": {
                 "all_concept_ids": {
                     "$concatArrays": [
-                        ["$concept_id"],  # Include the starting node's concept_id
-                        "$descendants.concept_id",  # Include descendant concept_ids
+                        ["$concept_id"],
+                        "$descendants.concept_id",
                     ]
                 }
             }
@@ -1617,22 +1654,32 @@ def get_vontology_node_and_descendant_ids(
     try:
         result = list(ConceptsRepository.aggregate(pipeline))
         if not result:
-            return []
+            return _manual_descendants(start_concept_id)
 
-        # The result is a list containing one document with an "all_concept_ids" field
-        # Return concept_id strings and remove duplicates
-        all_concept_ids = []
-        for concept_id in result[0].get("all_concept_ids", []):
-            if concept_id:  # Skip None/empty values
-                all_concept_ids.append(str(concept_id))
+        raw_ids = result[0].get("all_concept_ids", [])
+        all_concept_ids: list[str] = []
+        for concept_id in raw_ids:
+            if not concept_id:
+                continue
+            all_concept_ids.append(str(concept_id))
 
-        return list(set(all_concept_ids))  # Remove duplicates
+        # Mongomock (and some other test doubles) can incorrectly return literal
+        # field-path strings like "$concept_id" instead of actual values.
+        valid = [
+            cid
+            for cid in all_concept_ids
+            if isinstance(cid, str) and cid.startswith("#V#")
+        ]
+        if not valid:
+            return _manual_descendants(start_concept_id)
 
-    except PyMongoError as e:
+        return list(set(valid))
+
+    except Exception as e:
         logger.error(
             f"MongoDB error during get_vontology_node_and_descendant_ids for identifier '{identifier}': {e}"
         )
-        return []
+        return _manual_descendants(start_concept_id)
 
 
 def get_vontology_node_and_ancestor_instance_ids(
@@ -3479,28 +3526,31 @@ def create_vontology_concept(
     try:
         # Local import to avoid circular dependency at module import time
         from ..services.concept_service import create_concept  # type: ignore
+        from ..utils.concept_id_utils import canonicalise_vontology_concept_id
 
         # Validate concept name constraints upfront
         is_valid, error_msg = validate_concept_name_for_id(new_concept_name)
         if not is_valid:
             return {"success": False, "message": error_msg, "concept": None}
 
-        # Generate a base slug from the provided name (very lightweight normalisation)
-        # Collapse space sequences to single underscores (defensive; spaces are rejected by validator)
-        base_slug = re.sub(r"\s+", "_", new_concept_name).lower().strip()
-        if not base_slug:
+        # Generate a canonical concept_id from the provided name (slug-like input).
+        # This prevents punctuation variants (e.g. hyphen vs underscore) creating distinct concepts.
+        canonical_id = canonicalise_vontology_concept_id(new_concept_name)
+        if not canonical_id:
             return {
                 "success": False,
                 "message": "New concept name is empty after normalisation.",
                 "concept": None,
             }
 
+        base_slug = canonical_id[3:]
+
         # If creating an INSTANCE we allow duplicate display names by disambiguating the concept_id
         # (Users commonly create multiple instances sharing a natural language name.)
         # For TYPES we retain strict uniqueness to avoid hierarchy ambiguity.
         from ..db.repositories.concepts_repository import ConceptsRepository
 
-        candidate_concept_id = f"#V#{base_slug}"
+        candidate_concept_id = canonical_id
         if create_as_instance:
             # Preflight existence check and append incremental suffix until free
             counter = 2

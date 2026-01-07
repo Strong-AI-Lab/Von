@@ -150,6 +150,10 @@ class WorkflowExecutionTrace:
     status: str = "running"  # running|completed|failed|timeout|cancelled
     user_namespace: Optional[str] = None
     org_id: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    state_transitions: List[Dict[str, Any]] = field(default_factory=list)
+    prompts: List[Dict[str, Any]] = field(default_factory=list)
+    actions: List[Dict[str, Any]] = field(default_factory=list)
     steps: List[WorkflowStepTrace] = field(default_factory=list)
 
     def start_step(
@@ -158,6 +162,73 @@ class WorkflowExecutionTrace:
         step = WorkflowStepTrace(step_id=step_id, inputs=dict(inputs or {}))
         self.steps.append(step)
         return step
+
+    def record_state_transition(
+        self,
+        from_state: str,
+        to_state: str,
+        *,
+        verdict: Mapping[str, Any] | None = None,
+        call_id: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        transition: Dict[str, Any] = {
+            "from": from_state,
+            "to": to_state,
+            "timestamp": _utcnow(),
+        }
+        if verdict is not None:
+            transition["verdict"] = dict(verdict)
+        if call_id:
+            transition["call_id"] = call_id
+        if reason:
+            transition["reason"] = reason
+        self.state_transitions.append(transition)
+
+    def record_prompt(
+        self,
+        *,
+        prompt_id: str | None,
+        resolved_prompt: str | None,
+        variables: Mapping[str, Any] | None = None,
+    ) -> None:
+        entry: Dict[str, Any] = {}
+        if prompt_id:
+            entry["prompt_id"] = prompt_id
+        if resolved_prompt:
+            entry["preview"] = resolved_prompt[:400]
+            entry["truncated"] = len(resolved_prompt) > 400
+        if variables:
+            entry["variables"] = dict(variables)
+        self.prompts.append(entry)
+
+    def record_action(
+        self,
+        *,
+        action_id: str,
+        inputs: Mapping[str, Any] | None = None,
+        outputs: Mapping[str, Any] | None = None,
+        status: str = "success",
+        error: str | None = None,
+        call_id: str | None = None,
+        duration_ms: float | None = None,
+    ) -> None:
+        action_entry: Dict[str, Any] = {
+            "action_id": action_id,
+            "status": status,
+            "timestamp": _utcnow(),
+        }
+        if call_id:
+            action_entry["call_id"] = call_id
+        if duration_ms is not None:
+            action_entry["duration_ms"] = duration_ms
+        if inputs:
+            action_entry["inputs"] = dict(inputs)
+        if outputs:
+            action_entry["outputs"] = dict(outputs)
+        if error:
+            action_entry["error"] = error
+        self.actions.append(action_entry)
 
     def finish_completed(self) -> None:
         self.end_time = _utcnow()
@@ -180,6 +251,10 @@ class WorkflowExecutionTrace:
             "status": self.status,
             "user_namespace": self.user_namespace,
             "org_id": self.org_id,
+            "metadata": self.metadata,
+            "state_transitions": self.state_transitions,
+            "prompts": self.prompts,
+            "actions": self.actions,
             "steps": [
                 {
                     "step_id": s.step_id,

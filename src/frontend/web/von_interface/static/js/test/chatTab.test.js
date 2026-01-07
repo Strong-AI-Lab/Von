@@ -1,5 +1,8 @@
 import {
+    __testOnly_buildLlmDebugMetadata,
+    __testOnly_convertInlineQuotedStrongSegmentsToButtons,
     __testOnly_convertQuotedInstructionBlockquotesToButtons,
+    __testOnly_convertQuotedInstructionListItemsToButtons,
     __testOnly_convertReplyOptionsListsToButtons,
     __testOnly_deriveLlmDebugWarnings,
     __testOnly_hydrateChatConceptCartouches,
@@ -261,6 +264,106 @@ describe('chat insert prompt button behaviour', () => {
         expect(String(promptInput.value)).toContain('Do the thing');
         expect(sendButton.click).toHaveBeenCalledTimes(0);
     });
+
+    test('supports blockquotes with plain quoted text (no strong)', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = '<blockquote><p>“Create the full representation as specified.”</p></blockquote>';
+        __testOnly_convertQuotedInstructionBlockquotesToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+        expect(btn.textContent).toBe('Create the full representation as specified.');
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+        expect(String(promptInput.value)).toContain('Create the full representation as specified.');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+
+    test('supports unquoted strong blockquote confirmation prompt', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML =
+            '<blockquote><p><strong>Proceed with creation using verified parents and contribution‑based modelling?</strong></p></blockquote>';
+        __testOnly_convertQuotedInstructionBlockquotesToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+        expect(btn.textContent).toBe('Proceed with creation using verified parents and contribution‑based modelling?');
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(String(promptInput.value)).toContain('Proceed with creation using verified parents and contribution‑based modelling?');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('chat inline insert prompt button behaviour', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+        `;
+    });
+
+    test('inline quoted strong (e.g. “Yes”) becomes an insert button', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = '<p>If you say <strong>“Yes”</strong>, I will do the thing.</p>';
+        __testOnly_convertInlineQuotedStrongSegmentsToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+        expect(btn.textContent).toBe('Yes');
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(String(promptInput.value)).toContain('Yes');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('chat list-item insert prompt button behaviour', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <button id="sendButton"></button>
+            <textarea id="promptInput"></textarea>
+        `;
+    });
+
+    test('quoted bold list item becomes an insert button', () => {
+        const sendButton = document.getElementById('sendButton');
+        const promptInput = document.getElementById('promptInput');
+        sendButton.click = jest.fn();
+
+        const root = document.createElement('div');
+        root.innerHTML = `
+            <ul>
+                <li><strong>“Extract and materialise the full author list as researcher concepts.”</strong></li>
+            </ul>
+        `;
+
+        __testOnly_convertQuotedInstructionListItemsToButtons(root);
+
+        const btn = root.querySelector('.chat-insert-prompt-button');
+        expect(btn).not.toBeNull();
+        expect(btn.textContent).toBe('Extract and materialise the full author list as researcher concepts.');
+
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(String(promptInput.value)).toContain('Extract and materialise the full author list as researcher concepts.');
+        expect(sendButton.click).toHaveBeenCalledTimes(1);
+    });
 });
 
 describe('chat reply options button behaviour', () => {
@@ -408,5 +511,95 @@ describe('LLM debug warnings (presenter channel health)', () => {
         expect(warnings).toContain(
             'Spoken backfill attempted but spoken channel is still missing (missing_spoken).'
         );
+    });
+
+    test('flags when response claims more operations than executed tools', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            response: 'Done — 9 links added.',
+            tool_invocations: [
+                { method: 'add_relationship', arguments: { i: 0 } },
+                { method: 'add_relationship', arguments: { i: 1 } },
+                { method: 'add_relationship', arguments: { i: 2 } },
+                { method: 'add_relationship', arguments: { i: 3 } }
+            ]
+        });
+
+        expect(warnings).toContain(
+            'Response claims 9 operations, but only 4 tool invocations were recorded.'
+        );
+    });
+
+    test('surfaces tool-call parse errors from tool invocations', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            response: 'Tool call was not executed due to an MCP serialisation error.',
+            tool_invocations: [
+                {
+                    method: '__tool_call_parse_error__',
+                    error: 'Tool call was not executed: multiple JSON values were emitted in one response.'
+                }
+            ]
+        });
+
+        expect(warnings).toContain(
+            'Tool call was not executed: multiple JSON values were emitted in one response.'
+        );
+    });
+
+    test('flags when max tool invocation cap is hit but response still looks tool-shaped', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            response: '{"action":"call_tool","tool":"test","payload":{}}',
+            tool_invocations: [{ method: 'a' }, { method: 'b' }],
+            internal_mcp: {
+                execution_caps: {
+                    max_tool_invocations: 2,
+                    tool_batch_cap: 1
+                }
+            }
+        });
+
+        expect(warnings).toContain(
+            'Reached max tool invocation limit (2); additional tool calls were not executed.'
+        );
+    });
+});
+
+describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
+    test('includes internal MCP caps and usage against them', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            tool_invocations: [{}, {}, {}],
+            internal_mcp: {
+                execution_caps: {
+                    max_tool_invocations: 5,
+                    tool_batch_cap: 2
+                },
+                tool_use_progress: {
+                    enabled: true,
+                    request_id: 'req-123'
+                }
+            }
+        });
+
+        expect(metadata.internal_mcp).toBeTruthy();
+        expect(metadata.internal_mcp.execution_caps).toEqual({
+            max_tool_invocations: 5,
+            tool_batch_cap: 2
+        });
+
+        expect(metadata.internal_mcp.usage_against_caps).toEqual({
+            tool_invocations_done: 3,
+            tool_invocations_cap: 5,
+            tool_invocations_remaining: 2,
+            tool_invocations_exceeded: false,
+            tool_batch_cap: 2,
+            estimated_batches: 2,
+            estimated_last_batch_size: 1
+        });
+
+        expect(metadata.internal_mcp.tool_use_progress).toEqual({
+            enabled: true,
+            request_id: 'req-123'
+        });
     });
 });

@@ -14,13 +14,469 @@ import {
 } from './speech.js';
 import { selectBestNameForContext } from './utils/nameSelection.js';
 import { cartouchifyElementText, cartouchifyVontologyTokensInElement } from './utils/textDecorator.js';
+import { showToast } from './utils/toast.js';
 
 // Store LLM debug data for each turn
 const llmDebugData = new Map();
+const llmDebugFetchInFlight = new Map();
 // Track conversation turns for Markdown export and state resets
 const transcriptTurns = [];
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
+let activeChatSessionId = null;
+let activeChatSessionName = null;
+let sessionTabsCache = [];
+const sessionHistoryCache = new Map();
+let loadingChatSessionId = null;
+const SESSION_TABS_REFRESH_COOLDOWN_MS = 15_000;
+let lastSessionTabsRefreshMs = 0;
+let pendingSessionTabsRefresh = null;
+let lastRenderedSessionCount = 0;
+let chatSessionMenuEl = null;
+let activeHistoryRequest = null;
+let historyRequestCounter = 0;
+const HISTORY_SEGMENT_SIZE = 200;
+const HISTORY_TAIL_SEGMENT_SIZE = 30;
+
+// JVNAUTOSCI-942: Tool-use progress while "Thinking..."
+const DEFAULT_THINKING_TEXT = 'Thinking...';
+let showToolUseDuringThinkingSetting = true;
+let lastToolUseSettingRefreshMs = 0;
+const TOOL_USE_SETTING_REFRESH_COOLDOWN_MS = 30_000;
+
+function getLoadingIndicatorTextEl() {
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    if (!loadingIndicator) {
+        return null;
+    }
+    return loadingIndicator.querySelector('.loading-indicator-text');
+}
+
+function getLoadingIndicatorEl() {
+    return document.getElementById('loadingIndicator');
+}
+
+function setLoadingIndicatorText(text) {
+    const el = getLoadingIndicatorTextEl();
+    if (!el) {
+        return;
+    }
+    el.textContent = String(text ?? '').trim() || DEFAULT_THINKING_TEXT;
+}
+
+function setLoadingIndicatorTooltip(text) {
+    const value = String(text ?? '').trim();
+    const wrapper = getLoadingIndicatorEl();
+    if (wrapper) {
+        // Opt out of suppressTooltips.js for this element.
+        // Important: set before `title`, otherwise the MutationObserver may strip it.
+        wrapper.setAttribute('data-keep-title', 'true');
+        wrapper.title = value;
+        wrapper.setAttribute('aria-label', value);
+        wrapper.setAttribute('data-original-title', value);
+    }
+
+    const textEl = getLoadingIndicatorTextEl();
+    if (textEl) {
+        textEl.setAttribute('data-keep-title', 'true');
+        textEl.title = value;
+        textEl.setAttribute('aria-label', value);
+        textEl.setAttribute('data-original-title', value);
+    }
+}
+
+function createClientRequestId() {
+    try {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+            return crypto.randomUUID();
+        }
+    } catch (_) {
+        // Ignore.
+    }
+    return `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function updateSessionHistoryCache(sessionId, history, meta = {}) {
+    const sid = String(sessionId || '').trim();
+    if (!sid || !Array.isArray(history)) {
+        return;
+    }
+    sessionHistoryCache.set(sid, {
+        session_id: sid,
+        history,
+        message_count: meta.message_count ?? null,
+        last_message_at: meta.last_message_at ?? null,
+        segments: meta.segments ?? null,
+        total_segments: meta.total_segments ?? null,
+        cached_at_ms: Date.now()
+    });
+}
+
+function getSessionHistoryCache(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        return null;
+    }
+    return sessionHistoryCache.get(sid) || null;
+}
+
+function canReuseSessionHistory(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        return false;
+    }
+    const cached = getSessionHistoryCache(sid);
+    if (!cached) {
+        return false;
+    }
+    const sessionMeta = sessionTabsCache.find(
+        session => String(session?.session_id || '') === sid
+    );
+    if (!sessionMeta) {
+        return false;
+    }
+    const cachedCount = cached.message_count;
+    const cachedLast = cached.last_message_at;
+    const currentCount = sessionMeta.message_count;
+    const currentLast = sessionMeta.last_message_at;
+    if (cachedCount == null || cachedLast == null || currentCount == null || currentLast == null) {
+        return false;
+    }
+    return cachedCount === currentCount && cachedLast === currentLast;
+}
+
+function rehydrateFromCache(scrollableField, cached) {
+    if (!scrollableField || !cached || !Array.isArray(cached.history)) {
+        return false;
+    }
+    historySegmentsShown = Number.isInteger(cached.segments) && cached.segments > 0 ? cached.segments : 1;
+    totalHistorySegments = Number.isInteger(cached.total_segments) && cached.total_segments > 0
+        ? cached.total_segments
+        : historySegmentsShown;
+    rehydrateHistory(scrollableField, cached.history, {
+        scrollToBottom: true,
+        preserveScroll: false,
+        showResetNotice: false,
+        forceScrollToBottom: true
+    });
+    updateHistoryBanner();
+    return true;
+}
+
+async function refreshToolUseDuringThinkingSetting(force = false) {
+    const now = Date.now();
+    if (!force && now - lastToolUseSettingRefreshMs < TOOL_USE_SETTING_REFRESH_COOLDOWN_MS) {
+        return showToolUseDuringThinkingSetting;
+    }
+
+    lastToolUseSettingRefreshMs = now;
+    try {
+        const resp = await fetch('/api/settings/', { method: 'GET' });
+        if (!resp || !resp.ok) {
+            return showToolUseDuringThinkingSetting;
+        }
+        const data = await resp.json();
+        if (data && typeof data.show_tool_use_during_thinking !== 'undefined') {
+            showToolUseDuringThinkingSetting = !!data.show_tool_use_during_thinking;
+            if (!showToolUseDuringThinkingSetting && activeChatRequest) {
+                stopToolUseProgressPolling(activeChatRequest);
+                setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+            }
+        }
+    } catch (_) {
+        // Ignore.
+    }
+    return showToolUseDuringThinkingSetting;
+}
+
+function formatToolUseProgressText(progress) {
+    if (!progress || typeof progress !== 'object') {
+        return DEFAULT_THINKING_TEXT;
+    }
+
+    const status = typeof progress.status === 'string' ? progress.status : 'thinking';
+    const tool = typeof progress.tool === 'string' ? progress.tool : null;
+    const batchSize = Number.isFinite(progress.batch_size) ? Number(progress.batch_size) : null;
+    const done = Number.isFinite(progress.tool_calls_done) ? Number(progress.tool_calls_done) : null;
+    const cap = Number.isFinite(progress.tool_calls_cap) ? Number(progress.tool_calls_cap) : null;
+    const remaining = Number.isFinite(progress.tool_calls_remaining) ? Number(progress.tool_calls_remaining) : null;
+
+    const bits = [];
+
+    if (tool) {
+        bits.push(`tool: ${tool}`);
+    }
+
+    if (batchSize !== null) {
+        bits.push(`batch ${batchSize}`);
+    }
+
+    if (done !== null && cap !== null) {
+        bits.push(`${done}/${cap} used`);
+    }
+
+    if (remaining !== null) {
+        bits.push(`${remaining} remaining`);
+    }
+
+    if (status === 'tool_failed' || status === 'error') {
+        const error = typeof progress.error === 'string' ? progress.error.trim() : '';
+        if (error) {
+            bits.push(`error: ${error}`);
+        } else {
+            bits.push('error');
+        }
+    }
+
+    if (!bits.length) {
+        return DEFAULT_THINKING_TEXT;
+    }
+
+    return `${DEFAULT_THINKING_TEXT} (${bits.join(', ')})`;
+}
+
+function recordToolUseHistory(request, progress) {
+    if (!request || !progress || typeof progress !== 'object') {
+        return;
+    }
+
+    const tool = typeof progress.tool === 'string' ? progress.tool.trim() : '';
+    if (!tool) {
+        return;
+    }
+
+    const batchSize = Number.isFinite(progress.batch_size) ? Number(progress.batch_size) : null;
+
+    if (!Array.isArray(request.toolUseProgressHistory)) {
+        request.toolUseProgressHistory = [];
+    }
+
+    const history = request.toolUseProgressHistory;
+    const last = history.length ? history[history.length - 1] : null;
+    const lastTool = last && typeof last.tool === 'string' ? last.tool : null;
+    const lastBatch = last && Number.isFinite(last.batchSize) ? Number(last.batchSize) : null;
+
+    if (lastTool === tool && lastBatch === batchSize) {
+        return;
+    }
+
+    history.push({ tool, batchSize });
+}
+
+function formatThinkingDuration(elapsedMs) {
+    const ms = Number.isFinite(elapsedMs) ? Math.max(0, Number(elapsedMs)) : 0;
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+
+    if (minutes > 0) {
+        return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+    }
+    return `${totalSeconds}s`;
+}
+
+function formatToolUseHistoryTooltip(request) {
+    if (!request) {
+        return '';
+    }
+
+    const thinkingStartedAtMs = Number.isFinite(request.thinkingStartedAtMs)
+        ? Number(request.thinkingStartedAtMs)
+        : null;
+    const elapsedMs = thinkingStartedAtMs === null ? null : Date.now() - thinkingStartedAtMs;
+
+    const history = Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory : [];
+
+    if (!history.length) {
+        const lines = ['No tool use yet.'];
+        if (elapsedMs !== null) {
+            lines.push(`Thinking for ${formatThinkingDuration(elapsedMs)}.`);
+        }
+        return lines.join('\n');
+    }
+
+    const lines = [];
+    if (elapsedMs !== null) {
+        lines.push(`Thinking for ${formatThinkingDuration(elapsedMs)}`);
+    }
+    lines.push('Tools this turn:');
+    for (const entry of history) {
+        const tool = entry && typeof entry.tool === 'string' ? entry.tool : '';
+        if (!tool) {
+            continue;
+        }
+        const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
+        if (batchSize === null) {
+            lines.push(`- ${tool}`);
+        } else {
+            lines.push(`- ${tool} (batch ${batchSize})`);
+        }
+    }
+
+    return lines.length > 1 ? lines.join('\n') : '';
+}
+
+function stopToolUseProgressPolling(request) {
+    if (!request) {
+        return;
+    }
+
+    const poll = request.toolUseProgressPoll;
+    if (!poll) {
+        return;
+    }
+
+    request.toolUseProgressPoll = null;
+
+    try {
+        if (poll.intervalId) {
+            clearInterval(poll.intervalId);
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    try {
+        if (poll.timeoutId) {
+            clearTimeout(poll.timeoutId);
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    try {
+        poll.abortController?.abort();
+    } catch (_) {
+        // Ignore.
+    }
+}
+
+function stopThinkingTooltipTicker(request) {
+    if (!request) {
+        return;
+    }
+
+    try {
+        if (request.thinkingTooltipIntervalId) {
+            clearInterval(request.thinkingTooltipIntervalId);
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    request.thinkingTooltipIntervalId = null;
+}
+
+function startThinkingTooltipTicker(request) {
+    if (!request || request.aborted) {
+        return;
+    }
+
+    stopThinkingTooltipTicker(request);
+
+    // Update once per second so the elapsed time in the tooltip stays current,
+    // even if tool-progress polling backs off (e.g., repeated 404s).
+    request.thinkingTooltipIntervalId = setInterval(() => {
+        if (request.aborted || activeChatRequest !== request) {
+            stopThinkingTooltipTicker(request);
+            return;
+        }
+        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+    }, 1000);
+}
+
+function startToolUseProgressPolling(request) {
+    if (!request || request.aborted) {
+        return;
+    }
+
+    if (!showToolUseDuringThinkingSetting) {
+        return;
+    }
+
+    const requestId = request.clientRequestId;
+    if (!requestId) {
+        return;
+    }
+
+    stopToolUseProgressPolling(request);
+    const abortController = new AbortController();
+
+    const poll = {
+        abortController,
+        timeoutId: null,
+        intervalId: null,
+        nextDelayMs: 350,
+        consecutiveNotFound: 0
+    };
+
+    const scheduleNextPoll = (delayMs) => {
+        if (request.aborted || activeChatRequest !== request) {
+            return;
+        }
+        poll.timeoutId = setTimeout(() => {
+            void pollOnce();
+        }, Math.max(0, Number(delayMs) || 0));
+    };
+
+    const pollOnce = async () => {
+        if (request.aborted || activeChatRequest !== request) {
+            return;
+        }
+
+        // Keep tooltip "alive" even before the server has any tool-progress state.
+        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+
+        try {
+            const resp = await fetch(`/von/progress/${encodeURIComponent(requestId)}`,
+                { method: 'GET', signal: abortController.signal });
+            if (!resp) {
+                scheduleNextPoll(Math.min(5000, poll.nextDelayMs * 1.7));
+                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                return;
+            }
+
+            if (resp.status === 404) {
+                poll.consecutiveNotFound += 1;
+                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+
+            if (!resp.ok) {
+                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+            const progress = await resp.json();
+
+            poll.consecutiveNotFound = 0;
+            poll.nextDelayMs = 350;
+            setLoadingIndicatorText(formatToolUseProgressText(progress));
+            recordToolUseHistory(request, progress);
+            setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+
+            const status = typeof progress?.status === 'string' ? progress.status : null;
+            if (status === 'completed' || status === 'error') {
+                stopToolUseProgressPolling(request);
+                return;
+            }
+
+            scheduleNextPoll(poll.nextDelayMs);
+        } catch (err) {
+            if (err && err.name === 'AbortError') {
+                return;
+            }
+
+            poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+            scheduleNextPoll(poll.nextDelayMs);
+        }
+    };
+
+    request.toolUseProgressPoll = poll;
+
+    void pollOnce();
+}
 
 // Cool-down for failed history talk-track backfills so we do not spam the server.
 // Map<turnId, { at: number, error: string }>
@@ -174,6 +630,40 @@ function extractBoldQuotedInstruction(text) {
     return instruction;
 }
 
+function extractQuotedInstruction(text) {
+    const value = String(text ?? '').trim();
+    if (!value) return null;
+
+    // Support curly or straight quotes.
+    const m = value.match(/^(?:“|")(.+?)(?:”|")\s*$/);
+    if (!m) return null;
+
+    const instruction = String(m[1] ?? '').trim();
+    if (!instruction) return null;
+    return instruction;
+}
+
+function isAllowedUnquotedBlockquoteInstruction(text) {
+    const value = String(text ?? '').trim();
+    if (!value) return false;
+
+    // Purposefully narrow: broken-windows fix for known UI phrasing.
+    // (Avoid turning arbitrary bolded blockquotes into buttons.)
+    const compact = value.replace(/\s+/g, ' ');
+    return /^Proceed with creation using verified parents and contribution[-‑–—]based modelling\?$/i.test(compact);
+}
+
+function shouldButtonifyInlineQuotedInstruction(instruction) {
+    const value = String(instruction ?? '').trim();
+    if (!value) return false;
+    const compact = value.replace(/\s+/g, ' ');
+
+    if (/^(yes|no)$/i.test(compact)) return true;
+    if (/^Create the core paper representation now \(paper \+ authors \+ core contribution only\)\.?$/i.test(compact)) return true;
+    if (/^Create the full representation as specified\.?$/i.test(compact)) return true;
+    return false;
+}
+
 function extractBoldQuotedInstructionFromStrong(strongEl) {
     if (!strongEl) return null;
 
@@ -258,6 +748,464 @@ function submitChatPromptImmediately() {
         handleSendPrompt();
     } catch (_) {
         // Ignore.
+    }
+}
+
+function formatBytesForUi(sizeBytes) {
+    const size = Number(sizeBytes);
+    if (!Number.isFinite(size) || size < 0) return '';
+    if (size < 1024) return `${size} B`;
+    const kb = size / 1024;
+    if (kb < 1024) return `${kb.toFixed(1)} KB`;
+    const mb = kb / 1024;
+    if (mb < 1024) return `${mb.toFixed(1)} MB`;
+    const gb = mb / 1024;
+    return `${gb.toFixed(2)} GB`;
+}
+
+function isFileDragEvent(event) {
+    const dt = event?.dataTransfer;
+    if (!dt) return false;
+    try {
+        const types = Array.from(dt.types || []);
+        return types.includes('Files');
+    } catch (_) {
+        return false;
+    }
+}
+
+async function uploadSingleFileToVon(file) {
+    if (!file) {
+        throw new Error('No file provided');
+    }
+
+    const formData = new FormData();
+    formData.append('file', file, file.name || 'uploaded_file');
+
+    const response = await fetch('/von/api/files/upload', {
+        method: 'POST',
+        body: formData
+    });
+
+    let data = null;
+    try {
+        data = await response.json();
+    } catch (_) {
+        data = null;
+    }
+
+    if (!response.ok || !data || data.success !== true) {
+        const detail = data?.message || data?.error || `HTTP ${response.status}`;
+        throw new Error(`Upload failed: ${detail}`);
+    }
+
+    return data;
+}
+
+async function uploadFilesToVon(files) {
+    const list = Array.from(files || []).filter(Boolean);
+    if (!list.length) return;
+
+    for (const file of list) {
+        const sizeLabel = formatBytesForUi(file.size);
+        appendMessage('User', `Uploading file: ${file.name}${sizeLabel ? ` (${sizeLabel})` : ''}`);
+
+        try {
+            const result = await uploadSingleFileToVon(file);
+            const conceptId = result?.uploaded?.concept_id;
+            const blobUri = result?.storage?.uri;
+            const blobKey = result?.storage?.key;
+            const blobBackend = result?.storage?.backend;
+            const historyRecorded = result?.chat_history_recorded === true;
+
+            const downloadUrl = conceptId
+                ? `/von/api/files/${encodeURIComponent(conceptId)}/download`
+                : null;
+
+            const details = [];
+            if (blobUri) details.push(`Blob: ${blobUri}`);
+            if (blobBackend || blobKey) details.push(`Blob key: ${String(blobBackend || '')}:${String(blobKey || '')}`.replace(/^:/, ''));
+            if (historyRecorded) details.push('Recorded in chat history.');
+            if (downloadUrl) details.push(`[Download attachment](${downloadUrl})`);
+
+            appendMessage(
+                'Von',
+                `File uploaded and registered as ${conceptId || '(unknown)'}${details.length ? `\n${details.join('\n')}` : ''}`
+            );
+
+            if (conceptId) {
+                insertTextIntoChatPrompt(`Attached file concept: ${conceptId}`);
+            }
+        } catch (error) {
+            console.error('[chatTab] file upload error', error);
+            appendMessage('Error', `File upload failed: ${String(error?.message || error)}`);
+        }
+    }
+}
+
+function convertJustSayInstructionsToButtons(root) {
+    if (!root || !root.querySelectorAll) return;
+
+    const normalise = (value) => String(value ?? '').trim().replace(/\s+/g, ' ');
+
+    const isAllowedQuickReply = (value) => {
+        const compact = normalise(value);
+        if (!compact) return false;
+
+        if (compact.length > 60) return false;
+        if (compact.split(' ').length > 4) return false;
+        if (/[\n\r]/.test(compact)) return false;
+        if (/[<>]/.test(compact)) return false;
+
+        return true;
+    };
+
+    const createInsertButton = (text) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'chat-insert-prompt-button';
+        btn.textContent = text;
+        btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
+        btn.setAttribute('aria-label', `Insert into chat prompt: ${text}`);
+        btn.addEventListener('click', (e) => {
+            try {
+                e.preventDefault();
+                e.stopPropagation();
+            } catch (_) {
+                // Ignore.
+            }
+
+            insertTextIntoChatPrompt(text);
+
+            const shiftHeld = !!(e && e.shiftKey);
+            if (!shiftHeld) {
+                submitChatPromptImmediately();
+            }
+        });
+        return btn;
+    };
+
+    const shouldSkipNode = (node) => {
+        const parent = node?.parentElement;
+        if (!parent?.closest) return true;
+        if (parent.closest('pre, code, a, button, textarea, input')) return true;
+        if (parent.closest('.chat-insert-prompt-wrapper, .chat-insert-prompt-inline-wrapper')) return true;
+        return false;
+    };
+
+    const splitJustSayMatch = (fullMatch) => {
+        const text = String(fullMatch ?? '');
+        const pairs = [
+            ['"', '"'],
+            ['“', '”'],
+            ["'", "'"],
+            ['‘', '’']
+        ];
+
+        for (const [open, close] of pairs) {
+            const openIndex = text.indexOf(open);
+            const closeIndex = text.lastIndexOf(close);
+            if (openIndex !== -1 && closeIndex !== -1 && closeIndex > openIndex) {
+                return {
+                    leading: text.slice(0, openIndex),
+                    reply: text.slice(openIndex + open.length, closeIndex),
+                    trailing: text.slice(closeIndex + close.length)
+                };
+            }
+        }
+
+        const trimmed = text.replace(/\s+$/g, '');
+        const lastSpace = trimmed.lastIndexOf(' ');
+        if (lastSpace === -1) {
+            return { leading: '', reply: trimmed, trailing: '' };
+        }
+        return {
+            leading: trimmed.slice(0, lastSpace + 1),
+            reply: trimmed.slice(lastSpace + 1),
+            trailing: ''
+        };
+    };
+
+    const splitSayOrMatch = (fullMatch) => {
+        const text = String(fullMatch ?? '');
+        const marker = text.match(/\b(?:just\s+)?say\b/i);
+        if (!marker || marker.index == null) {
+            return null;
+        }
+
+        const afterMarker = text.slice(marker.index + marker[0].length);
+        const orIndex = afterMarker.toLowerCase().indexOf(' or ');
+        if (orIndex === -1) {
+            return null;
+        }
+
+        return {
+            prefix: text.slice(0, marker.index + marker[0].length),
+            left: afterMarker.slice(0, orIndex),
+            right: afterMarker.slice(orIndex + 4)
+        };
+    };
+
+    const quickReplyWords = '(?:proceed|yes|no|continue|ok|okay|cancel)';
+    const saySingleRegex = new RegExp(
+        `\\b(?:just\\s+)?say\\s+(?:"[^"\\n\\r]{1,80}"|“[^”\\n\\r]{1,80}”|'[^'\\n\\r]{1,80}'|‘[^’\\n\\r]{1,80}’|\\b${quickReplyWords}\\b)`,
+        'gi'
+    );
+    const sayOrRegex = new RegExp(
+        `\\b(?:just\\s+)?say\\s+(?:"[^"\\n\\r]{1,80}"|“[^”\\n\\r]{1,80}”|'[^'\\n\\r]{1,80}'|‘[^’\\n\\r]{1,80}’|\\b${quickReplyWords}\\b)\\s+or\\s+(?:"[^"\\n\\r]{1,80}"|“[^”\\n\\r]{1,80}”|'[^'\\n\\r]{1,80}'|‘[^’\\n\\r]{1,80}’|\\b${quickReplyWords}\\b)`,
+        'gi'
+    );
+
+    // Pass 1: handle cases where "say …" / "just say …" is fully contained in a single text node.
+    const textNodes = [];
+    try {
+        const walker = document.createTreeWalker(
+            root,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode: (node) => {
+                    if (!node || node.nodeType !== Node.TEXT_NODE) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    const text = String(node.textContent ?? '');
+                    const lowered = text ? text.toLowerCase() : '';
+                    if (!lowered || (!lowered.includes(' just ') && !lowered.includes('just ') && !lowered.includes(' say '))) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    if (shouldSkipNode(node)) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            },
+            false
+        );
+
+        let current = walker.nextNode();
+        while (current) {
+            textNodes.push(current);
+            current = walker.nextNode();
+        }
+    } catch (_) {
+        // Ignore.
+    }
+
+    for (const node of textNodes) {
+        try {
+            if (!node || node.nodeType !== Node.TEXT_NODE) continue;
+            const raw = String(node.textContent ?? '');
+            if (!raw.trim()) continue;
+
+            // Prefer the more specific "say X or Y" match so we can produce two buttons.
+            const orMatches = Array.from(raw.matchAll(sayOrRegex));
+            const singleMatches = orMatches.length === 0 ? Array.from(raw.matchAll(saySingleRegex)) : [];
+            if (orMatches.length === 0 && singleMatches.length === 0) continue;
+
+            const fragment = document.createDocumentFragment();
+            let cursor = 0;
+
+            const processSingleMatch = (match) => {
+                const matchIndex = match.index;
+                if (typeof matchIndex !== 'number') {
+                    return;
+                }
+
+                const full = String(match[0] ?? '');
+                if (!full) {
+                    return;
+                }
+
+                const start = matchIndex;
+                const end = matchIndex + full.length;
+                if (start < cursor) {
+                    return;
+                }
+
+                if (start > cursor) {
+                    fragment.appendChild(document.createTextNode(raw.slice(cursor, start)));
+                }
+
+                const { leading, reply, trailing } = splitJustSayMatch(full);
+                const replyText = normalise(reply);
+                if (!isAllowedQuickReply(replyText)) {
+                    fragment.appendChild(document.createTextNode(raw.slice(start, end)));
+                    cursor = end;
+                    return;
+                }
+
+                if (leading) {
+                    fragment.appendChild(document.createTextNode(leading));
+                }
+
+                const wrapper = document.createElement('span');
+                wrapper.className = 'chat-insert-prompt-inline-wrapper';
+                wrapper.appendChild(createInsertButton(replyText));
+                fragment.appendChild(wrapper);
+
+                if (trailing) {
+                    fragment.appendChild(document.createTextNode(trailing));
+                }
+
+                cursor = end;
+
+            };
+
+            const processOrMatch = (match) => {
+                const matchIndex = match.index;
+                if (typeof matchIndex !== 'number') {
+                    return;
+                }
+
+                const full = String(match[0] ?? '');
+                if (!full) {
+                    return;
+                }
+
+                const start = matchIndex;
+                const end = matchIndex + full.length;
+                if (start < cursor) {
+                    return;
+                }
+
+                if (start > cursor) {
+                    fragment.appendChild(document.createTextNode(raw.slice(cursor, start)));
+                }
+
+                const parts = splitSayOrMatch(full);
+                if (!parts) {
+                    fragment.appendChild(document.createTextNode(raw.slice(start, end)));
+                    cursor = end;
+                    return;
+                }
+
+                const leftParts = splitJustSayMatch(parts.left);
+                const rightParts = splitJustSayMatch(parts.right);
+                const leftText = normalise(leftParts.reply);
+                const rightText = normalise(rightParts.reply);
+
+                if (!isAllowedQuickReply(leftText) || !isAllowedQuickReply(rightText)) {
+                    fragment.appendChild(document.createTextNode(raw.slice(start, end)));
+                    cursor = end;
+                    return;
+                }
+
+                // Keep the original prefix, but replace options with buttons.
+                const prefix = String(full).replace(/\s+or\s+[\s\S]*$/i, ' ');
+                fragment.appendChild(document.createTextNode(prefix));
+
+                const leftWrapper = document.createElement('span');
+                leftWrapper.className = 'chat-insert-prompt-inline-wrapper';
+                leftWrapper.appendChild(createInsertButton(leftText));
+                fragment.appendChild(leftWrapper);
+
+                fragment.appendChild(document.createTextNode(' or '));
+
+                const rightWrapper = document.createElement('span');
+                rightWrapper.className = 'chat-insert-prompt-inline-wrapper';
+                rightWrapper.appendChild(createInsertButton(rightText));
+                fragment.appendChild(rightWrapper);
+
+                cursor = end;
+            };
+
+            const chosenMatches = orMatches.length > 0 ? orMatches : singleMatches;
+            const handler = orMatches.length > 0 ? processOrMatch : processSingleMatch;
+
+            for (const match of chosenMatches) {
+                handler(match);
+            }
+
+            if (cursor < raw.length) {
+                fragment.appendChild(document.createTextNode(raw.slice(cursor)));
+            }
+
+            node.replaceWith(fragment);
+        } catch (_) {
+            // Ignore.
+        }
+    }
+
+    const strongEls = Array.from(root.querySelectorAll('strong'));
+
+    // Pass 2: handle "say **X** or **Y**" where both options are separate <strong> nodes.
+    for (const strong of strongEls) {
+        try {
+            if (!strong || !strong.closest) continue;
+            if (strong.closest('pre, code, a, button')) continue;
+            if (strong.closest('.chat-insert-prompt-wrapper, .chat-insert-prompt-inline-wrapper')) continue;
+
+            const firstText = normalise(extractBoldQuotedInstructionFromStrong(strong));
+            if (!firstText || !isAllowedQuickReply(firstText)) {
+                continue;
+            }
+
+            const prev = strong.previousSibling;
+            if (!prev || prev.nodeType !== Node.TEXT_NODE) continue;
+            const prevText = String(prev.textContent ?? '');
+            if (!/\b(?:just\s+)?say\s*[:\-‑–—]?\s*$/i.test(prevText)) {
+                continue;
+            }
+
+            const between = strong.nextSibling;
+            if (!between || between.nodeType !== Node.TEXT_NODE) continue;
+            const betweenText = String(between.textContent ?? '');
+            if (!/^\s*or\s*$/i.test(betweenText)) {
+                continue;
+            }
+
+            const secondStrong = strong.nextElementSibling;
+            if (!secondStrong || secondStrong.tagName !== 'STRONG') {
+                continue;
+            }
+
+            const secondText = normalise(extractBoldQuotedInstructionFromStrong(secondStrong));
+            if (!secondText || !isAllowedQuickReply(secondText)) {
+                continue;
+            }
+
+            const firstWrapper = document.createElement('span');
+            firstWrapper.className = 'chat-insert-prompt-inline-wrapper';
+            firstWrapper.appendChild(createInsertButton(firstText));
+            strong.replaceWith(firstWrapper);
+
+            const secondWrapper = document.createElement('span');
+            secondWrapper.className = 'chat-insert-prompt-inline-wrapper';
+            secondWrapper.appendChild(createInsertButton(secondText));
+            secondStrong.replaceWith(secondWrapper);
+        } catch (_) {
+            // Ignore.
+        }
+    }
+
+    // Pass 3: handle markdown like "say **“Proceed”**" where the quoted reply is a separate <strong> node.
+    for (const strong of strongEls) {
+        try {
+            if (!strong || !strong.closest) continue;
+            if (strong.closest('pre, code, a, button')) continue;
+            if (strong.closest('.chat-insert-prompt-wrapper, .chat-insert-prompt-inline-wrapper')) continue;
+            if (strong.querySelector && strong.querySelector('.chat-insert-prompt-button')) continue;
+
+            const replyText = normalise(extractBoldQuotedInstructionFromStrong(strong));
+            if (!replyText) continue;
+            if (!isAllowedQuickReply(replyText)) continue;
+
+            const prev = strong.previousSibling;
+            if (!prev || prev.nodeType !== Node.TEXT_NODE) continue;
+            const prevText = String(prev.textContent ?? '');
+            if (!/\b(?:just\s+)?say\s*[:\-‑–—]?\s*$/i.test(prevText)) {
+                continue;
+            }
+
+            const wrapper = document.createElement('span');
+            wrapper.className = 'chat-insert-prompt-inline-wrapper';
+            wrapper.appendChild(createInsertButton(replyText));
+            strong.replaceWith(wrapper);
+        } catch (_) {
+            // Ignore.
+        }
     }
 }
 
@@ -432,26 +1380,52 @@ function convertQuotedInstructionBlockquotesToButtons(root) {
 
             const pElementChildren = Array.from(p.children ?? []);
             const strongCandidates = pElementChildren.filter((el) => el && el.tagName === 'STRONG');
-            if (strongCandidates.length !== 1) continue;
-            const strong = strongCandidates[0];
-
-            // Allow harmless formatting elements that do not contribute text.
-            if (pElementChildren.some((el) => el !== strong && el.tagName !== 'BR')) {
-                continue;
-            }
-
-            // No non-whitespace text nodes inside the paragraph.
-            const pNodes = Array.from(p.childNodes ?? []);
-            if (pNodes.some((n) => n.nodeType === Node.TEXT_NODE && String(n.textContent ?? '').trim())) {
-                continue;
-            }
-
-            const instruction = extractBoldQuotedInstructionFromStrong(strong);
-            if (!instruction) continue;
-
-            // Ensure the blockquote text is exactly the quoted strong text (no extra content).
             const normalise = (s) => String(s ?? '').trim().replace(/\s+/g, ' ');
-            if (normalise(block.textContent) !== normalise(strong.textContent)) continue;
+
+            let instruction = null;
+
+            if (strongCandidates.length === 1) {
+                const strong = strongCandidates[0];
+
+                // Allow harmless formatting elements that do not contribute text.
+                if (pElementChildren.some((el) => el !== strong && el.tagName !== 'BR')) {
+                    continue;
+                }
+
+                // No non-whitespace text nodes inside the paragraph.
+                const pNodes = Array.from(p.childNodes ?? []);
+                if (pNodes.some((n) => n.nodeType === Node.TEXT_NODE && String(n.textContent ?? '').trim())) {
+                    continue;
+                }
+
+                instruction = extractBoldQuotedInstructionFromStrong(strong);
+                if (!instruction) {
+                    const candidate = normalise(strong.textContent);
+                    if (isAllowedUnquotedBlockquoteInstruction(candidate)) {
+                        instruction = candidate;
+                    }
+                }
+                if (!instruction) continue;
+
+                // Ensure the blockquote text is exactly the expected paragraph text (no extra content).
+                if (normalise(block.textContent) !== normalise(p.textContent)) continue;
+            } else {
+                // Also support plain quoted text without bold:
+                // <blockquote><p>“...”</p></blockquote>
+                // Allow only <br> tags and no other nested markup.
+                if (pElementChildren.some((el) => el && el.tagName !== 'BR')) {
+                    continue;
+                }
+
+                const pNodes = Array.from(p.childNodes ?? []);
+                if (pNodes.some((n) => n.nodeType === Node.ELEMENT_NODE && n.tagName && n.tagName !== 'BR')) {
+                    continue;
+                }
+
+                instruction = extractQuotedInstruction(p.textContent);
+                if (!instruction) continue;
+                if (normalise(block.textContent) !== normalise(p.textContent)) continue;
+            }
 
             const btn = document.createElement('button');
             btn.type = 'button';
@@ -478,6 +1452,115 @@ function convertQuotedInstructionBlockquotesToButtons(root) {
             wrapper.className = 'chat-insert-prompt-wrapper';
             wrapper.appendChild(btn);
             block.replaceWith(wrapper);
+        } catch (_) {
+            // Ignore detached nodes or DOM mutation races.
+        }
+    }
+}
+
+function convertInlineQuotedStrongSegmentsToButtons(root) {
+    if (!root || !root.querySelectorAll) return;
+
+    const strongEls = Array.from(root.querySelectorAll('strong'));
+    for (const strong of strongEls) {
+        try {
+            if (!strong || !strong.closest) continue;
+            if (strong.closest('pre, code, a, button')) continue;
+            if (strong.closest('blockquote')) continue;
+            if (strong.closest('ul, ol')) continue;
+            if (strong.closest('.chat-insert-prompt-wrapper')) continue;
+
+            const instruction = extractBoldQuotedInstructionFromStrong(strong);
+            if (!instruction) continue;
+            if (!shouldButtonifyInlineQuotedInstruction(instruction)) continue;
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'chat-insert-prompt-button';
+            btn.textContent = instruction;
+            btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
+            btn.setAttribute('aria-label', `Insert into chat prompt: ${instruction}`);
+            btn.addEventListener('click', (e) => {
+                try {
+                    e.preventDefault();
+                    e.stopPropagation();
+                } catch (_) {
+                    // Ignore.
+                }
+                insertTextIntoChatPrompt(instruction);
+
+                const shiftHeld = !!(e && e.shiftKey);
+                if (!shiftHeld) {
+                    submitChatPromptImmediately();
+                }
+            });
+
+            const wrapper = document.createElement('span');
+            wrapper.className = 'chat-insert-prompt-inline-wrapper';
+            wrapper.appendChild(btn);
+            strong.replaceWith(wrapper);
+        } catch (_) {
+            // Ignore detached nodes or DOM mutation races.
+        }
+    }
+}
+
+function convertQuotedInstructionListItemsToButtons(root) {
+    if (!root || !root.querySelectorAll) return;
+
+    const listItems = Array.from(root.querySelectorAll('li'));
+    for (const li of listItems) {
+        try {
+            if (!li || !li.closest) continue;
+            if (li.closest('pre, code, a, button')) continue;
+            if (li.closest('.chat-insert-prompt-wrapper, .chat-insert-prompt-inline-wrapper')) continue;
+
+            if (li.querySelector('.chat-insert-prompt-button')) {
+                continue;
+            }
+
+            const elementChildren = Array.from(li.children ?? []);
+            const strongCandidates = elementChildren.filter((el) => el && el.tagName === 'STRONG');
+            if (strongCandidates.length !== 1) continue;
+            const strong = strongCandidates[0];
+
+            if (elementChildren.some((el) => el !== strong && el.tagName !== 'BR')) {
+                continue;
+            }
+
+            const liNodes = Array.from(li.childNodes ?? []);
+            if (liNodes.some((n) => n.nodeType === Node.TEXT_NODE && String(n.textContent ?? '').trim())) {
+                continue;
+            }
+
+            const instruction = extractBoldQuotedInstructionFromStrong(strong);
+            if (!instruction) continue;
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'chat-insert-prompt-button';
+            btn.textContent = instruction;
+            btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
+            btn.setAttribute('aria-label', `Insert into chat prompt: ${instruction}`);
+            btn.addEventListener('click', (e) => {
+                try {
+                    e.preventDefault();
+                    e.stopPropagation();
+                } catch (_) {
+                    // Ignore.
+                }
+                insertTextIntoChatPrompt(instruction);
+
+                const shiftHeld = !!(e && e.shiftKey);
+                if (!shiftHeld) {
+                    submitChatPromptImmediately();
+                }
+            });
+
+            const wrapper = document.createElement('span');
+            wrapper.className = 'chat-insert-prompt-inline-wrapper';
+            wrapper.appendChild(btn);
+            strong.replaceWith(wrapper);
         } catch (_) {
             // Ignore detached nodes or DOM mutation races.
         }
@@ -565,7 +1648,10 @@ async function renderChatMarkdownIntoContainer(container, text) {
 
     container.innerHTML = html;
     convertQuotedInstructionBlockquotesToButtons(container);
+    convertInlineQuotedStrongSegmentsToButtons(container);
+    convertJustSayInstructionsToButtons(container);
     convertReplyOptionsListsToButtons(container);
+    convertQuotedInstructionListItemsToButtons(container);
     try {
         container.dataset.renderMode = 'rendered';
     } catch (_) {
@@ -613,6 +1699,9 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
     if (cachedHtml) {
         messageTextEl.innerHTML = cachedHtml;
         convertQuotedInstructionBlockquotesToButtons(messageTextEl);
+        convertInlineQuotedStrongSegmentsToButtons(messageTextEl);
+        convertJustSayInstructionsToButtons(messageTextEl);
+        convertQuotedInstructionListItemsToButtons(messageTextEl);
         cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
         hydrateChatConceptCartouches(messageTextEl);
         return;
@@ -969,10 +2058,96 @@ export function __testOnly_convertReplyOptionsListsToButtons(root) {
     convertReplyOptionsListsToButtons(root);
 }
 
+// Export for testing.
+export function __testOnly_convertInlineQuotedStrongSegmentsToButtons(root) {
+    convertInlineQuotedStrongSegmentsToButtons(root);
+}
+
+// Export for testing.
+export function __testOnly_convertQuotedInstructionListItemsToButtons(root) {
+    convertQuotedInstructionListItemsToButtons(root);
+}
+
 function deriveLlmDebugWarnings(debugData) {
     const warnings = [];
     if (!debugData || typeof debugData !== 'object') {
         return warnings;
+    }
+
+    const responseText = (typeof debugData.response === 'string') ? debugData.response : '';
+    const toolInvocations = Array.isArray(debugData.tool_invocations) ? debugData.tool_invocations : [];
+    const toolStatsCount = (debugData.tool_stats && Number.isFinite(debugData.tool_stats.tool_count))
+        ? Number(debugData.tool_stats.tool_count)
+        : null;
+    const executedToolCount = toolInvocations.length || (toolStatsCount ?? 0);
+
+    // Surface tool invocation failures / parse errors so it is obvious when tool
+    // use was intended but did not execute.
+    for (const inv of toolInvocations) {
+        if (!inv || typeof inv !== 'object') {
+            continue;
+        }
+
+        const method = (typeof inv.method === 'string')
+            ? inv.method
+            : ((typeof inv.tool === 'string') ? inv.tool : 'unknown');
+
+        const errorText = (typeof inv.error === 'string') ? inv.error.trim() : '';
+        if (!errorText) {
+            continue;
+        }
+
+        if (method === '__tool_call_parse_error__') {
+            warnings.push(errorText);
+        } else {
+            warnings.push(`Tool ${method} failed: ${errorText}`);
+        }
+    }
+
+    // Detect when we reached the max tool invocation cap but the response still
+    // looks like a tool call (i.e., the LLM wanted more tools than we executed).
+    const maxToolInvocations = (debugData.internal_mcp && debugData.internal_mcp.execution_caps && Number.isFinite(debugData.internal_mcp.execution_caps.max_tool_invocations))
+        ? Number(debugData.internal_mcp.execution_caps.max_tool_invocations)
+        : null;
+
+    if (maxToolInvocations != null && maxToolInvocations > 0 && toolInvocations.length >= maxToolInvocations) {
+        const trimmed = String(responseText || '').trim();
+        const looksLikeToolCall = (trimmed.startsWith('{') || trimmed.startsWith('['))
+            && trimmed.includes('"call_tool"')
+            && trimmed.includes('"tool"');
+        if (looksLikeToolCall) {
+            warnings.push(
+                `Reached max tool invocation limit (${maxToolInvocations}); additional tool calls were not executed.`
+            );
+        }
+    }
+
+    // Heuristic: detect when the assistant claims it performed N operations but we
+    // only executed M tool calls. This often indicates tool truncation/early stop.
+    // (e.g., “Done — 9 links” but tool_invocations contains 4 items).
+    if (responseText) {
+        const patterns = [
+            /\b(?:done|complete|completed)\s*[—\-:]\s*(\d+)\b/gi,
+            /\b(?:added|linked|created|removed|updated|executed)\s+(\d+)\b/gi,
+            /\b(\d+)\s+(?:links?|relationships?|relations?|tool\s*calls?|tools?)\b/gi
+        ];
+
+        let claimed = null;
+        for (const re of patterns) {
+            let match;
+            while ((match = re.exec(responseText)) !== null) {
+                const n = Number(match[1]);
+                if (Number.isFinite(n)) {
+                    claimed = claimed == null ? n : Math.max(claimed, n);
+                }
+            }
+        }
+
+        if (claimed != null && claimed > 0 && executedToolCount >= 0 && claimed > executedToolCount) {
+            warnings.push(
+                `Response claims ${claimed} operations, but only ${executedToolCount} tool invocations were recorded.`
+            );
+        }
     }
 
     if (typeof debugData.error === 'string' && debugData.error.trim()) {
@@ -1038,6 +2213,36 @@ function deriveLlmDebugWarnings(debugData) {
         }
     }
 
+    const speechPlayback = debugData.speech_playback;
+    if (speechPlayback && typeof speechPlayback === 'object' && speechPlayback.duration_suspect_too_long) {
+        const actualMs = Number.isFinite(speechPlayback.actual_duration_ms)
+            ? speechPlayback.actual_duration_ms
+            : null;
+        const expectedMs = Number.isFinite(speechPlayback.expected_duration_ms)
+            ? speechPlayback.expected_duration_ms
+            : null;
+        const thresholdSec = Number.isFinite(speechPlayback.duration_threshold_sec)
+            ? speechPlayback.duration_threshold_sec
+            : null;
+
+        const actualSec = actualMs !== null ? (actualMs / 1000) : null;
+        const expectedSec = expectedMs !== null ? (expectedMs / 1000) : null;
+
+        const details = [];
+        if (actualSec !== null) {
+            details.push(`actual ${actualSec.toFixed(1)}s`);
+        } else if (expectedSec !== null) {
+            details.push(`expected ${expectedSec.toFixed(1)}s`);
+        }
+        if (thresholdSec !== null) {
+            details.push(`threshold ${thresholdSec}s`);
+        }
+
+        warnings.push(
+            `Narration playback duration exceeded long-duration threshold${details.length ? ` (${details.join(', ')})` : ''}.`
+        );
+    }
+
     return Array.from(new Set(warnings));
 }
 
@@ -1093,6 +2298,10 @@ const CHAT_TTS_LANGUAGE_STORAGE_KEY = 'chatTtsLanguage';
 const CHAT_TTS_RATE_STORAGE_KEY = 'chatTtsRate';
 const CHAT_TTS_PITCH_STORAGE_KEY = 'chatTtsPitch';
 const CHAT_TTS_VOLUME_STORAGE_KEY = 'chatTtsVolume';
+const CHAT_TTS_LONG_DURATION_THRESHOLD_KEY = 'chatTtsLongDurationThresholdSec';
+const DEFAULT_TTS_LONG_DURATION_THRESHOLD_SEC = 30;
+const CHAT_TTS_MAX_SPEAKING_SECONDS_KEY = 'chatTtsMaxSpeakingSeconds';
+const DEFAULT_TTS_MAX_SPEAKING_SECONDS = 40;
 
 const CHAT_STT_LANGUAGE_STORAGE_KEY = 'chatSttLanguage';
 const CHAT_STT_CONTINUOUS_STORAGE_KEY = 'chatSttContinuous';
@@ -1103,6 +2312,8 @@ let dictationState = null;
 
 let activeTtsTurnId = null;
 let activeTtsButton = null;
+let activeTtsPlaybackState = null;
+let activeTtsTimeoutId = null;
 
 function safeLocalStorageGet(key) {
     try {
@@ -1150,6 +2361,170 @@ function parseBoolSetting(value, fallbackValue) {
         return fallbackValue;
     }
     return String(value) === 'true';
+}
+
+function getTtsLongDurationThresholdSec() {
+    const raw = safeLocalStorageGet(CHAT_TTS_LONG_DURATION_THRESHOLD_KEY);
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.min(Math.max(parsed, 5), 300);
+    }
+    return DEFAULT_TTS_LONG_DURATION_THRESHOLD_SEC;
+}
+
+function getTtsMaxSpeakingSeconds() {
+    const raw = safeLocalStorageGet(CHAT_TTS_MAX_SPEAKING_SECONDS_KEY);
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.min(Math.max(parsed, 10), 600);
+    }
+    return DEFAULT_TTS_MAX_SPEAKING_SECONDS;
+}
+
+function clearActiveTtsTimeout() {
+    if (!activeTtsTimeoutId) {
+        return;
+    }
+    try { clearTimeout(activeTtsTimeoutId); } catch (_) { }
+    activeTtsTimeoutId = null;
+}
+
+function estimateSpeechDurationMs(text, rate) {
+    const cleaned = String(text ?? '').trim();
+    const chars = cleaned.length;
+    const words = cleaned ? cleaned.split(/\s+/).filter(Boolean).length : 0;
+    if (!chars) {
+        return { expectedMs: null, estimateMethod: null, words: 0, chars: 0 };
+    }
+
+    const safeRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    const baseWpm = 180;
+    if (words > 0) {
+        const wpm = baseWpm * safeRate;
+        return {
+            expectedMs: Math.round((words / wpm) * 60 * 1000),
+            estimateMethod: 'words_per_minute',
+            words,
+            chars
+        };
+    }
+
+    const charsPerSec = 12 * safeRate;
+    return {
+        expectedMs: Math.round((chars / charsPerSec) * 1000),
+        estimateMethod: 'chars_per_sec',
+        words,
+        chars
+    };
+}
+
+function resolveSpeechVoiceInfo(voiceUri) {
+    const uri = String(voiceUri || '').trim();
+    if (!uri) {
+        return { voice_uri: null, voice_name: null };
+    }
+
+    const voices = getSpeechSynthesisVoices();
+    const match = voices.find((voice) => voice && String(voice.voiceURI || '') === uri) || null;
+    const voiceName = match && match.name ? String(match.name).trim() : null;
+
+    return {
+        voice_uri: uri,
+        voice_name: voiceName || null
+    };
+}
+
+function buildSpeechPlaybackTelemetry(state, stopReason) {
+    if (!state || typeof state !== 'object') {
+        return null;
+    }
+
+    const startedAtMs = Number.isFinite(state.startedAtMs) ? state.startedAtMs : null;
+    const endedAtMs = Number.isFinite(state.endedAtMs) ? state.endedAtMs : null;
+    const actualDurationMs = (startedAtMs !== null && endedAtMs !== null)
+        ? Math.max(0, endedAtMs - startedAtMs)
+        : null;
+
+    const expectedMs = Number.isFinite(state.expectedDurationMs) ? state.expectedDurationMs : null;
+    const thresholdSec = Number.isFinite(state.thresholdSec) ? state.thresholdSec : null;
+
+    const actualSec = actualDurationMs !== null ? actualDurationMs / 1000 : null;
+    const expectedSec = expectedMs !== null ? expectedMs / 1000 : null;
+
+    const durationTooLong = (actualSec !== null && thresholdSec !== null)
+        ? actualSec > thresholdSec
+        : (expectedSec !== null && thresholdSec !== null ? expectedSec > thresholdSec : false);
+
+    return {
+        request_id: state.requestId || null,
+        turn_id: state.turnId || null,
+        started_at: state.startedAt || null,
+        ended_at: state.endedAt || null,
+        actual_duration_ms: actualDurationMs,
+        expected_duration_ms: expectedMs,
+        estimate_method: state.estimateMethod || null,
+        duration_threshold_sec: thresholdSec,
+        duration_suspect_too_long: durationTooLong,
+        tts_source: state.ttsSource || null,
+        tts_chars: Number.isFinite(state.ttsChars) ? state.ttsChars : null,
+        tts_words: Number.isFinite(state.ttsWords) ? state.ttsWords : null,
+        stop_reason: stopReason || null,
+        tts_settings: {
+            language: state.ttsLanguage || null,
+            rate: state.ttsRate ?? null,
+            pitch: state.ttsPitch ?? null,
+            volume: state.ttsVolume ?? null,
+            voice_uri: state.voiceUri || null,
+            voice_name: state.voiceName || null
+        }
+    };
+}
+
+async function postSpeechPlaybackTelemetry(turnId, telemetry) {
+    if (!telemetry || typeof telemetry !== 'object') {
+        return;
+    }
+
+    const payload = {
+        conversation_id: elements.conversationId || 'local',
+        turn_id: turnId,
+        request_id: telemetry.request_id || null,
+        speech_playback: telemetry,
+        context: getUserContext()
+    };
+
+    try {
+        await fetch('/api/speech/telemetry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+    } catch (err) {
+        console.warn('[speech] Telemetry post failed:', err);
+    }
+}
+
+function recordSpeechPlaybackTelemetry(turnId, telemetry) {
+    if (!telemetry || typeof telemetry !== 'object') {
+        return;
+    }
+
+    const debugData = turnId ? llmDebugData.get(turnId) : null;
+    if (debugData && typeof debugData === 'object') {
+        const updated = {
+            ...debugData,
+            speech_playback: telemetry
+        };
+        llmDebugData.set(turnId, updated);
+    }
+
+    if (telemetry.duration_suspect_too_long) {
+        console.warn('[speech] Long narration duration detected:', telemetry);
+    } else {
+        console.info('[speech] Narration playback telemetry:', telemetry);
+    }
+
+    void postSpeechPlaybackTelemetry(turnId, telemetry);
 }
 
 function getChatSpeechSettings() {
@@ -1250,6 +2625,7 @@ function clearActiveTtsUi() {
     }
     activeTtsTurnId = null;
     activeTtsButton = null;
+    clearActiveTtsTimeout();
 }
 
 function toggleSpeakTurn(turnId, text, button) {
@@ -1268,6 +2644,9 @@ function toggleSpeakTurn(turnId, text, button) {
 
     const isAlreadyActive = activeTtsTurnId === turnId;
     if (isAlreadyActive) {
+        if (activeTtsPlaybackState && activeTtsPlaybackState.turnId === turnId) {
+            activeTtsPlaybackState.stopRequested = true;
+        }
         stopSpeaking();
         clearActiveTtsUi();
         return;
@@ -1287,6 +2666,36 @@ function toggleSpeakTurn(turnId, text, button) {
     let utterance = null;
     try {
         const settings = getChatSpeechSettings();
+        const debugData = llmDebugData.get(turnId);
+        const estimate = estimateSpeechDurationMs(trimmed, settings.tts.rate);
+        const voiceInfo = resolveSpeechVoiceInfo(settings.tts.voiceUri);
+        const thresholdSec = getTtsLongDurationThresholdSec();
+        const maxSpeakingSeconds = getTtsMaxSpeakingSeconds();
+        const ttsSource = debugData?.speech_planning?.tts_source || null;
+
+        activeTtsPlaybackState = {
+            turnId,
+            requestId: debugData?.request_id || null,
+            expectedDurationMs: estimate.expectedMs,
+            estimateMethod: estimate.estimateMethod,
+            ttsChars: estimate.chars,
+            ttsWords: estimate.words,
+            thresholdSec,
+            maxSpeakingSeconds,
+            ttsSource,
+            ttsLanguage: settings.tts.language,
+            ttsRate: settings.tts.rate,
+            ttsPitch: settings.tts.pitch,
+            ttsVolume: settings.tts.volume,
+            voiceUri: voiceInfo.voice_uri,
+            voiceName: voiceInfo.voice_name,
+            startedAtMs: null,
+            endedAtMs: null,
+            startedAt: null,
+            endedAt: null,
+            stopRequested: false
+        };
+
         utterance = speakText(trimmed, {
             language: settings.tts.language,
             rate: settings.tts.rate,
@@ -1300,15 +2709,41 @@ function toggleSpeakTurn(turnId, text, button) {
         return;
     }
 
-    const finish = () => {
+    const finish = (reason) => {
+        if (activeTtsPlaybackState && activeTtsPlaybackState.turnId === turnId) {
+            activeTtsPlaybackState.endedAtMs = Date.now();
+            activeTtsPlaybackState.endedAt = new Date(activeTtsPlaybackState.endedAtMs).toISOString();
+            const stopReason = activeTtsPlaybackState.stopRequested ? 'cancelled' : reason;
+            const telemetry = buildSpeechPlaybackTelemetry(activeTtsPlaybackState, stopReason);
+            recordSpeechPlaybackTelemetry(turnId, telemetry);
+            activeTtsPlaybackState = null;
+        }
         if (activeTtsTurnId === turnId) {
             clearActiveTtsUi();
         }
     };
 
+    const maxSeconds = getTtsMaxSpeakingSeconds();
+    if (Number.isFinite(maxSeconds) && maxSeconds >= 10) {
+        clearActiveTtsTimeout();
+        activeTtsTimeoutId = setTimeout(() => {
+            if (activeTtsPlaybackState && activeTtsPlaybackState.turnId === turnId) {
+                activeTtsPlaybackState.stopRequested = true;
+            }
+            stopSpeaking();
+            finish('timeout');
+        }, Math.round(maxSeconds * 1000));
+    }
+
     try {
-        utterance.onend = finish;
-        utterance.onerror = finish;
+        utterance.onstart = () => {
+            if (activeTtsPlaybackState && activeTtsPlaybackState.turnId === turnId) {
+                activeTtsPlaybackState.startedAtMs = Date.now();
+                activeTtsPlaybackState.startedAt = new Date(activeTtsPlaybackState.startedAtMs).toISOString();
+            }
+        };
+        utterance.onend = () => finish('ended');
+        utterance.onerror = () => finish('error');
     } catch (_) {
         // Ignore.
     }
@@ -1360,6 +2795,734 @@ function updateHistoryBanner() {
     } else {
         banner.classList.add('hidden');
         loadButton.disabled = true;
+    }
+}
+
+function setActiveChatSession(sessionId, sessionName) {
+    activeChatSessionId = (typeof sessionId === 'string' && sessionId.trim())
+        ? sessionId.trim()
+        : null;
+    activeChatSessionName = (typeof sessionName === 'string' && sessionName.trim())
+        ? sessionName.trim()
+        : null;
+}
+
+function getChatSessionTabsContainer() {
+    return document.getElementById('chatSessionTabs');
+}
+
+function getChatTabButton() {
+    return document.querySelector('.tab-button[data-tab="chatTab"]');
+}
+
+function getChatSessionTabById(sessionId) {
+    const container = getChatSessionTabsContainer();
+    const sid = String(sessionId || '').trim();
+    if (!container || !sid) {
+        return null;
+    }
+    const escaped = (typeof CSS !== 'undefined' && typeof CSS.escape === 'function')
+        ? CSS.escape(sid)
+        : sid.replace(/"/g, '\\"');
+    return container.querySelector(`.chat-session-tab[data-session-id="${escaped}"]`);
+}
+
+function setChatSessionTabLoading(sessionId, isLoading) {
+    const sid = String(sessionId || '').trim();
+    const container = getChatSessionTabsContainer();
+    if (!container) {
+        if (!isLoading && loadingChatSessionId === sid) {
+            loadingChatSessionId = null;
+        } else if (isLoading && sid) {
+            loadingChatSessionId = sid;
+        }
+        return;
+    }
+
+    if (loadingChatSessionId && loadingChatSessionId !== sid) {
+        const previousTab = getChatSessionTabById(loadingChatSessionId);
+        if (previousTab) {
+            previousTab.classList.remove('is-loading');
+        }
+    }
+
+    if (!isLoading) {
+        if (loadingChatSessionId === sid) {
+            const targetTab = getChatSessionTabById(sid);
+            if (targetTab) {
+                targetTab.classList.remove('is-loading');
+            }
+            loadingChatSessionId = null;
+        }
+        return;
+    }
+
+    if (sid) {
+        loadingChatSessionId = sid;
+        const targetTab = getChatSessionTabById(sid);
+        if (targetTab) {
+            targetTab.classList.add('is-loading');
+        }
+    }
+}
+
+function getShortSessionId(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        return 'session';
+    }
+    return sid.length > 10 ? `${sid.slice(0, 8)}.` : sid;
+}
+
+function getSessionDisplayName(session) {
+    const rawName = (typeof session?.session_name === 'string' && session.session_name.trim())
+        ? session.session_name.trim()
+        : '';
+    if (rawName) {
+        return rawName;
+    }
+    return getShortSessionId(session?.session_id);
+}
+
+function formatCompletedLabel(isoString) {
+    if (!isoString) {
+        return 'completed';
+    }
+    const parsed = new Date(isoString);
+    if (Number.isNaN(parsed.getTime())) {
+        return 'completed';
+    }
+    const formatted = parsed.toLocaleString('en-NZ', {
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+    return `completed ${formatted}`;
+}
+
+function formatSessionTimestamp(isoString) {
+    if (!isoString) {
+        return '';
+    }
+    const parsed = new Date(isoString);
+    if (Number.isNaN(parsed.getTime())) {
+        return '';
+    }
+
+    const now = new Date();
+    const isToday = now.getFullYear() === parsed.getFullYear()
+        && now.getMonth() === parsed.getMonth()
+        && now.getDate() === parsed.getDate();
+
+    if (isToday) {
+        return parsed.toLocaleTimeString('en-NZ', {
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    }
+
+    return parsed.toLocaleDateString('en-NZ', {
+        day: '2-digit',
+        month: 'short'
+    });
+}
+
+function scheduleChatSessionTabsRefresh(force = false) {
+    if (force) {
+        void refreshChatSessionTabs();
+        return;
+    }
+
+    const now = Date.now();
+    const elapsed = now - lastSessionTabsRefreshMs;
+    if (elapsed >= SESSION_TABS_REFRESH_COOLDOWN_MS) {
+        void refreshChatSessionTabs();
+        return;
+    }
+
+    if (pendingSessionTabsRefresh) {
+        return;
+    }
+
+    pendingSessionTabsRefresh = setTimeout(() => {
+        pendingSessionTabsRefresh = null;
+        void refreshChatSessionTabs();
+    }, Math.max(500, SESSION_TABS_REFRESH_COOLDOWN_MS - elapsed));
+}
+
+async function refreshChatSessionTabs() {
+    const container = getChatSessionTabsContainer();
+    if (!container) {
+        return;
+    }
+
+    if (pendingSessionTabsRefresh) {
+        clearTimeout(pendingSessionTabsRefresh);
+        pendingSessionTabsRefresh = null;
+    }
+
+    lastSessionTabsRefreshMs = Date.now();
+
+    try {
+        const response = await fetch('/von/history/sessions?limit=50&summary=light', { cache: 'no-store' });
+        const data = await response.json();
+
+        if (!response.ok || data?.authenticated === false) {
+            container.innerHTML = '';
+            container.hidden = true;
+            lastRenderedSessionCount = 0;
+            sessionTabsCache = [];
+            return;
+        }
+
+        const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+        sessionTabsCache = sessions;
+        const activeSessionId = (typeof data?.active_session_id === 'string' && data.active_session_id.trim())
+            ? data.active_session_id.trim()
+            : null;
+
+        if (activeSessionId) {
+            const activeSession = sessions.find(
+                s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
+            );
+            setActiveChatSession(activeSessionId, activeSession?.session_name);
+        }
+
+        renderChatSessionTabs(sessions, activeChatSessionId || activeSessionId);
+    } catch (err) {
+        console.error('Failed to load chat sessions:', err);
+    }
+}
+
+function renderChatSessionTabs(sessions, activeSessionId) {
+    const container = getChatSessionTabsContainer();
+    if (!container) {
+        return;
+    }
+
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+        container.innerHTML = '';
+        container.hidden = true;
+        lastRenderedSessionCount = 0;
+        sessionTabsCache = [];
+        return;
+    }
+
+    container.hidden = false;
+    container.innerHTML = '';
+    lastRenderedSessionCount = sessions.length;
+
+    const fragment = document.createDocumentFragment();
+    const hasMultiple = sessions.length > 1;
+
+    if (hasMultiple) {
+        const newTab = document.createElement('button');
+        newTab.type = 'button';
+        newTab.className = 'chat-session-tab chat-session-tab-new';
+        newTab.title = 'New chat';
+        newTab.setAttribute('aria-label', 'New chat');
+        newTab.textContent = '+';
+        newTab.addEventListener('click', () => {
+            void promptAndCreateChatSession();
+        });
+        fragment.appendChild(newTab);
+    }
+
+    sessions.forEach((session) => {
+        const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+        if (!sid) {
+            return;
+        }
+
+        const displayName = getSessionDisplayName(session);
+        const timestampSource = (typeof session?.last_message_at === 'string' && session.last_message_at.trim())
+            ? session.last_message_at.trim()
+            : (typeof session?.created_at === 'string' && session.created_at.trim())
+                ? session.created_at.trim()
+                : '';
+        const timestampLabel = formatSessionTimestamp(timestampSource) || '-';
+        const tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = 'chat-session-tab';
+        tab.setAttribute('role', 'tab');
+        tab.setAttribute('aria-selected', sid === activeSessionId ? 'true' : 'false');
+        tab.dataset.sessionId = sid;
+        if (typeof session?.session_name === 'string') {
+            tab.dataset.sessionName = session.session_name;
+        }
+
+        if (sid === activeSessionId) {
+        tab.classList.add('is-active');
+    }
+
+        if (sid === loadingChatSessionId) {
+            tab.classList.add('is-loading');
+        }
+
+        if (session?.is_completed === true) {
+            tab.classList.add('is-completed');
+            const completedLabel = formatCompletedLabel(session?.completed_at);
+            tab.title = `${displayName} • ${timestampLabel} (${completedLabel})`;
+        } else {
+            tab.classList.add('is-open');
+            tab.title = `${displayName} • ${timestampLabel}`;
+        }
+
+        const label = document.createElement('span');
+        label.className = 'chat-session-tab-label';
+        label.textContent = displayName;
+
+        const meta = document.createElement('span');
+        meta.className = 'chat-session-tab-meta';
+        meta.textContent = timestampLabel;
+
+        tab.appendChild(label);
+        tab.appendChild(meta);
+        tab.addEventListener('click', () => {
+            if (sid === activeChatSessionId) {
+                return;
+            }
+            void switchToChatSession(sid);
+        });
+        tab.addEventListener('dblclick', () => {
+            void promptRenameChatSession(sid, session?.session_name || displayName);
+        });
+        tab.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+            openChatSessionMenu(event.clientX, event.clientY, [
+                {
+                    label: 'Rename chat',
+                    onClick: () => {
+                        void promptRenameChatSession(sid, session?.session_name || displayName);
+                    }
+                }
+            ]);
+        });
+
+        fragment.appendChild(tab);
+    });
+
+    container.appendChild(fragment);
+}
+
+function shouldShowChatTabMenu() {
+    const container = getChatSessionTabsContainer();
+    if (!container || container.hidden) {
+        return false;
+    }
+    return lastRenderedSessionCount <= 1;
+}
+
+function ensureChatSessionMenu() {
+    if (chatSessionMenuEl) {
+        return chatSessionMenuEl;
+    }
+
+    const menu = document.createElement('div');
+    menu.className = 'chat-session-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(menu);
+
+    document.addEventListener('click', (event) => {
+        if (menu.classList.contains('open') && !menu.contains(event.target)) {
+            closeChatSessionMenu();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closeChatSessionMenu();
+        }
+    });
+
+    chatSessionMenuEl = menu;
+    return menu;
+}
+
+function populateChatSessionMenu(items) {
+    const menu = ensureChatSessionMenu();
+    menu.innerHTML = '';
+    items.forEach((item) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = item.label;
+        button.setAttribute('role', 'menuitem');
+        button.addEventListener('click', () => {
+            closeChatSessionMenu();
+            item.onClick();
+        });
+        menu.appendChild(button);
+    });
+    return menu;
+}
+
+function openChatSessionMenu(x, y, items) {
+    if (!Array.isArray(items) || items.length === 0) {
+        return;
+    }
+
+    const menu = populateChatSessionMenu(items);
+    const padding = 8;
+    menu.classList.add('open');
+    menu.setAttribute('aria-hidden', 'false');
+    const maxX = window.innerWidth - menu.offsetWidth - padding;
+    const maxY = window.innerHeight - menu.offsetHeight - padding;
+    const left = Math.max(padding, Math.min(x, maxX));
+    const top = Math.max(padding, Math.min(y, maxY));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+}
+
+function closeChatSessionMenu() {
+    if (!chatSessionMenuEl) {
+        return;
+    }
+    chatSessionMenuEl.classList.remove('open');
+    chatSessionMenuEl.setAttribute('aria-hidden', 'true');
+}
+
+function setupChatTabContextMenu() {
+    const chatTabButton = getChatTabButton();
+    if (!chatTabButton) {
+        return;
+    }
+    chatTabButton.addEventListener('contextmenu', (event) => {
+        if (!shouldShowChatTabMenu()) {
+            return;
+        }
+        event.preventDefault();
+        openChatSessionMenu(event.clientX, event.clientY, [
+            {
+                label: 'New chat',
+                onClick: () => {
+                    void promptAndCreateChatSession();
+                }
+            }
+        ]);
+    });
+}
+
+async function promptAndCreateChatSession() {
+    const proposed = window.prompt('Name this chat (optional)', '');
+    if (proposed === null) {
+        return;
+    }
+    try {
+        await createChatSession(proposed);
+        scheduleChatSessionTabsRefresh(true);
+    } catch (err) {
+        const msg = err?.message ? String(err.message) : 'Unable to create chat.';
+        alert(msg);
+    }
+}
+
+async function promptRenameChatSession(sessionId, currentName) {
+    const proposed = window.prompt('Rename chat', currentName || '');
+    if (proposed === null) {
+        return;
+    }
+    const trimmed = String(proposed || '').trim();
+    if (!trimmed) {
+        alert('Chat name is required.');
+        return;
+    }
+    try {
+        await renameChatSession(sessionId, trimmed);
+        scheduleChatSessionTabsRefresh(true);
+    } catch (err) {
+        const msg = err?.message ? String(err.message) : 'Unable to rename chat.';
+        alert(msg);
+    }
+}
+
+async function createChatSession(sessionName) {
+    abortActiveChatRequest();
+
+    const payload = {};
+    if (typeof sessionName === 'string' && sessionName.trim()) {
+        payload.session_name = sessionName.trim();
+    }
+
+    const response = await fetch('/von/api/session/create_chat_session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+        const msg = data?.error ? String(data.error) : 'Unable to create chat session.';
+        throw new Error(msg);
+    }
+
+    setActiveChatSession(data?.session_id, data?.session_name);
+
+    const nowIso = new Date().toISOString();
+    const effectiveSessionId = (typeof data?.session_id === 'string' && data.session_id.trim())
+        ? data.session_id.trim()
+        : activeChatSessionId;
+    const effectiveName = (typeof data?.session_name === 'string' && data.session_name.trim())
+        ? data.session_name.trim()
+        : (typeof sessionName === 'string' && sessionName.trim())
+            ? sessionName.trim()
+            : '';
+
+    if (effectiveSessionId) {
+        const newSession = {
+            session_id: effectiveSessionId,
+            session_name: effectiveName || null,
+            message_count: 0,
+            last_message_at: nowIso,
+            created_at: nowIso,
+            is_completed: false,
+            completed_at: null
+        };
+        sessionTabsCache = [
+            newSession,
+            ...sessionTabsCache.filter(s => String(s?.session_id || '') !== effectiveSessionId)
+        ];
+        renderChatSessionTabs(sessionTabsCache, effectiveSessionId);
+    }
+
+    const history = Array.isArray(data?.history) ? data.history : [];
+    const scrollableField = document.getElementById('scrollableField');
+    if (scrollableField) {
+        historySegmentsShown = history.length ? 1 : 0;
+        totalHistorySegments = history.length ? 1 : 0;
+        updateHistoryBanner();
+        rehydrateHistory(scrollableField, history, {
+            scrollToBottom: true,
+            preserveScroll: false,
+            showResetNotice: false,
+            forceScrollToBottom: true
+        });
+    }
+
+    const promptInput = document.getElementById('promptInput');
+    if (promptInput) {
+        promptInput.value = '';
+        promptInput.focus();
+    }
+
+    document.dispatchEvent(new CustomEvent('von:contextReset', {
+        detail: { trigger: 'chat_new_session', session_id: effectiveSessionId, session_name: effectiveName || null }
+    }));
+
+    scheduleChatSessionTabsRefresh(true);
+    return data;
+}
+
+async function renameChatSession(sessionId, sessionName) {
+    const sid = (typeof sessionId === 'string') ? sessionId.trim() : '';
+    if (!sid) {
+        throw new Error('session_id required');
+    }
+
+    const name = (typeof sessionName === 'string') ? sessionName.trim() : '';
+    if (!name) {
+        throw new Error('session_name required');
+    }
+
+    const response = await fetch('/von/api/session/rename_chat_session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid, session_name: name })
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+        const msg = data?.error ? String(data.error) : 'Unable to rename chat session.';
+        throw new Error(msg);
+    }
+
+    if (sid === activeChatSessionId) {
+        setActiveChatSession(sid, data?.session_name);
+    }
+
+    if (sid) {
+        const updatedName = (typeof data?.session_name === 'string' && data.session_name.trim())
+            ? data.session_name.trim()
+            : name;
+        sessionTabsCache = sessionTabsCache.map((session) => {
+            if (String(session?.session_id || '') !== sid) {
+                return session;
+            }
+            return {
+                ...session,
+                session_name: updatedName
+            };
+        });
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId || sid);
+    }
+
+    scheduleChatSessionTabsRefresh(true);
+    return data;
+}
+
+async function switchToChatSession(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        return { ok: false, error: 'session_id required' };
+    }
+
+    const previousSessionId = activeChatSessionId;
+    const previousSessionName = activeChatSessionName;
+    const cachedSession = sessionTabsCache.find(
+        session => String(session?.session_id || '') === sid
+    );
+    const targetName = cachedSession?.session_name || null;
+    const shouldReuseCachedHistory = canReuseSessionHistory(sid);
+    const switchStart = performance.now();
+    console.log('[chatTab] switchToChatSession start', {
+        from_session_id: previousSessionId || null,
+        from_session_name: previousSessionName || null,
+        to_session_id: sid,
+        to_session_name: targetName,
+        cache_reuse: shouldReuseCachedHistory
+    });
+
+    setActiveChatSession(sid, cachedSession?.session_name);
+    if (sessionTabsCache.length > 0) {
+        renderChatSessionTabs(sessionTabsCache, sid);
+    }
+    setChatSessionTabLoading(sid, true);
+
+    abortActiveHistoryRequest();
+    abortActiveChatRequest();
+
+    const scrollableField = document.getElementById('scrollableField');
+    if (!scrollableField) {
+        setChatSessionTabLoading(sid, false);
+        return { ok: false, error: 'Chat panel unavailable.' };
+    }
+
+    scrollableField.innerHTML = '<div class="chat-session-loading">Switching chat…</div>';
+    historySegmentsShown = 0;
+    totalHistorySegments = 0;
+    updateHistoryBanner();
+
+    try {
+        const setSessionStart = performance.now();
+        const response = await fetch('/von/api/session/set_chat_session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sid, include_history: false })
+        });
+        const data = await response.json();
+        const setSessionMs = Math.round(performance.now() - setSessionStart);
+        console.log('[chatTab] switchToChatSession set_chat_session', {
+            ok: response.ok,
+            status: response.status,
+            duration_ms: setSessionMs,
+            session_id: data?.session_id || sid
+        });
+
+        if (!response.ok) {
+            const msg = data?.error ? String(data.error) : 'Unable to switch session.';
+            setActiveChatSession(previousSessionId, previousSessionName);
+            if (sessionTabsCache.length > 0) {
+                renderChatSessionTabs(sessionTabsCache, previousSessionId || sid);
+            }
+            setChatSessionTabLoading(sid, false);
+            scrollableField.innerHTML = `<div class="chat-session-loading">${escapeHtml(msg)}</div>`;
+            void loadChatHistory({
+                segments: 1,
+                scrollToBottom: true,
+                showResetNotice: false,
+                forceScrollToBottom: true
+            });
+            return { ok: false, error: msg };
+        }
+
+        setActiveChatSession(data?.session_id, data?.session_name);
+
+        if (shouldReuseCachedHistory) {
+            const cached = getSessionHistoryCache(sid);
+            const reused = rehydrateFromCache(scrollableField, cached);
+            console.log('[chatTab] switchToChatSession cache reuse', {
+                loaded: reused,
+                cached_messages: cached?.history?.length ?? 0,
+                session_id: sid
+            });
+            if (!reused) {
+                scrollableField.innerHTML = '';
+            }
+            setChatSessionTabLoading(sid, false);
+        } else {
+            const recentStart = performance.now();
+            const loaded = await loadRecentChatPair({
+                scrollToBottom: true,
+                preserveScroll: false,
+                showResetNotice: false,
+                forceScrollToBottom: true
+            });
+            const recentMs = Math.round(performance.now() - recentStart);
+            console.log('[chatTab] switchToChatSession recent pair', {
+                loaded,
+                duration_ms: recentMs,
+                session_id: sid
+            });
+            if (!loaded) {
+                scrollableField.innerHTML = '';
+            }
+
+            setTimeout(() => {
+                if (activeChatSessionId !== sid) {
+                    setChatSessionTabLoading(sid, false);
+                    return;
+                }
+                console.log('[chatTab] switchToChatSession backfill start', { session_id: sid });
+                const backfillPromise = loadChatHistory({
+                    segments: 1,
+                    scrollToBottom: false,
+                    preserveScroll: true,
+                    showResetNotice: false
+                });
+                backfillPromise.finally(() => {
+                    if (activeChatSessionId === sid) {
+                        setChatSessionTabLoading(sid, false);
+                    }
+                });
+            }, 250);
+        }
+
+        document.dispatchEvent(new CustomEvent('von:contextReset', {
+            detail: { trigger: 'history_session_switch', session_id: sid, session_name: data?.session_name || targetName }
+        }));
+
+        const promptInput = document.getElementById('promptInput');
+        if (promptInput) {
+            promptInput.focus();
+        }
+
+        scheduleChatSessionTabsRefresh(true);
+        console.log('[chatTab] switchToChatSession done', {
+            session_id: sid,
+            duration_ms: Math.round(performance.now() - switchStart)
+        });
+        return { ok: true, data };
+    } catch (err) {
+        console.error('Error switching chat session:', err);
+        setActiveChatSession(previousSessionId, previousSessionName);
+        if (sessionTabsCache.length > 0) {
+            renderChatSessionTabs(sessionTabsCache, previousSessionId || sid);
+        }
+        setChatSessionTabLoading(sid, false);
+        scrollableField.innerHTML = '<div class="chat-session-loading">Unable to switch session.</div>';
+        void loadChatHistory({
+            segments: 1,
+            scrollToBottom: true,
+            showResetNotice: false,
+            forceScrollToBottom: true
+        });
+        console.log('[chatTab] switchToChatSession failed', {
+            session_id: sid,
+            duration_ms: Math.round(performance.now() - switchStart)
+        });
+        return { ok: false, error: 'Unable to switch session.' };
     }
 }
 
@@ -1528,6 +3691,15 @@ async function updateHistoryLength() {
                             }
 
                             const sessions = Array.isArray(js?.sessions) ? js.sessions : [];
+                            const activeSessionId = (typeof js?.active_session_id === 'string')
+                                ? js.active_session_id
+                                : null;
+                            if (activeSessionId) {
+                                const activeSession = sessions.find(
+                                    s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
+                                );
+                                setActiveChatSession(activeSessionId, activeSession?.session_name);
+                            }
                             if (sessions.length === 0) {
                                 body.innerHTML = '<p>No saved sessions.</p>';
                                 return;
@@ -1542,38 +3714,52 @@ async function updateHistoryLength() {
 
                             const rows = sessions.map((s) => {
                                 const sidRaw = s?.session_id ? String(s.session_id) : '(unknown session)';
-                                const sidShort = (sidRaw.length > 10) ? `${sidRaw.slice(0, 8)}…` : sidRaw;
+                                const sidShort = (sidRaw.length > 10) ? `${sidRaw.slice(0, 8)}.` : sidRaw;
                                 const count = (typeof s?.message_count === 'number') ? s.message_count : 0;
 
                                 const lastAt = (typeof s?.last_message_at === 'string') ? s.last_message_at : null;
-                                const lastAtShort = lastAt ? lastAt.replace('T', ' ').replace('Z', '') : '—';
-                                const preview = (typeof s?.preview === 'string' && s.preview.trim()) ? s.preview.trim() : '—';
+                                const lastAtShort = lastAt ? lastAt.replace('T', ' ').replace('Z', '') : '-';
+                                const preview = (typeof s?.preview === 'string' && s.preview.trim()) ? s.preview.trim() : '-';
+
+                                const nameRaw = (typeof s?.session_name === 'string' && s.session_name.trim())
+                                    ? s.session_name.trim()
+                                    : null;
+                                const displayName = nameRaw || sidShort;
+                                const nameTitle = nameRaw || sidRaw;
 
                                 const ns = (typeof s?.namespace === 'string' && s.namespace.trim()) ? s.namespace.trim() : null;
-                                const nsShort = ns ? (ns.length > 48 ? `${ns.slice(0, 46)}…` : ns) : null;
+                                const nsShort = ns ? (ns.length > 48 ? `${ns.slice(0, 46)}.` : ns) : null;
 
                                 const sessionAttr = escapeHtml(sidRaw);
+                                const nameAttr = nameRaw ? escapeHtml(nameRaw) : '';
+                                const isActive = activeSessionId && sidRaw === activeSessionId;
+                                const isCompleted = s?.is_completed === true;
+                                const rowClass = `history-session-row${isActive ? ' is-active' : ''}${isCompleted ? ' is-completed' : ''}`;
+                                const idSnippet = nameRaw ? `  id ${escapeHtml(sidShort)}` : '';
+                                const completionSnippet = isCompleted
+                                    ? `  ${escapeHtml(formatCompletedLabel(s?.completed_at))}`
+                                    : '';
 
                                 return [
-                                    `<li class="history-session-row" role="button" tabindex="0" data-session-id="${sessionAttr}">`,
+                                    `<li class="${rowClass}" role="button" tabindex="0" data-session-id="${sessionAttr}" data-session-name="${nameAttr}">`,
                                     '<div class="history-session-content">',
-                                    `<strong class="history-session-id" title="${escapeHtml(sidRaw)}">${escapeHtml(sidShort)}</strong>`,
-                                    `<span class="history-session-meta">${count} msgs • last ${escapeHtml(lastAtShort)}${nsShort ? ` • ns ${escapeHtml(nsShort)}` : ''}</span>`,
-                                    `<span class="history-session-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</span>`,
-                                    '</div>',
-                                    '</li>'
+                                    `<strong class="history-session-id" title="${escapeHtml(nameTitle)}">${escapeHtml(displayName)}<\/strong>`,
+                                    `<span class="history-session-meta">${count} msgs  last ${escapeHtml(lastAtShort)}${completionSnippet}${idSnippet}${nsShort ? `  ns ${escapeHtml(nsShort)}` : ''}<\/span>`,
+                                    `<span class="history-session-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}<\/span>`,
+                                    '<\/div>',
+                                    '<\/li>'
                                 ].join('');
                             });
 
                             const summaryLine = `Showing ${sessions.length} most recent sessions (sorted by last message time)`;
 
                             body.innerHTML = [
-                                `<p class="history-session-summary">${escapeHtml(summaryLine)}</p>`,
+                                `<p class="history-session-summary">${escapeHtml(summaryLine)}<\/p>`,
                                 '<div class="history-session-scroll">',
                                 '<ul class="history-session-list">',
                                 ...rows,
-                                '</ul>',
-                                '</div>'
+                                '<\/ul>',
+                                '<\/div>'
                             ].join('');
 
                             const switchToSession = async (sessionId) => {
@@ -1582,57 +3768,15 @@ async function updateHistoryLength() {
                                     return;
                                 }
 
-                                abortActiveChatRequest();
-
-                                const scrollableField2 = document.getElementById('scrollableField');
-                                if (!scrollableField2) {
+                                body.innerHTML = '<p>Switching session.</p>';
+                                const result = await switchToChatSession(sid);
+                                if (!result.ok) {
+                                    body.innerHTML = `<p>${escapeHtml(result.error || 'Unable to switch session.')}</p>`;
                                     return;
                                 }
 
-                                try {
-                                    body.innerHTML = '<p>Switching session…</p>';
-
-                                    const setRes = await fetch('/von/api/session/set_chat_session', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ session_id: sid })
-                                    });
-                                    const setJs = await setRes.json();
-                                    if (!setRes.ok) {
-                                        const msg = setJs?.error ? String(setJs.error) : 'Unable to switch session.';
-                                        body.innerHTML = `<p>${escapeHtml(msg)}</p>`;
-                                        return;
-                                    }
-
-                                    const history = Array.isArray(setJs?.history) ? setJs.history : [];
-
-                                    historySegmentsShown = 1;
-                                    totalHistorySegments = 1;
-                                    updateHistoryBanner();
-
-                                    rehydrateHistory(scrollableField2, history, {
-                                        scrollToBottom: true,
-                                        preserveScroll: false,
-                                        showResetNotice: false,
-                                        forceScrollToBottom: true
-                                    });
-
-                                    modal.classList.remove('open');
-                                    modal.setAttribute('aria-hidden', 'true');
-
-                                    // Trigger immediate health poll to update RAG status with new session context.
-                                    document.dispatchEvent(new CustomEvent('von:contextReset', {
-                                        detail: { trigger: 'history_session_switch' }
-                                    }));
-
-                                    const promptInput = document.getElementById('promptInput');
-                                    if (promptInput) {
-                                        promptInput.focus();
-                                    }
-                                } catch (err) {
-                                    console.error('Error switching chat session:', err);
-                                    body.innerHTML = '<p>Unable to switch session.</p>';
-                                }
+                                modal.classList.remove('open');
+                                modal.setAttribute('aria-hidden', 'true');
                             };
 
                             const list = body.querySelector('.history-session-list');
@@ -1659,6 +3803,7 @@ async function updateHistoryLength() {
                                     }
                                 });
                             }
+
                         } catch (err) {
                             console.error('Error loading history sessions:', err);
                             body.innerHTML = '<p>Unable to load history sessions.</p>';
@@ -1666,6 +3811,8 @@ async function updateHistoryLength() {
                     });
                 }
             }
+
+            scheduleChatSessionTabsRefresh();
         } else {
             console.error('Failed to load chat history length:', data.error);
         }
@@ -1680,7 +3827,10 @@ async function loadChatHistory(options = {}) {
         scrollToBottom = true,
         preserveScroll = false,
         showResetNotice = false,
-        forceScrollToBottom = false
+        forceScrollToBottom = false,
+        segmentSizeOverride = null,
+        tailLimit = null,
+        filterRecentPair = false
     } = options;
 
     const scrollableField = document.getElementById('scrollableField');
@@ -1692,23 +3842,72 @@ async function loadChatHistory(options = {}) {
     const requestedSegments = Number.isInteger(segments) && segments > 0 ? segments : historySegmentsShown;
     const segmentCount = Math.max(requestedSegments || 1, 1);
 
+    const requestedSessionId = activeChatSessionId;
+    abortActiveHistoryRequest();
+    const requestId = ++historyRequestCounter;
+    const abortController = new AbortController();
+    activeHistoryRequest = {
+        id: requestId,
+        sessionId: requestedSessionId,
+        abortController,
+        aborted: false
+    };
+
     // Get user context to ensure we can load history even if session is new
     const userContext = getUserContext();
     const params = new URLSearchParams({ segments: segmentCount.toString() });
     if (userContext && userContext.user_id) {
         params.append('user_id', userContext.user_id);
     }
+    if (requestedSessionId) {
+        params.append('session_id', requestedSessionId);
+    }
+    const effectiveSegmentSize = Number.isInteger(segmentSizeOverride) && segmentSizeOverride > 0
+        ? segmentSizeOverride
+        : HISTORY_SEGMENT_SIZE;
+    if (effectiveSegmentSize > 0) {
+        params.append('segment_size', effectiveSegmentSize.toString());
+    }
+    if (Number.isInteger(tailLimit) && tailLimit > 0) {
+        params.append('tail_limit', tailLimit.toString());
+    }
+    params.append('include_debug', '0');
     try {
-        const response = await fetch(`/von/history?${params.toString()}`);
+        console.log('[chatTab] loadChatHistory request', {
+            session_id: requestedSessionId || null,
+            segments: segmentCount,
+            segment_size: effectiveSegmentSize,
+            tail_limit: Number.isInteger(tailLimit) ? tailLimit : null,
+            filter_recent_pair: !!filterRecentPair
+        });
+        const response = await fetch(`/von/history?${params.toString()}`, {
+            signal: abortController.signal
+        });
         const data = await response.json();
+
+        if (!activeHistoryRequest || activeHistoryRequest.id !== requestId) {
+            return false;
+        }
+        if (requestedSessionId && activeChatSessionId && requestedSessionId !== activeChatSessionId) {
+            return false;
+        }
 
         console.log(`[chatTab] loadChatHistory response: ok=${response.ok}, segments=${data.segments_returned}, total=${data.total_segments}, history_len=${data.history ? data.history.length : 'undefined'}`);
 
         if (response.ok && data.history && Array.isArray(data.history)) {
-            historySegmentsShown = Math.max(data.segments_returned || segmentCount, 0);
-            totalHistorySegments = Math.max(data.total_segments || historySegmentsShown, historySegmentsShown);
+            const historyMessages = filterRecentPair
+                ? selectRecentChatPair(data.history)
+                : data.history;
+            const hasMoreHistory = data?.has_more_history === true;
+            const segmentsReturned = Math.max(data.segments_returned || segmentCount, 0);
+            let totalSegments = Math.max(data.total_segments || segmentsReturned, segmentsReturned);
+            if (hasMoreHistory && totalSegments <= segmentsReturned) {
+                totalSegments = segmentsReturned + 1;
+            }
+            historySegmentsShown = segmentsReturned;
+            totalHistorySegments = totalSegments;
 
-            rehydrateHistory(scrollableField, data.history, {
+            rehydrateHistory(scrollableField, historyMessages, {
                 scrollToBottom,
                 preserveScroll,
                 showResetNotice,
@@ -1716,18 +3915,45 @@ async function loadChatHistory(options = {}) {
             });
 
             updateHistoryBanner();
+            const sessionMeta = sessionTabsCache.find(
+                session => String(session?.session_id || '') === String(requestedSessionId || '')
+            );
+            updateSessionHistoryCache(requestedSessionId, historyMessages, {
+                message_count: sessionMeta?.message_count ?? null,
+                last_message_at: sessionMeta?.last_message_at ?? null,
+                segments: historySegmentsShown,
+                total_segments: totalHistorySegments
+            });
             console.log(`Loaded ${data.history.length} historical messages across ${historySegmentsShown} segment(s)`);
+            if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
+                activeHistoryRequest = null;
+            }
             return true;
         }
 
-        historySegmentsShown = Math.max(data?.segments_returned || 0, 0);
-        totalHistorySegments = Math.max(data?.total_segments || historySegmentsShown, historySegmentsShown);
+        const hasMoreHistory = data?.has_more_history === true;
+        const segmentsReturned = Math.max(data?.segments_returned || 0, 0);
+        let totalSegments = Math.max(data?.total_segments || segmentsReturned, segmentsReturned);
+        if (hasMoreHistory && totalSegments <= segmentsReturned) {
+            totalSegments = segmentsReturned + 1;
+        }
+        historySegmentsShown = segmentsReturned;
+        totalHistorySegments = totalSegments;
         updateHistoryBanner();
         console.log('No chat history to load or empty history');
+        if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
+            activeHistoryRequest = null;
+        }
         return false;
     } catch (error) {
+        if (error?.name === 'AbortError') {
+            return false;
+        }
         console.error('Error loading chat history:', error);
         updateHistoryBanner();
+        if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
+            activeHistoryRequest = null;
+        }
         return false;
     }
 }
@@ -1755,6 +3981,55 @@ function forceScrollToBottomWithRetries(scrollableField, options = {}) {
     requestFrame(tick);
 }
 
+async function loadRecentChatPair(options = {}) {
+    return loadChatHistory({
+        ...options,
+        segments: 1,
+        segmentSizeOverride: HISTORY_TAIL_SEGMENT_SIZE,
+        tailLimit: HISTORY_TAIL_SEGMENT_SIZE,
+        filterRecentPair: true
+    });
+}
+
+function selectRecentChatPair(historyMessages) {
+    if (!Array.isArray(historyMessages) || historyMessages.length === 0) {
+        return [];
+    }
+
+    const eligible = historyMessages.filter(
+        (msg) => msg && (msg.role === 'user' || msg.role === 'assistant')
+    );
+    if (eligible.length === 0) {
+        return [];
+    }
+
+    let lastAssistantIndex = -1;
+    for (let i = eligible.length - 1; i >= 0; i -= 1) {
+        if (eligible[i].role === 'assistant') {
+            lastAssistantIndex = i;
+            break;
+        }
+    }
+
+    if (lastAssistantIndex === -1) {
+        return eligible.slice(-1);
+    }
+
+    let lastUserIndex = -1;
+    for (let i = lastAssistantIndex - 1; i >= 0; i -= 1) {
+        if (eligible[i].role === 'user') {
+            lastUserIndex = i;
+            break;
+        }
+    }
+
+    if (lastUserIndex === -1) {
+        return eligible.slice(lastAssistantIndex);
+    }
+
+    return eligible.slice(lastUserIndex);
+}
+
 function rehydrateHistory(scrollableField, historyMessages, options = {}) {
     const {
         scrollToBottom = true,
@@ -1776,7 +4051,8 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             const label = msg.role === 'user' ? 'User' : 'Von';
 
             // Restore debug data before rendering so markdown gating can see model info.
-            const hasDebugData = msg.role === 'assistant' && !!msg.llm_debug_data;
+            const hasDebugData = msg.role === 'assistant'
+                && (!!msg.llm_debug_data || !!msg.history_location);
             if (msg.role === 'assistant') {
                 const merged = {
                     ...(msg.llm_debug_data && typeof msg.llm_debug_data === 'object' ? msg.llm_debug_data : {}),
@@ -1858,16 +4134,72 @@ export function initializeChatTab() {
     const ttsToggle = document.getElementById('ttsToggle');
     const exportConversationJsonBtn = document.getElementById('exportConversationJsonBtn');
     const exportConversationMarkdownBtn = document.getElementById('exportConversationMarkdownBtn');
+    const uploadFileButton = document.getElementById('uploadFileButton');
+    const uploadFileInput = document.getElementById('uploadFileInput');
+    const chatTab = document.getElementById('chatTab');
 
     if (!sendButton || !resetButton || !promptInput) {
         console.error("Chat tab elements not found");
         return;
     }
 
+    if (uploadFileButton && uploadFileInput) {
+        uploadFileButton.addEventListener('click', () => {
+            try {
+                uploadFileInput.click();
+            } catch (_) {
+                // Ignore.
+            }
+        });
+
+        uploadFileInput.addEventListener('change', async () => {
+            const files = uploadFileInput.files;
+            // Clear the input so selecting the same file again triggers change.
+            uploadFileInput.value = '';
+            await uploadFilesToVon(files);
+        });
+    }
+
+    if (chatTab && scrollableField) {
+        // Prevent the browser navigating away when dropping files.
+        const preventIfFiles = (event) => {
+            if (!isFileDragEvent(event)) return;
+            event.preventDefault();
+            event.stopPropagation();
+        };
+
+        // Global guards
+        document.addEventListener('dragover', preventIfFiles);
+        document.addEventListener('drop', preventIfFiles);
+
+        // Local UI + drop handling
+        chatTab.addEventListener('dragover', (event) => {
+            if (!isFileDragEvent(event)) return;
+            preventIfFiles(event);
+            scrollableField.classList.add('drag-over');
+        });
+
+        chatTab.addEventListener('dragleave', (event) => {
+            if (!isFileDragEvent(event)) return;
+            scrollableField.classList.remove('drag-over');
+        });
+
+        chatTab.addEventListener('drop', async (event) => {
+            if (!isFileDragEvent(event)) return;
+            preventIfFiles(event);
+            scrollableField.classList.remove('drag-over');
+
+            const dt = event.dataTransfer;
+            const files = dt ? dt.files : null;
+            await uploadFilesToVon(files);
+        });
+    }
+
     // Initialize LLM debug popup handlers
     initializeLlmDebugPopup();
     initializeHistoryControls();
     updateHistoryBanner();
+    setupChatTabContextMenu();
 
     // Initialize export conversation button
     if (exportConversationJsonBtn) {
@@ -2013,8 +4345,10 @@ export function initializeChatTab() {
     // Render non-trigger (#V\u200B#...) concept tokens as cartouches in the prompt.
     initializePromptCartoucheOverlay(promptInput);
 
-    loadChatHistory();
+    loadRecentChatPair();
     updateHistoryLength();
+    void refreshChatSessionTabs();
+    void refreshToolUseDuringThinkingSetting();
     console.log("Chat tab initialized successfully");
 }
 
@@ -2026,6 +4360,13 @@ function setThinkingState(isThinking) {
     if (loadingIndicator) {
         loadingIndicator.style.display = isThinking ? 'inline-flex' : 'none';
         loadingIndicator.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+        if (isThinking) {
+            setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+            setLoadingIndicatorTooltip('');
+        } else {
+            setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+            setLoadingIndicatorTooltip('');
+        }
     }
 
     if (sendButton) {
@@ -2071,6 +4412,9 @@ function abortActiveChatRequest() {
     request.aborted = true;
     activeChatRequest = null;
 
+    stopToolUseProgressPolling(request);
+    stopThinkingTooltipTicker(request);
+
     try {
         request.abortController?.abort();
     } catch (_) {
@@ -2079,6 +4423,22 @@ function abortActiveChatRequest() {
 
     setThinkingState(false);
     restorePromptEditingState(request);
+}
+
+function abortActiveHistoryRequest() {
+    if (!activeHistoryRequest) {
+        return;
+    }
+
+    const request = activeHistoryRequest;
+    activeHistoryRequest = null;
+    request.aborted = true;
+
+    try {
+        request.abortController?.abort();
+    } catch (_) {
+        // Ignore abort errors.
+    }
 }
 
 function ensureAbortButtonBound() {
@@ -2119,6 +4479,11 @@ async function handleSendPrompt() {
         return;
     }
 
+    // Refresh setting in the background; default is enabled.
+    void refreshToolUseDuringThinkingSetting();
+
+    const clientRequestId = createClientRequestId();
+
     // Show loading indicator and disable send button
     setThinkingState(true);
 
@@ -2151,9 +4516,19 @@ async function handleSendPrompt() {
             promptRaw,
             selectionStart,
             selectionEnd,
-            aborted: false
+            aborted: false,
+            clientRequestId,
+            thinkingStartedAtMs: Date.now(),
+            toolUseProgressHistory: []
         };
         activeChatRequest = request;
+
+        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+
+        startThinkingTooltipTicker(request);
+
+        // Start polling immediately while the request is in flight.
+        startToolUseProgressPolling(request);
 
         // Get user context from localStorage to send to backend
         const userContext = getUserContext();
@@ -2170,6 +4545,7 @@ async function handleSendPrompt() {
             signal: request.abortController.signal,
             body: JSON.stringify({
                 prompt: promptText,
+                client_request_id: request.clientRequestId,
                 user_id: userContext.user_id,
                 org_id: userContext.org_id,
                 language: userContext.language,
@@ -2255,6 +4631,8 @@ async function handleSendPrompt() {
         const isStillActive = activeChatRequest === request;
         if (isStillActive) {
             activeChatRequest = null;
+            stopToolUseProgressPolling(request);
+            stopThinkingTooltipTicker(request);
             setThinkingState(false);
         }
         updateHistoryLength();
@@ -2286,11 +4664,12 @@ async function handleResetContext() {
             transcriptTurns.length = 0;
             llmDebugData.clear();
             updateHistoryLength();
+            scheduleChatSessionTabsRefresh(true);
 
             // Trigger immediate health poll to update RAG cartouche with new session context
             // Dispatch custom event that main.js health polling can listen for
             document.dispatchEvent(new CustomEvent('von:contextReset', {
-                detail: { trigger: 'chat_reset' }
+                detail: { trigger: 'chat_reset', session_id: activeChatSessionId || null, session_name: activeChatSessionName || null }
             }));
         } else {
             alert('Error resetting context: ' + (data.error || 'Unknown error'));
@@ -2494,12 +4873,16 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             let copyButtonAppended = false;
 
-            // Add LLM debug button if debug data available
-            if (hasLlmDebug && turnId) {
-                const debugData = llmDebugData.get(turnId);
+            const debugData = turnId ? llmDebugData.get(turnId) : null;
+            const hasHistoryLocation = !!debugData?.history_location;
+            const shouldShowDebug = !!turnId && (hasLlmDebug || hasHistoryLocation);
+
+            // Add LLM debug button if debug data is available or can be loaded on demand.
+            if (shouldShowDebug) {
+                const hasPayload = hasLlmDebugPayload(debugData);
 
                 // Compact model badge (visible at-a-glance)
-                if (debugData && debugData.model) {
+                if (hasPayload && debugData && debugData.model) {
                     const modelBadge = document.createElement('span');
                     modelBadge.className = 'chat-llm-model-badge';
                     modelBadge.textContent = String(debugData.model);
@@ -2509,22 +4892,27 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
                 const llmDebugButton = document.createElement('button');
                 llmDebugButton.className = 'btn-mini llm-debug-button';
-                llmDebugButton.textContent = 'LLM ⓘ';
-                llmDebugButton.title = 'Show LLM interaction details';
+                llmDebugButton.textContent = 'LLM ℹ';
+                llmDebugButton.title = hasPayload
+                    ? 'Show LLM interaction details'
+                    : 'Load LLM interaction details';
                 llmDebugButton.dataset.turnId = turnId;
-                llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
+                llmDebugButton.addEventListener('click', () => {
+                    void showLlmDebugPopup(turnId, { button: llmDebugButton });
+                });
                 messageHeader.appendChild(llmDebugButton);
 
                 messageHeader.appendChild(copyMarkdownButton);
                 copyButtonAppended = true;
 
-                const warnings = deriveLlmDebugWarnings(debugData);
-                const warningIndicator = createChatDebugWarningIndicator(warnings);
-                if (warningIndicator) {
-                    messageHeader.appendChild(warningIndicator);
+                if (hasPayload) {
+                    const warnings = deriveLlmDebugWarnings(debugData);
+                    const warningIndicator = createChatDebugWarningIndicator(warnings);
+                    if (warningIndicator) {
+                        messageHeader.appendChild(warningIndicator);
+                    }
                 }
             }
-
             if (!copyButtonAppended) {
                 messageHeader.appendChild(copyMarkdownButton);
             }
@@ -2754,10 +5142,12 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             if (sender === 'Error' && hasLlmDebug && turnId) {
                 const llmDebugButton = document.createElement('button');
                 llmDebugButton.className = 'btn-mini llm-debug-button';
-                llmDebugButton.textContent = 'LLM ⓘ';
+                llmDebugButton.textContent = 'LLM ℹ';
                 llmDebugButton.title = 'Show what was sent to LLM before error';
                 llmDebugButton.dataset.turnId = turnId;
-                llmDebugButton.addEventListener('click', () => showLlmDebugPopup(turnId));
+                llmDebugButton.addEventListener('click', () => {
+                    void showLlmDebugPopup(turnId, { button: llmDebugButton });
+                });
                 messageHeader.appendChild(llmDebugButton);
 
                 const debugData = llmDebugData.get(turnId);
@@ -2871,41 +5261,18 @@ function initializeLlmDebugPopup() {
     });
 }
 
-// Show LLM debug popup for a specific turn
-function showLlmDebugPopup(turnId) {
-    const debugDataRaw = llmDebugData.get(turnId);
-    const debugData = enrichDebugDataWithSpeechPlanning(debugDataRaw, { turnId });
-    if (!debugData) {
-        console.warn('[chatTab] No debug data for turn:', turnId);
-        return;
-    }
-
-    const popup = document.getElementById('chatLlmDebugPopup');
-    const metaDiv = document.getElementById('chatLlmDebugMeta');
-    const messagesPre = document.getElementById('chatLlmDebugMessages');
-    const responsePre = document.getElementById('chatLlmDebugResponse');
-    const toolsSection = document.getElementById('chatLlmDebugToolsSection');
-    const toolsPre = document.getElementById('chatLlmDebugTools');
-    const auxSection = document.getElementById('chatLlmDebugAuxSection');
-    const auxPre = document.getElementById('chatLlmDebugAux');
-
-    if (!popup || !metaDiv || !messagesPre || !responsePre || !toolsSection || !toolsPre || !auxSection || !auxPre) {
-        console.error('[chatTab] LLM debug popup elements missing');
-        return;
-    }
-
-    // Display metadata
-    const hasError = debugData.error !== undefined;
-
-    // Build metadata object (not HTML) so it's included in JSON structure
+function buildLlmDebugMetadata(debugData) {
     const metadata = {
-        model: debugData.model || 'Unknown',
-        message_count: debugData.messages?.length || 0
+        model: debugData?.model || 'Unknown',
+        message_count: debugData?.messages?.length || 0
     };
 
-    if (debugData.presenter_channels || debugData.speech_planning) {
+    if (debugData?.presenter_channels || debugData?.speech_planning) {
         metadata.speech_planning = debugData.speech_planning || null;
         metadata.presenter_channels = debugData.presenter_channels || null;
+    }
+    if (debugData?.speech_playback) {
+        metadata.speech_playback = debugData.speech_playback;
     }
 
     // LLM interaction telemetry (JVNAUTOSCI-877)
@@ -2940,7 +5307,7 @@ function showLlmDebugPopup(turnId) {
     }
 
     // Add context statistics if available
-    if (debugData.context_stats) {
+    if (debugData?.context_stats) {
         const sentStats = debugData.context_stats.sent_to_llm;
         const storedStats = debugData.context_stats.stored_context;
 
@@ -2961,7 +5328,7 @@ function showLlmDebugPopup(turnId) {
     }
 
     // Add tool statistics if available
-    if (debugData.tool_stats) {
+    if (debugData?.tool_stats) {
         metadata.mcp_tools_used = {
             tool_count: debugData.tool_stats.tool_count,
             total_chars: debugData.tool_stats.total_chars,
@@ -2969,9 +5336,174 @@ function showLlmDebugPopup(turnId) {
         };
     }
 
-    if (hasError) {
+    // Surface internal MCP execution caps + usage in the visible debug metadata.
+    const internalMcp = (debugData && typeof debugData === 'object') ? debugData.internal_mcp : null;
+    if (internalMcp && typeof internalMcp === 'object') {
+        const caps = internalMcp.execution_caps;
+        const progress = internalMcp.tool_use_progress;
+        const toolInvocationsCount = Array.isArray(debugData.tool_invocations) ? debugData.tool_invocations.length : 0;
+
+        const maxToolInvocations = (caps && Number.isFinite(caps.max_tool_invocations)) ? caps.max_tool_invocations : null;
+        const toolBatchCap = (caps && Number.isFinite(caps.tool_batch_cap)) ? caps.tool_batch_cap : null;
+
+        const usageAgainstCaps = {
+            tool_invocations_done: toolInvocationsCount,
+            tool_invocations_cap: maxToolInvocations,
+            tool_invocations_remaining: (typeof maxToolInvocations === 'number') ? Math.max(0, maxToolInvocations - toolInvocationsCount) : null,
+            tool_invocations_exceeded: (typeof maxToolInvocations === 'number') ? toolInvocationsCount > maxToolInvocations : null,
+            tool_batch_cap: toolBatchCap,
+            estimated_batches: (typeof toolBatchCap === 'number' && toolBatchCap > 0) ? Math.ceil(toolInvocationsCount / toolBatchCap) : null,
+            estimated_last_batch_size: (typeof toolBatchCap === 'number' && toolBatchCap > 0)
+                ? (toolInvocationsCount === 0 ? 0 : (toolInvocationsCount % toolBatchCap || toolBatchCap))
+                : null
+        };
+
+        if (caps || progress) {
+            metadata.internal_mcp = {
+                execution_caps: caps || null,
+                usage_against_caps: usageAgainstCaps,
+                tool_use_progress: progress || null
+            };
+        }
+    }
+
+    if (debugData?.error !== undefined) {
         metadata.error = debugData.error;
     }
+
+    return metadata;
+}
+
+export function __testOnly_buildLlmDebugMetadata(debugData) {
+    return buildLlmDebugMetadata(debugData);
+}
+
+function hasLlmDebugPayload(debugData) {
+    if (!debugData || typeof debugData !== 'object') {
+        return false;
+    }
+    return Boolean(
+        debugData.model
+        || debugData.response
+        || debugData.error !== undefined
+        || (Array.isArray(debugData.messages) && debugData.messages.length > 0)
+        || (Array.isArray(debugData.tool_invocations) && debugData.tool_invocations.length > 0)
+        || (Array.isArray(debugData.aux_llm_calls) && debugData.aux_llm_calls.length > 0)
+        || debugData.llm_interaction
+        || debugData.context_stats
+    );
+}
+
+async function loadLlmDebugDataForTurn(turnId, options = {}) {
+    const existing = llmDebugData.get(turnId);
+    if (hasLlmDebugPayload(existing)) {
+        return existing;
+    }
+
+    const historyLocation = existing?.history_location;
+    if (!historyLocation || !historyLocation.session_id || historyLocation.history_index === undefined || historyLocation.history_index === null) {
+        return null;
+    }
+
+    if (llmDebugFetchInFlight.has(turnId)) {
+        return llmDebugFetchInFlight.get(turnId);
+    }
+
+    const button = options.button;
+    const originalText = button?.textContent;
+    const originalTitle = button?.title;
+    if (button) {
+        button.disabled = true;
+        button.classList.add('loading');
+        button.textContent = 'LLM ...';
+        button.title = 'Loading LLM interaction details';
+    }
+
+    const fetchPromise = (async () => {
+        try {
+            const params = new URLSearchParams({
+                session_id: historyLocation.session_id,
+                history_index: String(historyLocation.history_index)
+            });
+            const response = await fetch(`/von/history/debug?${params.toString()}`, { cache: 'no-store' });
+            let data = null;
+            try {
+                data = await response.json();
+            } catch (_) {
+                data = null;
+            }
+            if (!response.ok) {
+                if (response.status === 404 && data?.error === 'debug_not_available') {
+                    showToast('No LLM debug data stored for this turn.');
+                }
+                return null;
+            }
+            if (data?.success === false && data?.error === 'debug_not_available') {
+                showToast('No LLM debug data stored for this turn.');
+                return null;
+            }
+            if (!data || typeof data.llm_debug_data !== 'object') {
+                return null;
+            }
+            const merged = {
+                ...data.llm_debug_data,
+                history_location: historyLocation
+            };
+            llmDebugData.set(turnId, merged);
+            return merged;
+        } catch (err) {
+            console.warn('[chatTab] Failed to load LLM debug data:', err);
+            return null;
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.classList.remove('loading');
+                button.textContent = originalText || 'LLM ℹ';
+                if (originalTitle) {
+                    button.title = originalTitle;
+                } else {
+                    button.title = 'Load LLM interaction details';
+                }
+            }
+        }
+    })();
+
+    llmDebugFetchInFlight.set(turnId, fetchPromise);
+    fetchPromise.finally(() => {
+        llmDebugFetchInFlight.delete(turnId);
+    });
+    return fetchPromise;
+}
+
+// Show LLM debug popup for a specific turn
+async function showLlmDebugPopup(turnId, options = {}) {
+    let debugDataRaw = llmDebugData.get(turnId);
+    if (!hasLlmDebugPayload(debugDataRaw)) {
+        debugDataRaw = await loadLlmDebugDataForTurn(turnId, options);
+    }
+    const debugData = enrichDebugDataWithSpeechPlanning(debugDataRaw, { turnId });
+    if (!debugData) {
+        console.warn('[chatTab] No debug data for turn:', turnId);
+        return;
+    }
+
+    const popup = document.getElementById('chatLlmDebugPopup');
+    const metaDiv = document.getElementById('chatLlmDebugMeta');
+    const messagesPre = document.getElementById('chatLlmDebugMessages');
+    const responsePre = document.getElementById('chatLlmDebugResponse');
+    const toolsSection = document.getElementById('chatLlmDebugToolsSection');
+    const toolsPre = document.getElementById('chatLlmDebugTools');
+    const auxSection = document.getElementById('chatLlmDebugAuxSection');
+    const auxPre = document.getElementById('chatLlmDebugAux');
+
+    if (!popup || !metaDiv || !messagesPre || !responsePre || !toolsSection || !toolsPre || !auxSection || !auxPre) {
+        console.error('[chatTab] LLM debug popup elements missing');
+        return;
+    }
+
+    // Display metadata
+    const metadata = buildLlmDebugMetadata(debugData);
+    const hasError = debugData.error !== undefined;
 
     let workflowExecutionTrace = null;
     if (Array.isArray(debugData.aux_llm_calls)) {
@@ -3249,6 +5781,11 @@ export function __testOnly_resetChatTtsState() {
     }
     try {
         clearActiveTtsUi();
+    } catch (_) {
+        // Ignore.
+    }
+    try {
+        activeTtsPlaybackState = null;
     } catch (_) {
         // Ignore.
     }

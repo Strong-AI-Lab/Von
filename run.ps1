@@ -77,6 +77,50 @@ if (-not (Get-Command Write-LauncherLog -ErrorAction SilentlyContinue)) {
 # - Else fall back to repo-local 'backups'.
 $BackupRoot = $null
 
+function Test-WDriveAvailable {
+    <#
+        Returns $true only when W: is present and reachable.
+        This is more defensive than Test-Path alone (network drives can throw).
+    #>
+    try {
+        $drive = Get-PSDrive -Name 'W' -ErrorAction Stop
+        if (-not $drive) { return $false }
+        try {
+            return [bool](Test-Path -LiteralPath 'W:\' -ErrorAction Stop)
+        }
+        catch {
+            return $false
+        }
+    }
+    catch {
+        return $false
+    }
+}
+
+function Resolve-BackupOutDir {
+    param(
+        [Parameter(Mandatory = $true)][string]$OutDir,
+        [Parameter(Mandatory = $true)][string]$FallbackDir,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $effective = $OutDir
+    try {
+        if ($effective -match '^[Ww]:\\' -and -not (Test-WDriveAvailable)) {
+            Write-LauncherLog "[backup] WARN: W: drive unavailable ($Reason); falling back to local backups: $FallbackDir"
+            $effective = $FallbackDir
+        }
+    }
+    catch {
+        # Defensive: if any drive probing fails, fall back to local.
+        Write-LauncherLog "[backup] WARN: Backup destination probe failed ($Reason): $($_.Exception.Message); falling back to local backups: $FallbackDir"
+        $effective = $FallbackDir
+    }
+
+    try { New-Item -ItemType Directory -Force -Path $effective | Out-Null } catch { }
+    return $effective
+}
+
 if ($env:VON_BACKUP_ROOT -and $env:VON_BACKUP_ROOT.ToString().Trim()) {
     $preferred = $env:VON_BACKUP_ROOT.ToString().Trim().Trim('"')
     try {
@@ -88,7 +132,7 @@ if ($env:VON_BACKUP_ROOT -and $env:VON_BACKUP_ROOT.ToString().Trim()) {
     }
 }
 
-if (-not $BackupRoot -and (Test-Path 'W:\')) {
+if (-not $BackupRoot -and (Test-WDriveAvailable)) {
     $preferred = 'W:\von_backups'
     try {
         New-Item -ItemType Directory -Force -Path $preferred | Out-Null
@@ -113,21 +157,31 @@ if (-not $BackupOutDir) {
 function Invoke-MigrateLocalBackupsToWDrive {
     <#
         If W: exists and local backups dir exists, move all but the most recent
-        timestamped backup directory from local 'backups' into W:\von_backups.
+        timestamped backup artefact from local 'backups' into W:\von_backups.
         Skips if backup root already is W:, or fewer than 2 local backups.
-        Only moves directories matching pattern <name>_YYYYMMDD_HHMMSS*.
+        Moves both directories (<name>_YYYYMMDD_HHMMSS*) and zip artefacts
+        (<name>_YYYYMMDD_HHMMSS*.zip or .zip.enc).
         Logs with [backup-migrate]. Failures on individual moves are warned and continue.
     #>
     $moved = 0
     $copied = 0
-    if (-not (Test-Path 'W:\')) { Write-LauncherLog "[backup-migrate] summary moved=$moved copied=$copied (no W: drive)"; return }
+    if (-not (Test-WDriveAvailable)) { Write-LauncherLog "[backup-migrate] summary moved=$moved copied=$copied (no W: drive)"; return }
     # Even if current backup root is already on W:, still attempt to migrate any residual local backups directory.
     $localBackups = Join-Path $Root 'backups'
     if (-not (Test-Path $localBackups)) {
         try { New-Item -ItemType Directory -Force -Path $localBackups | Out-Null } catch { Write-LauncherLog "[backup-migrate] summary moved=$moved copied=$copied (cannot create local backups dir)"; return }
     }
-    try { $items = Get-ChildItem -Path $localBackups -Directory -ErrorAction Stop } catch { $items = @() }
-    $candidates = $items | Where-Object { $_.Name -match '_[0-9]{8}_[0-9]{6}Z?' }
+    try {
+        $items = Get-ChildItem -Path $localBackups -ErrorAction Stop | Where-Object {
+            $_.PSIsContainer -or $_.Name -match '\.zip(\.enc)?$'
+        }
+    }
+    catch { $items = @() }
+    $candidates = $items | Where-Object {
+        $_.Name -match '_[0-9]{8}_[0-9]{6}Z?' -and (
+            $_.PSIsContainer -or $_.Name -match '\.zip(\.enc)?$'
+        )
+    }
     $newest = $null; $toMove = @()
     if ($candidates -and $candidates.Count -gt 0) {
         $sorted = $candidates | Sort-Object LastWriteTime
@@ -139,26 +193,31 @@ function Invoke-MigrateLocalBackupsToWDrive {
         try { New-Item -ItemType Directory -Force -Path $destRoot | Out-Null } catch { Write-LauncherLog "[backup-migrate] summary moved=$moved copied=$copied (create dest failed)"; return }
     }
     if ($toMove.Count -gt 0) {
-        foreach ($dir in $toMove) {
-            $dest = Join-Path $destRoot $dir.Name
+        foreach ($item in $toMove) {
+            $dest = Join-Path $destRoot $item.Name
             if (Test-Path $dest) {
-                Write-Verbose ("[backup-migrate] Skipping existing {0} already on W:" -f $dir.Name)
+                Write-Verbose ("[backup-migrate] Skipping existing {0} already on W:" -f $item.Name)
                 continue
             }
             try {
-                Write-LauncherLog "[backup-migrate] Moving $($dir.Name) -> $destRoot"
-                Move-Item -Path $dir.FullName -Destination $dest -Force -ErrorAction Stop
+                Write-LauncherLog "[backup-migrate] Moving $($item.Name) -> $destRoot"
+                Move-Item -Path $item.FullName -Destination $dest -Force -ErrorAction Stop
                 $moved++
             }
             catch {
-                Write-LauncherLog "[backup-migrate] WARN move failed $($dir.Name): $($_.Exception.Message)"
+                Write-LauncherLog "[backup-migrate] WARN move failed $($item.Name): $($_.Exception.Message)"
             }
         }
     }
     if ($newest -and -not (Test-Path (Join-Path $destRoot $newest.Name))) {
         try {
             Write-LauncherLog "[backup-migrate] Copying newest $($newest.Name) to W: (preserve local copy)"
-            Copy-Item -Path $newest.FullName -Destination (Join-Path $destRoot $newest.Name) -Recurse -Force -ErrorAction Stop
+            if ($newest.PSIsContainer) {
+                Copy-Item -Path $newest.FullName -Destination (Join-Path $destRoot $newest.Name) -Recurse -Force -ErrorAction Stop
+            }
+            else {
+                Copy-Item -Path $newest.FullName -Destination (Join-Path $destRoot $newest.Name) -Force -ErrorAction Stop
+            }
             $copied++
         }
         catch {
@@ -167,7 +226,11 @@ function Invoke-MigrateLocalBackupsToWDrive {
     }
     # Down-sync: if W: holds a newer backup than local newest (or local newest missing), copy newest W: back locally
     try {
-        $wBackups = Get-ChildItem -Path $destRoot -Directory -ErrorAction Stop | Where-Object { $_.Name -match '_[0-9]{8}_[0-9]{6}Z?' }
+        $wBackups = Get-ChildItem -Path $destRoot -ErrorAction Stop | Where-Object {
+            $_.Name -match '_[0-9]{8}_[0-9]{6}Z?' -and (
+                $_.PSIsContainer -or $_.Name -match '\.zip(\.enc)?$'
+            )
+        }
         if ($wBackups) {
             $wSorted = $wBackups | Sort-Object LastWriteTime
             $wNewest = $wSorted[-1]
@@ -186,7 +249,12 @@ function Invoke-MigrateLocalBackupsToWDrive {
                 if (-not (Test-Path $destLocal)) {
                     try {
                         Write-LauncherLog "[backup-migrate] Down-sync newer $($wNewest.Name) -> local backups"
-                        Copy-Item -Path $wNewest.FullName -Destination $destLocal -Recurse -Force -ErrorAction Stop
+                        if ($wNewest.PSIsContainer) {
+                            Copy-Item -Path $wNewest.FullName -Destination $destLocal -Recurse -Force -ErrorAction Stop
+                        }
+                        else {
+                            Copy-Item -Path $wNewest.FullName -Destination $destLocal -Force -ErrorAction Stop
+                        }
                     }
                     catch { Write-LauncherLog "[backup-migrate] WARN down-sync failed $($wNewest.Name): $($_.Exception.Message)" }
                 }
@@ -243,6 +311,30 @@ function Read-AdminToken {
     $gen = [guid]::NewGuid().ToString('N')
     Set-Content $tokenFile $gen
     return $gen
+}
+
+function Get-MongoConnectionSummary {
+    param([int]$Port)
+    try {
+        $resp = Invoke-RestMethod -Uri "http://localhost:$Port/api/system/db_status" -TimeoutSec 5
+        if ($null -eq $resp) { return "Mongo: unknown" }
+        $usingFallback = $resp.using_fallback
+        $atlasDetected = $resp.atlas_detected
+        $host = $resp.effective_host
+        if ($usingFallback -eq $true) {
+            if ($host) { return "Mongo: local fallback ($host)" }
+            return "Mongo: local fallback"
+        }
+        if ($atlasDetected -eq $true) {
+            if ($host) { return "Mongo: Atlas ($host)" }
+            return "Mongo: Atlas"
+        }
+        if ($host) { return "Mongo: $host" }
+        return "Mongo: unknown"
+    }
+    catch {
+        return "Mongo: status unavailable"
+    }
 }
 
 function Invoke-VonLogRotation {
@@ -568,6 +660,8 @@ function Invoke-DailyBackupIfDue {
         return
     }
     $pdmExe = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
+    $localFallback = Join-Path $Root 'backups'
+    $effectiveBackupRoot = Resolve-BackupOutDir -OutDir $BackupRoot -FallbackDir $localFallback -Reason 'daily-backup'
     Write-LauncherLog "[daily-backup] Launching background backup (interval ${intervalHours}h)..."
     Start-Job -Name 'von_daily_backup' -ScriptBlock {
         param($pdmExe, $root, $runDir, $sentinelPath, $backupRoot, $backupScript)
@@ -583,7 +677,7 @@ function Invoke-DailyBackupIfDue {
         catch {
             Write-Host ("[daily-backup] ERROR: {0}" -f $_.Exception.Message)
         }
-    } -ArgumentList $pdmExe, $Root, $RunDir, $sentinel, $BackupRoot, $backupScript | Out-Null
+    } -ArgumentList $pdmExe, $Root, $RunDir, $sentinel, $effectiveBackupRoot, $backupScript | Out-Null
 }
 
 # Backward-compatible convenience: if called as ".\run.ps1 -BackupDryRun" (no explicit action)
@@ -923,6 +1017,7 @@ function Start-VonServer {
         }
         if ($healthy) {
             Write-LauncherLog "Server healthy (http://localhost:$Port)"
+            Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
             if (-not $NoBrowser) {
                 $shouldOpen = $false
                 if ($ForceBrowser) { $shouldOpen = $true }
@@ -962,6 +1057,7 @@ function Start-VonServer {
         }
         elseif ($listeningLogged) {
             Write-LauncherLog "WARNING: Port is listening but /health did not respond in ${HealthTimeoutSec + $HealthGraceSec}s; continuing (service may still be initializing)."
+            Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
         }
         else {
             Write-LauncherLog "WARNING: Server not healthy after initial ${HealthTimeoutSec}s (port not listening); check logs: $CurrentLog"
@@ -1068,6 +1164,7 @@ function Get-VonStatus {
     $startTime = $null; if ($startLine -and $startLine -match 'START=(.*)') { $startTime = Get-Date $Matches[1] }
     $uptime = if ($startTime) { (Get-Date) - $startTime } else { [timespan]::Zero }
     Write-LauncherLog ("RUNNING PID={0} Uptime={1} Healthy={2}" -f $proc.Id, [int]$uptime.TotalMinutes, $healthy)
+    Write-LauncherLog (Get-MongoConnectionSummary -Port $Port)
     Write-LauncherLog "Log: $CurrentLog"
     try { Invoke-DailyGovernanceScan -Port $Port -StartupHealthy $healthy } catch { Write-LauncherLog "[governance-scan] ERROR: $($_.Exception.Message)" }
     try { Invoke-ConceptDataAbsenceCheck } catch { Write-LauncherLog "[concept-data-check] ERROR: $($_.Exception.Message)" }
@@ -1845,7 +1942,8 @@ function Invoke-BackupNow {
     }
     $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
     $tag = if ($BackupTag) { $BackupTag } else { 'manual' }
-    $outDir = if ($BackupOutDir) { $BackupOutDir } else { $BackupRoot }
+    $requestedOutDir = if ($BackupOutDir) { $BackupOutDir } else { $BackupRoot }
+    $outDir = Resolve-BackupOutDir -OutDir $requestedOutDir -FallbackDir (Join-Path $Root 'backups') -Reason 'manual-backup'
     $apply = -not $BackupDryRun
     $mode = if ($apply) { 'apply' } else { 'dry-run' }
     Write-LauncherLog "[backup] Starting backup (mode=$mode tag=$tag out=$outDir root=$BackupRoot)"
@@ -1862,6 +1960,11 @@ function Invoke-BackupNow {
     }
     else {
         Write-LauncherLog "[backup] ERROR exit=$exitCode"
+    }
+
+    # Best-effort: if W: is (re)connected, migrate local backup artefacts now.
+    if (-not $NoBackupMigrate) {
+        try { Invoke-MigrateLocalBackupsToWDrive } catch { Write-LauncherLog "[backup-migrate] WARN post-backup migrate failed: $($_.Exception.Message)" }
     }
 }
 

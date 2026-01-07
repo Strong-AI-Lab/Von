@@ -36,16 +36,30 @@ def _host_display_from_uri(uri: str) -> str:
     return redacted.split("/")[0]
 
 
-USE_MOCK_DB = os.environ.get("VON_USE_MOCK_DB", "0").lower() in {"1", "true", "yes"}
-mongomock = None
-if USE_MOCK_DB:
+def is_mock_db_enabled() -> bool:
+    """Return True if in-memory Mongo mocking is enabled.
+
+    IMPORTANT: This reads the environment at call-time so tests can toggle it
+    via monkeypatch without having to control import order.
+    """
+
+    return os.environ.get("VON_USE_MOCK_DB", "0").lower() in {"1", "true", "yes"}
+
+
+# DEPRECATED: Prefer is_mock_db_enabled() which reads the environment at call-time.
+# This module-level constant is retained for compatibility.
+USE_MOCK_DB = is_mock_db_enabled()
+
+
+def _get_mongomock_module():
     try:  # pragma: no cover - optional dependency import
         import mongomock as _mongomock
 
-        mongomock = _mongomock
+        return _mongomock
     except Exception as exc:  # pragma: no cover
-        mongomock = None
         logger.warning("VON_USE_MOCK_DB set but mongomock import failed: %s", exc)
+        return None
+
 
 # Import colorama for colored console output
 try:
@@ -92,11 +106,23 @@ except Exception:
     pass
 
 # Use environment variables or default to localhost
-MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/")
+
+
+def _get_nonempty_env_value(name: str) -> str | None:
+    value = os.environ.get(name)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if value else None
+
+
+MONGO_URI = _get_nonempty_env_value("MONGO_URI") or "mongodb://localhost:27017/"
 # Optional fallback URI to use when SRV DNS resolution fails (useful offline)
-MONGO_LOCAL_URI = os.environ.get(
-    "MONGO_LOCAL_URI", "mongodb://127.0.0.1:27017/?directConnection=true"
+MONGO_LOCAL_URI = (
+    _get_nonempty_env_value("MONGO_LOCAL_URI")
+    or "mongodb://127.0.0.1:27017/?directConnection=true"
 )
+MONGO_DNS_FALLBACK_URI = _get_nonempty_env_value("MONGO_DNS_FALLBACK_URI")
 MONGO_ALLOW_LOCAL_FALLBACK = os.environ.get("MONGO_ALLOW_LOCAL_FALLBACK", "1") in (
     "1",
     "true",
@@ -191,13 +217,15 @@ AGENT_GMAIL_TOKENS_COLLECTION_NAME = "agent_gmail_tokens"
 ROOM_DEVICES_COLLECTION_NAME = "room_devices"
 
 # --- Client Initialization ---
-# REFACTORING_NOTE: The global client is being removed in favor of a more robust
-# connection management pattern within get_db(). This avoids issues with
-# initialization order and makes the connection more resilient.
-_mongo_client = None
+# REFACTORING_NOTE: We maintain separate clients for real MongoDB vs mongomock.
+# This prevents test suites from “poisoning” the process by enabling VON_USE_MOCK_DB
+# in one test and accidentally forcing *all later tests* to keep using mongomock.
+_mongo_client_real: MongoClient | None = None
+_mongo_client_mock = None
+
 # Track whether we are using a fallback URI (local) rather than the primary MONGO_URI
-_using_fallback = False
-_effective_uri = MONGO_URI  # The URI actually used to create the client
+_using_fallback_real = False
+_effective_uri_real = MONGO_URI  # The URI actually used to create the real client
 
 
 def get_db() -> Database | None:
@@ -205,30 +233,29 @@ def get_db() -> Database | None:
     Establishes a connection to the MongoDB database if one doesn't exist,
     and returns the database instance.
     """
-    global _mongo_client
-    global _using_fallback, _effective_uri
+    global _mongo_client_real, _mongo_client_mock
+    global _using_fallback_real, _effective_uri_real
     db_name = get_configured_database_name()
     assert_safe_database_name_for_pytest(db_name)
 
-    if USE_MOCK_DB:
-        if _mongo_client is None:
+    if is_mock_db_enabled():
+        if _mongo_client_mock is None:
+            mongomock = _get_mongomock_module()
             if mongomock is None:
                 raise RuntimeError(
                     "VON_USE_MOCK_DB is enabled but mongomock is unavailable"
                 )
-            _mongo_client = mongomock.MongoClient()
-            _effective_uri = "mongomock://"
-            _using_fallback = False
-        return _mongo_client[db_name]
+            _mongo_client_mock = mongomock.MongoClient()
+        return _mongo_client_mock[db_name]
 
-    if _mongo_client is None:
+    if _mongo_client_real is None:
         try:
             # Try without SSL/TLS as a last resort (INSECURE but may work for development)
-            _mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            _mongo_client_real = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
             # The ismaster command is cheap and does not require auth.
-            _mongo_client.admin.command("ismaster")
-            _effective_uri = MONGO_URI
-            _using_fallback = False
+            _mongo_client_real.admin.command("ismaster")
+            _effective_uri_real = MONGO_URI
+            _using_fallback_real = False
             if _debug_mongo_enabled():
                 try:
                     logger.debug(
@@ -251,7 +278,7 @@ def get_db() -> Database | None:
                     os.environ.get("MONGO_PROJECT", "Unknown"),
                 )
 
-            _mongo_client = None  # Ensure client is None on failure
+            _mongo_client_real = None  # Ensure client is None on failure
 
             # Check for common SSL/Connection errors that warrant a fallback attempt
             # WinError 10054: Connection reset by peer (common with IP whitelist blocks)
@@ -285,12 +312,12 @@ def get_db() -> Database | None:
                     logger.warning(
                         "[mongo_fallback] Attempting local MongoDB fallback due to connection failure."
                     )
-                    _mongo_client = MongoClient(
+                    _mongo_client_real = MongoClient(
                         MONGO_LOCAL_URI, serverSelectionTimeoutMS=3000
                     )
-                    _mongo_client.admin.command("ismaster")
-                    _effective_uri = MONGO_LOCAL_URI
-                    _using_fallback = True
+                    _mongo_client_real.admin.command("ismaster")
+                    _effective_uri_real = MONGO_LOCAL_URI
+                    _using_fallback_real = True
                     try:
                         logger.warning(
                             "[mongo_fallback] Using local fallback Mongo URI instead of primary (connection failure)."
@@ -307,7 +334,7 @@ def get_db() -> Database | None:
                             pass
                 except Exception as fe:
                     logger.warning("Local fallback connection failed: %s", fe)
-                    _mongo_client = None
+                    _mongo_client_real = None
                     return None
             else:
                 return None
@@ -316,56 +343,63 @@ def get_db() -> Database | None:
                 "An unexpected error occurred during MongoDB client initialisation: %s",
                 e,
             )
-            # Attempt local fallback for DNS resolution errors (common with SRV)
+            # Attempt fallback for DNS resolution errors (common with SRV)
             if MONGO_ALLOW_LOCAL_FALLBACK and (
                 "resolution" in str(e).lower()
                 or "dns" in str(e).lower()
                 or MONGO_URI.startswith("mongodb+srv://")
             ):
                 try:
+                    fallback_uri = MONGO_DNS_FALLBACK_URI or MONGO_LOCAL_URI
+                    fallback_label = (
+                        "dns fallback" if MONGO_DNS_FALLBACK_URI else "local fallback"
+                    )
                     logger.warning(
-                        "[mongo_fallback] Attempting local MongoDB fallback due to DNS/SRV error."
+                        "[mongo_fallback] Attempting %s MongoDB fallback due to DNS/SRV error.",
+                        fallback_label,
                     )
-                    _mongo_client = MongoClient(
-                        MONGO_LOCAL_URI, serverSelectionTimeoutMS=3000
+                    _mongo_client_real = MongoClient(
+                        fallback_uri, serverSelectionTimeoutMS=3000
                     )
-                    _mongo_client.admin.command("ismaster")
-                    _effective_uri = MONGO_LOCAL_URI
-                    _using_fallback = True
+                    _mongo_client_real.admin.command("ismaster")
+                    _effective_uri_real = fallback_uri
+                    _using_fallback_real = True
                     try:
                         logger.warning(
-                            "[mongo_fallback] Using local fallback Mongo URI instead of primary (DNS/SRV error)."
+                            "[mongo_fallback] Using %s Mongo URI instead of primary (DNS/SRV error).",
+                            fallback_label,
                         )
                     except Exception:
                         pass
                     if _debug_mongo_enabled():
                         try:
                             logger.debug(
-                                "[MongoConnect] Local fallback host: %s",
-                                _host_display_from_uri(MONGO_LOCAL_URI),
+                                "[MongoConnect] %s host: %s",
+                                fallback_label,
+                                _host_display_from_uri(fallback_uri),
                             )
                         except Exception:
                             pass
                 except Exception as fe:
                     logger.warning("Local fallback connection failed: %s", fe)
-                    _mongo_client = None
+                    _mongo_client_real = None
                     return None
             else:
-                _mongo_client = None  # Ensure client is None on failure
+                _mongo_client_real = None  # Ensure client is None on failure
                 return None
 
-        if _mongo_client:
+        if _mongo_client_real:
             print_connection_info()
 
-    if _mongo_client:
-        return _mongo_client[db_name]
+    if _mongo_client_real:
+        return _mongo_client_real[db_name]
     return None
 
 
 def print_connection_info():
     """Log helpful connection info on startup."""
-    global _effective_uri
-    uri_to_use = _effective_uri if _effective_uri else MONGO_URI
+    global _effective_uri_real
+    uri_to_use = _effective_uri_real if _effective_uri_real else MONGO_URI
     host = _host_display_from_uri(uri_to_use)
     if "localhost" in host or "127.0.0.1" in host:
         logger.info("[Von Database] Connecting to LOCAL MongoDB at %s", host)
@@ -375,20 +409,22 @@ def print_connection_info():
 
 def get_effective_mongo_uri() -> str:
     """Return the URI that was effectively used to create the client (may be fallback)."""
-    return _effective_uri
+    return _effective_uri_real
 
 
 def is_using_fallback_uri() -> bool:
     """Return True if a local fallback URI is being used instead of the primary MONGO_URI."""
-    return _using_fallback
+    return _using_fallback_real
 
 
 def close_connection():
     """Closes the MongoDB connection."""
-    global _mongo_client
-    if _mongo_client:
-        _mongo_client.close()
-        _mongo_client = None
+    global _mongo_client_real, _mongo_client_mock
+    if _mongo_client_real:
+        _mongo_client_real.close()
+        _mongo_client_real = None
+    # mongomock doesn't require close(), but clear ref for correctness.
+    _mongo_client_mock = None
 
 
 def test_connection(verbose: bool = False) -> bool:

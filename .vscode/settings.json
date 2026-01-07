@@ -4,9 +4,15 @@
   "terminal.integrated.shellIntegration.suggestEnabled": true,
   "terminal.integrated.environmentChangesRelaunch": false,
   "terminal.integrated.showEnvironmentContributions": false,
+  "terminal.integrated.automationProfile.windows": {
+    "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "args": [
+      "-NoLogo"
+    ]
+  },
   "terminal.integrated.profiles.windows": {
     "PowerShell": {
-      "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
       "args": [
         "-NoLogo"
       ]
@@ -94,7 +100,9 @@
   "jest.rootPath": "${workspaceFolder}",
   "workbench.tree.expandMode": "singleClick",
   "files.eol": "\n",
-  "jest.runMode": "deferred",
+  "jest.runMode": "on-demand",
+  "jest.shell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  "jest.debugMode": true,
   "github.copilot.nextEditSuggestions.enabled": true,
   "chat.instructionsFilesLocations": {
     ".github/instructions": true,
@@ -105,7 +113,7 @@
   "editor.formatOnSaveMode": "file",
   "editor.trimAutoWhitespace": true,
   "chat.edits2.enabled": true,
-  "jest.jestCommandLine": "node --unhandled-rejections=strict node_modules/jest/bin/jest.js",
+  "jest.jestCommandLine": "npm run test:frontend --",
   "git.pruneOnFetch": true,
   "editor.renderWhitespace": "selection",
   "typescript.inlayHints.enumMemberValues.enabled": true,
@@ -119,7 +127,6 @@
     "**/logs": true
   },
   "chat.editing.confirmEditRequestRemoval": false,
-  "jest.shell": "",
   "git.autofetch": true,
   "jest.enableInlineErrorMessages": true,
   "jupyter.askForKernelRestart": false,

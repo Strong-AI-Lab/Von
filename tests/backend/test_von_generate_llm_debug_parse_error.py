@@ -63,3 +63,10 @@ def test_llm_debug_contains_rejected_tool_payload(app):
         == '{"action":"call_tool"} trailing'
     )
     assert "invalid JSON in tool call response" in invocation["error"]
+
+    warnings = llm_debug.get("warnings")
+    assert isinstance(warnings, list)
+    assert any(
+        "Tool call was not executed" in str(w) or "invalid JSON" in str(w)
+        for w in warnings
+    )

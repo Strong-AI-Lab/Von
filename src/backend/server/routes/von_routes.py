@@ -1,13 +1,35 @@
-from flask import Blueprint, request, jsonify, render_template, current_app, session
+from flask import (
+    Blueprint,
+    request,
+    jsonify,
+    render_template,
+    current_app,
+    session,
+    send_file,
+)
 import os
+import re
 import time
+import threading
+import secrets
 import uuid
 from datetime import datetime, timezone
-from workflows.onboarding_workflow import run_onboarding_workflow  # fixed import path
+from typing import Any
+from src.workflows.onboarding_workflow import run_onboarding_workflow
 from ...languagemodels.llm_interface import get_llm_client, get_active_model_name
 from .settings_routes import get_all_settings_data
 from ...integrations.internal_mcp import ToolCallParsingError
 from ...services import chat_history_service
+from ...services.settings_service import (
+    get_internal_mcp_max_tool_invocations,
+    get_internal_mcp_tool_batch_cap,
+    get_show_tool_use_during_thinking,
+)
+from ...workflows import (
+    CHAT_NARRATION_WORKFLOW_ID,
+    WorkflowExecutionTrace,
+    insert_workflow_execution_trace,
+)
 
 # NOTE: Previous relative template_folder path ('../../frontend/...') was incorrect.
 # From this file (src/backend/server/routes/von_routes.py) we need to traverse up THREE levels
@@ -19,6 +41,573 @@ _TEMPLATE_DIR = os.path.abspath(
     )
 )
 von_bp = Blueprint("von", __name__, template_folder=_TEMPLATE_DIR)
+
+
+# ----------------- Tool progress (JVNAUTOSCI-942) -----------------
+
+_TOOL_PROGRESS_TTL_SEC = 10 * 60
+_TOOL_PROGRESS_LOCK = threading.Lock()
+_TOOL_PROGRESS: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _slugify_concept_id_for_key(concept_id: str) -> str:
+    cleaned = (concept_id or "").strip()
+    if cleaned.startswith("#V#"):
+        cleaned = cleaned[3:]
+    cleaned = cleaned.strip().lower()
+    cleaned = re.sub(r"[^a-z0-9]+", "_", cleaned).strip("_")
+    return cleaned or "unknown"
+
+
+def _get_tool_progress_scope_key() -> str:
+    """Return a stable scope key for tool-progress lookup.
+
+    - Authenticated: scope is user concept id
+    - Unauthenticated: scope is a session-scoped random token
+    """
+
+    user_concept_id = None
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if isinstance(user_concept_id, str) and user_concept_id.strip():
+        return f"user:{user_concept_id.strip()}"
+
+    if "tool_progress_scope" not in session:
+        session["tool_progress_scope"] = secrets.token_urlsafe(16)
+
+    return f"anon:{session.get('tool_progress_scope')}"
+
+
+@von_bp.route("/api/files/upload", methods=["POST"])
+def upload_file_to_blob_store_and_vontology():
+    """Upload a user-provided file into the configured blob store and register it in Vontology.
+
+    Security: user identity is derived server-side via get_effective_user_concept_id().
+
+    Multipart form-data:
+      - file: the uploaded file
+
+    Returns JSON:
+      - success
+      - uploaded: { concept_id, type_concept_id, sha256, size_bytes, content_type, original_filename }
+      - storage: { backend, key, uri, content_type, size_bytes, metadata }
+    """
+
+    from werkzeug.utils import secure_filename
+
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "missing_user_context",
+                    "message": "Missing user context: establish an authenticated session first.",
+                }
+            ),
+            401,
+        )
+
+    # Ensure the upload is associated with a stable chat session so it becomes part
+    # of the same persisted history that /von/generate uses.
+    if "session_id" not in session:
+        session["session_id"] = str(uuid.uuid4())
+    session_id = session["session_id"]
+
+    if "file" not in request.files:
+        return jsonify({"success": False, "error": "missing_file"}), 400
+
+    uploaded = request.files.get("file")
+    if not uploaded or not getattr(uploaded, "filename", None):
+        return jsonify({"success": False, "error": "empty_upload"}), 400
+
+    original_filename = str(uploaded.filename)
+    safe_filename = secure_filename(original_filename) or "uploaded_file"
+    content_type = getattr(uploaded, "mimetype", None) or None
+
+    try:
+        data = uploaded.read()
+    except Exception as exc:
+        current_app.logger.warning(f"[files/upload] Failed to read upload: {exc}")
+        return jsonify({"success": False, "error": "read_failed"}), 400
+
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return jsonify({"success": False, "error": "empty_bytes"}), 400
+
+    data_bytes = bytes(data)
+
+    import hashlib
+
+    sha256 = hashlib.sha256(data_bytes).hexdigest()
+    size_bytes = len(data_bytes)
+
+    from ...services.blob_store import get_blob_store_from_env
+
+    store = get_blob_store_from_env()
+    user_slug = _slugify_concept_id_for_key(user_concept_id)
+    blob_key = f"uploads/{user_slug}/{sha256}/{safe_filename}"
+    uploaded_at = _now_utc_iso()
+
+    blob_ref = store.put_bytes(
+        blob_key,
+        data_bytes,
+        content_type=content_type,
+        metadata={
+            "original_filename": original_filename,
+            "sha256": sha256,
+            "user_concept_id": user_concept_id.strip(),
+            "uploaded_at": uploaded_at,
+        },
+    )
+
+    # --- Ensure KR infrastructure exists ---
+    type_concept_id = "#V#computer_file_copy"
+
+    try:
+        from ...db.repositories.concepts_repository import ConceptsRepository
+        from ...vontology.utils_vontology import (
+            THING_PRIMARY_ID,
+            create_vontology_concept,
+            ensure_thing_exists_and_link_orphans,
+        )
+
+        if not ConceptsRepository.find_one({"concept_id": type_concept_id}):
+            # Prefer a store-of-information parent if present; otherwise fall back to Thing.
+            parent_id = (
+                "#V#store_of_information"
+                if ConceptsRepository.find_one(
+                    {"concept_id": "#V#store_of_information"}
+                )
+                else THING_PRIMARY_ID
+            )
+            if parent_id == THING_PRIMARY_ID:
+                # Best-effort: ensure Thing exists.
+                ensure_thing_exists_and_link_orphans()
+
+            created = create_vontology_concept(
+                parent_id=parent_id,
+                new_concept_name="Computer File Copy",
+                create_as_instance=False,
+                description=(
+                    "A computer file copy is an information-bearing artefact representing a specific stored byte sequence "
+                    "(for example an uploaded file stored in Von's blob store)."
+                ),
+                notes=(
+                    "Created on-demand by Von's chat file upload flow. Instances typically have blob store metadata "
+                    "(URI, key, content type, size, and hash) recorded as text relations."
+                ),
+            )
+            if not created.get("success"):
+                current_app.logger.warning(
+                    "[files/upload] Failed to create Computer File Copy type: %s",
+                    created.get("message"),
+                )
+    except Exception as exc:
+        current_app.logger.warning(
+            f"[files/upload] KR type ensure failed (continuing): {exc}"
+        )
+
+    # --- Create the file-copy instance concept ---
+    instance_concept_id = f"#V#uploaded_file_copy_{uuid.uuid4().hex}"
+
+    try:
+        from ...services import concept_service
+        from ...db.repositories.concepts_repository import ConceptsRepository
+        from ...services.text_value_service import upsert_text_for_concept
+
+        instance = concept_service.create_concept(
+            name=original_filename,
+            concept_id=instance_concept_id,
+            parent_concept_ids=[type_concept_id],
+            create_as_instance=True,
+            system_tags=["uploaded", "file", "blob_store"],
+            attributes={
+                "sha256": sha256,
+                "size_bytes": size_bytes,
+                "content_type": content_type,
+                "blob_backend": blob_ref.backend,
+                "blob_key": blob_ref.key,
+                "blob_uri": blob_ref.uri,
+            },
+        )
+
+        # Scope visibility to the current user.
+        ConceptsRepository.update_one(
+            {"concept_id": instance_concept_id},
+            {"$set": {"relationships.specific_to_user": [user_concept_id.strip()]}},
+        )
+
+        # Attach blob + metadata as text relations (authoritative)
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="#V#has_original_filename",
+            text=original_filename,
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="#V#has_sha256",
+            text=sha256,
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="#V#has_size_bytes",
+            text=str(size_bytes),
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="#V#has_upload_timestamp",
+            text=str(uploaded_at),
+            lang="en-NZ",
+        )
+        if content_type:
+            upsert_text_for_concept(
+                subject_concept_id=instance_concept_id,
+                predicate="#V#has_mime_type",
+                text=content_type,
+                lang="en-NZ",
+            )
+
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="#V#has_blob_backend",
+            text=str(blob_ref.backend),
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="#V#has_blob_key",
+            text=str(blob_ref.key),
+            lang="en-NZ",
+        )
+        upsert_text_for_concept(
+            subject_concept_id=instance_concept_id,
+            predicate="#V#has_blob_uri",
+            text=str(blob_ref.uri),
+            lang="en-NZ",
+        )
+    except Exception as exc:
+        current_app.logger.error(
+            f"[files/upload] Failed to register uploaded file in Vontology: {exc}",
+            exc_info=True,
+        )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "vontology_register_failed",
+                    "detail": str(exc),
+                }
+            ),
+            500,
+        )
+
+    chat_history_recorded = _record_file_upload_in_chat_history(
+        user_concept_id=user_concept_id.strip(),
+        session_id=session_id,
+        original_filename=original_filename,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        sha256=sha256,
+        blob_backend=str(blob_ref.backend),
+        blob_key=str(blob_ref.key),
+        blob_uri=str(blob_ref.uri),
+        file_copy_concept_id=instance_concept_id,
+    )
+
+    return (
+        jsonify(
+            {
+                "success": True,
+                "uploaded": {
+                    "concept_id": instance_concept_id,
+                    "type_concept_id": type_concept_id,
+                    "sha256": sha256,
+                    "size_bytes": size_bytes,
+                    "content_type": content_type,
+                    "original_filename": original_filename,
+                },
+                "storage": {
+                    "backend": blob_ref.backend,
+                    "key": blob_ref.key,
+                    "uri": blob_ref.uri,
+                    "content_type": blob_ref.content_type,
+                    "size_bytes": blob_ref.size_bytes,
+                    "metadata": blob_ref.metadata,
+                },
+                "chat_history_recorded": bool(chat_history_recorded),
+            }
+        ),
+        200,
+    )
+
+
+def _record_file_upload_in_chat_history(
+    *,
+    user_concept_id: str,
+    session_id: str,
+    original_filename: str,
+    content_type: str | None,
+    size_bytes: int,
+    sha256: str,
+    blob_backend: str,
+    blob_key: str,
+    blob_uri: str,
+    file_copy_concept_id: str,
+) -> bool:
+    """Persist a durable upload record in chat history.
+
+    We store human-readable text plus a compact JSON payload. This ensures the
+    attachment can be rediscovered later (including the blob key/URI), assuming
+    the user is authorised.
+    """
+
+    try:
+        import json
+
+        upload_summary = f"[UPLOAD] {original_filename} ({size_bytes} bytes)"
+        assistant_lines: list[str] = [
+            f"Attachment uploaded: {original_filename}",
+            f"File copy concept: {file_copy_concept_id}",
+            f"Blob URI: {blob_uri}",
+            "(Blob access is subject to authorisation.)",
+        ]
+
+        payload = {
+            "kind": "file_upload",
+            "original_filename": original_filename,
+            "content_type": content_type,
+            "size_bytes": size_bytes,
+            "sha256": sha256,
+            "file_copy_concept_id": file_copy_concept_id,
+            "blob": {
+                "backend": blob_backend,
+                "key": blob_key,
+                "uri": blob_uri,
+            },
+        }
+
+        assistant_text = (
+            "\n".join(assistant_lines)
+            + "\n\n"
+            + json.dumps(payload, ensure_ascii=False)
+        )
+
+        chat_history_service.add_message_to_history(
+            user_concept_id,
+            session_id,
+            {"role": "user", "content": upload_summary},
+        )
+        chat_history_service.add_message_to_history(
+            user_concept_id,
+            session_id,
+            {"role": "assistant", "content": assistant_text},
+        )
+        return True
+    except Exception as exc:
+        current_app.logger.warning(
+            "[files/upload] Failed to record upload in chat history: %s", exc
+        )
+        return False
+
+
+@von_bp.route("/api/files/<path:file_copy_concept_id>/download", methods=["GET"])
+def download_file_copy(file_copy_concept_id: str):
+    """Download an uploaded file-copy by its Vontology concept id.
+
+    Security: user identity is derived server-side via get_effective_user_concept_id().
+    Access is restricted using relationships.specific_to_user on the file-copy concept.
+
+    Path params:
+      - file_copy_concept_id: URL-encoded concept id (e.g. %23V%23uploaded_file_copy_...)
+    Query params:
+      - concept_id: optional override (for callers that prefer query param)
+    """
+
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "missing_user_context",
+                    "message": "Missing user context: establish an authenticated session first.",
+                }
+            ),
+            401,
+        )
+
+    # Allow query-parameter override so callers don't need to place the full id in the path.
+    concept_id = request.args.get("concept_id") or file_copy_concept_id
+    concept_id = str(concept_id or "").strip()
+    if not concept_id:
+        return jsonify({"success": False, "error": "missing_concept_id"}), 400
+
+    try:
+        from ...db.repositories.concepts_repository import ConceptsRepository
+
+        concept_doc = ConceptsRepository.find_one({"concept_id": concept_id})
+    except Exception as exc:
+        current_app.logger.warning("[files/download] Concept lookup failed: %s", exc)
+        concept_doc = None
+
+    if not isinstance(concept_doc, dict):
+        # Avoid leaking which concept IDs exist.
+        return jsonify({"success": False, "error": "not_found"}), 404
+
+    relationships = (
+        concept_doc.get("relationships") if isinstance(concept_doc, dict) else None
+    )
+    specific = (
+        relationships.get("specific_to_user")
+        if isinstance(relationships, dict)
+        else None
+    )
+    if isinstance(specific, list) and user_concept_id.strip() not in {
+        str(x).strip() for x in specific if x is not None
+    }:
+        # Avoid leaking which concept IDs exist.
+        return jsonify({"success": False, "error": "not_found"}), 404
+
+    def _first_text(subject_id: str, predicate: str) -> str | None:
+        try:
+            from ...services.text_value_service import get_texts_for_concept
+
+            rows = get_texts_for_concept(subject_id, predicate=predicate, limit=5)
+            for row in rows or []:
+                text = row.get("text") if isinstance(row, dict) else None
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+            return None
+        except Exception:
+            return None
+
+    blob_key = _first_text(concept_id, "#V#has_blob_key")
+    blob_backend = _first_text(concept_id, "#V#has_blob_backend")
+    content_type = _first_text(concept_id, "#V#has_mime_type")
+    original_filename = _first_text(concept_id, "#V#has_original_filename")
+
+    if not blob_key:
+        return jsonify({"success": False, "error": "missing_blob_key"}), 404
+
+    from ...services.blob_store import get_blob_store_from_env
+
+    store = get_blob_store_from_env()
+    env_backend = (os.environ.get("VON_BLOB_STORE_BACKEND") or "local").strip().lower()
+    if blob_backend and str(blob_backend).strip().lower() != env_backend:
+        current_app.logger.warning(
+            "[files/download] Blob backend mismatch for %s: concept=%s env=%s",
+            concept_id,
+            blob_backend,
+            env_backend,
+        )
+        # Proceed anyway: the configured store may still be able to fetch the key,
+        # and we avoid failing downloads in test/mocked environments.
+
+    try:
+        data_bytes = store.get_bytes(blob_key)
+    except Exception as exc:
+        current_app.logger.warning("[files/download] Blob fetch failed: %s", exc)
+        return jsonify({"success": False, "error": "blob_fetch_failed"}), 404
+
+    import io
+
+    download_name = original_filename or concept_doc.get("name") or "download"
+    mimetype = content_type or "application/octet-stream"
+    resp = send_file(
+        io.BytesIO(data_bytes),
+        mimetype=mimetype,
+        as_attachment=True,
+        download_name=download_name,
+        max_age=0,
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+def _prune_tool_progress() -> None:
+    cutoff = time.time() - _TOOL_PROGRESS_TTL_SEC
+    with _TOOL_PROGRESS_LOCK:
+        stale_keys = [
+            key
+            for key, value in _TOOL_PROGRESS.items()
+            if isinstance(value, dict)
+            and isinstance(value.get("updated_at_epoch"), (int, float))
+            and float(value["updated_at_epoch"]) < cutoff
+        ]
+        for key in stale_keys:
+            _TOOL_PROGRESS.pop(key, None)
+
+
+def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) -> None:
+    _prune_tool_progress()
+    now_epoch = time.time()
+    with _TOOL_PROGRESS_LOCK:
+        key = (scope_key, request_id)
+        existing = _TOOL_PROGRESS.get(key)
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = {**existing, **(update or {})}
+        merged["updated_at"] = _now_utc_iso()
+        merged["updated_at_epoch"] = now_epoch
+        _TOOL_PROGRESS[key] = merged
+
+
+def _get_tool_progress(scope_key: str, request_id: str) -> dict[str, Any] | None:
+    _prune_tool_progress()
+    with _TOOL_PROGRESS_LOCK:
+        value = _TOOL_PROGRESS.get((scope_key, request_id))
+        return dict(value) if isinstance(value, dict) else None
+
+
+def _clear_tool_progress(scope_key: str, request_id: str) -> None:
+    with _TOOL_PROGRESS_LOCK:
+        _TOOL_PROGRESS.pop((scope_key, request_id), None)
+
+
+@von_bp.route("/progress/<request_id>", methods=["GET"])
+def get_generation_progress(request_id: str):
+    """Return the latest tool-execution progress for an in-flight generate() call."""
+
+    if (
+        not isinstance(request_id, str)
+        or not request_id.strip()
+        or len(request_id) > 200
+    ):
+        return jsonify({"error": "Invalid request_id"}), 400
+
+    scope_key = _get_tool_progress_scope_key()
+    state = _get_tool_progress(scope_key, request_id.strip())
+    if not state:
+        return jsonify({"status": "not_found"}), 404
+
+    # Do not leak internal epoch detail to the UI.
+    state.pop("updated_at_epoch", None)
+    return jsonify(state), 200
 
 
 def _truncate_large_tool_results(
@@ -241,6 +830,62 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
             if isinstance(call.get("error"), str) and call.get("error", "").strip():
                 warnings.append(call["error"].strip())
 
+    # Tool invocation failures / parse errors
+    tool_invocations = debug_info.get("tool_invocations", [])
+    if isinstance(tool_invocations, list):
+        for inv in tool_invocations:
+            if not isinstance(inv, dict):
+                continue
+            method = inv.get("method")
+            if not isinstance(method, str):
+                method = (
+                    inv.get("tool") if isinstance(inv.get("tool"), str) else "unknown"
+                )
+            error = inv.get("error")
+            error_text = error.strip() if isinstance(error, str) else ""
+            if not error_text:
+                continue
+
+            # Surface parse errors directly so it is obvious tools were not executed.
+            if method == "__tool_call_parse_error__":
+                warnings.append(error_text)
+            else:
+                warnings.append(f"Tool {method} failed: {error_text}")
+
+    # Max tool invocation cap reached (LLM still wants tools)
+    try:
+        internal_mcp = debug_info.get("internal_mcp")
+        caps = (
+            internal_mcp.get("execution_caps")
+            if isinstance(internal_mcp, dict)
+            else None
+        )
+        max_invocations = (
+            caps.get("max_tool_invocations") if isinstance(caps, dict) else None
+        )
+        max_invocations = int(max_invocations) if max_invocations is not None else None
+    except Exception:
+        max_invocations = None
+
+    response_text = debug_info.get("response")
+    if (
+        isinstance(response_text, str)
+        and isinstance(max_invocations, int)
+        and max_invocations > 0
+        and isinstance(tool_invocations, list)
+        and len(tool_invocations) >= max_invocations
+    ):
+        trimmed = response_text.strip()
+        looks_like_tool_call = (
+            (trimmed.startswith("{") or trimmed.startswith("["))
+            and '"call_tool"' in trimmed
+            and '"tool"' in trimmed
+        )
+        if looks_like_tool_call:
+            warnings.append(
+                f"Reached max tool invocation limit ({max_invocations}); additional tool calls were not executed."
+            )
+
     # Check presenter channel health (screen/spoken routes)
     presenter_channels = debug_info.get("presenter_channels")
     if isinstance(presenter_channels, dict):
@@ -299,6 +944,583 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
     return unique_warnings
 
 
+def _extract_presenter_channels(text: str) -> dict[str, object] | None:
+    """Extract presenter-style output blocks.
+
+    Expected format (v1):
+      <spoken>...talk track...</spoken>
+      <screen>...what to display...</screen>
+
+    Returns None when no tags are present.
+    """
+
+    if not isinstance(text, str) or not text:
+        return None
+
+    def _find_block(tag: str) -> str | None:
+        pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
+        match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+        if not match:
+            return None
+        value = match.group(1)
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value if value else None
+
+    spoken = _find_block("spoken")
+    screen = _find_block("screen")
+
+    if spoken is None and screen is None:
+        return None
+
+    # Defaults:
+    # - If only <spoken> is provided, display it on-screen too (otherwise we'd render the raw tags).
+    # - If only <screen> is provided, do NOT fabricate spoken from screen; let the client fall back.
+    screen_text = screen if screen is not None else spoken
+    spoken_text = spoken
+
+    if screen_text is None:
+        screen_text = text.strip()
+
+    return {
+        "format": "tagged_blocks_v1",
+        "extracted": True,
+        "screen": screen_text,
+        "spoken": spoken_text,
+    }
+
+
+def _is_prompt_introspection_question(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return False
+    triggers = (
+        "what is my user prompt",
+        "what's my user prompt",
+        "what is my system prompt",
+        "what's my system prompt",
+        "what prompt is active",
+        "which prompt is active",
+        "tell me what my user prompt is",
+        "tell me what my system prompt is",
+    )
+    return any(t in lowered for t in triggers)
+
+
+def _is_tool_introspection_question(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return False
+    triggers = (
+        "what tools do you have",
+        "what tools can you",
+        "what tools can i",
+        "list tools",
+        "show tools",
+        "available tools",
+        "tool list",
+        "mcp tools",
+        "what can you do",
+        "what capabilities do you have",
+    )
+    return any(t in lowered for t in triggers)
+
+
+def _is_rag_status_question(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return False
+    triggers = (
+        "rag status",
+        "what is my rag status",
+        "is rag enabled",
+        "is rag on",
+        "rag enabled",
+        "rag on",
+        "rag working",
+        "rag isolation",
+    )
+    return any(t in lowered for t in triggers)
+
+
+def _format_tool_inventory(methods: dict) -> str:
+    # Deterministic plain-text listing; keep stable ordering.
+    if not isinstance(methods, dict) or not methods:
+        return "No internal MCP tools are registered."
+
+    # Group by category
+    buckets: dict[str, list[tuple[str, str]]] = {}
+    for name, meta in methods.items():
+        if not isinstance(name, str):
+            continue
+        meta_dict = meta if isinstance(meta, dict) else {}
+
+        category: str = "other"
+        category_value = meta_dict.get("category")
+        if isinstance(category_value, str) and category_value.strip():
+            category = category_value.strip()
+
+        desc: str = ""
+        desc_value = meta_dict.get("description")
+        if isinstance(desc_value, str):
+            desc = desc_value.strip()
+
+        buckets.setdefault(category, []).append((name, desc))
+
+    lines: list[str] = []
+    lines.append("Internal MCP tools currently registered:")
+    for category in sorted(buckets.keys()):
+        lines.append("")
+        lines.append(f"- {category}:")
+        for name, desc in sorted(buckets[category], key=lambda x: x[0]):
+            if desc:
+                lines.append(f"  - {name}: {desc}")
+            else:
+                lines.append(f"  - {name}")
+    lines.append("")
+    lines.append(
+        "Note: Some tools (especially RAG) require a user namespace to avoid cross-user data leakage."
+    )
+    return "\n".join(lines)
+
+
+def _deterministic_introspection_enabled() -> bool:
+    try:
+        flag_value = os.getenv("VON_DETERMINISTIC_INTROSPECTION", "0")
+        return str(flag_value).strip().lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return False
+
+
+def _maybe_handle_prompt_introspection_fastpath(
+    *,
+    prompt_text: str,
+    user_concept_id: str,
+    session_id: str,
+    auxiliary_system_prompt: str | None,
+    user_prompt_debug: dict,
+    context: list[dict],
+    interaction_timestamp_utc: str,
+    model_name: str,
+    request_start_perf: float,
+):
+    gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
+    import json as _json
+
+    tool_messages: list[dict] = []
+    tool_invocations: list[dict] = []
+
+    response_text = None
+    used_tool = False
+
+    if gateway is not None and getattr(gateway, "enabled", False):
+        try:
+            tool_result = gateway.invoke(
+                "chat_get_prompt_context",
+                {
+                    "namespace": user_concept_id,
+                    "include_content": True,
+                    "max_chars": 5000,
+                },
+            )
+            payload = tool_result.payload
+            duration_ms = getattr(tool_result, "duration_ms", None)
+            used_tool = True
+
+            tool_messages = [
+                {
+                    "role": "tool",
+                    "content": _json.dumps(
+                        {
+                            "tool": "chat_get_prompt_context",
+                            "status": "ok",
+                            "duration_ms": duration_ms,
+                            "payload": payload,
+                        },
+                        default=str,
+                    ),
+                }
+            ]
+            tool_invocations = [
+                {
+                    "tool": "chat_get_prompt_context",
+                    "payload": {
+                        "namespace": user_concept_id,
+                        "include_content": True,
+                        "max_chars": 5000,
+                    },
+                    "duration_ms": duration_ms,
+                    "direct_user_call": False,
+                }
+            ]
+
+            if isinstance(payload, dict) and payload.get("success"):
+                prompt_ids = payload.get("prompt_concept_ids") or []
+                prompt_text_value = payload.get("prompt_text") or ""
+                if not isinstance(prompt_text_value, str):
+                    prompt_text_value = str(prompt_text_value)
+                prompt_text_value = prompt_text_value.strip()
+                if not prompt_text_value:
+                    response_text = (
+                        "No user-specific system prompt text is currently available for your account. "
+                        "(The prompt linkage exists but no content was returned.)"
+                    )
+                else:
+                    response_text = (
+                        "Here is your current user-specific system prompt (from Vontology).\n\n"
+                        f"Prompt concept IDs: {prompt_ids}\n\n"
+                        f"{prompt_text_value}"
+                    )
+            else:
+                response_text = (
+                    "I could not retrieve your user-specific prompt context via internal tools. "
+                    f"Result: {payload}"
+                )
+        except Exception as exc:
+            current_app.logger.warning(
+                "[mcp_orchestrator] Prompt introspection tool failed: %s", exc
+            )
+
+    # Fallback: use already-loaded prompt fragments (no tool required)
+    if response_text is None:
+        prompt_ids = (
+            user_prompt_debug.get("prompt_concept_ids")
+            if isinstance(user_prompt_debug, dict)
+            else []
+        )
+        if not isinstance(prompt_ids, list):
+            prompt_ids = []
+        prompt_text_value = auxiliary_system_prompt or ""
+        prompt_text_value = (
+            prompt_text_value.strip()
+            if isinstance(prompt_text_value, str)
+            else str(prompt_text_value)
+        )
+        if not prompt_text_value:
+            response_text = "No user-specific system prompt is currently active (no prompt content was loaded from Vontology)."
+        else:
+            response_text = (
+                "Here is your current user-specific system prompt (from Vontology).\n\n"
+                f"Prompt concept IDs: {prompt_ids}\n\n"
+                f"{prompt_text_value}"
+            )
+
+    # Store messages in history/context, matching the direct-tool-call pattern.
+    chat_history_service.add_message_to_history(
+        user_concept_id,
+        session_id,
+        {"role": "user", "content": prompt_text},
+    )
+    for tool_msg in _truncate_large_tool_results(
+        tool_messages, max_tool_content_chars=5000
+    ):
+        chat_history_service.add_message_to_history(
+            user_concept_id, session_id, tool_msg
+        )
+    chat_history_service.add_message_to_history(
+        user_concept_id,
+        session_id,
+        {"role": "assistant", "content": response_text},
+    )
+
+    current_app.config["CONTEXT"] = _limit_context_size(
+        current_app.config.get("CONTEXT", []), max_messages=20
+    )
+
+    current_turn_messages = [{"role": "user", "content": prompt_text}] + tool_messages
+    context_stats = _calculate_context_stats(context)
+    current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
+    tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
+
+    llm_debug_info = {
+        "interaction_timestamp_utc": interaction_timestamp_utc,
+        "model": model_name,
+        "llm_interaction": {
+            "requested_model": model_name,
+            "orchestrator_used": False,
+            "duration_ms": None,
+            "usage": None,
+            "calls": [],
+            "server_elapsed_ms": (time.perf_counter() - request_start_perf) * 1000.0,
+        },
+        "messages": current_turn_messages,
+        "response": response_text,
+        "user_prompt": user_prompt_debug,
+        "context_stats": {
+            "sent_to_llm": context_stats,
+            "stored_context": current_context_stats,
+        },
+        "tool_stats": tool_stats,
+        "tool_invocations": tool_invocations,
+        "prompt_introspection_fastpath": {"used_tool": used_tool, "enabled": True},
+        "fastpath": {
+            "name": "prompt_introspection",
+            "bypassed_llm": True,
+            "used_tool": used_tool,
+            "enabled": True,
+        },
+    }
+    llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+
+    return jsonify(
+        {
+            "response": response_text,
+            "fastpath": {
+                "name": "prompt_introspection",
+                "bypassed_llm": True,
+                "used_tool": used_tool,
+            },
+            "llm_debug": llm_debug_info,
+        }
+    )
+
+
+def _maybe_handle_tool_inventory_fastpath(
+    *,
+    prompt_text: str,
+    user_concept_id: str | None,
+    session_id: str,
+    context: list[dict],
+    interaction_timestamp_utc: str,
+    model_name: str,
+    request_start_perf: float,
+    user_prompt_debug: dict,
+):
+    gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
+
+    response_text = None
+    used_tool = False
+    methods_snapshot = None
+
+    if gateway is not None and getattr(gateway, "enabled", False):
+        try:
+            methods_snapshot = gateway.describe_methods()
+            used_tool = True
+            response_text = _format_tool_inventory(methods_snapshot)
+        except Exception as exc:
+            response_text = (
+                f"Could not retrieve tool inventory from the internal gateway: {exc}"
+            )
+    else:
+        response_text = (
+            "Internal MCP gateway is disabled; tool inventory is unavailable."
+        )
+
+    current_turn_messages = [{"role": "user", "content": prompt_text}]
+    context_stats = _calculate_context_stats(context)
+    current_context_stats = _calculate_context_stats(
+        current_app.config.get("CONTEXT", [])
+    )
+
+    llm_debug_info = {
+        "interaction_timestamp_utc": interaction_timestamp_utc,
+        "model": model_name,
+        "llm_interaction": {
+            "requested_model": model_name,
+            "orchestrator_used": False,
+            "duration_ms": None,
+            "usage": None,
+            "calls": [],
+            "server_elapsed_ms": (time.perf_counter() - request_start_perf) * 1000.0,
+        },
+        "messages": current_turn_messages,
+        "response": response_text,
+        "user_prompt": user_prompt_debug,
+        "context_stats": {
+            "sent_to_llm": context_stats,
+            "stored_context": current_context_stats,
+        },
+        "tool_stats": None,
+        "tool_invocations": (
+            [
+                {
+                    "tool": "gateway.describe_methods",
+                    "payload": {},
+                    "duration_ms": None,
+                    "direct_user_call": False,
+                    "ok": bool(methods_snapshot is not None),
+                }
+            ]
+            if used_tool
+            else []
+        ),
+        "fastpath": {
+            "name": "tool_inventory",
+            "bypassed_llm": True,
+            "used_tool": used_tool,
+            "enabled": True,
+        },
+    }
+
+    llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+
+    if user_concept_id:
+        chat_history_service.add_message_to_history(
+            user_concept_id,
+            session_id,
+            {"role": "user", "content": prompt_text},
+        )
+        chat_history_service.add_message_to_history(
+            user_concept_id,
+            session_id,
+            {"role": "assistant", "content": response_text},
+        )
+    else:
+        stored_context = current_app.config.get("CONTEXT", [])
+        stored_context.append({"role": "user", "content": prompt_text})
+        stored_context.append({"role": "assistant", "content": response_text})
+        current_app.config["CONTEXT"] = _limit_context_size(
+            stored_context, max_messages=20
+        )
+
+    current_app.config["CONTEXT"] = _limit_context_size(
+        current_app.config.get("CONTEXT", []), max_messages=20
+    )
+
+    return jsonify(
+        {
+            "response": response_text,
+            "fastpath": {
+                "name": "tool_inventory",
+                "bypassed_llm": True,
+                "used_tool": used_tool,
+            },
+            "llm_debug": llm_debug_info,
+        }
+    )
+
+
+def _maybe_handle_rag_status_fastpath(
+    *,
+    prompt_text: str,
+    user_concept_id: str,
+    session_id: str,
+    context: list[dict],
+    interaction_timestamp_utc: str,
+    model_name: str,
+    request_start_perf: float,
+    user_prompt_debug: dict,
+):
+    gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
+    import json as _json
+
+    tool_messages: list[dict] = []
+    tool_invocations: list[dict] = []
+    used_tool = False
+    response_text = None
+
+    if gateway is not None and getattr(gateway, "enabled", False):
+        try:
+            tool_result = gateway.invoke(
+                "rag_get_status",
+                {"namespace": user_concept_id},
+            )
+            payload = tool_result.payload
+            duration_ms = getattr(tool_result, "duration_ms", None)
+            used_tool = True
+
+            tool_messages = [
+                {
+                    "role": "tool",
+                    "content": _json.dumps(
+                        {
+                            "tool": "rag_get_status",
+                            "status": "ok",
+                            "duration_ms": duration_ms,
+                            "payload": payload,
+                        },
+                        default=str,
+                    ),
+                }
+            ]
+            tool_invocations = [
+                {
+                    "tool": "rag_get_status",
+                    "payload": {"namespace": user_concept_id},
+                    "duration_ms": duration_ms,
+                    "direct_user_call": False,
+                }
+            ]
+
+            response_text = (
+                "Here is your current RAG status (server-truth):\n\n"
+                + _json.dumps(payload, indent=2, default=str)
+            )
+        except Exception as exc:
+            response_text = f"I could not retrieve RAG status via internal tools: {exc}"
+    else:
+        response_text = "Internal MCP gateway is disabled; RAG status is unavailable."
+
+    # Persist messages in history/context.
+    chat_history_service.add_message_to_history(
+        user_concept_id,
+        session_id,
+        {"role": "user", "content": prompt_text},
+    )
+    for tool_msg in _truncate_large_tool_results(
+        tool_messages, max_tool_content_chars=5000
+    ):
+        chat_history_service.add_message_to_history(
+            user_concept_id, session_id, tool_msg
+        )
+    chat_history_service.add_message_to_history(
+        user_concept_id,
+        session_id,
+        {"role": "assistant", "content": response_text},
+    )
+
+    current_app.config["CONTEXT"] = _limit_context_size(
+        current_app.config.get("CONTEXT", []), max_messages=20
+    )
+
+    current_turn_messages = [{"role": "user", "content": prompt_text}] + tool_messages
+    context_stats = _calculate_context_stats(context)
+    current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
+    tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
+
+    llm_debug_info = {
+        "interaction_timestamp_utc": interaction_timestamp_utc,
+        "model": model_name,
+        "llm_interaction": {
+            "requested_model": model_name,
+            "orchestrator_used": False,
+            "duration_ms": None,
+            "usage": None,
+            "calls": [],
+            "server_elapsed_ms": (time.perf_counter() - request_start_perf) * 1000.0,
+        },
+        "messages": current_turn_messages,
+        "response": response_text,
+        "user_prompt": user_prompt_debug,
+        "context_stats": {
+            "sent_to_llm": context_stats,
+            "stored_context": current_context_stats,
+        },
+        "tool_stats": tool_stats,
+        "tool_invocations": tool_invocations,
+        "fastpath": {
+            "name": "rag_status",
+            "bypassed_llm": True,
+            "used_tool": used_tool,
+            "enabled": True,
+        },
+    }
+    llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+
+    return jsonify(
+        {
+            "response": response_text,
+            "fastpath": {
+                "name": "rag_status",
+                "bypassed_llm": True,
+                "used_tool": used_tool,
+            },
+            "llm_debug": llm_debug_info,
+        }
+    )
+
+
 @von_bp.route("/onboard_new_member", methods=["POST"])
 def onboard_new_member():
     """Onboards a new lab member."""
@@ -354,6 +1576,16 @@ def generate():
     data = request.get_json()
     prompt_text = data.get("prompt", "")
 
+    client_request_id = data.get("client_request_id")
+    if (
+        isinstance(client_request_id, str)
+        and client_request_id.strip()
+        and len(client_request_id) <= 200
+    ):
+        request_id = client_request_id.strip()
+    else:
+        request_id = str(uuid.uuid4())
+
     presenter_mode_requested = bool(data.get("presenter_mode"))
 
     request_start_perf = time.perf_counter()
@@ -384,55 +1616,6 @@ def generate():
     # REFACTORING_NOTE: Use the new factory to get the correct client and model
     # Get user and org context for per-user/org LLM settings
     try:
-
-        def _extract_presenter_channels(text: str) -> dict[str, object] | None:
-            """Extract presenter-style output blocks.
-
-            Expected format (v1):
-              <spoken>...talk track...</spoken>
-              <screen>...what to display...</screen>
-
-            Returns None when no tags are present.
-            """
-
-            if not isinstance(text, str) or not text:
-                return None
-
-            import re
-
-            def _find_block(tag: str) -> str | None:
-                pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
-                m = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
-                if not m:
-                    return None
-                value = m.group(1)
-                if not isinstance(value, str):
-                    return None
-                value = value.strip()
-                return value if value else None
-
-            spoken = _find_block("spoken")
-            screen = _find_block("screen")
-
-            if spoken is None and screen is None:
-                return None
-
-            # Defaults:
-            # - If only <spoken> is provided, display it on-screen too (otherwise we'd render the raw tags).
-            # - If only <screen> is provided, do NOT fabricate spoken from screen; let the client fall back.
-            screen_text = screen if screen is not None else spoken
-            spoken_text = spoken
-
-            if screen_text is None:
-                screen_text = text.strip()
-
-            return {
-                "format": "tagged_blocks_v1",
-                "extracted": True,
-                "screen": screen_text,
-                "spoken": spoken_text,
-            }
-
         from ...security.access_control import get_effective_user_concept_id
 
         user_concept_id = get_effective_user_concept_id()
@@ -458,6 +1641,37 @@ def generate():
         user_concept_id = None
         org_concept_id = None
 
+    progress_scope_key = _get_tool_progress_scope_key()
+    show_tool_use_progress = False
+    try:
+        show_tool_use_progress = bool(get_show_tool_use_during_thinking())
+    except Exception:
+        show_tool_use_progress = False
+
+    if show_tool_use_progress:
+        try:
+            max_calls = int(get_internal_mcp_max_tool_invocations())
+        except Exception:
+            max_calls = 0
+        try:
+            batch_cap = int(get_internal_mcp_tool_batch_cap())
+        except Exception:
+            batch_cap = 4
+        _set_tool_progress(
+            progress_scope_key,
+            request_id,
+            {
+                "status": "thinking",
+                "request_id": request_id,
+                "tool": None,
+                "batch_size": None,
+                "tool_calls_done": 0,
+                "tool_calls_cap": max_calls,
+                "tool_calls_remaining": max(0, max_calls),
+                "tool_batch_cap": batch_cap,
+            },
+        )
+
     try:
         llm_client = get_llm_client(
             user_concept_id=user_concept_id, org_concept_id=org_concept_id
@@ -478,6 +1692,7 @@ def generate():
         # ---------------------------------------------------------
         auxiliary_system_prompt = None
         narration_prompt_text = None
+        narration_prompt_fragments = []
         user_prompt_debug = {
             "effective_user_concept_id": user_concept_id,
             "loaded": False,
@@ -572,560 +1787,46 @@ def generate():
                 )
                 user_prompt_debug["error"] = str(e)
 
-        def _is_prompt_introspection_question(text: str) -> bool:
-            lowered = (text or "").strip().lower()
-            if not lowered:
-                return False
-            triggers = (
-                "what is my user prompt",
-                "what's my user prompt",
-                "what is my system prompt",
-                "what's my system prompt",
-                "what prompt is active",
-                "which prompt is active",
-                "tell me what my user prompt is",
-                "tell me what my system prompt is",
-            )
-            return any(t in lowered for t in triggers)
+        deterministic_introspection_enabled = _deterministic_introspection_enabled()
 
-        def _is_tool_introspection_question(text: str) -> bool:
-            lowered = (text or "").strip().lower()
-            if not lowered:
-                return False
-            triggers = (
-                "what tools do you have",
-                "what tools can you",
-                "what tools can i",
-                "list tools",
-                "show tools",
-                "available tools",
-                "tool list",
-                "mcp tools",
-                "what can you do",
-                "what capabilities do you have",
-            )
-            return any(t in lowered for t in triggers)
-
-        def _is_rag_status_question(text: str) -> bool:
-            lowered = (text or "").strip().lower()
-            if not lowered:
-                return False
-            triggers = (
-                "rag status",
-                "what is my rag status",
-                "is rag enabled",
-                "is rag on",
-                "rag enabled",
-                "rag on",
-                "rag working",
-                "rag isolation",
-            )
-            return any(t in lowered for t in triggers)
-
-        def _format_tool_inventory(methods: dict) -> str:
-            # Deterministic plain-text listing; keep stable ordering.
-            if not isinstance(methods, dict) or not methods:
-                return "No internal MCP tools are registered."
-
-            # Group by category
-            buckets: dict[str, list[tuple[str, str]]] = {}
-            for name, meta in methods.items():
-                if not isinstance(name, str):
-                    continue
-                meta_dict = meta if isinstance(meta, dict) else {}
-
-                category: str = "other"
-                category_value = meta_dict.get("category")
-                if isinstance(category_value, str) and category_value.strip():
-                    category = category_value.strip()
-
-                desc: str = ""
-                desc_value = meta_dict.get("description")
-                if isinstance(desc_value, str):
-                    desc = desc_value.strip()
-
-                buckets.setdefault(category, []).append((name, desc))
-
-            lines: list[str] = []
-            lines.append("Internal MCP tools currently registered:")
-            for category in sorted(buckets.keys()):
-                lines.append("")
-                lines.append(f"- {category}:")
-                for name, desc in sorted(buckets[category], key=lambda x: x[0]):
-                    if desc:
-                        lines.append(f"  - {name}: {desc}")
-                    else:
-                        lines.append(f"  - {name}")
-            lines.append("")
-            lines.append(
-                "Note: Some tools (especially RAG) require a user namespace to avoid cross-user data leakage."
-            )
-            return "\n".join(lines)
-
-        # ---------------------------------------------------------
-        # Deterministic prompt introspection (avoid LLM self-report)
-        # ---------------------------------------------------------
-        deterministic_introspection_enabled = False
-        try:
-            import os
-
-            flag_value = os.getenv("VON_DETERMINISTIC_INTROSPECTION", "0")
-            deterministic_introspection_enabled = str(flag_value).strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-        except Exception:
-            deterministic_introspection_enabled = False
-
-        if (
-            deterministic_introspection_enabled
-            and user_concept_id
-            and _is_prompt_introspection_question(prompt_text)
-        ):
-            gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-            import json as _json
-
-            tool_messages = []
-            tool_invocations = []
-
-            response_text = None
-            used_tool = False
-
-            if gateway is not None and getattr(gateway, "enabled", False):
-                try:
-                    tool_result = gateway.invoke(
-                        "chat_get_prompt_context",
-                        {
-                            "namespace": user_concept_id,
-                            "include_content": True,
-                            "max_chars": 5000,
-                        },
-                    )
-                    payload = tool_result.payload
-                    duration_ms = getattr(tool_result, "duration_ms", None)
-                    used_tool = True
-
-                    tool_messages = [
-                        {
-                            "role": "tool",
-                            "content": _json.dumps(
-                                {
-                                    "tool": "chat_get_prompt_context",
-                                    "status": "ok",
-                                    "duration_ms": duration_ms,
-                                    "payload": payload,
-                                },
-                                default=str,
-                            ),
-                        }
-                    ]
-                    tool_invocations = [
-                        {
-                            "tool": "chat_get_prompt_context",
-                            "payload": {
-                                "namespace": user_concept_id,
-                                "include_content": True,
-                                "max_chars": 5000,
-                            },
-                            "duration_ms": duration_ms,
-                            "direct_user_call": False,
-                        }
-                    ]
-
-                    if isinstance(payload, dict) and payload.get("success"):
-                        prompt_ids = payload.get("prompt_concept_ids") or []
-                        prompt_text_value = payload.get("prompt_text") or ""
-                        if not isinstance(prompt_text_value, str):
-                            prompt_text_value = str(prompt_text_value)
-                        prompt_text_value = prompt_text_value.strip()
-                        if not prompt_text_value:
-                            response_text = (
-                                "No user-specific system prompt text is currently available for your account. "
-                                "(The prompt linkage exists but no content was returned.)"
-                            )
-                        else:
-                            response_text = (
-                                "Here is your current user-specific system prompt (from Vontology).\n\n"
-                                f"Prompt concept IDs: {prompt_ids}\n\n"
-                                f"{prompt_text_value}"
-                            )
-                    else:
-                        response_text = (
-                            "I could not retrieve your user-specific prompt context via internal tools. "
-                            f"Result: {payload}"
-                        )
-                except Exception as exc:
-                    current_app.logger.warning(
-                        "[mcp_orchestrator] Prompt introspection tool failed: %s", exc
-                    )
-
-            # Fallback: use already-loaded prompt fragments (no tool required)
-            if response_text is None:
-                prompt_ids = (
-                    user_prompt_debug.get("prompt_concept_ids")
-                    if isinstance(user_prompt_debug, dict)
-                    else []
-                )
-                if not isinstance(prompt_ids, list):
-                    prompt_ids = []
-                prompt_text_value = auxiliary_system_prompt or ""
-                prompt_text_value = (
-                    prompt_text_value.strip()
-                    if isinstance(prompt_text_value, str)
-                    else str(prompt_text_value)
-                )
-                if not prompt_text_value:
-                    response_text = "No user-specific system prompt is currently active (no prompt content was loaded from Vontology)."
-                else:
-                    response_text = (
-                        "Here is your current user-specific system prompt (from Vontology).\n\n"
-                        f"Prompt concept IDs: {prompt_ids}\n\n"
-                        f"{prompt_text_value}"
-                    )
-
-            # Store messages in history/context, matching the direct-tool-call pattern.
-            if user_concept_id:
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "user", "content": prompt_text},
-                )
-                for tool_msg in _truncate_large_tool_results(
-                    tool_messages, max_tool_content_chars=5000
-                ):
-                    chat_history_service.add_message_to_history(
-                        user_concept_id, session_id, tool_msg
-                    )
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "assistant", "content": response_text},
-                )
-            else:
-                current_app.config["CONTEXT"].append(
-                    {"role": "user", "content": prompt_text}
-                )
-                for tool_msg in _truncate_large_tool_results(
-                    tool_messages, max_tool_content_chars=5000
-                ):
-                    current_app.config["CONTEXT"].append(tool_msg)
-                current_app.config["CONTEXT"].append(
-                    {"role": "assistant", "content": response_text}
+        if deterministic_introspection_enabled and user_concept_id:
+            if _is_prompt_introspection_question(prompt_text):
+                return _maybe_handle_prompt_introspection_fastpath(
+                    prompt_text=prompt_text,
+                    user_concept_id=user_concept_id,
+                    session_id=session_id,
+                    auxiliary_system_prompt=auxiliary_system_prompt,
+                    user_prompt_debug=user_prompt_debug,
+                    context=context,
+                    interaction_timestamp_utc=interaction_timestamp_utc,
+                    model_name=model_name or "unknown",
+                    request_start_perf=request_start_perf,
                 )
 
-            current_app.config["CONTEXT"] = _limit_context_size(
-                current_app.config["CONTEXT"], max_messages=20
-            )
+            if _is_rag_status_question(prompt_text):
+                return _maybe_handle_rag_status_fastpath(
+                    prompt_text=prompt_text,
+                    user_concept_id=user_concept_id,
+                    session_id=session_id,
+                    context=context,
+                    interaction_timestamp_utc=interaction_timestamp_utc,
+                    model_name=model_name or "unknown",
+                    request_start_perf=request_start_perf,
+                    user_prompt_debug=user_prompt_debug,
+                )
 
-            current_turn_messages = [
-                {"role": "user", "content": prompt_text}
-            ] + tool_messages
-            context_stats = _calculate_context_stats(context)
-            current_context_stats = _calculate_context_stats(
-                current_app.config["CONTEXT"]
-            )
-            tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
-
-            llm_debug_info = {
-                "interaction_timestamp_utc": interaction_timestamp_utc,
-                "model": model_name,
-                "llm_interaction": {
-                    "requested_model": model_name,
-                    "orchestrator_used": False,
-                    "duration_ms": None,
-                    "usage": None,
-                    "calls": [],
-                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
-                    * 1000.0,
-                },
-                "messages": current_turn_messages,
-                "response": response_text,
-                "user_prompt": user_prompt_debug,
-                "context_stats": {
-                    "sent_to_llm": context_stats,
-                    "stored_context": current_context_stats,
-                },
-                "tool_stats": tool_stats,
-                "tool_invocations": tool_invocations,
-                "prompt_introspection_fastpath": {
-                    "used_tool": used_tool,
-                    "enabled": True,
-                },
-                "fastpath": {
-                    "name": "prompt_introspection",
-                    "bypassed_llm": True,
-                    "used_tool": used_tool,
-                    "enabled": True,
-                },
-            }
-
-            llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
-
-            return jsonify(
-                {
-                    "response": response_text,
-                    "fastpath": {
-                        "name": "prompt_introspection",
-                        "bypassed_llm": True,
-                        "used_tool": used_tool,
-                    },
-                    "llm_debug": llm_debug_info,
-                }
-            )
-
-        # ---------------------------------------------------------
-        # Deterministic tool inventory (avoid LLM narration)
-        # ---------------------------------------------------------
         if deterministic_introspection_enabled and _is_tool_introspection_question(
             prompt_text
         ):
-            gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-
-            response_text = None
-            used_tool = False
-            methods_snapshot = None
-
-            if gateway is not None and getattr(gateway, "enabled", False):
-                try:
-                    methods_snapshot = gateway.describe_methods()
-                    used_tool = True
-                    response_text = _format_tool_inventory(methods_snapshot)
-                except Exception as exc:
-                    response_text = f"Could not retrieve tool inventory from the internal gateway: {exc}"
-            else:
-                response_text = (
-                    "Internal MCP gateway is disabled; tool inventory is unavailable."
-                )
-
-            current_turn_messages = [{"role": "user", "content": prompt_text}]
-            context_stats = _calculate_context_stats(context)
-            current_context_stats = _calculate_context_stats(
-                current_app.config["CONTEXT"]
-            )
-
-            llm_debug_info = {
-                "interaction_timestamp_utc": interaction_timestamp_utc,
-                "model": model_name,
-                "llm_interaction": {
-                    "requested_model": model_name,
-                    "orchestrator_used": False,
-                    "duration_ms": None,
-                    "usage": None,
-                    "calls": [],
-                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
-                    * 1000.0,
-                },
-                "messages": current_turn_messages,
-                "response": response_text,
-                "user_prompt": user_prompt_debug,
-                "context_stats": {
-                    "sent_to_llm": context_stats,
-                    "stored_context": current_context_stats,
-                },
-                "tool_stats": None,
-                "tool_invocations": (
-                    [
-                        {
-                            "tool": "gateway.describe_methods",
-                            "payload": {},
-                            "duration_ms": None,
-                            "direct_user_call": False,
-                            "ok": bool(methods_snapshot is not None),
-                        }
-                    ]
-                    if used_tool
-                    else []
-                ),
-                "fastpath": {
-                    "name": "tool_inventory",
-                    "bypassed_llm": True,
-                    "used_tool": used_tool,
-                    "enabled": True,
-                },
-            }
-
-            # Persist minimal history for continuity.
-            if user_concept_id:
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "user", "content": prompt_text},
-                )
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "assistant", "content": response_text},
-                )
-            else:
-                current_app.config["CONTEXT"].append(
-                    {"role": "user", "content": prompt_text}
-                )
-                current_app.config["CONTEXT"].append(
-                    {"role": "assistant", "content": response_text}
-                )
-            current_app.config["CONTEXT"] = _limit_context_size(
-                current_app.config["CONTEXT"], max_messages=20
-            )
-
-            return jsonify(
-                {
-                    "response": response_text,
-                    "fastpath": {
-                        "name": "tool_inventory",
-                        "bypassed_llm": True,
-                        "used_tool": used_tool,
-                    },
-                    "llm_debug": llm_debug_info,
-                }
-            )
-
-        # ---------------------------------------------------------
-        # Deterministic RAG status (avoid LLM narration)
-        # ---------------------------------------------------------
-        if (
-            deterministic_introspection_enabled
-            and user_concept_id
-            and _is_rag_status_question(prompt_text)
-        ):
-            gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
-            import json as _json
-
-            tool_messages = []
-            tool_invocations = []
-            used_tool = False
-            response_text = None
-
-            if gateway is not None and getattr(gateway, "enabled", False):
-                try:
-                    tool_result = gateway.invoke(
-                        "rag_get_status",
-                        {"namespace": user_concept_id},
-                    )
-                    payload = tool_result.payload
-                    duration_ms = getattr(tool_result, "duration_ms", None)
-                    used_tool = True
-
-                    tool_messages = [
-                        {
-                            "role": "tool",
-                            "content": _json.dumps(
-                                {
-                                    "tool": "rag_get_status",
-                                    "status": "ok",
-                                    "duration_ms": duration_ms,
-                                    "payload": payload,
-                                },
-                                default=str,
-                            ),
-                        }
-                    ]
-                    tool_invocations = [
-                        {
-                            "tool": "rag_get_status",
-                            "payload": {"namespace": user_concept_id},
-                            "duration_ms": duration_ms,
-                            "direct_user_call": False,
-                        }
-                    ]
-
-                    response_text = (
-                        "Here is your current RAG status (server-truth):\n\n"
-                        + _json.dumps(payload, indent=2, default=str)
-                    )
-                except Exception as exc:
-                    response_text = (
-                        f"I could not retrieve RAG status via internal tools: {exc}"
-                    )
-            else:
-                response_text = (
-                    "Internal MCP gateway is disabled; RAG status is unavailable."
-                )
-
-            # Persist messages in history/context.
-            if user_concept_id:
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "user", "content": prompt_text},
-                )
-                for tool_msg in _truncate_large_tool_results(
-                    tool_messages, max_tool_content_chars=5000
-                ):
-                    chat_history_service.add_message_to_history(
-                        user_concept_id, session_id, tool_msg
-                    )
-                chat_history_service.add_message_to_history(
-                    user_concept_id,
-                    session_id,
-                    {"role": "assistant", "content": response_text},
-                )
-            else:
-                current_app.config["CONTEXT"].append(
-                    {"role": "user", "content": prompt_text}
-                )
-                for tool_msg in _truncate_large_tool_results(
-                    tool_messages, max_tool_content_chars=5000
-                ):
-                    current_app.config["CONTEXT"].append(tool_msg)
-                current_app.config["CONTEXT"].append(
-                    {"role": "assistant", "content": response_text}
-                )
-            current_app.config["CONTEXT"] = _limit_context_size(
-                current_app.config["CONTEXT"], max_messages=20
-            )
-
-            current_turn_messages = [
-                {"role": "user", "content": prompt_text}
-            ] + tool_messages
-            context_stats = _calculate_context_stats(context)
-            current_context_stats = _calculate_context_stats(
-                current_app.config["CONTEXT"]
-            )
-            tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
-
-            llm_debug_info = {
-                "interaction_timestamp_utc": interaction_timestamp_utc,
-                "model": model_name,
-                "llm_interaction": {
-                    "requested_model": model_name,
-                    "orchestrator_used": False,
-                    "duration_ms": None,
-                    "usage": None,
-                    "calls": [],
-                    "server_elapsed_ms": (time.perf_counter() - request_start_perf)
-                    * 1000.0,
-                },
-                "messages": current_turn_messages,
-                "response": response_text,
-                "user_prompt": user_prompt_debug,
-                "context_stats": {
-                    "sent_to_llm": context_stats,
-                    "stored_context": current_context_stats,
-                },
-                "tool_stats": tool_stats,
-                "tool_invocations": tool_invocations,
-                "fastpath": {
-                    "name": "rag_status",
-                    "bypassed_llm": True,
-                    "used_tool": used_tool,
-                    "enabled": True,
-                },
-            }
-
-            llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
-
-            return jsonify(
-                {
-                    "response": response_text,
-                    "fastpath": {
-                        "name": "rag_status",
-                        "bypassed_llm": True,
-                        "used_tool": used_tool,
-                    },
-                    "llm_debug": llm_debug_info,
-                }
+            return _maybe_handle_tool_inventory_fastpath(
+                prompt_text=prompt_text,
+                user_concept_id=user_concept_id,
+                session_id=session_id,
+                context=context,
+                interaction_timestamp_utc=interaction_timestamp_utc,
+                model_name=model_name or "unknown",
+                request_start_perf=request_start_perf,
+                user_prompt_debug=user_prompt_debug,
             )
 
         # Try to get user name from concept if user_id provided
@@ -1723,16 +2424,48 @@ def generate():
                     "[NAMESPACE] Calling orchestrator.run() with user_namespace=%s",
                     user_namespace,
                 )
+                try:
+                    orchestrator.configure_execution_caps(
+                        max_tool_invocations=get_internal_mcp_max_tool_invocations(),
+                        tool_batch_cap=get_internal_mcp_tool_batch_cap(),
+                    )
+                except Exception:
+                    # Defensive: never fail the request due to settings refresh.
+                    pass
+
+                if show_tool_use_progress:
+
+                    def _progress_update(info: dict[str, Any]) -> None:
+                        payload = (
+                            dict(info)
+                            if isinstance(info, dict)
+                            else {"status": "unknown"}
+                        )
+                        payload.setdefault("request_id", request_id)
+                        _set_tool_progress(progress_scope_key, request_id, payload)
+
+                    try:
+                        orchestrator.set_progress_callback(_progress_update)
+                    except Exception:
+                        pass
+
                 orchestrator_start_perf = time.perf_counter()
-                orchestrator_result = orchestrator.run(
-                    prompt=prompt_text,
-                    context=enhanced_context,
-                    llm_client=llm_client,
-                    model=model_name,
-                    user_namespace=user_namespace,
-                    gmail_profile=request_gmail_profile,
-                    auxiliary_system_prompt=auxiliary_system_prompt,
-                )
+                try:
+                    orchestrator_result = orchestrator.run(
+                        prompt=prompt_text,
+                        context=enhanced_context,
+                        llm_client=llm_client,
+                        model=model_name,
+                        user_namespace=user_namespace,
+                        gmail_profile=request_gmail_profile,
+                        auxiliary_system_prompt=auxiliary_system_prompt,
+                    )
+                finally:
+                    if show_tool_use_progress:
+                        try:
+                            orchestrator.set_progress_callback(None)
+                        except Exception:
+                            pass
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf
                 ) * 1000.0
@@ -1775,6 +2508,16 @@ def generate():
                         else "not_authenticated"
                     )
                 rag_trace["tool_results_included_in_prompt"] = bool(tool_messages)
+
+                if show_tool_use_progress:
+                    _set_tool_progress(
+                        progress_scope_key,
+                        request_id,
+                        {
+                            "status": "completed",
+                            "request_id": request_id,
+                        },
+                    )
             except ToolCallParsingError as exc:
                 current_app.logger.warning(
                     "[mcp_orchestrator] Invalid tool request payload: %s", exc
@@ -1799,6 +2542,17 @@ def generate():
                         "error": str(exc),
                     }
                 ]
+
+                if show_tool_use_progress:
+                    _set_tool_progress(
+                        progress_scope_key,
+                        request_id,
+                        {
+                            "status": "error",
+                            "request_id": request_id,
+                            "error": str(exc),
+                        },
+                    )
 
         presenter_channels = _extract_presenter_channels(response_text)
 
@@ -1899,50 +2653,127 @@ def generate():
                         else str(response_text)
                     )
 
-                narration_system = (
-                    "You are Von. Produce a short talk track for text-to-speech. "
-                    "Return ONLY one block: <spoken>...</spoken>. "
-                    "Do not include <screen>. Do not include code blocks. "
-                    "Use New Zealand English spelling."
-                    + (
-                        "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
-                        + narration_prompt_text
-                        if narration_prompt_text
-                        else ""
-                    )
-                )
-
-                narration_user = (
-                    "User message:\n"
-                    f"{prompt_text}\n\n"
-                    "On-screen content (do not read verbatim if long; summarise):\n"
-                    f"{screen_text}\n"
-                )
-
-                narration_response = llm_client.generate(
-                    prompt="Generate <spoken> talk track",
-                    context=[
-                        {"role": "system", "content": narration_system},
-                        {"role": "user", "content": narration_user},
+                narration_data = {
+                    "presenter_mode_requested": presenter_mode_requested,
+                    "screen_text": screen_text,
+                    "user_prompt": prompt_text,
+                    "narration_prompt_text": narration_prompt_text,
+                    "narration_prompt_ids": [
+                        frag.get("concept_id")
+                        for frag in (narration_prompt_fragments or [])
+                        if isinstance(frag, dict)
                     ],
-                    model=model_name,
-                )
-
-                spoken_fallback = _coerce_spoken_text(narration_response)
-                if not spoken_fallback:
-                    # Last resort: derive a short talk track from the screen text.
-                    spoken_fallback = _coerce_spoken_text(screen_text)
-
-                if spoken_fallback:
-                    base_channels = (
+                    "presenter_channels": (
                         dict(presenter_channels)
                         if isinstance(presenter_channels, dict)
                         else {}
+                    ),
+                }
+
+                narration_trace = None
+                narration_trace_store = None
+                narration_trace_enabled = os.getenv(
+                    "VON_WORKFLOWS_TRACE_ENABLED", "0"
+                ).lower() in {"1", "true"}
+                if narration_trace_enabled:
+                    try:
+                        narration_trace = WorkflowExecutionTrace(
+                            workflow_id=CHAT_NARRATION_WORKFLOW_ID
+                        )
+                        narration_trace.user_namespace = user_namespace
+                        narration_trace_store = insert_workflow_execution_trace
+                    except Exception:
+                        narration_trace = None
+                        narration_trace_store = None
+                        narration_trace_enabled = False
+
+                workflow_result = None
+                if orchestrator is not None:
+                    workflow_result = orchestrator.execute_workflow(
+                        CHAT_NARRATION_WORKFLOW_ID,
+                        data=narration_data,
+                        llm_client=llm_client,
+                        model=model_name,
+                        user_namespace=user_namespace,
+                        auxiliary_system_prompt=auxiliary_system_prompt,
+                        trace=narration_trace,
                     )
-                    base_channels["screen"] = screen_text
-                    base_channels["spoken"] = spoken_fallback
-                    base_channels["format"] = "narration_fallback_v1"
-                    presenter_channels = base_channels
+
+                if workflow_result is not None:
+                    channels = workflow_result.data.get(
+                        "presenter_channels", presenter_channels
+                    )
+                    if isinstance(channels, dict) and channels:
+                        presenter_channels = channels
+                    if narration_trace_enabled and narration_trace is not None:
+                        try:
+                            if workflow_result.completed:
+                                narration_trace.finish_completed()
+                            elif workflow_result.error:
+                                narration_trace.finish_failed(workflow_result.error)
+                        except Exception:
+                            pass
+                        if narration_trace_store is not None:
+                            try:
+                                stored_exec = narration_trace_store(
+                                    narration_trace.to_storage_document()
+                                )
+                                auxiliary_llm_calls.append(
+                                    {
+                                        "type": "workflow_execution_trace",
+                                        "path": "narration",
+                                        "workflow_id": CHAT_NARRATION_WORKFLOW_ID,
+                                        "execution_id": narration_trace.execution_id,
+                                        "stored": bool(stored_exec),
+                                        "status": narration_trace.status,
+                                    }
+                                )
+                            except Exception:
+                                pass
+                else:
+                    narration_system = (
+                        "You are Von. Produce a short talk track for text-to-speech. "
+                        "Return ONLY one block: <spoken>...</spoken>. "
+                        "Do not include <screen>. Do not include code blocks. "
+                        "Use New Zealand English spelling."
+                        + (
+                            "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
+                            + narration_prompt_text
+                            if narration_prompt_text
+                            else ""
+                        )
+                    )
+
+                    narration_user = (
+                        "User message:\n"
+                        f"{prompt_text}\n\n"
+                        "On-screen content (do not read verbatim if long; summarise):\n"
+                        f"{screen_text}\n"
+                    )
+
+                    narration_response = llm_client.generate(
+                        prompt="Generate <spoken> talk track",
+                        context=[
+                            {"role": "system", "content": narration_system},
+                            {"role": "user", "content": narration_user},
+                        ],
+                        model=model_name,
+                    )
+
+                    spoken_fallback = _coerce_spoken_text(narration_response)
+                    if not spoken_fallback:
+                        spoken_fallback = _coerce_spoken_text(screen_text)
+
+                    if spoken_fallback:
+                        base_channels = (
+                            dict(presenter_channels)
+                            if isinstance(presenter_channels, dict)
+                            else {}
+                        )
+                        base_channels["screen"] = screen_text
+                        base_channels["spoken"] = spoken_fallback
+                        base_channels["format"] = "narration_fallback_v1"
+                        presenter_channels = base_channels
             except Exception:
                 # Defensive: never fail the request just because narration generation failed.
                 presenter_channels = presenter_channels
@@ -2054,8 +2885,19 @@ def generate():
             except Exception:
                 tool_catalogue_summary = None
 
+        try:
+            applied_max_tool_invocations = int(get_internal_mcp_max_tool_invocations())
+        except Exception:
+            applied_max_tool_invocations = None
+
+        try:
+            applied_tool_batch_cap = int(get_internal_mcp_tool_batch_cap())
+        except Exception:
+            applied_tool_batch_cap = None
+
         llm_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
+            "request_id": request_id,
             "model": model_name,
             "llm_interaction": {
                 **llm_interaction,
@@ -2077,6 +2919,14 @@ def generate():
                     else False
                 ),
                 "orchestrator_present": orchestrator is not None,
+                "execution_caps": {
+                    "max_tool_invocations": applied_max_tool_invocations,
+                    "tool_batch_cap": applied_tool_batch_cap,
+                },
+                "tool_use_progress": {
+                    "enabled": show_tool_use_progress,
+                    "request_id": request_id,
+                },
                 "tool_catalogue": tool_catalogue_summary,
             },
             "context_stats": {
@@ -2140,6 +2990,7 @@ def generate():
 
         return jsonify(
             {
+                "request_id": request_id,
                 "response": response_text,
                 "response_channels": (
                     {
@@ -2169,8 +3020,25 @@ def generate():
             except:
                 pass
 
+        if "show_tool_use_progress" in locals() and show_tool_use_progress:
+            try:
+                _set_tool_progress(
+                    _get_tool_progress_scope_key(),
+                    request_id if "request_id" in locals() else "unknown",
+                    {
+                        "status": "error",
+                        "request_id": (
+                            request_id if "request_id" in locals() else "unknown"
+                        ),
+                        "error": str(e),
+                    },
+                )
+            except Exception:
+                pass
+
         error_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
+            "request_id": request_id,
             "model": model_name if "model_name" in locals() else "unknown",
             "messages": [{"role": "user", "content": prompt_text}],
             "response": None,
@@ -2182,7 +3050,11 @@ def generate():
             "tool_invocations": [],
         }
         error_debug_info["warnings"] = _derive_llm_debug_warnings(error_debug_info)
-        body = {"error": str(e), "llm_debug": error_debug_info}
+        body = {
+            "request_id": request_id,
+            "error": str(e),
+            "llm_debug": error_debug_info,
+        }
         if "rag_trace" in locals():
             body["rag_trace"] = rag_trace
         if "namespace_report" in locals():
@@ -2196,10 +3068,14 @@ def history():
     # Try to get user_id from session first, then query param
     user_concept_id = session.get("user_concept_id") or request.args.get("user_id")
 
-    # Ensure session_id exists (create if needed for the current session context)
-    if "session_id" not in session:
-        session["session_id"] = str(uuid.uuid4())
-    session_id = session["session_id"]
+    requested_session_id = request.args.get("session_id")
+    if isinstance(requested_session_id, str) and requested_session_id.strip():
+        session_id = requested_session_id.strip()
+    else:
+        # Ensure session_id exists (create if needed for the current session context)
+        if "session_id" not in session:
+            session["session_id"] = str(uuid.uuid4())
+        session_id = session["session_id"]
 
     if not user_concept_id:
         return jsonify(
@@ -2213,11 +3089,43 @@ def history():
 
     requested_segments = request.args.get("segments", default=1, type=int)
     segment_count = max(1, requested_segments)
+    segment_size = request.args.get("segment_size", default=None, type=int)
+    if not segment_size or segment_size <= 0:
+        segment_size = None
+    tail_limit = request.args.get("tail_limit", default=None, type=int)
+    if tail_limit is not None and tail_limit <= 0:
+        tail_limit = None
+    include_debug_raw = request.args.get("include_debug")
+    include_debug = True
+    if isinstance(include_debug_raw, str):
+        parsed = include_debug_raw.strip().lower()
+        if parsed in ("0", "false", "no", "n", "off"):
+            include_debug = False
+        elif parsed in ("1", "true", "yes", "y", "on"):
+            include_debug = True
+    history_tail_limit = None
+    if isinstance(tail_limit, int) and tail_limit > 0:
+        history_tail_limit = tail_limit
+    elif isinstance(segment_size, int) and segment_size > 0:
+        history_tail_limit = segment_size * max(segment_count, 1)
 
     try:
-        segments = chat_history_service.get_chat_history_segments(
-            user_concept_id, session_id, include_locations=True
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        segments_result = chat_history_service.get_chat_history_segments(
+            user_concept_id,
+            session_id,
+            include_locations=True,
+            namespace=namespace,
+            segment_size=segment_size,
+            include_debug=include_debug,
+            history_tail_limit=history_tail_limit,
+            return_meta=True,
         )
+        if isinstance(segments_result, tuple):
+            segments, meta = segments_result
+        else:
+            segments = segments_result
+            meta = {"history_truncated": False}
         total_segments = len(segments)
 
         if total_segments == 0:
@@ -2233,19 +3141,77 @@ def history():
         segment_count = min(segment_count, total_segments)
         selected_segments = segments[-segment_count:]
         flattened_history = [msg for segment in selected_segments for msg in segment]
-
-        has_more = segment_count < total_segments
+        segments_returned = len(selected_segments)
+        history_truncated = bool(meta.get("history_truncated"))
+        has_more = history_truncated or segments_returned < total_segments
+        if history_truncated and total_segments <= segments_returned:
+            total_segments = segments_returned + 1
 
         return jsonify(
             {
                 "history": flattened_history,
-                "segments_returned": segment_count,
+                "segments_returned": segments_returned,
                 "total_segments": total_segments,
                 "has_more_history": has_more,
             }
         )
     except Exception as e:
         print(f"Error retrieving history: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/history/debug", methods=["GET"])
+def history_debug():
+    """Retrieve stored LLM debug data for a specific history entry."""
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return jsonify({"error": "Not authenticated"}), 401
+
+    session_id = request.args.get("session_id") or session.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return jsonify({"error": "session_id required"}), 400
+
+    history_index = request.args.get("history_index", default=None, type=int)
+    if history_index is None or history_index < 0:
+        return jsonify({"error": "history_index required"}), 400
+
+    try:
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        debug_data = chat_history_service.get_chat_history_debug_entry(
+            user_id=user_concept_id,
+            session_id=session_id.strip(),
+            history_index=history_index,
+            namespace=namespace,
+        )
+        if not debug_data:
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "debug_not_available",
+                    "history_location": {
+                        "session_id": session_id.strip(),
+                        "history_index": history_index,
+                    },
+                }
+            )
+        return jsonify(
+            {
+                "success": True,
+                "history_location": {
+                    "session_id": session_id.strip(),
+                    "history_index": history_index,
+                },
+                "llm_debug_data": debug_data,
+            }
+        )
+    except Exception as e:
+        print(f"Error retrieving history debug data: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -2468,9 +3434,12 @@ def history_length():
         return jsonify({"history_length": 0, "authenticated": False})
 
     try:
-        length = chat_history_service.get_chat_history_length(user_concept_id)
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        length = chat_history_service.get_chat_history_length(
+            user_concept_id, namespace=namespace
+        )
         session_count = chat_history_service.get_chat_history_session_count(
-            user_concept_id
+            user_concept_id, namespace=namespace
         )
         return jsonify(
             {
@@ -2493,11 +3462,24 @@ def history_sessions():
         return jsonify({"authenticated": False, "sessions": []})
 
     limit = request.args.get("limit", default=50, type=int)
+    summary_mode = request.args.get("summary", default="full")
+    if not isinstance(summary_mode, str) or not summary_mode.strip():
+        summary_mode = "full"
     try:
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
         sessions = chat_history_service.get_chat_history_session_summaries(
-            user_concept_id, limit=limit
+            user_concept_id,
+            limit=limit,
+            namespace=namespace,
+            summary_mode=summary_mode,
         )
-        return jsonify({"authenticated": True, "sessions": sessions})
+        return jsonify(
+            {
+                "authenticated": True,
+                "sessions": sessions,
+                "active_session_id": session.get("session_id"),
+            }
+        )
     except Exception as e:
         print(f"Error retrieving history sessions: {e}")
         return jsonify({"error": str(e)}), 500
@@ -2618,6 +3600,108 @@ def reset_context():
 
 
 # Phase 2: Organisation and Role Selection Endpoints
+@von_bp.route("/api/session/set_user_concept", methods=["POST"])
+def set_user_concept():
+    """Set the current user concept in the session.
+
+    This aligns the authenticated session identity with the user selected in Settings.
+
+    Request body: {user_concept_id: str}
+    Returns: {user_id, organisation_id, role, namespace, status: 'updated'}
+    """
+    try:
+        from ...services.namespace_service import derive_namespace
+
+        authenticated_id = (
+            session.get("user_id")
+            or session.get("user_concept_id")
+            or session.get("user_email")
+        )
+        if not authenticated_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        user_concept_id = data.get("user_concept_id")
+        if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+            return jsonify({"error": "user_concept_id required"}), 400
+
+        user_concept_id = user_concept_id.strip()
+        if not user_concept_id.startswith("#V#"):
+            user_concept_id = f"#V#{user_concept_id}"
+
+        user_slug = user_concept_id[3:]
+        user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
+
+        existing_user_concept_id = session.get("user_concept_id")
+        if isinstance(existing_user_concept_id, str):
+            existing_user_concept_id = existing_user_concept_id.strip()
+            if existing_user_concept_id and not existing_user_concept_id.startswith(
+                "#V#"
+            ):
+                existing_user_concept_id = f"#V#{existing_user_concept_id}"
+        else:
+            existing_user_concept_id = None
+
+        organisation_concept_id = session.get("organisation_concept_id")
+        role_in_org = session.get("role_in_org")
+        org_slug = None
+        if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
+            org_slug_raw = organisation_concept_id.strip()
+            if org_slug_raw.startswith("#V#"):
+                org_slug_raw = org_slug_raw[3:]
+            if "@" in org_slug_raw:
+                org_slug_raw = org_slug_raw.split("@", 1)[0]
+            if "+" in org_slug_raw:
+                org_slug_raw = org_slug_raw.split("+", 1)[0]
+            org_slug = re.sub(r"[^a-z0-9]+", "_", org_slug_raw.strip().lower()).strip(
+                "_"
+            )
+
+        namespace = derive_namespace(user_slug, org_slug, role_in_org)
+
+        # Store the concept id for authoritative identity.
+        session["user_concept_id"] = user_concept_id
+        # Keep backward compatibility with code that still reads session['user_id'].
+        session["user_id"] = user_concept_id
+
+        # Clear org-scoped context only when switching between different user concepts.
+        # If we are simply backfilling user_concept_id for an already-authenticated session,
+        # keep any existing org selection and recompute namespace accordingly.
+        if existing_user_concept_id and existing_user_concept_id != user_concept_id:
+            organisation_concept_id = None
+            role_in_org = None
+            session.pop("organisation_concept_id", None)
+            session.pop("role_in_org", None)
+        session["namespace"] = namespace
+        session.modified = True
+
+        organisation_id_response = None
+        if isinstance(organisation_concept_id, str) and organisation_concept_id.strip():
+            organisation_id_response = organisation_concept_id.strip()
+            if not organisation_id_response.startswith("#V#"):
+                organisation_id_response = f"#V#{organisation_id_response}"
+
+        return (
+            jsonify(
+                {
+                    "status": (
+                        "updated"
+                        if existing_user_concept_id != user_concept_id
+                        else "unchanged"
+                    ),
+                    "user_id": user_concept_id,
+                    "organisation_id": organisation_id_response,
+                    "role": role_in_org,
+                    "namespace": namespace,
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error setting user concept: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/api/session/set_organisation", methods=["POST"])
 def set_organisation():
     """
@@ -2633,8 +3717,8 @@ def set_organisation():
         from ...security.role_resolver import get_user_role
 
         user_id = (
-            session.get("user_id")
-            or session.get("user_concept_id")
+            session.get("user_concept_id")
+            or session.get("user_id")
             or session.get("user_email")
         )
         if not user_id:
@@ -2648,8 +3732,10 @@ def set_organisation():
         if user_slug.startswith("#V#"):
             user_slug = user_slug[3:]
         if "@" in user_slug:
-            user_slug = user_slug.split("@")[0]
-        user_slug = user_slug.strip().lower().replace(" ", "_")
+            user_slug = user_slug.split("@", 1)[0]
+        if "+" in user_slug:
+            user_slug = user_slug.split("+", 1)[0]
+        user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
 
         # Check if this is a clear request (empty dict or explicit null/empty string)
         is_clear_request = "organisation_concept_id" in data and not org_id
@@ -2737,8 +3823,8 @@ def get_session_context():
         from ...security.role_resolver import get_user_role
 
         user_id = (
-            session.get("user_id")
-            or session.get("user_concept_id")
+            session.get("user_concept_id")
+            or session.get("user_id")
             or session.get("user_email")
         )
         if not user_id:
@@ -2765,8 +3851,10 @@ def get_session_context():
             if user_slug.startswith("#V#"):
                 user_slug = user_slug[3:]
             if "@" in user_slug:
-                user_slug = user_slug.split("@")[0]
-            user_slug = user_slug.strip().lower().replace(" ", "_")
+                user_slug = user_slug.split("@", 1)[0]
+            if "+" in user_slug:
+                user_slug = user_slug.split("+", 1)[0]
+            user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
             if org_id:
                 # Get role if not in session
                 if not role_in_org:
@@ -2778,12 +3866,18 @@ def get_session_context():
             else:
                 namespace = derive_namespace(user_slug)
 
+        organisation_id_response = None
+        if isinstance(org_id, str) and org_id.strip():
+            organisation_id_response = org_id.strip()
+            if not organisation_id_response.startswith("#V#"):
+                organisation_id_response = f"#V#{organisation_id_response}"
+
         return (
             jsonify(
                 {
                     "authenticated": True,
                     "user_id": user_id,
-                    "organisation_id": org_id,
+                    "organisation_id": organisation_id_response,
                     "role": role_in_org,
                     "namespace": namespace,
                 }
@@ -2800,8 +3894,8 @@ def get_session_context():
 def set_chat_session():
     """Set the active chat session_id for the current authenticated user.
 
-    Request body: {session_id: str}
-    Returns: {status, session_id, history}
+    Request body: {session_id: str, include_history?: bool}
+    Returns: {status, session_id, session_name, history}
 
     This enables the frontend to switch to a prior session and continue it.
     """
@@ -2815,22 +3909,41 @@ def set_chat_session():
         if not isinstance(session_id, str) or not session_id.strip():
             return jsonify({"error": "session_id required"}), 400
         session_id = session_id.strip()
+        include_history = data.get("include_history", True)
+        if isinstance(include_history, bool):
+            pass
+        elif isinstance(include_history, str):
+            parsed = include_history.strip().lower()
+            if parsed in ("0", "false", "no", "n", "off"):
+                include_history = False
+            elif parsed in ("1", "true", "yes", "y", "on"):
+                include_history = True
+            else:
+                include_history = True
+        elif isinstance(include_history, (int, float)):
+            include_history = include_history != 0
+        else:
+            include_history = True
 
         # Verify the session belongs to this user.
         coll = chat_history_service.get_chat_history_collection_service()
         if coll is None:
             return jsonify({"error": "Chat history unavailable"}), 503
 
-        doc = coll.find_one(
-            {"user_id": user_concept_id, "session_id": session_id},
-            {"history": 1},
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        query = chat_history_service.build_chat_history_query(
+            user_id=user_concept_id,
+            session_id=session_id,
+            namespace=namespace,
         )
+        projection = {"session_name": 1}
+        if include_history:
+            projection["history"] = 1
+        doc = coll.find_one(query, projection)
         if not doc:
             return jsonify({"error": "Session not found"}), 404
 
-        history = doc.get("history") or []
-        if not isinstance(history, list):
-            history = []
+        session_name = doc.get("session_name")
 
         def _normalise_timestamp(value):
             if isinstance(value, datetime):
@@ -2840,13 +3953,17 @@ def set_chat_session():
             return value
 
         normalised_history = []
-        for msg in history:
-            if not isinstance(msg, dict):
-                continue
-            out = dict(msg)
-            if "timestamp" in out:
-                out["timestamp"] = _normalise_timestamp(out.get("timestamp"))
-            normalised_history.append(out)
+        if include_history:
+            history = doc.get("history") or []
+            if not isinstance(history, list):
+                history = []
+            for msg in history:
+                if not isinstance(msg, dict):
+                    continue
+                out = dict(msg)
+                if "timestamp" in out:
+                    out["timestamp"] = _normalise_timestamp(out.get("timestamp"))
+                normalised_history.append(out)
 
         # Switch active session.
         session["session_id"] = session_id
@@ -2863,6 +3980,7 @@ def set_chat_session():
                 {
                     "status": "updated",
                     "session_id": session_id,
+                    "session_name": session_name,
                     "history": normalised_history,
                 }
             ),
@@ -2870,6 +3988,110 @@ def set_chat_session():
         )
     except Exception as e:
         print(f"Error setting chat session: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/session/create_chat_session", methods=["POST"])
+def create_chat_session():
+    """Create and switch to a new named chat session for the current user."""
+    try:
+        user_concept_id = session.get("user_concept_id")
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        session_name = data.get("session_name") or data.get("name") or data.get(
+            "chat_name"
+        )
+
+        session_id = str(uuid.uuid4())
+
+        result = chat_history_service.create_chat_session(
+            user_id=user_concept_id,
+            session_id=session_id,
+            session_name=session_name,
+        )
+
+        session["session_id"] = session_id
+        session.modified = True
+
+        try:
+            current_app.config["CONTEXT"] = []
+        except Exception:
+            pass
+
+        return (
+            jsonify(
+                {
+                    "status": "created",
+                    "session_id": session_id,
+                    "session_name": result.get("session_name"),
+                    "history": [],
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error creating chat session: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/session/rename_chat_session", methods=["POST"])
+def rename_chat_session():
+    """Rename an existing chat session for the current user."""
+    try:
+        user_concept_id = session.get("user_concept_id")
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return jsonify({"error": "session_id required"}), 400
+        session_id = session_id.strip()
+        include_history = data.get("include_history", True)
+        if isinstance(include_history, bool):
+            pass
+        elif isinstance(include_history, str):
+            parsed = include_history.strip().lower()
+            if parsed in ("0", "false", "no", "n", "off"):
+                include_history = False
+            elif parsed in ("1", "true", "yes", "y", "on"):
+                include_history = True
+            else:
+                include_history = True
+        elif isinstance(include_history, (int, float)):
+            include_history = include_history != 0
+        else:
+            include_history = True
+
+        session_name = data.get("session_name") or data.get("name")
+        if not isinstance(session_name, str) or not session_name.strip():
+            return jsonify({"error": "session_name required"}), 400
+
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        result = chat_history_service.rename_chat_session(
+            user_id=user_concept_id,
+            session_id=session_id,
+            session_name=session_name,
+            namespace=namespace,
+        )
+
+        if not result.get("matched"):
+            return jsonify({"error": "Session not found"}), 404
+
+        return (
+            jsonify(
+                {
+                    "status": "updated",
+                    "session_id": session_id,
+                    "session_name": result.get("session_name"),
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error renaming chat session: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -2881,7 +4103,8 @@ def get_my_organisations():
     Returns: {organisations: [{concept_id, name, role}, ...], total_count}
     """
     try:
-        from ...security.role_resolver import get_all_user_organisations
+        from ...security.role_resolver import get_all_user_organisations, get_user_role
+        from ...services.concept_service import get_concept_by_concept_id
 
         user_id = (
             session.get("user_id")
@@ -2891,30 +4114,99 @@ def get_my_organisations():
         if not user_id:
             return jsonify({"error": "Not authenticated"}), 401
 
-        # Derive a slug for stub role resolution
-        user_slug = str(user_id)
+        requested_user_concept_id = request.args.get("user_concept_id")
+        user_concept_id = requested_user_concept_id or session.get("user_concept_id")
+        user_email = session.get("user_email")
+
+        def _normalise_relationships(rel):
+            if not isinstance(rel, (dict, list)):
+                return {}
+            if isinstance(rel, list):
+                out = {}
+                for item in rel:
+                    if not isinstance(item, dict):
+                        continue
+                    pred = item.get("predicate")
+                    tgt = item.get("target")
+                    if not pred or not tgt:
+                        continue
+                    out.setdefault(pred, [])
+                    if isinstance(tgt, list):
+                        out[pred].extend(tgt)
+                    else:
+                        out[pred].append(tgt)
+                return out
+            return rel or {}
+
+        def _prettify_concept_id(concept_id: str) -> str:
+            return concept_id.replace("#V#", "").replace("_", " ").title()
+
+        # Derive a slug for stub role resolution.
+        # Prefer identifiers that are stable/meaningful (concept ID or email) over
+        # opaque auth subjects.
+        slug_source = user_concept_id or user_email or user_id
+
+        user_slug = str(slug_source)
         if user_slug.startswith("#V#"):
             user_slug = user_slug[3:]
         if "@" in user_slug:
-            user_slug = user_slug.split("@")[0]
-        user_slug = user_slug.strip().lower().replace(" ", "_")
+            user_slug = user_slug.split("@", 1)[0]
+        if "+" in user_slug:
+            user_slug = user_slug.split("+", 1)[0]
 
-        # Get orgs from role resolver (Phase 1 hardcoded mappings)
-        # Returns dict: {org_id: role_name}
-        org_roles = get_all_user_organisations(user_slug)
+        import re
 
-        # TODO: Once organisation concepts exist in Vontology, fetch their names
-        # For now, use concept_id as name
+        user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
+
+        USER_PREF_ORG_PREDICATE = "#V#member_of_organisation"
+
         organisations = []
-        for org_id, role in org_roles.items():
-            concept_id = org_id if org_id.startswith("#V#") else f"#V#{org_id}"
-            organisations.append(
-                {
-                    "concept_id": concept_id,
-                    "name": concept_id.replace("#V#", "").replace("_", " ").title(),
-                    "role": role,
-                }
-            )
+
+        # Prefer memberships stored on the selected/authenticated user concept.
+        if isinstance(user_concept_id, str) and user_concept_id.strip():
+            try:
+                user_concept = get_concept_by_concept_id(concept_id=user_concept_id)
+            except Exception:
+                user_concept = None
+            if isinstance(user_concept, dict):
+                rel = _normalise_relationships(user_concept.get("relationships", {}))
+                org_raw = rel.get(USER_PREF_ORG_PREDICATE)
+
+                org_targets: list[str] = []
+                if isinstance(org_raw, str) and org_raw:
+                    org_targets = [org_raw]
+                elif isinstance(org_raw, list):
+                    org_targets = [t for t in org_raw if isinstance(t, str) and t]
+
+                for org_cid in org_targets:
+                    org_cid = org_cid if org_cid.startswith("#V#") else f"#V#{org_cid}"
+                    org_slug = org_cid[3:] if org_cid.startswith("#V#") else org_cid
+                    org_slug = org_slug.strip().lower().replace(" ", "_")
+                    try:
+                        role = get_user_role(user_slug, org_slug)
+                    except Exception:
+                        role = "member"
+
+                    organisations.append(
+                        {
+                            "concept_id": org_cid,
+                            "name": _prettify_concept_id(org_cid),
+                            "role": role,
+                        }
+                    )
+
+        # Fallback: stub role resolver mappings (Phase 1 hardcoded)
+        if not organisations:
+            org_roles = get_all_user_organisations(user_slug)
+            for org_id, role in org_roles.items():
+                concept_id = org_id if org_id.startswith("#V#") else f"#V#{org_id}"
+                organisations.append(
+                    {
+                        "concept_id": concept_id,
+                        "name": _prettify_concept_id(concept_id),
+                        "role": role,
+                    }
+                )
 
         return (
             jsonify(

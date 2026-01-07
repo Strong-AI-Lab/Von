@@ -704,6 +704,49 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="resolve_concept_by_name",
+            description="Resolve a Vontology concept deterministically from a user-provided surface form. Read-only (no mutation). Returns resolved/ambiguous/not_found with an audit trail.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The surface form / name to resolve",
+                    },
+                    "preferred_languages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Preferred languages (ordered) used as a tie-breaker",
+                    },
+                    "allowed_languages": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Restrict candidate name matching to these languages",
+                    },
+                    "instance_of": {
+                        "type": "string",
+                        "description": "Restrict matches to concepts that are instances of this type (includes descendants)",
+                    },
+                    "match_code_strings": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "If true, allow resolving '#V#...' and code-style identifiers",
+                    },
+                    "normalisation_level": {
+                        "type": "string",
+                        "default": "default",
+                        "description": "Normalisation aggressiveness (currently informational)",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "default": 5,
+                        "description": "Maximum candidates returned when ambiguous",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        Tool(
             name="vontology_concept_search",
             description="Namespaced alias for concept search used by the MCP orchestrator. Same behaviour as search_concepts (query required; use empty string when combining with instance_of filters).",
             inputSchema={
@@ -1993,6 +2036,31 @@ async def _handle_search_concepts(arguments: dict[str, Any]) -> list[TextContent
     return [_json_text(search_result)]
 
 
+async def _handle_resolve_concept_by_name(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    from src.backend.services.concept_resolution_service import resolve_concept_by_name
+
+    name = arguments.get("name")
+    if name is None or not str(name).strip():
+        return [
+            _json_text(
+                {"success": False, "status": "not_found", "error": "Missing 'name'"}
+            )
+        ]
+
+    payload = resolve_concept_by_name(
+        name=str(name),
+        preferred_languages=arguments.get("preferred_languages"),
+        allowed_languages=arguments.get("allowed_languages"),
+        instance_of=arguments.get("instance_of"),
+        match_code_strings=bool(arguments.get("match_code_strings", True)),
+        normalisation_level=str(arguments.get("normalisation_level", "default")),
+        max_results=int(arguments.get("max_results", 5)),
+    )
+    return [_json_text(payload)]
+
+
 async def _handle_extract_annotations(arguments: dict[str, Any]) -> list[TextContent]:
     input_text = arguments.get("input_text")
     context_concept_id = arguments.get("context_concept_id")
@@ -2239,8 +2307,22 @@ async def _handle_add_relationship(arguments: dict[str, Any]) -> list[TextConten
     predicate = arguments.get("predicate")
     target = arguments.get("target")
     if not source_id or not predicate or not target:
+        missing: list[str] = []
+        if not source_id:
+            missing.append("source_id")
+        if not predicate:
+            missing.append("predicate")
+        if not target:
+            missing.append("target")
         return [
-            _json_error("Missing required parameters: source_id, predicate, and target")
+            _json_text(
+                {
+                    "success": False,
+                    "error": "Missing required parameters: source_id, predicate, and target",
+                    "error_code": "missing_parameter",
+                    "error_details": {"missing": missing},
+                }
+            )
         ]
     try:
         result = _add_relationship(
@@ -2248,7 +2330,16 @@ async def _handle_add_relationship(arguments: dict[str, Any]) -> list[TextConten
         )
         return [_json_text(result)]
     except Exception as exc:
-        return [_json_error(f"Failed to add relationship: {str(exc)}")]
+        return [
+            _json_text(
+                {
+                    "success": False,
+                    "error": f"Failed to add relationship: {str(exc)}",
+                    "error_code": "exception",
+                    "error_details": {"exception_type": type(exc).__name__},
+                }
+            )
+        ]
 
 
 async def _handle_remove_relationship(arguments: dict[str, Any]) -> list[TextContent]:
@@ -2256,8 +2347,22 @@ async def _handle_remove_relationship(arguments: dict[str, Any]) -> list[TextCon
     predicate = arguments.get("predicate")
     target = arguments.get("target")
     if not source_id or not predicate or not target:
+        missing: list[str] = []
+        if not source_id:
+            missing.append("source_id")
+        if not predicate:
+            missing.append("predicate")
+        if not target:
+            missing.append("target")
         return [
-            _json_error("Missing required parameters: source_id, predicate, and target")
+            _json_text(
+                {
+                    "success": False,
+                    "error": "Missing required parameters: source_id, predicate, and target",
+                    "error_code": "missing_parameter",
+                    "error_details": {"missing": missing},
+                }
+            )
         ]
     try:
         result = _remove_relationship(
@@ -2265,7 +2370,16 @@ async def _handle_remove_relationship(arguments: dict[str, Any]) -> list[TextCon
         )
         return [_json_text(result)]
     except Exception as exc:
-        return [_json_error(f"Failed to remove relationship: {str(exc)}")]
+        return [
+            _json_text(
+                {
+                    "success": False,
+                    "error": f"Failed to remove relationship: {str(exc)}",
+                    "error_code": "exception",
+                    "error_details": {"exception_type": type(exc).__name__},
+                }
+            )
+        ]
 
 
 async def _handle_delete_concept(arguments: dict[str, Any]) -> list[TextContent]:
@@ -2370,6 +2484,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "concept_exists": _handle_concept_exists,
     "search_concepts": _handle_search_concepts,
     "vontology_concept_search": _handle_search_concepts,
+    "resolve_concept_by_name": _handle_resolve_concept_by_name,
     "extract_annotations": _handle_extract_annotations,
     "search_arxiv": _handle_search_arxiv,
     "get_paper_metadata": _handle_get_paper_metadata,
