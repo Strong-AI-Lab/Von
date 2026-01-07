@@ -100,6 +100,9 @@ coverage/
 scripts/tmp/*
 !scripts/tmp/.gitkeep
 
+# Local runtime data (never commit)
+data/
+
 # Local MongoDB dumps and raw data
 data/raw/mongo_dump/
 
