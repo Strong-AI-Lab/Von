@@ -100,6 +100,18 @@ def test_extract_tool_calls_accepts_json_array_batch():
     assert calls[1]["payload"]["a"] == 1
 
 
+def test_extract_tool_calls_repairs_truncated_json_array():
+    text = (
+        '[{"action":"call_tool","tool":"test","payload":{}},'
+        '{"action":"call_tool","tool":"test","payload":{"a":1}}'
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    calls = orchestrator._extract_tool_calls(text)
+    assert calls is not None
+    assert len(calls) == 2
+    assert calls[1]["payload"]["a"] == 1
+
+
 def test_interpret_model_turn_ignores_non_tool_json_without_error():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     interpretation = orchestrator._interpret_model_turn('{"foo": 1, "bar": [1, 2]}')
@@ -121,7 +133,7 @@ def test_interpret_model_turn_flags_tool_result_shaped_json_as_json_action():
 def test_interpret_model_turn_captures_tool_call_parse_error():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     interpretation = orchestrator._interpret_model_turn(
-        '{"action":"call_tool","tool":"test","payload":{}'
+        '{"action":"call_tool","tool":"test","payload":{"concept_id":"#V#foo}'
     )
     assert interpretation.tool_calls is None
     assert isinstance(interpretation.tool_call_parse_error, ToolCallParsingError)
@@ -316,6 +328,13 @@ def test_extract_json_blob_malformed_json():
     orchestrator = InternalMCPChatOrchestrator(gateway=None)  # type: ignore[arg-type]
     with pytest.raises(ToolCallParsingError):
         orchestrator._extract_json_blob(text)
+
+
+def test_extract_json_blob_repairs_truncated_object():
+    text = '{"action": "call_tool", "tool": "test", "payload": {}'
+    orchestrator = InternalMCPChatOrchestrator(gateway=None)  # type: ignore[arg-type]
+    result = orchestrator._extract_json_blob(text)
+    assert result == {"action": "call_tool", "tool": "test", "payload": {}}
 
 
 def test_extract_json_blob_accepts_trailing_characters():
@@ -653,7 +672,7 @@ def test_run_recovers_from_invalid_tool_call_json_with_retry():
     llm = _RecorderLLM(
         [
             # Initial response: clearly a tool call but malformed JSON.
-            '{"action":"call_tool","tool":"test","payload":{}',
+            '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
             # Retry response: valid tool call.
             '{"action":"call_tool","tool":"test","payload":{}}',
             # Follow-up after tool invocation.
@@ -697,7 +716,7 @@ def test_run_recovers_from_late_turn_invalid_tool_call_json_with_retry():
             # Initial response: tool call.
             '{"action":"call_tool","tool":"test","payload":{}}',
             # Follow-up after tool invocation: malformed JSON tool call.
-            '{"action":"call_tool","tool":"test","payload":{}',
+            '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
             # Retry response: valid tool call.
             '{"action":"call_tool","tool":"test","payload":{}}',
             # Follow-up after second tool invocation.
@@ -744,9 +763,9 @@ def test_run_surfaces_late_turn_parse_error_when_retry_also_invalid():
             # Initial response: tool call.
             '{"action":"call_tool","tool":"test","payload":{}}',
             # Follow-up after tool invocation: malformed JSON tool call.
-            '{"action":"call_tool","tool":"test","payload":{}',
+            '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
             # Retry response: still malformed.
-            '{"action":"call_tool","tool":"test","payload":{}',
+            '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
         ]
     )
 

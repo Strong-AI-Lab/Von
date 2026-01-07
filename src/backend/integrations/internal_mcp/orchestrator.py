@@ -1622,10 +1622,24 @@ class InternalMCPChatOrchestrator:
         try:
             parsed, end = decoder.raw_decode(raw)
         except json.JSONDecodeError as exc:
-            raise ToolCallParsingError(
-                "Tool call was not executed: invalid JSON in tool call response.",
-                raw_response=text,
-            ) from exc
+            repaired = self._repair_truncated_json(raw)
+            if repaired is not None:
+                try:
+                    parsed, end = decoder.raw_decode(repaired)
+                    raw = repaired
+                    self._logger.warning(
+                        "[mcp_orchestrator] Repaired truncated tool-call JSON payload."
+                    )
+                except json.JSONDecodeError as repair_exc:
+                    raise ToolCallParsingError(
+                        "Tool call was not executed: invalid JSON in tool call response.",
+                        raw_response=text,
+                    ) from repair_exc
+            else:
+                raise ToolCallParsingError(
+                    "Tool call was not executed: invalid JSON in tool call response.",
+                    raw_response=text,
+                ) from exc
 
         trailing = raw[end:].strip()
 
@@ -1748,6 +1762,53 @@ class InternalMCPChatOrchestrator:
 
         return tool_calls
 
+    @staticmethod
+    def _repair_truncated_json(raw: str) -> str | None:
+        """Attempt to close unterminated JSON when it looks safely truncated."""
+        if not raw:
+            return None
+
+        stack: list[str] = []
+        in_string = False
+        escaped = False
+        pairs = {"{": "}", "[": "]"}
+
+        for ch in raw:
+            if in_string:
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\":
+                    escaped = True
+                    continue
+                if ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+                continue
+            if ch in pairs:
+                stack.append(ch)
+                continue
+            if ch in ("}", "]"):
+                if not stack:
+                    return None
+                opening = stack.pop()
+                if pairs.get(opening) != ch:
+                    return None
+
+        if in_string or not stack:
+            return None
+
+        closing = "".join(pairs[ch] for ch in reversed(stack))
+        candidate = raw + closing
+        try:
+            json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        return candidate
+
     def _extract_json_blob(self, text: str) -> Optional[MutableMapping[str, Any]]:
         """Parse a single JSON object from the model response.
 
@@ -1814,10 +1875,24 @@ class InternalMCPChatOrchestrator:
         try:
             parsed, end = decoder.raw_decode(raw)
         except json.JSONDecodeError as exc:
-            raise ToolCallParsingError(
-                "Tool call was not executed: invalid JSON in tool call response.",
-                raw_response=text,
-            ) from exc
+            repaired = self._repair_truncated_json(raw)
+            if repaired is not None:
+                try:
+                    parsed, end = decoder.raw_decode(repaired)
+                    raw = repaired
+                    self._logger.warning(
+                        "[mcp_orchestrator] Repaired truncated tool-call JSON payload."
+                    )
+                except json.JSONDecodeError as repair_exc:
+                    raise ToolCallParsingError(
+                        "Tool call was not executed: invalid JSON in tool call response.",
+                        raw_response=text,
+                    ) from repair_exc
+            else:
+                raise ToolCallParsingError(
+                    "Tool call was not executed: invalid JSON in tool call response.",
+                    raw_response=text,
+                ) from exc
 
         is_tool_call = False
         if isinstance(parsed, MutableMapping):
