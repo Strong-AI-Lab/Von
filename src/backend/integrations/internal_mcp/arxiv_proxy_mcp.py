@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, List
@@ -302,27 +303,143 @@ class ArxivMCPProxy:
         # an invalid arXiv API request when no filters are provided).
         self._ensure_storage_path()
 
-        papers: List[Dict[str, Any]] = []
+        by_id: dict[str, Dict[str, Any]] = {}
+
+        # 1) Local cache listing (external arxiv-mcp-server cache).
         for path in sorted(self._config.storage_path.rglob("*.pdf")):
             if not path.is_file():
                 continue
 
-            arxiv_id = _guess_arxiv_id_from_filename(path.name)
-            papers.append(
+            filename = path.name
+            arxiv_id = _guess_arxiv_id_from_filename(filename)
+            stable_id = _normalise_arxiv_id(arxiv_id) if arxiv_id else filename
+            entry = by_id.setdefault(
+                stable_id,
                 {
-                    "file_path": str(path),
-                    "filename": path.name,
-                    "size_bytes": path.stat().st_size,
                     "arxiv_id": arxiv_id,
+                    "filename": filename,
                     "version": _extract_arxiv_version(arxiv_id) if arxiv_id else None,
-                }
+                },
             )
+
+            entry["file_path"] = str(path)
+            entry["size_bytes"] = path.stat().st_size
+
+        # 2) Durable listing (blob store - local or Swift).
+        blob_store = None
+        try:
+            blob_store = get_blob_store_from_env()
+        except Exception:
+            blob_store = None
+
+        if blob_store is not None:
+            try:
+                durable_keys = blob_store.list("arxiv/papers")
+            except Exception:
+                durable_keys = []
+
+            backend = _infer_blob_backend(blob_store)
+            for key in durable_keys:
+                if not isinstance(key, str) or not key.lower().endswith(".pdf"):
+                    continue
+
+                arxiv_id = _guess_arxiv_id_from_blob_key(key)
+                stable_id = _normalise_arxiv_id(arxiv_id) if arxiv_id else key
+
+                filename = os.path.basename(key)
+                entry = by_id.setdefault(
+                    stable_id,
+                    {
+                        "arxiv_id": arxiv_id,
+                        "filename": filename,
+                        "version": _extract_arxiv_version(arxiv_id) if arxiv_id else None,
+                    },
+                )
+
+                entry["storage"] = {
+                    "backend": backend,
+                    "key": key,
+                    "uri": _build_blob_uri(blob_store, backend=backend, key=key),
+                }
+
+                # If durable store is local, we can compute size cheaply.
+                if backend == "local" and "size_bytes" not in entry:
+                    size = _try_local_blob_size(blob_store, key)
+                    if size is not None:
+                        entry["size_bytes"] = size
+
+        papers: List[Dict[str, Any]] = sorted(
+            by_id.values(),
+            key=lambda p: str(p.get("arxiv_id") or p.get("filename") or ""),
+        )
 
         return {
             "success": True,
             "total_papers": len(papers),
             "papers": papers,
         }
+
+
+def _infer_blob_backend(blob_store: Any) -> str:
+    name = getattr(blob_store, "__class__", type("x", (), {})).__name__
+    if name == "SwiftBlobStore":
+        return "swift"
+    if name == "LocalBlobStore":
+        return "local"
+    return (os.environ.get("VON_BLOB_STORE_BACKEND") or "local").strip().lower()
+
+
+def _build_blob_uri(blob_store: Any, *, backend: str, key: str) -> str | None:
+    if backend == "local":
+        root_dir = getattr(blob_store, "root_dir", None)
+        if root_dir is None:
+            return None
+        try:
+            return str(Path(root_dir) / key)
+        except Exception:
+            return None
+
+    if backend == "swift":
+        container = (os.environ.get("VON_SWIFT_CONTAINER") or "").strip()
+        if not container:
+            return None
+        prefix = (os.environ.get("VON_SWIFT_PREFIX") or "").strip("/")
+        public_base_url = os.environ.get("VON_SWIFT_PUBLIC_BASE_URL")
+        public_base_url = public_base_url.rstrip("/") if public_base_url else None
+
+        full_key = _normalise_key_for_uri(key)
+        if prefix:
+            full_key = f"{prefix}/{full_key}"
+
+        if public_base_url:
+            return f"{public_base_url}/{container}/{full_key}"
+        return f"swift://{container}/{full_key}"
+
+    return None
+
+
+def _normalise_key_for_uri(key: str) -> str:
+    return key.strip().replace("\\", "/").lstrip("/")
+
+
+def _try_local_blob_size(blob_store: Any, key: str) -> int | None:
+    root_dir = getattr(blob_store, "root_dir", None)
+    if root_dir is None:
+        return None
+    try:
+        path = Path(root_dir) / key
+        if path.exists():
+            return path.stat().st_size
+    except Exception:
+        return None
+    return None
+
+
+def _guess_arxiv_id_from_blob_key(key: str) -> str | None:
+    value = key.replace("\\", "/")
+    if value.lower().startswith("arxiv/papers/"):
+        value = value[len("arxiv/papers/") :]
+    return _guess_arxiv_id_from_filename(value)
 
     async def read_paper(self, arxiv_id: str) -> Dict[str, Any]:
         """Read content of a downloaded paper.
