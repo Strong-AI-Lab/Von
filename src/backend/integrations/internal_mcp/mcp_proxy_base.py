@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -106,6 +106,30 @@ class MCPStdIOClient:
             logger.error("%s Tool call failed: %s", self._config.log_tag, exc)
             raise MCPToolClientError(str(exc)) from exc
 
+    async def list_tools(self) -> list[Dict[str, Any]]:
+        """List tools exposed by the MCP server."""
+
+        params = StdioServerParameters(
+            command=self._config.command,
+            args=self._config.args,
+            env=self._config.env,
+        )
+
+        logger.info("%s Listing tools", self._config.log_tag)
+
+        try:
+            async with stdio_client(params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    result = await session.list_tools()
+                    self._call_count += 1
+                    tools = self._extract_tools(result)
+                    return [self._serialise_tool(tool) for tool in tools]
+        except Exception as exc:  # pragma: no cover - environment dependent
+            self._error_count += 1
+            logger.error("%s Tool list failed: %s", self._config.log_tag, exc)
+            raise MCPToolClientError(str(exc)) from exc
+
     def _parse_result(
         self,
         result: Any,
@@ -148,3 +172,30 @@ class MCPStdIOClient:
             return json.loads(stripped)
         except json.JSONDecodeError:
             return None
+
+    @staticmethod
+    def _extract_tools(result: Any) -> Sequence[Any]:
+        tools = getattr(result, "tools", None)
+        if tools is not None:
+            return tools
+        if isinstance(result, list):
+            return result
+        return ()
+
+    @staticmethod
+    def _serialise_tool(tool: Any) -> Dict[str, Any]:
+        name = getattr(tool, "name", None)
+        description = getattr(tool, "description", None)
+        input_schema = getattr(tool, "inputSchema", None)
+        if isinstance(tool, dict):
+            name = tool.get("name", name)
+            description = tool.get("description", description)
+            input_schema = tool.get("inputSchema", input_schema)
+        payload: Dict[str, Any] = {}
+        if name is not None:
+            payload["name"] = name
+        if description is not None:
+            payload["description"] = description
+        if input_schema is not None:
+            payload["input_schema"] = input_schema
+        return payload
