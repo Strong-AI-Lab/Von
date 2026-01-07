@@ -25,12 +25,12 @@ describe('LLM debug warnings (speech playback)', () => {
             speech_playback: {
                 duration_suspect_too_long: true,
                 actual_duration_ms: 42000,
-                duration_threshold_sec: 30
+                duration_threshold_sec: 40
             }
         });
 
         expect(warnings).toContain(
-            'Narration playback duration exceeded long-duration threshold (actual 42.0s, threshold 30s).'
+            'Narration playback duration exceeded long-duration threshold (actual 42.0s, threshold 40s).'
         );
     });
 });
