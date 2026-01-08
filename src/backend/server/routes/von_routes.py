@@ -1721,6 +1721,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     prompt_types=(
                         "#V#von_chat_behaviour_prompt",
                         "#V#von_chat_behavior_prompt",
+                        "#V#von_llm_prompt",
                     ),
                 )
                 narration_prompt_fragments = get_user_specific_prompt_fragments(

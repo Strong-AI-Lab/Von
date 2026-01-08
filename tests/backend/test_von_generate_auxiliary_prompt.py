@@ -45,7 +45,11 @@ def app(monkeypatch):
         lambda _user_id, **kwargs: (
             [{"concept_id": "#V#test_prompt", "content": "Please be terse."}]
             if kwargs.get("prompt_types")
-            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
             else []
         ),
     )

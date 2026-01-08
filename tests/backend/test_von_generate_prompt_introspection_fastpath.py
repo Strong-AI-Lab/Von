@@ -63,7 +63,11 @@ def app(monkeypatch):
                 }
             ]
             if kwargs.get("prompt_types")
-            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
             else []
         ),
     )
@@ -231,7 +235,11 @@ def test_prompt_introspection_fastpath_disabled_by_default_does_not_trigger(
                 }
             ]
             if kwargs.get("prompt_types")
-            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
             else []
         ),
     )

@@ -42,7 +42,11 @@ def test_chat_get_prompt_context_returns_prompt_metadata(monkeypatch):
                 {"concept_id": "#V#prompt_b", "content": "Beta"},
             ]
             if kwargs.get("prompt_types")
-            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
             else []
         ),
     )
@@ -51,7 +55,11 @@ def test_chat_get_prompt_context_returns_prompt_metadata(monkeypatch):
         lambda _namespace, **kwargs: (
             "Alpha\n\nBeta"
             if kwargs.get("prompt_types")
-            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
             else ""
         ),
     )
@@ -78,7 +86,11 @@ def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
         lambda _namespace, **kwargs: (
             [{"concept_id": "#V#prompt_a", "content": "Alpha"}]
             if kwargs.get("prompt_types")
-            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
             else []
         ),
     )
@@ -87,7 +99,11 @@ def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
         lambda _namespace, **kwargs: (
             "Alpha"
             if kwargs.get("prompt_types")
-            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
             else ""
         ),
     )
@@ -107,7 +123,11 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
         lambda _namespace, **kwargs: (
             [{"concept_id": "#V#prompt_a", "content": "Alpha"}]
             if kwargs.get("prompt_types")
-            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
             else []
         ),
     )
@@ -116,7 +136,11 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
         lambda _namespace, **kwargs: (
             "Alpha"
             if kwargs.get("prompt_types")
-            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
             else ""
         ),
     )

@@ -5139,6 +5139,7 @@ def _chat_get_prompt_context(
 
     Prompts are purpose-specific types:
     - `#V#von_chat_behaviour_prompt` (system behaviour)
+    - `#V#von_llm_prompt` (legacy behaviour prompt ID)
     - `#V#von_chat_narration_prompt` (TTS / presenter narration)
     """
 
@@ -5167,6 +5168,7 @@ def _chat_get_prompt_context(
         prompt_types=(
             "#V#von_chat_behaviour_prompt",
             "#V#von_chat_behavior_prompt",
+            "#V#von_llm_prompt",
         ),
     )
     narration_fragments = get_user_specific_prompt_fragments(
@@ -5190,6 +5192,7 @@ def _chat_get_prompt_context(
         prompt_types=(
             "#V#von_chat_behaviour_prompt",
             "#V#von_chat_behavior_prompt",
+            "#V#von_llm_prompt",
         ),
     )
     if (
@@ -5355,6 +5358,7 @@ def _chat_introspect(
         prompt_types=(
             "#V#von_chat_behaviour_prompt",
             "#V#von_chat_behavior_prompt",
+            "#V#von_llm_prompt",
         ),
     )
     narration_fragments = get_user_specific_prompt_fragments(
@@ -5379,6 +5383,7 @@ def _chat_introspect(
             prompt_types=(
                 "#V#von_chat_behaviour_prompt",
                 "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
             ),
         )
         or ""
@@ -5656,8 +5661,9 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             category="read",
             description=(
-                "Report which Vontology `#V#von_llm_prompt` concepts (linked via `#V#specific_to_von_user`) "
-                "apply to the authenticated user namespace and optionally include their content."
+                "Report which Vontology chat behaviour prompt concepts (including legacy "
+                "`#V#von_llm_prompt`, linked via `#V#specific_to_von_user`) apply to the authenticated "
+                "user namespace and optionally include their content."
             ),
         ),
         MethodDefinition(
