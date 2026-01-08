@@ -41,6 +41,9 @@ INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME = "internal_mcp_tool_batch_cap"
 # Chat UI: show tool use during the “Thinking…” indicator (JVNAUTOSCI-942)
 SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME = "show_tool_use_during_thinking"
 
+# Admin: allow disabling write-tool conservatism for internal MCP write tools.
+DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME = "disable_write_tool_conservatism"
+
 # Prefixes for contextual (scoped) LLM settings (Phase 2 scaffold)
 _ACTIVE_LLM_USER_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:user:"
 _ACTIVE_LLM_ORG_PREFIX = f"{ACTIVE_LLM_SETTING_NAME}:org:"
@@ -724,6 +727,30 @@ def set_show_tool_use_during_thinking(enabled: bool) -> bool:
     if not isinstance(enabled, bool):
         enabled = bool(enabled)
     return update_setting(SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME, enabled)
+
+
+def get_disable_write_tool_conservatism() -> bool:
+    """Return whether admin has disabled write-tool conservatism.
+
+    Defaults to False when unset or invalid.
+    """
+
+    val = get_setting(DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME)
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        normalised = val.strip().lower()
+        if normalised in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalised in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return False
+
+
+def set_disable_write_tool_conservatism(disabled: bool) -> bool:
+    return update_setting(DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME, bool(disabled))
 
 
 def _coerce_int_setting(

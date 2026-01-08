@@ -859,6 +859,21 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="finalise_cached_paper",
+            description="Upload an already-cached arXiv PDF to the configured blob store and register a Computer File Copy record. Requires authentication (user-scoped write).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "arxiv_id": {"type": "string", "description": "arXiv identifier"},
+                    "filename": {
+                        "type": "string",
+                        "description": "Optional display name to record as original filename",
+                    },
+                },
+                "required": ["arxiv_id"],
+            },
+        ),
+        Tool(
             name="search_web",
             description="Search the web for current information using Tavily MCP proxy. Supports advanced search depth, domain filters, direct answers, raw content, and images.",
             inputSchema={
@@ -2130,6 +2145,27 @@ async def _handle_download_paper(arguments: dict[str, Any]) -> list[TextContent]
         ]
 
 
+async def _handle_finalise_cached_paper(arguments: dict[str, Any]) -> list[TextContent]:
+    arxiv_id = arguments.get("arxiv_id")
+    if not arxiv_id:
+        return [_json_error("Missing required parameter: arxiv_id")]
+
+    try:
+        from src.backend.integrations.internal_mcp import (
+            catalogue as internal_catalogue,
+        )
+
+        result = internal_catalogue._finalise_cached_paper(
+            arxiv_id=arxiv_id,
+            name=arguments.get("filename") or arguments.get("name"),
+        )
+        return [_json_text(result)]
+    except Exception as exc:
+        return [
+            _json_text({"error": f"Unexpected error: {str(exc)}", "success": False})
+        ]
+
+
 async def _handle_search_web(arguments: dict[str, Any]) -> list[TextContent]:
     query = arguments.get("query")
     if not query:
@@ -2489,6 +2525,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "search_arxiv": _handle_search_arxiv,
     "get_paper_metadata": _handle_get_paper_metadata,
     "download_paper": _handle_download_paper,
+    "finalise_cached_paper": _handle_finalise_cached_paper,
     "search_web": _handle_search_web,
     "context_search": _handle_context_search,
     "qna_search": _handle_qna_search,

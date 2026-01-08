@@ -31,6 +31,7 @@ const LS_TTS_RATE = 'chatTtsRate';
 const LS_TTS_PITCH = 'chatTtsPitch';
 const LS_TTS_VOLUME = 'chatTtsVolume';
 const LS_TTS_MAX_SPEAKING_SECONDS = 'chatTtsMaxSpeakingSeconds';
+const LS_TTS_PREFERRED_SPEAKING_SECONDS = 'chatTtsPreferredSpeakingSeconds';
 const LS_STT_LANGUAGE = 'chatSttLanguage';
 const LS_STT_CONTINUOUS = 'chatSttContinuous';
 const LS_STT_INTERIM_RESULTS = 'chatSttInterimResults';
@@ -41,6 +42,34 @@ const RUNTIME_REFRESH_MS = 12000;
 let runtimeIntervalId = null;
 let runtimeAbortController = null;
 let runtimeStatusInFlight = false;
+
+let __vonIsAdminOrOwner = false;
+
+function _setWriteConservatismOverrideBadgeEnabled(enabled) {
+  try {
+    const badge = document.getElementById('disableWriteToolConservatismOnBadge');
+    if (badge) {
+      badge.classList.toggle('hidden', !enabled);
+    }
+  } catch { }
+
+  // Keep the global footer in sync if this UI is inside an iframe.
+  try {
+    if (window.parent?.updateModelInfoFooterDisplay) {
+      void window.parent.updateModelInfoFooterDisplay();
+    }
+  } catch { }
+}
+
+async function _fetchSessionContextForRole() {
+  try {
+    const resp = await fetch('/von/api/session/context', { cache: 'no-cache' });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
 
 function formatUptime(ms) {
   const totalSec = Math.floor(ms / 1000);
@@ -155,6 +184,8 @@ function getSpeechSettingsFromStorage() {
   const ttsPitch = clampNumber(safeLocalStorageGet(LS_TTS_PITCH), 0, 2, 1);
   const ttsVolume = clampNumber(safeLocalStorageGet(LS_TTS_VOLUME), 0, 1, 1);
   const ttsMaxSeconds = clampNumber(safeLocalStorageGet(LS_TTS_MAX_SPEAKING_SECONDS), 10, 600, 40);
+  const ttsPreferredSecondsRaw = clampNumber(safeLocalStorageGet(LS_TTS_PREFERRED_SPEAKING_SECONDS), 5, 600, 20);
+  const ttsPreferredSeconds = Math.min(ttsPreferredSecondsRaw, ttsMaxSeconds);
 
   const sttLanguage = normaliseLanguageSetting(safeLocalStorageGet(LS_STT_LANGUAGE)) || preferredLanguage;
   const sttContinuous = parseBoolSetting(safeLocalStorageGet(LS_STT_CONTINUOUS), true);
@@ -167,7 +198,8 @@ function getSpeechSettingsFromStorage() {
       rate: ttsRate,
       pitch: ttsPitch,
       volume: ttsVolume,
-      maxSpeakingSeconds: ttsMaxSeconds
+      maxSpeakingSeconds: ttsMaxSeconds,
+      preferredSpeakingSeconds: ttsPreferredSeconds
     },
     stt: {
       language: sttLanguage,
@@ -225,6 +257,7 @@ function setupSpeechSettingsSection() {
   const ttsPitchRange = document.getElementById('settingsTtsPitchRange');
   const ttsVolumeRange = document.getElementById('settingsTtsVolumeRange');
   const ttsMaxSecondsInput = document.getElementById('settingsTtsMaxSecondsInput');
+  const ttsPreferredSecondsInput = document.getElementById('settingsTtsPreferredSecondsInput');
   const ttsRateValue = document.getElementById('settingsTtsRateValue');
   const ttsPitchValue = document.getElementById('settingsTtsPitchValue');
   const ttsVolumeValue = document.getElementById('settingsTtsVolumeValue');
@@ -264,6 +297,15 @@ function setupSpeechSettingsSection() {
       ttsMaxSecondsInput.value = String(currentValue);
       if (existingRaw === null || existingRaw === undefined || String(existingRaw).trim() === '') {
         safeLocalStorageSet(LS_TTS_MAX_SPEAKING_SECONDS, String(currentValue));
+      }
+    }
+
+    if (ttsPreferredSecondsInput) {
+      const existingRaw = safeLocalStorageGet(LS_TTS_PREFERRED_SPEAKING_SECONDS);
+      const currentValue = settings.tts.preferredSpeakingSeconds ?? 20;
+      ttsPreferredSecondsInput.value = String(currentValue);
+      if (existingRaw === null || existingRaw === undefined || String(existingRaw).trim() === '') {
+        safeLocalStorageSet(LS_TTS_PREFERRED_SPEAKING_SECONDS, String(currentValue));
       }
     }
     if (ttsRateValue) {
@@ -314,11 +356,26 @@ function setupSpeechSettingsSection() {
     if (ttsPitchRange) ttsPitchRange.disabled = true;
     if (ttsVolumeRange) ttsVolumeRange.disabled = true;
     if (ttsMaxSecondsInput) ttsMaxSecondsInput.disabled = true;
+    if (ttsPreferredSecondsInput) ttsPreferredSecondsInput.disabled = true;
     if (ttsPreviewButton) {
       ttsPreviewButton.disabled = true;
       ttsPreviewButton.title = 'Text-to-speech is not supported in this browser.';
     }
   }
+
+  const notifySpeechSettingsChanged = (changedKey, value) => {
+    try {
+      const detail = { key: String(changedKey || ''), value };
+      window.dispatchEvent(new CustomEvent('von-preferences-changed', { detail }));
+    } catch { }
+
+    // Also notify parent (Settings is typically loaded in an iframe).
+    try {
+      window.parent?.dispatchEvent?.(new CustomEvent('von-preferences-changed', {
+        detail: { key: String(changedKey || ''), value }
+      }));
+    } catch { }
+  };
 
   if (!sttSupported) {
     if (sttLanguageInput) sttLanguageInput.disabled = true;
@@ -329,6 +386,7 @@ function setupSpeechSettingsSection() {
   if (ttsVoiceSelect) {
     ttsVoiceSelect.addEventListener('change', (e) => {
       safeLocalStorageSet(LS_TTS_VOICE_URI, String(e.target.value || ''));
+      notifySpeechSettingsChanged(LS_TTS_VOICE_URI, String(e.target.value || ''));
     });
 
     // Voices can load asynchronously.
@@ -348,7 +406,9 @@ function setupSpeechSettingsSection() {
 
   if (ttsLanguageInput) {
     ttsLanguageInput.addEventListener('change', (e) => {
-      safeLocalStorageSet(LS_TTS_LANGUAGE, normaliseLanguageSetting(e.target.value));
+      const value = normaliseLanguageSetting(e.target.value);
+      safeLocalStorageSet(LS_TTS_LANGUAGE, value);
+      notifySpeechSettingsChanged(LS_TTS_LANGUAGE, value);
     });
   }
   if (ttsRateRange) {
@@ -356,6 +416,7 @@ function setupSpeechSettingsSection() {
       const value = clampNumber(e.target.value, 0.5, 2, 1);
       safeLocalStorageSet(LS_TTS_RATE, String(value));
       if (ttsRateValue) ttsRateValue.textContent = String(value.toFixed(1));
+      notifySpeechSettingsChanged(LS_TTS_RATE, value);
     });
   }
   if (ttsPitchRange) {
@@ -363,6 +424,7 @@ function setupSpeechSettingsSection() {
       const value = clampNumber(e.target.value, 0, 2, 1);
       safeLocalStorageSet(LS_TTS_PITCH, String(value));
       if (ttsPitchValue) ttsPitchValue.textContent = String(value.toFixed(1));
+      notifySpeechSettingsChanged(LS_TTS_PITCH, value);
     });
   }
   if (ttsVolumeRange) {
@@ -370,6 +432,7 @@ function setupSpeechSettingsSection() {
       const value = clampNumber(e.target.value, 0, 1, 1);
       safeLocalStorageSet(LS_TTS_VOLUME, String(value));
       if (ttsVolumeValue) ttsVolumeValue.textContent = String(value.toFixed(2));
+      notifySpeechSettingsChanged(LS_TTS_VOLUME, value);
     });
   }
 
@@ -378,6 +441,29 @@ function setupSpeechSettingsSection() {
       const value = clampNumber(e.target.value, 10, 600, 40);
       safeLocalStorageSet(LS_TTS_MAX_SPEAKING_SECONDS, String(value));
       ttsMaxSecondsInput.value = String(value);
+
+      // Ensure preferred stays within max.
+      if (ttsPreferredSecondsInput) {
+        const preferred = clampNumber(ttsPreferredSecondsInput.value, 5, 600, 20);
+        const nextPreferred = Math.min(preferred, value);
+        safeLocalStorageSet(LS_TTS_PREFERRED_SPEAKING_SECONDS, String(nextPreferred));
+        ttsPreferredSecondsInput.value = String(nextPreferred);
+        notifySpeechSettingsChanged(LS_TTS_PREFERRED_SPEAKING_SECONDS, nextPreferred);
+      }
+
+      notifySpeechSettingsChanged(LS_TTS_MAX_SPEAKING_SECONDS, value);
+    });
+  }
+
+  if (ttsPreferredSecondsInput) {
+    ttsPreferredSecondsInput.addEventListener('change', (e) => {
+      const maxSeconds = clampNumber(safeLocalStorageGet(LS_TTS_MAX_SPEAKING_SECONDS), 10, 600, 40);
+      const value = clampNumber(e.target.value, 5, 600, 20);
+      const nextValue = Math.min(value, maxSeconds);
+
+      safeLocalStorageSet(LS_TTS_PREFERRED_SPEAKING_SECONDS, String(nextValue));
+      ttsPreferredSecondsInput.value = String(nextValue);
+      notifySpeechSettingsChanged(LS_TTS_PREFERRED_SPEAKING_SECONDS, nextValue);
     });
   }
 
@@ -948,6 +1034,17 @@ async function loadAndDisplaySettings() {
     if (!response.ok) throw new Error(`Failed to fetch settings: ${response.statusText}`);
     const settings = await response.json();
 
+    // Admin-only controls: decide visibility based on session role.
+    try {
+      const sessionContext = await _fetchSessionContextForRole();
+      const role = (sessionContext && sessionContext.role) ? String(sessionContext.role).toLowerCase() : '';
+      __vonIsAdminOrOwner = role === 'admin' || role === 'owner';
+      const container = document.getElementById('disableWriteToolConservatismContainer');
+      if (container) {
+        container.classList.toggle('hidden', !__vonIsAdminOrOwner);
+      }
+    } catch { __vonIsAdminOrOwner = false; }
+
     // Extract current model information from active_llm setting
     let currentOllamaModel = null;
     let currentOpenAIModel = null;
@@ -1129,6 +1226,28 @@ async function loadAndDisplaySettings() {
           ? !!settings.show_tool_use_during_thinking
           : true;
         toolUseToggleEl.checked = !!flag;
+      }
+    } catch { }
+
+    // Populate admin-only disable_write_tool_conservatism toggle
+    try {
+      const adminToggleEl = document.getElementById('disableWriteToolConservatismToggle');
+      if (adminToggleEl) {
+        const flag = Object.prototype.hasOwnProperty.call(settings, 'disable_write_tool_conservatism')
+          ? !!settings.disable_write_tool_conservatism
+          : false;
+        adminToggleEl.checked = !!flag;
+        adminToggleEl.disabled = !__vonIsAdminOrOwner;
+
+        _setWriteConservatismOverrideBadgeEnabled(!!adminToggleEl.checked);
+
+        // Live-update badge for immediate feedback (even before save).
+        if (!adminToggleEl.__vonBound) {
+          adminToggleEl.__vonBound = true;
+          adminToggleEl.addEventListener('change', () => {
+            _setWriteConservatismOverrideBadgeEnabled(!!adminToggleEl.checked);
+          });
+        }
       }
     } catch { }
 
@@ -1348,6 +1467,13 @@ async function saveAllSettings(changedProvider = null) {
     show_tool_use_during_thinking: !!document.getElementById('showToolUseDuringThinkingToggle')?.checked,
   };
 
+  if (__vonIsAdminOrOwner) {
+    const adminToggleEl = document.getElementById('disableWriteToolConservatismToggle');
+    if (adminToggleEl) {
+      settings.disable_write_tool_conservatism = !!adminToggleEl.checked;
+    }
+  }
+
   try {
     const response = await postJson('/api/settings/', settings);
     showStatusMessage('settingsStatusMessage', response.message || 'Settings saved successfully!');
@@ -1509,7 +1635,7 @@ async function verifyOpenAiApiKey(savedModel = null) {
 
 export async function loadSettings() {
   try {
-    const response = await fetch('/api/settings');
+    const response = await fetch('/api/settings/');
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
@@ -1522,7 +1648,7 @@ export async function loadSettings() {
 
 export async function saveSettings(settings) {
   try {
-    const response = await fetch('/api/settings', {
+    const response = await fetch('/api/settings/', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'

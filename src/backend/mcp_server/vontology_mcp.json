@@ -1078,6 +1078,24 @@
             }
         },
         {
+            "name": "finalise_cached_paper",
+            "description": "Upload an already-cached arXiv PDF to the configured blob store and register a Computer File Copy record. Requires authentication (user-scoped write).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "arxiv_id": {
+                        "type": "string"
+                    },
+                    "filename": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "arxiv_id"
+                ]
+            }
+        },
+        {
             "name": "search_knowledge_base",
             "description": "Search the internal knowledge base (RAG) for documents and indexed content. Use when user asks about internal documents, policies, or specific indexed knowledge that is not in the ontology or on the public web. Returns semantically relevant text chunks.",
             "inputSchema": {
