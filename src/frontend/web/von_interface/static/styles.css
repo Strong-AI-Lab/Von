@@ -3114,7 +3114,19 @@ footer {
     padding: 6px 0 10px;
     border-bottom: 1px solid #e5e7eb;
     overflow-x: auto;
-    scrollbar-width: thin;
+}
+
+.chat-session-tabs::-webkit-scrollbar {
+    height: 8px;
+}
+
+.chat-session-tabs::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 999px;
+}
+
+.chat-session-tabs::-webkit-scrollbar-track {
+    background: transparent;
 }
 
 .chat-session-tab {

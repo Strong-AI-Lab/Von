@@ -70,6 +70,19 @@ def test_explicit_finalise_cached_arxiv_paper_allows_write():
     assert decision.reason == "explicit_artefact_download_request"
 
 
+def test_minimal_finalise_arxiv_id_allows_write():
+    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
+
+    decision = compute_allowed_write_tools(
+        prompt="finalise 2505.12477",
+        requested_tools=["finalise_cached_paper"],
+        recent_user_prompts=[],
+    )
+
+    assert "finalise_cached_paper" in decision.allowed_tools
+    assert decision.reason == "explicit_artefact_download_request"
+
+
 def test_no_recent_write_intent_blocks():
     from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
 

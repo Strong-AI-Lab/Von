@@ -158,6 +158,8 @@ def _prompt_allows_artefact_download(prompt: str) -> bool:
         "archive",
         "persist",
         "upload",
+        "finalise",
+        "finalize",
     )
     artefact_terms = (
         "arxiv",
@@ -183,7 +185,7 @@ def _prompt_allows_artefact_download(prompt: str) -> bool:
     negated = {
         match.group(1)
         for match in re.finditer(
-            r"\b(?:do not|don't|dont|never)\s+(download|fetch|save|store|cache|archive|persist|upload)\b",
+            r"\b(?:do not|don't|dont|never)\s+(download|fetch|save|store|cache|archive|persist|upload|finalise|finalize)\b",
             lowered,
         )
     }

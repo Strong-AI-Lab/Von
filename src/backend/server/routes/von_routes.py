@@ -1590,7 +1590,7 @@ def serve_page():
 
 
 @von_bp.route("/generate", methods=["POST"])
-def generate():
+def generate():  # pyright: ignore[reportGeneralTypeIssues]
     """Handle text generation requests."""
     data = request.get_json()
     prompt_text = data.get("prompt", "")
