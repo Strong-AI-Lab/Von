@@ -14,6 +14,9 @@
     "test:backend": "jest tests/backend",
     "test:frontend": "jest tests/frontend --passWithNoTests"
   },
+  "jest": {
+    "testEnvironment": "jsdom"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Strong-AI-Lab/Von.git"

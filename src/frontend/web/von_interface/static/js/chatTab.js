@@ -1915,13 +1915,11 @@ function scheduleChatConceptMetaRetry(fullId) {
         chatConceptMetaRetryTimers.delete(fullId);
         chatConceptMetaRetryCounts.set(fullId, retries + 1);
 
-        if (chatConceptMetaPending.has(fullId)) {
-            scheduleChatConceptMetaRetry(fullId);
-            return;
-        }
-
+        const shouldTrackPending = !chatConceptMetaPending.has(fullId);
         const p = fetchConceptMetaForChatNodeOnly(fullId).then((meta) => {
-            chatConceptMetaPending.delete(fullId);
+            if (shouldTrackPending) {
+                chatConceptMetaPending.delete(fullId);
+            }
 
             if (meta) {
                 chatConceptMetaCache.set(fullId, meta);
@@ -1936,7 +1934,9 @@ function scheduleChatConceptMetaRetry(fullId) {
             return meta;
         });
 
-        chatConceptMetaPending.set(fullId, p);
+        if (shouldTrackPending) {
+            chatConceptMetaPending.set(fullId, p);
+        }
     }, delayMs);
 
     chatConceptMetaRetryTimers.set(fullId, timerId);
@@ -2009,6 +2009,7 @@ function hydrateChatConceptCartouches(root) {
                 return meta;
             });
             chatConceptMetaPending.set(fullId, p);
+            scheduleChatConceptMetaRetry(fullId);
         }
 
         chatConceptMetaPending.get(fullId)
@@ -4382,6 +4383,7 @@ function setThinkingState(isThinking) {
     }
 
     if (abortButton) {
+        abortButton.style.display = isThinking ? 'inline-flex' : 'none';
         abortButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
     }
 }

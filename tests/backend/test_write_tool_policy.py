@@ -94,3 +94,16 @@ def test_no_recent_write_intent_blocks():
 
     assert "create_concepts" not in decision.allowed_tools
     assert decision.reason == "no_explicit_write_intent_detected"
+
+
+def test_explicit_note_request_allows_text_relation_write():
+    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
+
+    decision = compute_allowed_write_tools(
+        prompt="Add the note now.",
+        requested_tools=["upsert_text_relation"],
+        recent_user_prompts=[],
+    )
+
+    assert "upsert_text_relation" in decision.allowed_tools
+    assert decision.reason == "explicit_vontology_mutation_request"

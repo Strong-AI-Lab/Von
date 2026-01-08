@@ -75,7 +75,20 @@ describe('chat speech planning (presenter channels)', () => {
         const promptInput = document.getElementById('promptInput');
         promptInput.value = 'test prompt';
 
-        global.fetch = jest.fn((url) => {
+        global.fetch = jest.fn((url, options) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                let text = '';
+                try {
+                    text = JSON.parse(options?.body ?? '{}')?.text ?? '';
+                } catch (_) {
+                    text = '';
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(text) })
+                });
+            }
+
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -144,7 +157,20 @@ describe('chat speech planning (presenter channels)', () => {
         const promptInput = document.getElementById('promptInput');
         promptInput.value = 'test prompt';
 
-        global.fetch = jest.fn((url) => {
+        global.fetch = jest.fn((url, options) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                let text = '';
+                try {
+                    text = JSON.parse(options?.body ?? '{}')?.text ?? '';
+                } catch (_) {
+                    text = '';
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(text) })
+                });
+            }
+
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -196,7 +222,20 @@ describe('chat speech planning (presenter channels)', () => {
         const promptInput = document.getElementById('promptInput');
         promptInput.value = 'test prompt';
 
-        global.fetch = jest.fn((url) => {
+        global.fetch = jest.fn((url, options) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                let text = '';
+                try {
+                    text = JSON.parse(options?.body ?? '{}')?.text ?? '';
+                } catch (_) {
+                    text = '';
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(text) })
+                });
+            }
+
             if (typeof url === 'string' && url.startsWith('/von/history/length')) {
                 return Promise.resolve({
                     ok: true,
@@ -298,6 +337,7 @@ describe('chat speech planning (presenter channels)', () => {
         const scrollableField = document.getElementById('scrollableField');
         expect(scrollableField).toBeTruthy();
 
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
         let backfillCalls = 0;
         global.fetch = jest.fn((url, init) => {
             if (typeof url === 'string' && url.startsWith('/von/history/backfill_spoken')) {
@@ -335,6 +375,7 @@ describe('chat speech planning (presenter channels)', () => {
         expect(String(notice1.textContent || '')).toContain('Talk track unavailable');
 
         expect(backfillCalls).toBe(1);
+        expect(warnSpy).toHaveBeenCalled();
 
         // Second click stops the current speech (toggle behaviour).
         speakButton.click();

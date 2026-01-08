@@ -52,6 +52,7 @@ describe("Concept interaction session recovery", () => {
       <button id="resetConceptTabButton_s1"></button>
 
       <p id="finalResult_s1"></p>
+      <ul id="conceptListUl_s1"></ul>
     `;
 
         setCurrentlySelectedConceptId("#V#test_concept");
