@@ -2369,6 +2369,14 @@ function getTtsLongDurationThresholdSec() {
     if (Number.isFinite(parsed) && parsed > 0) {
         return Math.min(Math.max(parsed, 5), 300);
     }
+
+    // Default to the user-configured maximum speaking duration so UI settings are respected.
+    // (The dedicated long-duration threshold key is not exposed in the settings UI.)
+    const maxSpeakingSeconds = getTtsMaxSpeakingSeconds();
+    if (Number.isFinite(maxSpeakingSeconds) && maxSpeakingSeconds > 0) {
+        return Math.min(Math.max(maxSpeakingSeconds, 5), 600);
+    }
+
     return DEFAULT_TTS_LONG_DURATION_THRESHOLD_SEC;
 }
 
@@ -3054,8 +3062,8 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         }
 
         if (sid === activeSessionId) {
-        tab.classList.add('is-active');
-    }
+            tab.classList.add('is-active');
+        }
 
         if (sid === loadingChatSessionId) {
             tab.classList.add('is-loading');

@@ -3782,24 +3782,29 @@ def _ensure_import_description_relation(
 
     try:
         from ..services import text_value_service as text_service
+        from ..security.access_control import bypass_access_control
 
-        existing = text_service.get_texts_for_concept(
-            concept_id, predicate="hasDescription", limit=10
-        )
-        for relation in existing:
-            text = relation.get("text")
-            if (
-                isinstance(text, str)
-                and re.sub(r"\s+", " ", text.strip()).strip().lower() == normalised
-            ):
-                return  # Already present, nothing to do
+        # Import jobs may run without a request context/user session. These
+        # descriptions are part of the shared ontology import, so bypass access
+        # control checks for this internal operation.
+        with bypass_access_control():
+            existing = text_service.get_texts_for_concept(
+                concept_id, predicate="hasDescription", limit=10
+            )
+            for relation in existing:
+                text = relation.get("text")
+                if (
+                    isinstance(text, str)
+                    and re.sub(r"\s+", " ", text.strip()).strip().lower() == normalised
+                ):
+                    return  # Already present, nothing to do
 
-        text_service.upsert_text_for_concept(
-            subject_concept_id=concept_id,
-            predicate="hasDescription",
-            text=stored_text,
-            lang="en-NZ",
-        )
+            text_service.upsert_text_for_concept(
+                subject_concept_id=concept_id,
+                predicate="hasDescription",
+                text=stored_text,
+                lang="en-NZ",
+            )
     except Exception as exc:  # pragma: no cover - guard import path during import jobs
         logger.warning(
             "[import_ontology_nodes] Failed to upsert hasDescription relation for %s: %s",

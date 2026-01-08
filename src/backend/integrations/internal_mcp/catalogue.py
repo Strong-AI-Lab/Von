@@ -1227,19 +1227,270 @@ def _download_paper(**kwargs):
     if not arxiv_id:
         return {"error": "Missing required parameter: arxiv_id", "success": False}
 
+    # If the PDF is already present in the local arXiv cache, prefer finalise_cached_paper so
+    # we can upload to durable storage and register the Computer File Copy without calling
+    # the upstream MCP server again.
+    try:
+        import os
+        from pathlib import Path
+
+        from src.backend.security.access_control import get_effective_user_concept_id
+
+        from .arxiv_proxy_mcp import _find_cached_pdf_for_arxiv_id
+
+        user_concept_id = get_effective_user_concept_id()
+        if user_concept_id:
+            workspace_root = Path(__file__).parent.parent.parent.parent.parent
+            storage_path = workspace_root / "data" / "arxiv_cache"
+            env_storage = os.environ.get("ARXIV_CACHE_PATH") or os.environ.get(
+                "ARXIV_STORAGE_PATH"
+            )
+            if env_storage:
+                storage_path = Path(env_storage)
+
+            cached = _find_cached_pdf_for_arxiv_id(storage_path, str(arxiv_id))
+            if cached is not None:
+                finalised = _finalise_cached_paper(
+                    arxiv_id=arxiv_id,
+                    name=kwargs.get("filename"),
+                    delete_local_cache=kwargs.get("delete_local_cache"),
+                )
+                if isinstance(finalised, dict) and finalised.get("success") is True:
+                    return finalised
+    except Exception:
+        # Best-effort: if anything goes wrong with cache detection/finalisation,
+        # fall back to the normal download behaviour.
+        pass
+
     async def _async_download():
         try:
             proxy = await get_arxiv_proxy()
-            return await proxy.download_paper(
+            stored = await proxy.download_paper(
                 arxiv_id=arxiv_id,
                 filename=kwargs.get("filename"),
             )
+
+            # If authenticated, always register the Computer File Copy (even on a fresh
+            # download). The proxy already stores the PDF in durable blob storage.
+            try:
+                from pathlib import Path
+
+                from src.backend.security.access_control import (
+                    get_effective_user_concept_id,
+                )
+                from src.backend.services.computer_file_copy_service import (
+                    create_computer_file_copy_instance,
+                )
+
+                user_concept_id = get_effective_user_concept_id()
+                if (
+                    user_concept_id
+                    and isinstance(stored, dict)
+                    and stored.get("success") is True
+                ):
+                    storage = stored.get("storage")
+                    if isinstance(storage, dict):
+                        record = create_computer_file_copy_instance(
+                            user_concept_id=str(user_concept_id),
+                            name=str(
+                                kwargs.get("filename")
+                                or Path(str(stored.get("file_path") or "")).name
+                                or f"{arxiv_id}.pdf"
+                            ),
+                            sha256=str(stored.get("sha256") or ""),
+                            size_bytes=int(stored.get("size_bytes") or 0),
+                            content_type="application/pdf",
+                            blob_backend=str(storage.get("backend") or ""),
+                            blob_key=str(storage.get("key") or ""),
+                            blob_uri=str(storage.get("uri") or ""),
+                            metadata={
+                                "source": "arxiv",
+                                "arxiv_id": str(stored.get("arxiv_id") or arxiv_id),
+                                "original_path": str(stored.get("file_path") or ""),
+                            },
+                        )
+                        stored = dict(stored)
+                        stored["computer_file_copy_concept_id"] = record.concept_id
+                        stored["uploaded_at"] = record.uploaded_at
+
+                    # Best-effort cache cleanup (delete local cached PDF) after durable upload.
+                    delete_local_cache = kwargs.get("delete_local_cache")
+                    if delete_local_cache is None:
+                        delete_local_cache = True
+                    if bool(delete_local_cache):
+                        try:
+                            import os
+
+                            workspace_root = Path(
+                                __file__
+                            ).parent.parent.parent.parent.parent
+                            cache_root = workspace_root / "data" / "arxiv_cache"
+                            env_storage = os.environ.get(
+                                "ARXIV_CACHE_PATH"
+                            ) or os.environ.get("ARXIV_STORAGE_PATH")
+                            if env_storage:
+                                cache_root = Path(env_storage)
+
+                            cached_path = Path(str(stored.get("file_path") or ""))
+                            local_deleted = False
+                            local_error = None
+                            try:
+                                resolved_cache = cache_root.resolve()
+                                resolved_file = cached_path.resolve()
+                                if (
+                                    resolved_cache in resolved_file.parents
+                                    and resolved_file.is_file()
+                                ):
+                                    resolved_file.unlink()
+                                    local_deleted = True
+                            except Exception as exc:  # pragma: no cover - best effort
+                                local_error = str(exc)
+
+                            stored = dict(stored)
+                            stored["local_cache_deleted"] = local_deleted
+                            if local_error:
+                                stored["local_cache_delete_error"] = local_error
+                        except Exception:  # pragma: no cover - best effort
+                            pass
+
+            except Exception:
+                # Defensive: registration/cleanup must not break the download itself.
+                pass
+
+            return stored
         except ArxivProxyError as e:
             return {"error": str(e), "success": False}
         except Exception as e:
             return {"error": f"Unexpected error: {e}", "success": False}
 
     return _run_async_compat(_async_download)
+
+
+def _finalise_cached_paper(**kwargs):
+    """Upload an already-cached arXiv PDF to the blob store and register a Computer File Copy."""
+
+    arxiv_id = kwargs.get("arxiv_id")
+    if not arxiv_id:
+        return {"error": "Missing required parameter: arxiv_id", "success": False}
+
+    from src.backend.services.blob_uploads import BlobUploadError, put_bytes_durable
+
+    try:
+        import hashlib
+        import os
+        from pathlib import Path
+
+        from src.backend.security.access_control import get_effective_user_concept_id
+        from src.backend.services.computer_file_copy_service import (
+            create_computer_file_copy_instance,
+        )
+
+        from .arxiv_proxy_mcp import (
+            _arxiv_pdf_blob_key,
+            _find_cached_pdf_for_arxiv_id,
+            _normalise_arxiv_id,
+        )
+
+        user_concept_id = get_effective_user_concept_id()
+        if not user_concept_id:
+            return {
+                "success": False,
+                "error": "not_authenticated",
+                "message": "Authentication required to register file copies.",
+            }
+
+        workspace_root = Path(__file__).parent.parent.parent.parent.parent
+        storage_path = workspace_root / "data" / "arxiv_cache"
+        env_storage = os.environ.get("ARXIV_CACHE_PATH") or os.environ.get(
+            "ARXIV_STORAGE_PATH"
+        )
+        if env_storage:
+            storage_path = Path(env_storage)
+
+        cached = _find_cached_pdf_for_arxiv_id(storage_path, str(arxiv_id))
+        if cached is None:
+            return {
+                "success": False,
+                "error": "cached_pdf_not_found",
+                "message": f"No cached arXiv PDF found for {arxiv_id} under {storage_path}",
+            }
+
+        data = cached.read_bytes()
+        size_bytes = len(data)
+        sha256 = hashlib.sha256(data).hexdigest()
+        storage_key = _arxiv_pdf_blob_key(str(arxiv_id))
+        stable_id = _normalise_arxiv_id(str(arxiv_id))
+
+        stored = put_bytes_durable(
+            key=storage_key,
+            data=data,
+            content_type="application/pdf",
+            sha256=sha256,
+            size_bytes=size_bytes,
+            metadata={
+                "source": "arxiv",
+                "arxiv_id": stable_id,
+                "original_path": str(cached),
+            },
+        )
+
+        ref = stored.ref
+
+        record = create_computer_file_copy_instance(
+            user_concept_id=str(user_concept_id),
+            name=str(kwargs.get("name") or cached.name),
+            sha256=sha256,
+            size_bytes=size_bytes,
+            content_type="application/pdf",
+            blob_backend=str(ref.backend),
+            blob_key=str(ref.key),
+            blob_uri=str(ref.uri),
+            metadata={
+                "source": "arxiv",
+                "arxiv_id": stable_id,
+                "original_path": str(cached),
+            },
+        )
+
+        # Best-effort cache cleanup (delete local cached PDF) after durable upload.
+        delete_local_cache = kwargs.get("delete_local_cache")
+        if delete_local_cache is None:
+            delete_local_cache = True
+        local_deleted = False
+        local_error = None
+        if bool(delete_local_cache):
+            try:
+                resolved_cache_root = storage_path.resolve()
+                resolved_cached = cached.resolve()
+                if (
+                    resolved_cache_root in resolved_cached.parents
+                    and resolved_cached.is_file()
+                ):
+                    resolved_cached.unlink()
+                    local_deleted = True
+            except Exception as exc:  # pragma: no cover - best effort
+                local_error = str(exc)
+
+        return {
+            "success": True,
+            "arxiv_id": stable_id,
+            "file_path": str(cached),
+            "size_bytes": size_bytes,
+            "sha256": sha256,
+            "storage": {
+                "backend": ref.backend,
+                "key": ref.key,
+                "uri": ref.uri,
+            },
+            "computer_file_copy_concept_id": record.concept_id,
+            "uploaded_at": record.uploaded_at,
+            "local_cache_deleted": local_deleted,
+            "local_cache_delete_error": local_error,
+        }
+    except BlobUploadError as exc:
+        return {"success": False, "error": f"blob_store_upload_failed: {exc}"}
+    except Exception as exc:
+        return {"success": False, "error": f"Unexpected error: {exc}"}
 
 
 def _list_papers(**kwargs):
@@ -2181,9 +2432,13 @@ def _download_paper_input_schema() -> Schema:
         },
         optional={
             "filename": (str, type(None)),
+            "delete_local_cache": (bool, type(None)),
         },
         allow_unknown=True,
-        description="download_paper input: arxiv_id (str, e.g., '2506.16596'), filename (str, optional custom name)",
+        description=(
+            "download_paper input: arxiv_id (str, e.g., '2506.16596'), filename (str, optional custom name), "
+            "delete_local_cache (bool, optional; default true when authenticated)"
+        ),
     )
 
 
@@ -2198,6 +2453,10 @@ def _download_paper_output_schema() -> Schema:
             "size_bytes": (int, type(None)),
             "sha256": (str, type(None)),
             "storage": (dict, type(None)),
+            "computer_file_copy_concept_id": (str, type(None)),
+            "uploaded_at": (str, type(None)),
+            "local_cache_deleted": (bool, type(None)),
+            "local_cache_delete_error": (str, type(None)),
             "error": (str, type(None)),
         },
         allow_unknown=True,
@@ -2205,7 +2464,54 @@ def _download_paper_output_schema() -> Schema:
             "download_paper output: success (bool), file_path (str, local cache path), "
             "storage (dict with backend/key/uri for durable blob-store location), arxiv_id (str), "
             "version (int, optional), size_bytes (int, optional), sha256 (str, optional), "
+            "computer_file_copy_concept_id (str, optional when authenticated), uploaded_at (iso str, optional), "
+            "local_cache_deleted (bool, optional), local_cache_delete_error (str, optional), "
             "or error (str) if failed"
+        ),
+    )
+
+
+def _finalise_cached_paper_input_schema() -> Schema:
+    return Schema(
+        required={
+            "arxiv_id": str,
+        },
+        optional={
+            "name": (str, type(None)),
+            "delete_local_cache": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "finalise_cached_paper input: arxiv_id (str, e.g., '2506.16596v2'); "
+            "name (str, optional concept/display name override); "
+            "delete_local_cache (bool, optional; default true)"
+        ),
+    )
+
+
+def _finalise_cached_paper_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "arxiv_id": (str, type(None)),
+            "file_path": (str, type(None)),
+            "size_bytes": (int, type(None)),
+            "sha256": (str, type(None)),
+            "storage": (dict, type(None)),
+            "computer_file_copy_concept_id": (str, type(None)),
+            "uploaded_at": (str, type(None)),
+            "local_cache_deleted": (bool, type(None)),
+            "local_cache_delete_error": (str, type(None)),
+            "message": (str, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "finalise_cached_paper output: success (bool), file_path (local cached PDF path), "
+            "storage (dict with backend/key/uri), sha256 (str), size_bytes (int), "
+            "computer_file_copy_concept_id (str) and uploaded_at (iso str), "
+            "local_cache_deleted (bool), local_cache_delete_error (str, optional), or error (str)."
         ),
     )
 
@@ -5320,6 +5626,15 @@ def build_default_catalogue() -> MethodCatalogue:
             category="write",
             timeout_sec=60.0,
             description="Download PDF of an arXiv paper, then store it in the configured blob store (local or OpenStack Swift). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file_path and a durable storage.uri. Use when user asks to download/save/fetch a paper.",
+        ),
+        MethodDefinition(
+            name="finalise_cached_paper",
+            handler=_finalise_cached_paper,
+            input_schema=_finalise_cached_paper_input_schema(),
+            output_schema=_finalise_cached_paper_output_schema(),
+            category="write",
+            timeout_sec=30.0,
+            description="Take an already-cached arXiv PDF (in the local arXiv cache directory), upload it to the configured durable blob store, and register a #V#computer_file_copy instance with authoritative blob metadata text relations. Use when the PDF is already cached and you need a definitive durable URI + ontology record.",
         ),
         MethodDefinition(
             name="list_papers",

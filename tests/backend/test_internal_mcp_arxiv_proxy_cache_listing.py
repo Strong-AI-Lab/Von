@@ -2,11 +2,18 @@ import asyncio
 import hashlib
 
 
-def test_arxiv_list_papers_lists_cached_pdfs_without_calling_upstream(tmp_path):
+def test_arxiv_list_papers_lists_cached_pdfs_without_calling_upstream(
+    monkeypatch, tmp_path
+):
     from src.backend.integrations.internal_mcp.arxiv_proxy_mcp import (
         ArxivMCPProxy,
         ArxivProxyConfig,
     )
+
+    # Ensure the test is isolated from any developer/CI environment configuration.
+    monkeypatch.delenv("VON_ARXIV_INCLUDE_DURABLE_LISTING", raising=False)
+    monkeypatch.delenv("VON_BLOB_STORE_BACKEND", raising=False)
+    monkeypatch.delenv("VON_BLOB_STORE_LOCAL_ROOT", raising=False)
 
     cache_dir = tmp_path / "arxiv_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -24,7 +31,7 @@ def test_arxiv_list_papers_lists_cached_pdfs_without_calling_upstream(tmp_path):
     result = asyncio.run(proxy.list_papers())
 
     assert result["success"] is True
-    assert result["total_papers"] == 1
+    assert result["total_papers"] == 1, result
 
     paper = result["papers"][0]
     assert paper["filename"] == "2506.16596v2.pdf"
@@ -70,6 +77,40 @@ def test_arxiv_store_downloaded_pdf_includes_sha256_and_size(monkeypatch, tmp_pa
     assert storage["uri"]
 
 
+def test_arxiv_store_downloaded_pdf_falls_back_to_cached_pdf_when_missing_path(
+    monkeypatch, tmp_path
+):
+    from src.backend.integrations.internal_mcp.arxiv_proxy_mcp import (
+        ArxivMCPProxy,
+        ArxivProxyConfig,
+    )
+
+    blob_root = tmp_path / "blob_store"
+    monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
+    monkeypatch.setenv("VON_BLOB_STORE_LOCAL_ROOT", str(blob_root))
+
+    cache_dir = tmp_path / "arxiv_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    data = b"%PDF-1.4\n%fake\ncontent\n"
+    pdf_path = cache_dir / "2512.23959.pdf"
+    pdf_path.write_bytes(data)
+
+    proxy = ArxivMCPProxy(ArxivProxyConfig(storage_path=cache_dir))
+
+    # Simulate arxiv-mcp-server reporting success without returning a file path.
+    stored = proxy._store_downloaded_pdf(
+        result={"success": True}, arxiv_id="2512.23959"
+    )
+
+    assert stored["file_path"] == str(pdf_path)
+    assert stored["size_bytes"] == len(data)
+    assert stored["sha256"] == hashlib.sha256(data).hexdigest()
+    assert stored["storage"]["backend"] == "local"
+    assert stored["storage"]["key"].endswith("arxiv/papers/2512.23959.pdf")
+    assert stored["storage"]["uri"]
+
+
 def test_arxiv_list_papers_includes_durable_blob_store_objects(monkeypatch, tmp_path):
     import asyncio
 
@@ -81,6 +122,7 @@ def test_arxiv_list_papers_includes_durable_blob_store_objects(monkeypatch, tmp_
     blob_root = tmp_path / "blob_store"
     monkeypatch.setenv("VON_BLOB_STORE_BACKEND", "local")
     monkeypatch.setenv("VON_BLOB_STORE_LOCAL_ROOT", str(blob_root))
+    monkeypatch.setenv("VON_ARXIV_INCLUDE_DURABLE_LISTING", "1")
 
     # Create a durable blob-store object (local backend stores this as a file).
     durable_key = blob_root / "arxiv" / "papers"

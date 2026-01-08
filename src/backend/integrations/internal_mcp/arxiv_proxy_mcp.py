@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, List
 
 from src.backend.services.blob_store import get_blob_store_from_env
+from src.backend.services.blob_uploads import BlobUploadError, put_bytes_durable
 
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.session import ClientSession
@@ -246,9 +247,22 @@ class ArxivMCPProxy:
                 result = dict(result)
                 result["file_path"] = file_path
             else:
-                raise ArxivProxyError(
-                    "arXiv download succeeded but no file path was returned by arxiv-mcp-server"
+                cached = _find_cached_pdf_for_arxiv_id(
+                    self._config.storage_path, arxiv_id
                 )
+                if cached is not None:
+                    file_path = str(cached)
+                    result = dict(result)
+                    result["file_path"] = file_path
+                    logger.warning(
+                        "%s download_paper returned no file path; using cached PDF at %s",
+                        _LOG_TAG,
+                        cached,
+                    )
+                else:
+                    raise ArxivProxyError(
+                        "arXiv download succeeded but no file path was returned by arxiv-mcp-server"
+                    )
 
         path = Path(file_path)
         if not path.is_absolute():
@@ -258,26 +272,25 @@ class ArxivMCPProxy:
             raise ArxivProxyError(f"Downloaded PDF not found at: {path}")
 
         size_bytes = path.stat().st_size
-
-        blob_store = get_blob_store_from_env()
         storage_key = _arxiv_pdf_blob_key(arxiv_id)
 
         try:
             data = path.read_bytes()
             sha256 = hashlib.sha256(data).hexdigest()
-            ref = blob_store.put_bytes(
-                storage_key,
-                data,
+            stored = put_bytes_durable(
+                key=storage_key,
+                data=data,
                 content_type="application/pdf",
+                sha256=sha256,
+                size_bytes=size_bytes,
                 metadata={
                     "source": "arxiv",
                     "arxiv_id": _normalise_arxiv_id(arxiv_id),
                     "original_path": str(path),
-                    "sha256": sha256,
-                    "size_bytes": str(size_bytes),
                 },
             )
-        except Exception as exc:
+            ref = stored.ref
+        except BlobUploadError as exc:
             raise ArxivProxyError(f"Failed to store PDF in blob store: {exc}") from exc
 
         stored = dict(result)
@@ -326,11 +339,24 @@ class ArxivMCPProxy:
             entry["size_bytes"] = path.stat().st_size
 
         # 2) Durable listing (blob store - local or Swift).
+        # Only include durable blob store objects when explicitly requested.
+        # This avoids accidentally listing papers from a shared/default local
+        # blob root during isolated unit tests.
+        env_configured = (
+            os.environ.get("VON_ARXIV_INCLUDE_DURABLE_LISTING") or ""
+        ).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
         blob_store = None
-        try:
-            blob_store = get_blob_store_from_env()
-        except Exception:
-            blob_store = None
+        if env_configured:
+            try:
+                blob_store = get_blob_store_from_env()
+            except Exception:
+                blob_store = None
 
         if blob_store is not None:
             try:
@@ -352,7 +378,9 @@ class ArxivMCPProxy:
                     {
                         "arxiv_id": arxiv_id,
                         "filename": filename,
-                        "version": _extract_arxiv_version(arxiv_id) if arxiv_id else None,
+                        "version": (
+                            _extract_arxiv_version(arxiv_id) if arxiv_id else None
+                        ),
                     },
                 )
 
@@ -377,6 +405,28 @@ class ArxivMCPProxy:
             "success": True,
             "total_papers": len(papers),
             "papers": papers,
+        }
+
+    async def read_paper(self, arxiv_id: str) -> Dict[str, Any]:
+        """Read content of a downloaded paper.
+
+        Args:
+            arxiv_id: arXiv identifier
+
+        Returns:
+            Dict with paper content
+        """
+        return await self._call_tool("read_paper", {"paper_id": arxiv_id})
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get proxy statistics.
+
+        Returns:
+            Dict with call_count and error_count
+        """
+        return {
+            "call_count": self._call_count,
+            "error_count": self._error_count,
         }
 
 
@@ -441,27 +491,60 @@ def _guess_arxiv_id_from_blob_key(key: str) -> str | None:
         value = value[len("arxiv/papers/") :]
     return _guess_arxiv_id_from_filename(value)
 
-    async def read_paper(self, arxiv_id: str) -> Dict[str, Any]:
-        """Read content of a downloaded paper.
 
-        Args:
-            arxiv_id: arXiv identifier
+def _find_cached_pdf_for_arxiv_id(storage_path: Path, arxiv_id: str) -> Path | None:
+    """Best-effort fallback: locate an arXiv PDF in the cache directory.
 
-        Returns:
-            Dict with paper content
-        """
-        return await self._call_tool("read_paper", {"paper_id": arxiv_id})
+    This is used when arxiv-mcp-server reports success but omits a file path.
+    """
+    try:
+        storage_path = Path(storage_path)
+    except Exception:
+        return None
 
-    def get_stats(self) -> Dict[str, int]:
-        """Get proxy statistics.
+    if not storage_path.exists():
+        return None
 
-        Returns:
-            Dict with call_count and error_count
-        """
-        return {
-            "call_count": self._call_count,
-            "error_count": self._error_count,
-        }
+    stable_id = _normalise_arxiv_id(arxiv_id)
+    safe_id = stable_id.replace("/", "_")
+    candidates: list[Path] = []
+
+    # Common filenames.
+    for stem in {stable_id, safe_id, f"arxiv_{stable_id}", f"arxiv_{safe_id}"}:
+        p = storage_path / f"{stem}.pdf"
+        if p.exists() and p.is_file():
+            candidates.append(p)
+
+    # If arxiv_id includes a version, some tools strip/keep it differently.
+    version = _extract_arxiv_version(stable_id)
+    if version is not None and "v" in stable_id.lower():
+        base_id = stable_id[: stable_id.lower().rfind("v")]
+        base_safe = base_id.replace("/", "_")
+        for stem in {base_id, base_safe, f"arxiv_{base_id}", f"arxiv_{base_safe}"}:
+            p = storage_path / f"{stem}.pdf"
+            if p.exists() and p.is_file():
+                candidates.append(p)
+
+    if candidates:
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    # Last resort: scan for PDFs containing the id in the name.
+    try:
+        needle = safe_id.lower()
+        best: Path | None = None
+        best_mtime = -1.0
+        for p in storage_path.rglob("*.pdf"):
+            if not p.is_file():
+                continue
+            if needle not in p.name.lower():
+                continue
+            mtime = p.stat().st_mtime
+            if mtime > best_mtime:
+                best = p
+                best_mtime = mtime
+        return best
+    except Exception:
+        return None
 
 
 # Singleton instance
@@ -565,7 +648,17 @@ def _normalise_path_candidate(value: str) -> str | None:
 
 
 def _extract_download_file_path(result: Dict[str, Any]) -> str | None:
-    keys = {"file_path", "path", "filepath", "filename", "uri", "text"}
+    keys = {
+        "file_path",
+        "path",
+        "filepath",
+        "filename",
+        "pdf_path",
+        "local_path",
+        "output_path",
+        "uri",
+        "text",
+    }
     stack: list[Any] = [result]
     seen: set[int] = set()
 

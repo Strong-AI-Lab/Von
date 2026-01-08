@@ -90,6 +90,11 @@ function getMaxSpeakingSecondsSetting() {
     return clampNumber(raw, 10, 600);
 }
 
+function getPreferredSpeakingSecondsSetting() {
+    const raw = safeLocalStorageGet('chatTtsPreferredSpeakingSeconds');
+    return clampNumber(raw, 5, 600);
+}
+
 export function __testOnly_buildClientCapabilitiesPayload() {
     const root = getRoot();
     const documentEl = root?.document || null;
@@ -112,7 +117,8 @@ export function __testOnly_buildClientCapabilitiesPayload() {
                 pitch: clampNumber(safeLocalStorageGet('chatTtsPitch'), 0, 2),
                 volume: clampNumber(safeLocalStorageGet('chatTtsVolume'), 0, 1),
                 voice_name: voiceName,
-                max_speaking_seconds: getMaxSpeakingSecondsSetting()
+                max_speaking_seconds: getMaxSpeakingSecondsSetting(),
+                preferred_speaking_seconds: getPreferredSpeakingSecondsSetting()
             }
         },
         audio_output: {
@@ -165,7 +171,8 @@ export function startClientCapabilitiesReporting(options = {}) {
         stopped: false,
         lastReportAtMs: 0,
         debounceTimerId: null,
-        boundVoicesHandler: null
+        boundVoicesHandler: null,
+        boundPrefsHandler: null
     };
 
     const scheduleReport = (reason) => {
@@ -202,6 +209,15 @@ export function startClientCapabilitiesReporting(options = {}) {
 
     // Initial report.
     scheduleReport('initial');
+
+    // Re-report when local preferences change (e.g., Settings updates TTS values).
+    try {
+        const handler = () => scheduleReport('preferences_changed');
+        state.boundPrefsHandler = handler;
+        root.addEventListener?.('von-preferences-changed', handler);
+    } catch (_) {
+        // Ignore.
+    }
 
     // Re-report when speech synthesis voices become available.
     try {
@@ -247,6 +263,14 @@ export function startClientCapabilitiesReporting(options = {}) {
             try {
                 if (root?.speechSynthesis && state.boundVoicesHandler) {
                     root.speechSynthesis.removeEventListener?.('voiceschanged', state.boundVoicesHandler);
+                }
+            } catch (_) {
+                // Ignore.
+            }
+
+            try {
+                if (state.boundPrefsHandler) {
+                    root.removeEventListener?.('von-preferences-changed', state.boundPrefsHandler);
                 }
             } catch (_) {
                 // Ignore.

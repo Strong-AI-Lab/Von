@@ -19,7 +19,10 @@ class WriteToolPolicyDecision:
 
 
 def compute_allowed_write_tools(
-    *, prompt: str, requested_tools: list[str], recent_user_prompts: list[str] | None = None
+    *,
+    prompt: str,
+    requested_tools: list[str],
+    recent_user_prompts: list[str] | None = None,
 ) -> WriteToolPolicyDecision:
     """Compute which write tools are allowed for this user prompt.
 
@@ -56,10 +59,12 @@ def compute_allowed_write_tools(
         )
 
     # Side-effect writes (artefact storage) are allowed when explicitly requested.
-    if "download_paper" in requested and (
+    artefact_tools = {"download_paper", "finalise_cached_paper"}
+    requested_artefact_tools = artefact_tools.intersection(set(requested))
+    if requested_artefact_tools and (
         explicit_artefact_intent or recent_artefact_intent
     ):
-        allowed.add("download_paper")
+        allowed.update(requested_artefact_tools)
         return WriteToolPolicyDecision(
             allowed_tools=frozenset(allowed),
             reason=(
@@ -143,8 +148,10 @@ def _prompt_allows_artefact_download(prompt: str) -> bool:
     import re
 
     action_verbs = (
+        "get",
         "download",
         "fetch",
+        "retrieve",
         "save",
         "store",
         "cache",

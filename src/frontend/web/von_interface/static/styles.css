@@ -2528,6 +2528,26 @@ footer {
     border: 1px solid rgba(0, 0, 0, 0.1);
 }
 
+/* Admin override badge (write-tool conservatism disabled) */
+.write-policy-override-badge {
+    display: inline-block;
+    font-size: 12px;
+    line-height: 1;
+    padding: 5px 8px;
+    border-radius: 999px;
+    margin-left: 8px;
+    background: #7f1d1d;
+    color: #ffffff;
+    border: 1px solid #b91c1c;
+    letter-spacing: 0.02em;
+    font-weight: 700;
+}
+
+.write-policy-override-badge.footer {
+    margin-left: 0;
+    padding: 6px 8px;
+}
+
 .db-conn-badge.local {
     background: #d4edda;
     color: #155724;
@@ -3185,6 +3205,7 @@ footer {
     0% {
         transform: translateX(-120%);
     }
+
     100% {
         transform: translateX(220%);
     }

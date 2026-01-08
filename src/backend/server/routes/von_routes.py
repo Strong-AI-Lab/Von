@@ -156,24 +156,43 @@ def upload_file_to_blob_store_and_vontology():
     sha256 = hashlib.sha256(data_bytes).hexdigest()
     size_bytes = len(data_bytes)
 
-    from ...services.blob_store import get_blob_store_from_env
+    from ...services.blob_uploads import BlobUploadError, put_bytes_durable
 
-    store = get_blob_store_from_env()
     user_slug = _slugify_concept_id_for_key(user_concept_id)
     blob_key = f"uploads/{user_slug}/{sha256}/{safe_filename}"
     uploaded_at = _now_utc_iso()
 
-    blob_ref = store.put_bytes(
-        blob_key,
-        data_bytes,
-        content_type=content_type,
-        metadata={
-            "original_filename": original_filename,
-            "sha256": sha256,
-            "user_concept_id": user_concept_id.strip(),
-            "uploaded_at": uploaded_at,
-        },
-    )
+    try:
+        stored = put_bytes_durable(
+            key=blob_key,
+            data=data_bytes,
+            content_type=content_type,
+            sha256=sha256,
+            size_bytes=size_bytes,
+            metadata={
+                "original_filename": original_filename,
+                "user_concept_id": user_concept_id.strip(),
+                "uploaded_at": uploaded_at,
+            },
+        )
+    except BlobUploadError as exc:
+        current_app.logger.error(
+            "[files/upload] Blob store upload failed: %s",
+            exc,
+            exc_info=True,
+        )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "blob_store_upload_failed",
+                    "message": str(exc),
+                }
+            ),
+            502,
+        )
+
+    blob_ref = stored.ref
 
     # --- Ensure KR infrastructure exists ---
     type_concept_id = "#V#computer_file_copy"
@@ -1915,6 +1934,56 @@ def generate():
         # JVNAUTOSCI-894: Presenter-mode response protocol
         # ---------------------------------------------------------
         if presenter_mode_requested:
+            # Include a small client-reported timing hint for narration generation.
+            # (Non-authoritative; used only for guidance.)
+            timing_hint = None
+            try:
+                from ...services.client_capabilities_service import (
+                    get_client_capabilities_snapshot,
+                )
+
+                snapshot = get_client_capabilities_snapshot()
+                speech = (
+                    snapshot.get("speech_synthesis")
+                    if isinstance(snapshot, dict)
+                    else None
+                )
+                speech = speech if isinstance(speech, dict) else {}
+                raw_settings = speech.get("settings")
+                settings = raw_settings if isinstance(raw_settings, dict) else {}
+
+                preferred = settings.get("preferred_speaking_seconds")
+                maximum = settings.get("max_speaking_seconds")
+
+                try:
+                    preferred_int = int(preferred) if preferred is not None else None
+                except Exception:
+                    preferred_int = None
+
+                try:
+                    maximum_int = int(maximum) if maximum is not None else None
+                except Exception:
+                    maximum_int = None
+
+                if preferred_int is not None:
+                    preferred_int = max(1, min(preferred_int, 600))
+                if maximum_int is not None:
+                    maximum_int = max(1, min(maximum_int, 600))
+
+                effective_preferred = preferred_int
+                if preferred_int is not None and maximum_int is not None:
+                    effective_preferred = min(preferred_int, maximum_int)
+
+                if effective_preferred is not None or maximum_int is not None:
+                    timing_hint = (
+                        "Speech timing hint (client-reported, non-authoritative): "
+                        f"preferred_speaking_seconds={effective_preferred!r}, "
+                        f"max_speaking_seconds={maximum_int!r}. "
+                        "Aim for about preferred_speaking_seconds seconds and do not exceed max_speaking_seconds."
+                    )
+            except Exception:
+                timing_hint = None
+
             presenter_protocol_message = {
                 "role": "system",
                 "content": (
@@ -1926,6 +1995,7 @@ def generate():
                     "- <screen> is what will be shown. It may include structured markdown, code blocks, and full details.\n"
                     "- Do not include <spoken>/<screen> tags inside code blocks.\n"
                     "- Use New Zealand English spelling."
+                    + ("\n\n" + timing_hint if timing_hint else "")
                     + (
                         "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
                         + narration_prompt_text
@@ -2603,7 +2673,11 @@ def generate():
                 return None
 
             # Keep it short for TTS.
-            max_chars = 800
+            try:
+                max_chars = int(os.getenv("VON_NARRATION_SPOKEN_MAX_CHARS", "4000"))
+            except ValueError:
+                max_chars = 4000
+            max_chars = max(200, min(max_chars, 50000))
             if len(raw) > max_chars:
                 clipped = raw[:max_chars].rstrip()
                 # Prefer clipping at a sentence boundary.
@@ -2731,11 +2805,66 @@ def generate():
                             except Exception:
                                 pass
                 else:
+                    # Include a small client-reported timing hint for narration generation.
+                    # (Non-authoritative; used only for guidance.)
+                    timing_hint = None
+                    try:
+                        from ...services.client_capabilities_service import (
+                            get_client_capabilities_snapshot,
+                        )
+
+                        snapshot = get_client_capabilities_snapshot()
+                        speech = (
+                            snapshot.get("speech_synthesis")
+                            if isinstance(snapshot, dict)
+                            else None
+                        )
+                        speech = speech if isinstance(speech, dict) else {}
+                        raw_settings = speech.get("settings")
+                        settings = (
+                            raw_settings if isinstance(raw_settings, dict) else {}
+                        )
+
+                        preferred = settings.get("preferred_speaking_seconds")
+                        maximum = settings.get("max_speaking_seconds")
+
+                        try:
+                            preferred_int = (
+                                int(preferred) if preferred is not None else None
+                            )
+                        except Exception:
+                            preferred_int = None
+
+                        try:
+                            maximum_int = int(maximum) if maximum is not None else None
+                        except Exception:
+                            maximum_int = None
+
+                        if preferred_int is not None:
+                            preferred_int = max(1, min(preferred_int, 600))
+                        if maximum_int is not None:
+                            maximum_int = max(1, min(maximum_int, 600))
+
+                        effective_preferred = preferred_int
+                        if preferred_int is not None and maximum_int is not None:
+                            effective_preferred = min(preferred_int, maximum_int)
+
+                        if effective_preferred is not None or maximum_int is not None:
+                            timing_hint = (
+                                "Speech timing hint (client-reported, non-authoritative): "
+                                f"preferred_speaking_seconds={effective_preferred!r}, "
+                                f"max_speaking_seconds={maximum_int!r}. "
+                                "Aim for about preferred_speaking_seconds seconds and do not exceed max_speaking_seconds."
+                            )
+                    except Exception:
+                        timing_hint = None
+
                     narration_system = (
                         "You are Von. Produce a short talk track for text-to-speech. "
                         "Return ONLY one block: <spoken>...</spoken>. "
                         "Do not include <screen>. Do not include code blocks. "
                         "Use New Zealand English spelling."
+                        + ("\n\n" + timing_hint if timing_hint else "")
                         + (
                             "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
                             + narration_prompt_text
@@ -3363,11 +3492,60 @@ def history_backfill_spoken():
             cleaned = value.strip()
             return cleaned or None
 
+        # Include a small client-reported timing hint for narration generation.
+        # (Non-authoritative; used only for guidance.)
+        timing_hint = None
+        try:
+            from ...services.client_capabilities_service import (
+                get_client_capabilities_snapshot,
+            )
+
+            snapshot = get_client_capabilities_snapshot()
+            speech = (
+                snapshot.get("speech_synthesis") if isinstance(snapshot, dict) else None
+            )
+            speech = speech if isinstance(speech, dict) else {}
+            raw_settings = speech.get("settings")
+            settings = raw_settings if isinstance(raw_settings, dict) else {}
+
+            preferred = settings.get("preferred_speaking_seconds")
+            maximum = settings.get("max_speaking_seconds")
+
+            try:
+                preferred_int = int(preferred) if preferred is not None else None
+            except Exception:
+                preferred_int = None
+
+            try:
+                maximum_int = int(maximum) if maximum is not None else None
+            except Exception:
+                maximum_int = None
+
+            if preferred_int is not None:
+                preferred_int = max(1, min(preferred_int, 600))
+            if maximum_int is not None:
+                maximum_int = max(1, min(maximum_int, 600))
+
+            effective_preferred = preferred_int
+            if preferred_int is not None and maximum_int is not None:
+                effective_preferred = min(preferred_int, maximum_int)
+
+            if effective_preferred is not None or maximum_int is not None:
+                timing_hint = (
+                    "Speech timing hint (client-reported, non-authoritative): "
+                    f"preferred_speaking_seconds={effective_preferred!r}, "
+                    f"max_speaking_seconds={maximum_int!r}. "
+                    "Aim for about preferred_speaking_seconds seconds and do not exceed max_speaking_seconds."
+                )
+        except Exception:
+            timing_hint = None
+
         narration_system = (
             "You are Von. Produce a short talk track for text-to-speech. "
             "Return ONLY one block: <spoken>...</spoken>. "
             "Do not include <screen>. Do not include code blocks. "
             "Use New Zealand English spelling."
+            + ("\n\n" + timing_hint if timing_hint else "")
             + (
                 "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
                 + narration_prompt_text
@@ -4000,8 +4178,8 @@ def create_chat_session():
             return jsonify({"error": "Not authenticated"}), 401
 
         data = request.get_json(silent=True) or {}
-        session_name = data.get("session_name") or data.get("name") or data.get(
-            "chat_name"
+        session_name = (
+            data.get("session_name") or data.get("name") or data.get("chat_name")
         )
 
         session_id = str(uuid.uuid4())
