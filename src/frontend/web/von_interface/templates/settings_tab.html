@@ -185,15 +185,15 @@
                     <input type="checkbox" id="disableWriteToolConservatismToggle"
                         aria-describedby="disableWriteToolConservatismHelp" />
                     <label for="disableWriteToolConservatismToggle" class="ml-1"
-                        title="When enabled, Von will allow internal MCP write tools without requiring explicit user write intent.">
-                        Disable write-tool conservatism
+                        title="When enabled, Von will require explicit user write intent before running internal MCP write tools.">
+                        Enable write-tool conservatism
                         <span id="disableWriteToolConservatismOnBadge"
-                            class="write-policy-override-badge hidden">OVERRIDE ON</span>
+                            class="write-policy-override-badge hidden">GATE ON</span>
                     </label>
                 </div>
                 <small id="disableWriteToolConservatismHelp" class="settings-note">
-                    <strong>Danger:</strong> Allows write tools even when the prompt is ambiguous. Admins/owners only.
-                    This is a global server setting.
+                    <strong>Default:</strong> Disabled. When enabled, write tools require explicit user intent. Admins/owners
+                    only. This is a global server setting.
                 </small>
             </div>
 

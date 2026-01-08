@@ -1229,14 +1229,14 @@ async function loadAndDisplaySettings() {
       }
     } catch { }
 
-    // Populate admin-only disable_write_tool_conservatism toggle
+    // Populate admin-only write-tool conservatism toggle (inverse of disable flag).
     try {
       const adminToggleEl = document.getElementById('disableWriteToolConservatismToggle');
       if (adminToggleEl) {
-        const flag = Object.prototype.hasOwnProperty.call(settings, 'disable_write_tool_conservatism')
+        const disabled = Object.prototype.hasOwnProperty.call(settings, 'disable_write_tool_conservatism')
           ? !!settings.disable_write_tool_conservatism
-          : false;
-        adminToggleEl.checked = !!flag;
+          : true;
+        adminToggleEl.checked = !disabled;
         adminToggleEl.disabled = !__vonIsAdminOrOwner;
 
         _setWriteConservatismOverrideBadgeEnabled(!!adminToggleEl.checked);
@@ -1470,7 +1470,7 @@ async function saveAllSettings(changedProvider = null) {
   if (__vonIsAdminOrOwner) {
     const adminToggleEl = document.getElementById('disableWriteToolConservatismToggle');
     if (adminToggleEl) {
-      settings.disable_write_tool_conservatism = !!adminToggleEl.checked;
+      settings.disable_write_tool_conservatism = !adminToggleEl.checked;
     }
   }
 

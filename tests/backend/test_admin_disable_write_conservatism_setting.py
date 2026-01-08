@@ -32,8 +32,8 @@ class _StubRequest:
 @pytest.mark.parametrize(
     "raw, expected",
     [
-        (None, False),
-        ("", False),
+        (None, True),
+        ("", True),
         ("false", False),
         ("0", False),
         (0, False),
