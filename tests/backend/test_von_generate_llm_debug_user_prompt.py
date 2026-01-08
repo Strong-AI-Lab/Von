@@ -41,7 +41,11 @@ def app(monkeypatch):
                 {"concept_id": "#V#prompt2", "content": "Second prompt."},
             ]
             if kwargs.get("prompt_types")
-            == ("#V#von_chat_behaviour_prompt", "#V#von_chat_behavior_prompt")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
             else []
         ),
     )
