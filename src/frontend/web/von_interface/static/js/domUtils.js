@@ -357,13 +357,13 @@ export async function setModelInfoFooterText() {
     segments.push(placeholder);
   }
 
-  // Admin safety signal: show a persistent badge when write-tool conservatism is disabled.
+  // Admin safety signal: show a persistent badge when write-tool conservatism is enabled.
   try {
-    if (Object.prototype.hasOwnProperty.call(settings, 'disable_write_tool_conservatism') && !!settings.disable_write_tool_conservatism) {
+    if (Object.prototype.hasOwnProperty.call(settings, 'disable_write_tool_conservatism') && !settings.disable_write_tool_conservatism) {
       const badge = document.createElement('span');
       badge.className = 'footer-segment write-policy-override-badge footer';
-      badge.textContent = 'WRITE OVERRIDE';
-      badge.title = 'Admin override enabled: write-tool conservatism is disabled.';
+      badge.textContent = 'WRITE GATE ON';
+      badge.title = 'Write-tool conservatism is enabled: explicit user write intent required.';
       segments.push(badge);
     }
   } catch (_) { }

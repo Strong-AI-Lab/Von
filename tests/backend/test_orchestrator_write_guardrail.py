@@ -8,6 +8,7 @@ from typing import Any, Mapping, Optional, Sequence, cast
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
 )
+from src.backend.services import settings_service
 
 
 @dataclass(frozen=True)
@@ -92,8 +93,12 @@ def test_write_guard_allows_download_paper_when_user_requests_artefact_download(
     )
 
 
-def test_write_guard_blocks_download_paper_without_explicit_request():
+def test_write_guard_blocks_download_paper_without_explicit_request(monkeypatch):
     """download_paper should be blocked when the user does not ask for storage."""
+
+    monkeypatch.setattr(
+        settings_service, "get_disable_write_tool_conservatism", lambda: False
+    )
 
     gateway = _WriteToolGateway()
     orchestrator = InternalMCPChatOrchestrator(

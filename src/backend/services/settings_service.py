@@ -732,21 +732,25 @@ def set_show_tool_use_during_thinking(enabled: bool) -> bool:
 def get_disable_write_tool_conservatism() -> bool:
     """Return whether admin has disabled write-tool conservatism.
 
-    Defaults to False when unset or invalid.
+    Defaults to True (disabled) when unset or invalid.
     """
 
     val = get_setting(DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME)
+    if val is None:
+        return True
     if isinstance(val, bool):
         return val
     if isinstance(val, (int, float)):
         return bool(val)
     if isinstance(val, str):
         normalised = val.strip().lower()
+        if normalised in {"", "unset", "none", "null"}:
+            return True
         if normalised in {"1", "true", "yes", "y", "on"}:
             return True
-        if normalised in {"0", "false", "no", "n", "off", ""}:
+        if normalised in {"0", "false", "no", "n", "off"}:
             return False
-    return False
+    return True
 
 
 def set_disable_write_tool_conservatism(disabled: bool) -> bool:
