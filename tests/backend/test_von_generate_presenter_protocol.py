@@ -199,3 +199,45 @@ def test_generate_accepts_plain_text_from_narration_second_pass(monkeypatch):
 
     assert len(llm.calls) == 2
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
+
+
+def test_generate_narration_prompt_includes_preferred_and_max_speaking_seconds(
+    monkeypatch,
+):
+    llm = _StubLLMSequence(
+        [
+            "This is the full on-screen answer with details.",
+            "<spoken>Short talk track.</spoken>",
+        ]
+    )
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+
+    with client.session_transaction() as sess:
+        sess["client_capabilities_snapshot"] = {
+            "kind": "client_capabilities",
+            "client_reported": True,
+            "speech_synthesis": {
+                "supported": True,
+                "voices_count": 1,
+                "default_voice_lang": "en-NZ",
+                "settings": {
+                    "max_speaking_seconds": 40,
+                    "preferred_speaking_seconds": 20,
+                },
+            },
+        }
+
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Hello", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    assert len(llm.calls) == 2
+
+    system_text = llm.calls[1]["context"][0]["content"]
+    assert "Speech timing hint" in system_text, system_text
+    assert "preferred_speaking_seconds=20" in system_text
+    assert "max_speaking_seconds=40" in system_text

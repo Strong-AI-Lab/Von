@@ -447,6 +447,24 @@ class InternalMCPChatOrchestrator:
         if not isinstance(recent_user_prompts, list):
             recent_user_prompts = []
 
+        # Admin override: allow all requested write tools.
+        try:
+            from src.backend.services.settings_service import (
+                get_disable_write_tool_conservatism,
+            )
+
+            if get_disable_write_tool_conservatism():
+                allowed = sorted({str(tool) for tool in requested_tools if tool})
+                return WorkflowActionResult(
+                    outputs={
+                        "allowed_write_tools": allowed,
+                        "write_policy_reason": "write_conservatism_disabled_by_admin_setting",
+                    }
+                )
+        except Exception:
+            # Defensive: do not fail policy evaluation if Settings storage is unavailable.
+            pass
+
         decision = compute_allowed_write_tools(
             prompt=prompt,
             requested_tools=[str(tool) for tool in requested_tools if tool],
@@ -462,13 +480,47 @@ class InternalMCPChatOrchestrator:
             }
         )
 
-        return WorkflowActionResult(outputs=outputs)
-
     def _action_missing_tool_call_retry(self, request: Any) -> WorkflowActionResult:
         data = request.data
         aux_log = data.setdefault("aux_llm_calls", [])
         augmented_context = data.get("augmented_context") or []
         record_llm_call = data.get("record_llm_call")
+
+        forced = self._infer_missing_tool_call_retry_tool_calls(
+            augmented_context,
+            user_prompt=data.get("user_prompt"),
+        )
+        if forced:
+            import json
+
+            try:
+                aux_log.append(
+                    {
+                        "type": "missing_tool_call_retry",
+                        "path": "forced",
+                        "mechanism": "heuristic",
+                        "stage": "response",
+                        "retry_reason": data.get("missing_tool_call_retry_reason")
+                        or "",
+                        "response_preview": "(forced tool call)",
+                    }
+                )
+            except Exception:
+                pass
+
+            response_text = (
+                json.dumps(forced[0]) if len(forced) == 1 else json.dumps(forced)
+            )
+
+            return WorkflowActionResult(
+                outputs={
+                    "response_text": response_text,
+                    "tool_calls": forced,
+                    "missing_tool_call_retry_success": True,
+                    "tool_call_parse_error": None,
+                },
+                duration_ms=0.0,
+            )
 
         calling_path = "legacy"
         assessment = data.get("missing_tool_call_assessment")
@@ -617,9 +669,26 @@ class InternalMCPChatOrchestrator:
         raw = raw.replace("`", "").strip()
         if not raw:
             return None
-        max_chars = 800
+        try:
+            max_chars = int(os.getenv("VON_NARRATION_SPOKEN_MAX_CHARS", "4000"))
+        except ValueError:
+            max_chars = 4000
+        max_chars = max(200, min(max_chars, 50000))
+
         if len(raw) > max_chars:
-            raw = raw[:max_chars].rstrip()
+            clipped = raw[:max_chars].rstrip()
+            # Prefer clipping at a sentence boundary.
+            for sep in (". ", "! ", "? "):
+                cut = clipped.rfind(sep)
+                if cut > 200:
+                    clipped = clipped[: cut + 1]
+                    break
+            else:
+                # Fall back to the last whitespace so we don't chop words.
+                cut = clipped.rfind(" ")
+                if cut > 200:
+                    clipped = clipped[:cut]
+            raw = clipped.strip()
         return raw or None
 
     def _action_narration_render(self, request: Any) -> WorkflowActionResult:
@@ -633,6 +702,10 @@ class InternalMCPChatOrchestrator:
             "Do not include <screen>. Do not include code blocks. "
             "Use New Zealand English spelling."
         )
+
+        timing_hint = self._build_client_capabilities_narration_timing_hint()
+        if timing_hint:
+            narration_system += "\n" + timing_hint
         if prompt_text:
             narration_system += "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
             narration_system += prompt_text
@@ -962,7 +1035,12 @@ class InternalMCPChatOrchestrator:
             "If user provides a URL to analyse or extract content from → USE extract_url (or resilient_extract_url for JS-heavy/blocked pages)\n"
             "If user asks a direct factual question needing verification → USE qna_search\n"
             "If searching within specific domain/context (e.g., site:example.com) → USE context_search\n"
-            "If user asks about arXiv papers by author, topic, or ID → USE list_papers or read_paper\n"
+            "ARXIV TOOL ROUTING:\n"
+            "- To search arXiv by author/topic/keywords → USE search_arxiv\n"
+            "- To list papers already cached locally / already stored → USE list_papers\n"
+            "- To download a specific arXiv PDF and store it durably → USE download_paper (requires arxiv_id)\n"
+            "- To upload a PDF that is already cached and register a file-copy record → USE finalise_cached_paper (requires arxiv_id)\n"
+            "- To read/summarise an already-downloaded paper → USE read_paper (requires arxiv_id)\n"
             'If user asks "what\'s in my RAG store?" or asks about RAG *collections/sources* → USE rag_list_collections\n'
             'If user asks about RAG sessions ("how many", "what\'s indexed", "list sessions") → USE rag_list_indexed (often with collection=...)\n'
             "If user wants to see RAG content from a specific session → USE rag_get_item (often with collection=...)\n"
@@ -2203,6 +2281,70 @@ class InternalMCPChatOrchestrator:
             "If voice_name is None, the browser has not reported a selected voice yet."
         )
 
+    def _build_client_capabilities_narration_timing_hint(self) -> str | None:
+        """Return a small, safe timing hint for narration generation.
+
+        Uses the per-session client capability snapshot (client-reported and
+        non-authoritative).
+        """
+
+        try:
+            from flask import has_request_context
+
+            if not has_request_context():
+                return None
+        except Exception:
+            return None
+
+        try:
+            from ...services.client_capabilities_service import (
+                get_client_capabilities_snapshot,
+            )
+
+            snapshot = get_client_capabilities_snapshot()
+        except Exception:
+            snapshot = None
+
+        speech = (
+            snapshot.get("speech_synthesis") if isinstance(snapshot, dict) else None
+        )
+        speech = speech if isinstance(speech, dict) else {}
+        raw_settings = speech.get("settings")
+        settings = raw_settings if isinstance(raw_settings, dict) else {}
+
+        preferred = settings.get("preferred_speaking_seconds")
+        maximum = settings.get("max_speaking_seconds")
+
+        try:
+            preferred_int = int(preferred) if preferred is not None else None
+        except Exception:
+            preferred_int = None
+
+        try:
+            maximum_int = int(maximum) if maximum is not None else None
+        except Exception:
+            maximum_int = None
+
+        if preferred_int is None and maximum_int is None:
+            return None
+
+        if preferred_int is not None:
+            preferred_int = max(1, min(preferred_int, 600))
+        if maximum_int is not None:
+            maximum_int = max(1, min(maximum_int, 600))
+
+        effective_preferred = preferred_int
+        if preferred_int is not None and maximum_int is not None:
+            effective_preferred = min(preferred_int, maximum_int)
+
+        # Keep this deterministic and short to avoid context bloat.
+        return (
+            "Speech timing hint (client-reported, non-authoritative): "
+            f"preferred_speaking_seconds={effective_preferred!r}, "
+            f"max_speaking_seconds={maximum_int!r}. "
+            "Aim for about preferred_speaking_seconds seconds and do not exceed max_speaking_seconds."
+        )
+
     def _interpret_model_turn(self, response: Any) -> _ModelTurnInterpretation:
         """Parse and classify a single model response.
 
@@ -2367,9 +2509,112 @@ class InternalMCPChatOrchestrator:
             "Your previous message described an action that requires MCP tools, but you did not emit a tool call. "
             "NOW respond with ONLY a tool-call JSON object or a JSON array of tool-call objects. "
             "Choose a tool that matches the user's request; do NOT call write tools unless the user explicitly asked for the write-side effect (e.g., Vontology changes or downloading/storing an artefact). "
+            "If the user provided an arXiv ID/URL and asked to download/store/upload/finalise an artefact, call download_paper or finalise_cached_paper with the arxiv_id (do NOT call list_papers). "
             "No prose. No Markdown. Do NOT wrap the JSON in ``` fences (including ```json). "
             "The first character MUST be an opening curly brace or an opening square bracket, and the response must contain only valid JSON."
         )
+
+    @staticmethod
+    def _extract_arxiv_id_from_text(text: str) -> str | None:
+        if not isinstance(text, str):
+            return None
+
+        import re
+
+        raw = text.strip()
+        if not raw:
+            return None
+
+        lowered = raw.lower()
+
+        url_match = re.search(
+            r"arxiv\.org/(?:abs|pdf)/(?P<id>(?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))(?:v\d+)?",
+            lowered,
+        )
+        if url_match:
+            return url_match.group("id")
+
+        prefix_match = re.search(
+            r"\barxiv:\s*(?P<id>(?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))(?:v\d+)?\b",
+            lowered,
+        )
+        if prefix_match:
+            return prefix_match.group("id")
+
+        bare_match = re.search(
+            r"\b(?P<id>(?:[a-z\-]+/\d{7})|(?:\d{4}\.\d{4,5}))(?:v\d+)?\b",
+            lowered,
+        )
+        if bare_match:
+            return bare_match.group("id")
+
+        return None
+
+    def _infer_missing_tool_call_retry_tool_calls(
+        self,
+        augmented_context: Sequence[Mapping[str, Any]],
+        user_prompt: Any | None = None,
+    ) -> list[_ToolCallRequest] | None:
+        """Best-effort deterministic recovery for common missing-tool-call cases.
+
+        This is intentionally narrow: we only force a write tool when the user
+        explicitly requests the write-side effect.
+        """
+
+        last_user_text: str | None = None
+        if isinstance(user_prompt, str) and user_prompt.strip():
+            last_user_text = user_prompt.strip()
+
+        if last_user_text is None:
+            try:
+                for item in reversed(list(augmented_context or [])):
+                    if not isinstance(item, Mapping):
+                        continue
+                    if str(item.get("role") or "") != "user":
+                        continue
+                    content = item.get("content")
+                    if isinstance(content, str) and content.strip():
+                        last_user_text = content
+                        break
+            except Exception:
+                last_user_text = None
+
+        if not last_user_text:
+            return None
+
+        arxiv_id = self._extract_arxiv_id_from_text(last_user_text)
+        if not arxiv_id:
+            return None
+
+        lowered = last_user_text.lower()
+        explicit_artefact_intent = any(
+            token in lowered
+            for token in (
+                "download",
+                "ingest",
+                "upload",
+                "store",
+                "save",
+                "finalise",
+                "finalize",
+            )
+        )
+        if not explicit_artefact_intent:
+            return None
+
+        tool_name = (
+            "finalise_cached_paper"
+            if ("finalise" in lowered or "finalize" in lowered or "cached" in lowered)
+            else "download_paper"
+        )
+
+        return [
+            {
+                "action": "call_tool",
+                "tool": tool_name,
+                "payload": {"arxiv_id": arxiv_id},
+            }
+        ]
 
     def _resolve_allowed_write_tools(
         self,
@@ -2898,6 +3143,7 @@ class InternalMCPChatOrchestrator:
         if not has_valid_tool_call:
             workflow_def = self._workflow_registry.get(MISSING_TOOL_CALL_WORKFLOW_ID)
             workflow_context = {
+                "user_prompt": prompt,
                 "response_text": (
                     response if isinstance(response, str) else str(response)
                 ),
@@ -3004,6 +3250,7 @@ class InternalMCPChatOrchestrator:
                         MISSING_TOOL_CALL_WORKFLOW_ID
                     )
                     workflow_context = {
+                        "user_prompt": prompt,
                         "response_text": (
                             current_response
                             if isinstance(current_response, str)

@@ -297,3 +297,32 @@ def test_download_round_trip_and_access_control(app):
 
     denied_resp = client.get(f"/von/api/files/{encoded}/download")
     assert denied_resp.status_code == 404
+
+
+def test_upload_returns_error_when_blob_store_fails(app, monkeypatch):
+    client = app.test_client()
+
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user"
+        sess["session_id"] = "test-session"
+
+    fake_store = app.config["TEST_FAKE_STORE"]
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("swift is down")
+
+    monkeypatch.setattr(fake_store, "put_bytes", boom)
+
+    resp = client.post(
+        "/von/api/files/upload",
+        data={"file": (io.BytesIO(b"hello"), "hello.txt")},
+        content_type="multipart/form-data",
+    )
+
+    assert resp.status_code == 502
+    body = resp.get_json()
+    assert body["success"] is False
+    assert body["error"] == "blob_store_upload_failed"
+
+    created = app.config["TEST_CREATED"]
+    assert created == []

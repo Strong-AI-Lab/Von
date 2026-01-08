@@ -31,6 +31,58 @@ def test_recent_prompt_allows_artefact_download():
     assert decision.reason == "recent_artefact_download_request"
 
 
+def test_recent_prompt_allows_cached_paper_finalise():
+    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
+
+    decision = compute_allowed_write_tools(
+        prompt="What is arxiv 1234.5678 about?",
+        requested_tools=["finalise_cached_paper"],
+        recent_user_prompts=["Finalise and store the cached arxiv 1234.5678 PDF."],
+    )
+
+    assert "finalise_cached_paper" in decision.allowed_tools
+    assert decision.reason == "recent_artefact_download_request"
+
+
+def test_explicit_get_arxiv_paper_allows_download():
+    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
+
+    decision = compute_allowed_write_tools(
+        prompt="2512.23959 get that arxiv paper",
+        requested_tools=["download_paper"],
+        recent_user_prompts=[],
+    )
+
+    assert "download_paper" in decision.allowed_tools
+    assert decision.reason == "explicit_artefact_download_request"
+
+
+def test_explicit_finalise_cached_arxiv_paper_allows_write():
+    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
+
+    decision = compute_allowed_write_tools(
+        prompt="Finalise cached arXiv:2512.23959 and store it.",
+        requested_tools=["finalise_cached_paper"],
+        recent_user_prompts=[],
+    )
+
+    assert "finalise_cached_paper" in decision.allowed_tools
+    assert decision.reason == "explicit_artefact_download_request"
+
+
+def test_minimal_finalise_arxiv_id_allows_write():
+    from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
+
+    decision = compute_allowed_write_tools(
+        prompt="finalise 2505.12477",
+        requested_tools=["finalise_cached_paper"],
+        recent_user_prompts=[],
+    )
+
+    assert "finalise_cached_paper" in decision.allowed_tools
+    assert decision.reason == "explicit_artefact_download_request"
+
+
 def test_no_recent_write_intent_blocks():
     from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
 

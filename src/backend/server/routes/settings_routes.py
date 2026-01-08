@@ -35,6 +35,8 @@ from ...services.settings_service import (
     set_internal_mcp_max_tool_invocations,
     get_internal_mcp_tool_batch_cap,
     set_internal_mcp_tool_batch_cap,
+    get_disable_write_tool_conservatism,
+    set_disable_write_tool_conservatism,
 )
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...languagemodels.llm_interface import OpenAIClient
@@ -134,6 +136,33 @@ def _validate_unified_concept_schema(concept, index):
 settings_bp = Blueprint(
     "settings", __name__
 )  # REMOVED url_prefix, as it's set during registration
+
+
+def _is_admin_or_owner_session() -> bool:
+    """Best-effort check for admin/owner privileges.
+
+    We accept either a session role (normal UI path) or an admin token header
+    (for scripted/ops use when configured via VON_ADMIN_TOKEN).
+    """
+
+    try:
+        role = session.get("role_in_org")
+        if isinstance(role, str) and role.strip().lower() in {"admin", "owner"}:
+            return True
+    except Exception:
+        pass
+
+    try:
+        required_token = os.getenv("VON_ADMIN_TOKEN")
+        if not required_token:
+            return False
+        provided = request.headers.get("X-Von-Admin-Token") or request.headers.get(
+            "X-Admin-Token"
+        )
+        return bool(provided) and provided == required_token
+    except Exception:
+        return False
+
 
 # --- Import & Orphan Metrics (JVNAUTOSCI-584) ---
 # These dicts are appended (never structural breaking changes) and surfaced via /diag.
@@ -532,6 +561,12 @@ def get_all_settings():
     """API endpoint to retrieve all relevant settings."""
     try:
         settings = get_all_settings_data()
+
+        # Admin-only settings (never trust the client; only reveal to admins/owners)
+        if _is_admin_or_owner_session():
+            settings["disable_write_tool_conservatism"] = (
+                get_disable_write_tool_conservatism()
+            )
         # Optional resolution using query args
         user_concept_id = request.args.get("user_concept_id")
         org_concept_id = request.args.get(
@@ -560,6 +595,28 @@ def save_all_settings():
         return jsonify({"status": "error", "message": "Invalid JSON payload"}), 400
 
     try:
+        if "disable_write_tool_conservatism" in data:
+            if not _is_admin_or_owner_session():
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": "Admin privileges required to update disable_write_tool_conservatism.",
+                        }
+                    ),
+                    403,
+                )
+
+            try:
+                disabled = bool(data.get("disable_write_tool_conservatism"))
+            except Exception:
+                disabled = False
+            set_disable_write_tool_conservatism(disabled)
+            current_app.logger.warning(
+                "disable_write_tool_conservatism updated: %s",
+                disabled,
+            )
+
         if "active_llm" in data and data["active_llm"]:
             llm_data = data["active_llm"]
             provider = llm_data.get("provider")

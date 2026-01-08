@@ -103,6 +103,15 @@ scripts/tmp/*
 # Runtime data (do not commit)
 data/
 
+# Local MongoDB dumps and raw data
+data/raw/mongo_dump/
+
+# arXiv papers storage (external MCP server)
+data/arxiv_papers/
+
+# Local RAG stores (runtime artifacts, never commit)
+data/rag_storage/
+
 # Database backup dumps (exclude committed artifacts going forward)
 backups/
 !backups/.gitkeep

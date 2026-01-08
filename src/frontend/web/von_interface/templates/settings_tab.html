@@ -179,6 +179,24 @@
             <small id="showToolUseDuringThinkingHelp" class="settings-note">Default: enabled. Shows last tool name,
                 batch size, and remaining tool-call budget.</small>
 
+            <div id="disableWriteToolConservatismContainer" class="mt-3 hidden">
+                <h4>Admin Override</h4>
+                <div class="inline-form inline-form-tight">
+                    <input type="checkbox" id="disableWriteToolConservatismToggle"
+                        aria-describedby="disableWriteToolConservatismHelp" />
+                    <label for="disableWriteToolConservatismToggle" class="ml-1"
+                        title="When enabled, Von will allow internal MCP write tools without requiring explicit user write intent.">
+                        Disable write-tool conservatism
+                        <span id="disableWriteToolConservatismOnBadge"
+                            class="write-policy-override-badge hidden">OVERRIDE ON</span>
+                    </label>
+                </div>
+                <small id="disableWriteToolConservatismHelp" class="settings-note">
+                    <strong>Danger:</strong> Allows write tools even when the prompt is ambiguous. Admins/owners only.
+                    This is a global server setting.
+                </small>
+            </div>
+
             <h3 class="mt-3">Jira Tool Guardrails</h3>
             <p class="settings-note">Read-only visibility into the environment guardrails used by the internal MCP Jira
                 write tools. To change these values, update your environment and restart Von.</p>
@@ -321,9 +339,18 @@
                                 aria-label="Text-to-speech volume"></span>
                         </div>
                         <div class="speech-settings-row">
-                            <label class="speech-settings-label" for="settingsTtsMaxSecondsInput">Max speaking (s)</label>
+                            <label class="speech-settings-label" for="settingsTtsMaxSecondsInput">Max speaking
+                                (s)</label>
                             <input id="settingsTtsMaxSecondsInput" class="speech-settings-input" type="number" min="10"
                                 step="5" inputmode="numeric" />
+                        </div>
+
+                        <div class="speech-settings-row">
+                            <label class="speech-settings-label" for="settingsTtsPreferredSecondsInput">Preferred
+                                speaking
+                                (s)</label>
+                            <input id="settingsTtsPreferredSecondsInput" class="speech-settings-input" type="number"
+                                min="5" step="5" inputmode="numeric" />
                         </div>
 
                         <div class="speech-settings-actions">

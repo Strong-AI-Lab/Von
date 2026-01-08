@@ -173,6 +173,23 @@ def sanitise_client_capabilities(
                 and (speech.get("settings", {}).get("max_speaking_seconds") is not None)
                 else None
             ),
+            "preferred_speaking_seconds": (
+                _clamp_int(
+                    (
+                        speech.get("settings", {})
+                        if isinstance(speech.get("settings"), dict)
+                        else {}
+                    ).get("preferred_speaking_seconds"),
+                    minimum=5,
+                    maximum=600,
+                )
+                if isinstance(speech.get("settings"), dict)
+                and (
+                    speech.get("settings", {}).get("preferred_speaking_seconds")
+                    is not None
+                )
+                else None
+            ),
         },
     }
 

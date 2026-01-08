@@ -357,6 +357,17 @@ export async function setModelInfoFooterText() {
     segments.push(placeholder);
   }
 
+  // Admin safety signal: show a persistent badge when write-tool conservatism is disabled.
+  try {
+    if (Object.prototype.hasOwnProperty.call(settings, 'disable_write_tool_conservatism') && !!settings.disable_write_tool_conservatism) {
+      const badge = document.createElement('span');
+      badge.className = 'footer-segment write-policy-override-badge footer';
+      badge.textContent = 'WRITE OVERRIDE';
+      badge.title = 'Admin override enabled: write-tool conservatism is disabled.';
+      segments.push(badge);
+    }
+  } catch (_) { }
+
   // Fetch DB connection info for footer badge (local vs remote)
   let dbInfo = null;
   try {
