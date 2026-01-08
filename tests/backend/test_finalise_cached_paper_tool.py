@@ -41,6 +41,17 @@ def test_finalise_cached_paper_uploads_cached_pdf_and_registers_file_copy(
         _fake_create_instance,
     )
 
+    linked = {}
+
+    def _fake_link_file_copy_to_arxiv_paper(**kwargs):
+        linked.update(kwargs)
+        return {"paper_concept_id": "#V#paper_on_arxiv_2506_16596v2_deadbeef"}
+
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.link_file_copy_to_arxiv_paper",
+        _fake_link_file_copy_to_arxiv_paper,
+    )
+
     result = catalogue._finalise_cached_paper(arxiv_id="2506.16596v2")
 
     assert result["success"] is True
@@ -50,6 +61,7 @@ def test_finalise_cached_paper_uploads_cached_pdf_and_registers_file_copy(
     assert result["storage"]["backend"] == "local"
     assert result["storage"]["key"].endswith("arxiv/papers/2506.16596v2.pdf")
     assert result["computer_file_copy_concept_id"] == "#V#computer_file_copy_test"
+    assert result["paper_concept_id"] == "#V#paper_on_arxiv_2506_16596v2_deadbeef"
     assert result["local_cache_deleted"] is True
     assert result.get("local_cache_delete_error") in (None, "")
 
@@ -57,9 +69,14 @@ def test_finalise_cached_paper_uploads_cached_pdf_and_registers_file_copy(
     assert pdf_path.exists() is False
 
     assert recorded["user_concept_id"] == "#V#user_test"
+    assert recorded["type_concept_id"] == "#V#arxiv_pdf_file"
     assert recorded["sha256"] == result["sha256"]
     assert recorded["size_bytes"] == len(data)
     assert recorded["blob_key"].endswith("arxiv/papers/2506.16596v2.pdf")
+
+    assert linked["user_concept_id"] == "#V#user_test"
+    assert linked["arxiv_id"] == "2506.16596v2"
+    assert linked["file_copy_concept_id"] == "#V#computer_file_copy_test"
 
 
 def test_finalise_cached_paper_errors_when_cache_missing(monkeypatch, tmp_path):

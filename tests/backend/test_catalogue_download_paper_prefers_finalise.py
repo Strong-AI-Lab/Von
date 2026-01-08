@@ -153,6 +153,17 @@ def test_download_paper_registers_file_copy_when_authenticated(monkeypatch, tmp_
         _fake_create_instance,
     )
 
+    linked = {}
+
+    def _fake_link_file_copy_to_arxiv_paper(**kwargs):
+        linked.update(kwargs)
+        return {"paper_concept_id": "#V#paper_on_arxiv_2505_12477_deadbeef"}
+
+    monkeypatch.setattr(
+        "src.backend.services.arxiv_paper_link_service.link_file_copy_to_arxiv_paper",
+        _fake_link_file_copy_to_arxiv_paper,
+    )
+
     # Act
     result = catalogue._download_paper(arxiv_id="2505.12477")
 
@@ -160,8 +171,14 @@ def test_download_paper_registers_file_copy_when_authenticated(monkeypatch, tmp_
     assert result["success"] is True
     assert result["computer_file_copy_concept_id"] == "#V#computer_file_copy_test"
     assert result["uploaded_at"] == "2026-01-01T00:00:00+00:00"
+    assert result["paper_concept_id"] == "#V#paper_on_arxiv_2505_12477_deadbeef"
     assert recorded["user_concept_id"] == "#V#user_test"
+    assert recorded["type_concept_id"] == "#V#arxiv_pdf_file"
     assert recorded["blob_key"].endswith("arxiv/papers/2505.12477.pdf")
+
+    assert linked["user_concept_id"] == "#V#user_test"
+    assert linked["arxiv_id"] == "2505.12477"
+    assert linked["file_copy_concept_id"] == "#V#computer_file_copy_test"
 
     # And local cache is deleted by default when authenticated.
     assert result.get("local_cache_deleted") is True

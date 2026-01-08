@@ -1291,6 +1291,7 @@ def _download_paper(**kwargs):
                     storage = stored.get("storage")
                     if isinstance(storage, dict):
                         record = create_computer_file_copy_instance(
+                            type_concept_id="#V#arxiv_pdf_file",
                             user_concept_id=str(user_concept_id),
                             name=str(
                                 kwargs.get("filename")
@@ -1312,6 +1313,26 @@ def _download_paper(**kwargs):
                         stored = dict(stored)
                         stored["computer_file_copy_concept_id"] = record.concept_id
                         stored["uploaded_at"] = record.uploaded_at
+
+                        # Best-effort: link this file copy to a stable Paper-on-arXiv instance.
+                        try:
+                            from src.backend.services.arxiv_paper_link_service import (
+                                link_file_copy_to_arxiv_paper,
+                            )
+
+                            link_result = link_file_copy_to_arxiv_paper(
+                                user_concept_id=str(user_concept_id),
+                                arxiv_id=str(stored.get("arxiv_id") or arxiv_id),
+                                file_copy_concept_id=str(record.concept_id),
+                            )
+                            if isinstance(link_result, dict) and link_result.get(
+                                "paper_concept_id"
+                            ):
+                                stored["paper_concept_id"] = link_result.get(
+                                    "paper_concept_id"
+                                )
+                        except Exception:
+                            pass
 
                     # Best-effort cache cleanup (delete local cached PDF) after durable upload.
                     delete_local_cache = kwargs.get("delete_local_cache")
@@ -1437,6 +1458,7 @@ def _finalise_cached_paper(**kwargs):
         ref = stored.ref
 
         record = create_computer_file_copy_instance(
+            type_concept_id="#V#arxiv_pdf_file",
             user_concept_id=str(user_concept_id),
             name=str(kwargs.get("name") or cached.name),
             sha256=sha256,
@@ -1451,6 +1473,22 @@ def _finalise_cached_paper(**kwargs):
                 "original_path": str(cached),
             },
         )
+
+        paper_concept_id = None
+        try:
+            from src.backend.services.arxiv_paper_link_service import (
+                link_file_copy_to_arxiv_paper,
+            )
+
+            link_result = link_file_copy_to_arxiv_paper(
+                user_concept_id=str(user_concept_id),
+                arxiv_id=stable_id,
+                file_copy_concept_id=str(record.concept_id),
+            )
+            if isinstance(link_result, dict):
+                paper_concept_id = link_result.get("paper_concept_id")
+        except Exception:
+            paper_concept_id = None
 
         # Best-effort cache cleanup (delete local cached PDF) after durable upload.
         delete_local_cache = kwargs.get("delete_local_cache")
@@ -1483,6 +1521,7 @@ def _finalise_cached_paper(**kwargs):
                 "uri": ref.uri,
             },
             "computer_file_copy_concept_id": record.concept_id,
+            "paper_concept_id": paper_concept_id,
             "uploaded_at": record.uploaded_at,
             "local_cache_deleted": local_deleted,
             "local_cache_delete_error": local_error,
