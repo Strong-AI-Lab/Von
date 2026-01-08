@@ -54,3 +54,25 @@ def test_extract_download_file_path_from_item_list():
     assert _assert_extract(arxiv_proxy_mcp, payload).endswith(
         "data/arxiv_cache/2506.16596.pdf"
     )
+
+
+def test_extract_download_file_path_from_markdown_uri():
+    payload = {"resource": {"uri": "file:///data/arxiv_cache/2506.16596.md"}}
+
+    assert _assert_extract(arxiv_proxy, payload).endswith(
+        "data/arxiv_cache/2506.16596.pdf"
+    )
+    assert _assert_extract(arxiv_proxy_mcp, payload).endswith(
+        "data/arxiv_cache/2506.16596.pdf"
+    )
+
+
+def test_extract_download_file_path_from_unexpected_key():
+    payload = {"result": {"file": "data/arxiv_cache/2506.16596.pdf"}}
+
+    assert _assert_extract(arxiv_proxy, payload).endswith(
+        "data/arxiv_cache/2506.16596.pdf"
+    )
+    assert _assert_extract(arxiv_proxy_mcp, payload).endswith(
+        "data/arxiv_cache/2506.16596.pdf"
+    )

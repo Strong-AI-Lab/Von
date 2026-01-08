@@ -11,7 +11,7 @@ def test_arxiv_list_papers_lists_cached_pdfs_without_calling_upstream(
     )
 
     # Ensure the test is isolated from any developer/CI environment configuration.
-    monkeypatch.delenv("VON_ARXIV_INCLUDE_DURABLE_LISTING", raising=False)
+    monkeypatch.setenv("VON_ARXIV_INCLUDE_DURABLE_LISTING", "0")
     monkeypatch.delenv("VON_BLOB_STORE_BACKEND", raising=False)
     monkeypatch.delenv("VON_BLOB_STORE_LOCAL_ROOT", raising=False)
 
