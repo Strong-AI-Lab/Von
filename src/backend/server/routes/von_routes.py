@@ -511,51 +511,41 @@ def download_file_copy(file_copy_concept_id: str):
         # Avoid leaking which concept IDs exist.
         return jsonify({"success": False, "error": "not_found"}), 404
 
-    def _first_text(subject_id: str, predicate: str) -> str | None:
-        try:
-            from ...services.text_value_service import get_texts_for_concept
+    from ...services.computer_file_copy_service import fetch_file_copy_bytes
 
-            rows = get_texts_for_concept(subject_id, predicate=predicate, limit=5)
-            for row in rows or []:
-                text = row.get("text") if isinstance(row, dict) else None
-                if isinstance(text, str) and text.strip():
-                    return text.strip()
-            return None
-        except Exception:
-            return None
+    result = fetch_file_copy_bytes(
+        file_copy_concept_id=concept_id,
+        allow_large=True,
+        logger=current_app.logger,
+    )
+    if not isinstance(result, dict) or result.get("success") is not True:
+        error = result.get("error") if isinstance(result, dict) else "not_found"
+        if error == "not_found":
+            return jsonify({"success": False, "error": "not_found"}), 404
+        if error == "blob_fetch_failed":
+            return jsonify({"success": False, "error": "blob_fetch_failed"}), 404
+        if error == "file_too_large":
+            return jsonify({"success": False, "error": "file_too_large"}), 413
+        return jsonify({"success": False, "error": "not_found"}), 404
 
-    blob_key = _first_text(concept_id, "#V#has_blob_key")
-    blob_backend = _first_text(concept_id, "#V#has_blob_backend")
-    content_type = _first_text(concept_id, "#V#has_mime_type")
-    original_filename = _first_text(concept_id, "#V#has_original_filename")
-
-    if not blob_key:
-        return jsonify({"success": False, "error": "missing_blob_key"}), 404
-
-    from ...services.blob_store import get_blob_store_from_env
-
-    store = get_blob_store_from_env()
-    env_backend = (os.environ.get("VON_BLOB_STORE_BACKEND") or "local").strip().lower()
-    if blob_backend and str(blob_backend).strip().lower() != env_backend:
-        current_app.logger.warning(
-            "[files/download] Blob backend mismatch for %s: concept=%s env=%s",
-            concept_id,
-            blob_backend,
-            env_backend,
-        )
-        # Proceed anyway: the configured store may still be able to fetch the key,
-        # and we avoid failing downloads in test/mocked environments.
-
-    try:
-        data_bytes = store.get_bytes(blob_key)
-    except Exception as exc:
-        current_app.logger.warning("[files/download] Blob fetch failed: %s", exc)
+    info = result.get("info")
+    data_bytes = result.get("data")
+    if data_bytes is None:
         return jsonify({"success": False, "error": "blob_fetch_failed"}), 404
 
     import io
 
-    download_name = original_filename or concept_doc.get("name") or "download"
-    mimetype = content_type or "application/octet-stream"
+    download_name = "download"
+    if info is not None and getattr(info, "original_filename", None):
+        download_name = str(info.original_filename)
+    else:
+        name = concept_doc.get("name") if isinstance(concept_doc, dict) else None
+        if isinstance(name, str) and name.strip():
+            download_name = name.strip()
+
+    mimetype = "application/octet-stream"
+    if info is not None and getattr(info, "content_type", None):
+        mimetype = str(info.content_type)
     resp = send_file(
         io.BytesIO(data_bytes),
         mimetype=mimetype,

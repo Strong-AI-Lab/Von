@@ -1568,6 +1568,107 @@ def _read_paper(**kwargs):
     return _run_async_compat(_async_read)
 
 
+# Blob/file-copy retrieval
+def _read_file_copy(**kwargs):
+    from ...security.access_control import (
+        get_effective_user_concept_id,
+        override_current_user,
+        override_current_organisation,
+    )
+    from ...services.computer_file_copy_service import fetch_file_copy_bytes
+
+    concept_id = kwargs.get("concept_id") or kwargs.get("file_copy_concept_id")
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return {"error": "Missing required parameter: concept_id", "success": False}
+
+    max_bytes = kwargs.get("max_bytes")
+    if max_bytes is None:
+        max_bytes = 200_000
+    else:
+        try:
+            max_bytes = int(max_bytes)
+        except (TypeError, ValueError):
+            return {"error": "Invalid max_bytes", "success": False}
+        if max_bytes <= 0:
+            return {"error": "max_bytes must be positive", "success": False}
+
+    as_text = kwargs.get("as_text")
+    if as_text is None:
+        as_text = True
+    encoding = kwargs.get("encoding") or "utf-8"
+    allow_large = bool(kwargs.get("allow_large", False))
+
+    namespace = kwargs.get("namespace")
+    user_part = None
+    org_part = None
+    if isinstance(namespace, str) and "@" in namespace:
+        user_part, org_part = namespace.split("@", 1)
+        user_part = (user_part or "").strip() or None
+        org_part = (org_part or "").strip() or None
+        if org_part and not org_part.startswith("#V#"):
+            org_part = f"#V#{org_part}"
+    elif isinstance(namespace, str) and namespace.strip():
+        user_part = namespace.strip()
+
+    def _run_read():
+        user_concept_id = get_effective_user_concept_id()
+        if not user_concept_id:
+            return {"error": "missing_user_context", "success": False}
+
+        result = fetch_file_copy_bytes(
+            file_copy_concept_id=concept_id,
+            max_bytes=max_bytes,
+            allow_large=allow_large,
+        )
+        if not isinstance(result, dict) or result.get("success") is not True:
+            error = result.get("error") if isinstance(result, dict) else "not_found"
+            payload = {"success": False, "error": error, "concept_id": concept_id}
+            if error == "file_too_large":
+                payload["size_bytes"] = result.get("size_bytes")
+                payload["max_bytes"] = result.get("max_bytes")
+            return payload
+
+        info = result.get("info")
+        data_bytes = result.get("data") or b""
+
+        payload = {
+            "success": True,
+            "concept_id": getattr(info, "concept_id", concept_id),
+            "original_filename": getattr(info, "original_filename", None),
+            "content_type": getattr(info, "content_type", None),
+            "size_bytes": getattr(info, "size_bytes", None),
+            "byte_length": len(data_bytes),
+            "blob": {
+                "backend": getattr(info, "blob_backend", None),
+                "key": getattr(info, "blob_key", None),
+                "uri": getattr(info, "blob_uri", None),
+            },
+        }
+
+        if as_text:
+            try:
+                text = bytes(data_bytes).decode(str(encoding), errors="replace")
+            except LookupError:
+                return {"success": False, "error": "invalid_encoding"}
+            payload["text"] = text
+            payload["encoding"] = str(encoding)
+        else:
+            import base64
+
+            payload["bytes_base64"] = base64.b64encode(bytes(data_bytes)).decode(
+                "ascii"
+            )
+            payload["bytes_base64_encoding"] = "base64"
+
+        return payload
+
+    if user_part or org_part:
+        with override_current_user(user_part), override_current_organisation(org_part):
+            return _run_read()
+
+    return _run_read()
+
+
 # Search MCP handlers
 def _search_web(**kwargs):
     import asyncio
@@ -2605,6 +2706,56 @@ def _read_paper_output_schema() -> Schema:
         },
         allow_unknown=True,
         description="read_paper output: status (str), paper_id (str), content (str, markdown text of paper), or error (str) if failed",
+    )
+
+
+def _read_file_copy_input_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+        },
+        optional={
+            "max_bytes": (int, type(None)),
+            "encoding": (str, type(None)),
+            "as_text": (bool, type(None)),
+            "allow_large": (bool, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "read_file_copy input: concept_id (str for a #V#computer_file_copy instance), "
+            "max_bytes (int, optional default 200000), encoding (str, default utf-8), "
+            "as_text (bool, default true; if false returns base64), allow_large (bool, default false), "
+            "namespace (optional user@org override)."
+        ),
+    )
+
+
+def _read_file_copy_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "success": (bool, type(None)),
+            "error": (str, type(None)),
+            "concept_id": (str, type(None)),
+            "original_filename": (str, type(None)),
+            "content_type": (str, type(None)),
+            "size_bytes": (int, type(None)),
+            "byte_length": (int, type(None)),
+            "blob": (dict, type(None)),
+            "text": (str, type(None)),
+            "encoding": (str, type(None)),
+            "bytes_base64": (str, type(None)),
+            "bytes_base64_encoding": (str, type(None)),
+            "max_bytes": (int, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "read_file_copy output: success (bool), concept_id (str), original_filename (str), "
+            "content_type (str), size_bytes (int), byte_length (int), blob (dict), "
+            "text (str, when as_text=true) or bytes_base64 (str, when as_text=false), "
+            "encoding (str, when as_text=true), or error (str) if failed."
+        ),
     )
 
 
@@ -5692,6 +5843,20 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             timeout_sec=20.0,
             description="Read the full content of a downloaded arXiv paper in markdown format. Use when user asks to read, summarise, analyse, or extract information from a downloaded paper. Paper must be downloaded first (use download_paper if needed). Returns markdown-formatted text content of the paper. Requires arxiv_id parameter (e.g., '1706.03762').",
+        ),
+        MethodDefinition(
+            name="read_file_copy",
+            handler=_read_file_copy,
+            input_schema=_read_file_copy_input_schema(),
+            output_schema=_read_file_copy_output_schema(),
+            category="read",
+            timeout_sec=20.0,
+            description=(
+                "Read the content of an uploaded file-copy stored in the blob store. "
+                "Use when the user asks to read, summarise, analyse, or extract information from "
+                "a file they uploaded or an artefact stored as a #V#computer_file_copy. "
+                "Requires authenticated user context and the file-copy concept_id."
+            ),
         ),
         # Search MCP tools (Tavily)
         MethodDefinition(

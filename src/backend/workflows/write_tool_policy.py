@@ -98,6 +98,12 @@ def _prompt_allows_vontology_mutation(prompt: str) -> bool:
             "relationship",
             "predicate",
             "text relation",
+            "note",
+            "notes",
+            "description",
+            "summary",
+            "annotation",
+            "metadata",
         )
     )
     if not mentions_vontology:

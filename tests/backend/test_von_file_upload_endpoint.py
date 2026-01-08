@@ -57,7 +57,7 @@ def app(monkeypatch):
         "#V#store_of_information": {"concept_id": "#V#store_of_information"},
     }
 
-    def fake_find_one(query):
+    def fake_find_one(query, projection=None):
         concept_id = (query or {}).get("concept_id")
         if not concept_id:
             return None

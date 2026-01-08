@@ -13,6 +13,17 @@ class ComputerFileCopyRecord:
     uploaded_at: str
 
 
+@dataclass(frozen=True)
+class FileCopyBlobInfo:
+    concept_id: str
+    blob_key: str
+    blob_backend: str | None
+    blob_uri: str | None
+    content_type: str | None
+    original_filename: str | None
+    size_bytes: int | None
+
+
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -242,3 +253,136 @@ def create_computer_file_copy_instance(
         type_concept_id=type_concept_id,
         uploaded_at=uploaded_at,
     )
+
+
+def _first_text_value(concept_id: str, predicate: str) -> str | None:
+    try:
+        from .text_value_service import get_texts_for_concept
+
+        rows = get_texts_for_concept(concept_id, predicate=predicate, limit=1)
+        if rows and isinstance(rows[0], dict):
+            text = rows[0].get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+    except Exception:
+        return None
+    return None
+
+
+def resolve_file_copy_blob_info(
+    *,
+    file_copy_concept_id: str,
+) -> FileCopyBlobInfo | None:
+    if not isinstance(file_copy_concept_id, str) or not file_copy_concept_id.strip():
+        return None
+
+    from ..db.repositories.concepts_repository import ConceptsRepository
+
+    concept_id = file_copy_concept_id.strip()
+    concept_doc = ConceptsRepository.find_one(
+        {"concept_id": concept_id}, {"concept_id": 1, "name": 1}
+    )
+    if not isinstance(concept_doc, dict):
+        return None
+
+    blob_key = _first_text_value(concept_id, "#V#has_blob_key")
+    if not blob_key:
+        return None
+
+    blob_backend = _first_text_value(concept_id, "#V#has_blob_backend")
+    blob_uri = _first_text_value(concept_id, "#V#has_blob_uri")
+    content_type = _first_text_value(concept_id, "#V#has_mime_type")
+    original_filename = _first_text_value(concept_id, "#V#has_original_filename")
+    if not original_filename:
+        name = concept_doc.get("name")
+        if isinstance(name, str) and name.strip():
+            original_filename = name.strip()
+
+    size_bytes = None
+    size_text = _first_text_value(concept_id, "#V#has_size_bytes")
+    if isinstance(size_text, str) and size_text.strip():
+        try:
+            size_bytes = int(size_text.strip())
+        except ValueError:
+            size_bytes = None
+
+    return FileCopyBlobInfo(
+        concept_id=concept_id,
+        blob_key=blob_key,
+        blob_backend=blob_backend,
+        blob_uri=blob_uri,
+        content_type=content_type,
+        original_filename=original_filename,
+        size_bytes=size_bytes,
+    )
+
+
+def fetch_file_copy_bytes(
+    *,
+    file_copy_concept_id: str,
+    max_bytes: int | None = None,
+    allow_large: bool = False,
+    logger: Any | None = None,
+) -> dict[str, Any]:
+    info = resolve_file_copy_blob_info(file_copy_concept_id=file_copy_concept_id)
+    if info is None:
+        return {"success": False, "error": "not_found"}
+
+    if info.blob_backend:
+        try:
+            import os
+
+            env_backend = (
+                os.environ.get("VON_BLOB_STORE_BACKEND") or "local"
+            ).strip().lower()
+            if info.blob_backend.strip().lower() != env_backend and logger is not None:
+                logger.warning(
+                    "[file_copy] Blob backend mismatch for %s: concept=%s env=%s",
+                    info.concept_id,
+                    info.blob_backend,
+                    env_backend,
+                )
+        except Exception:
+            pass
+
+    if (
+        max_bytes is not None
+        and isinstance(info.size_bytes, int)
+        and info.size_bytes > max_bytes
+        and not allow_large
+    ):
+        return {
+            "success": False,
+            "error": "file_too_large",
+            "size_bytes": info.size_bytes,
+            "max_bytes": max_bytes,
+        }
+
+    from .blob_store import get_blob_store_from_env
+
+    store = get_blob_store_from_env()
+    try:
+        data_bytes = store.get_bytes(info.blob_key)
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("[file_copy] Blob fetch failed: %s", exc)
+        return {"success": False, "error": "blob_fetch_failed"}
+
+    if (
+        max_bytes is not None
+        and isinstance(data_bytes, (bytes, bytearray))
+        and len(data_bytes) > max_bytes
+        and not allow_large
+    ):
+        return {
+            "success": False,
+            "error": "file_too_large",
+            "size_bytes": len(data_bytes),
+            "max_bytes": max_bytes,
+        }
+
+    return {
+        "success": True,
+        "info": info,
+        "data": bytes(data_bytes),
+    }
