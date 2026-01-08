@@ -128,6 +128,50 @@ def ensure_arxiv_pdf_file_type_exists(*, logger: Any | None = None) -> None:
             )
 
 
+def ensure_arxiv_markdown_file_type_exists(*, logger: Any | None = None) -> None:
+    """Best-effort ensure the #V#arxiv_markdown_file type exists.
+
+    This is a more specific subtype of #V#computer_file_copy.
+    """
+
+    type_concept_id = "#V#arxiv_markdown_file"
+
+    ensure_computer_file_copy_type_exists(logger=logger)
+
+    try:
+        from . import concept_service
+
+        def _concept_exists(concept_id: str) -> bool:
+            try:
+                return concept_service.get_concept_by_concept_id(concept_id) is not None
+            except Exception:
+                return False
+
+        if _concept_exists(type_concept_id):
+            return
+
+        concept_service.create_concept(
+            name="arXiv Markdown file",
+            concept_id=type_concept_id,
+            parent_concept_ids=["#V#computer_file_copy"],
+            create_as_instance=False,
+            description=(
+                "A computer file copy that is specifically an arXiv-sourced Markdown conversion."
+            ),
+            notes=(
+                "Subtype created on-demand. Instances generally have blob store metadata (URI, key, content type, "
+                "size, and hash) recorded as text relations, plus arXiv-specific metadata such as the arXiv ID."
+            ),
+            system_tags=["file", "blob_store", "arxiv", "markdown"],
+        )
+    except Exception as exc:
+        if logger is not None:
+            logger.warning(
+                "[arxiv_markdown_file] Type ensure failed (continuing): %s",
+                exc,
+            )
+
+
 def create_computer_file_copy_instance(
     *,
     type_concept_id: str = "#V#computer_file_copy",
@@ -152,6 +196,8 @@ def create_computer_file_copy_instance(
         ensure_computer_file_copy_type_exists(logger=logger)
     elif type_concept_id == "#V#arxiv_pdf_file":
         ensure_arxiv_pdf_file_type_exists(logger=logger)
+    elif type_concept_id == "#V#arxiv_markdown_file":
+        ensure_arxiv_markdown_file_type_exists(logger=logger)
     else:
         # Best-effort: ensure the base file-copy type exists; assume caller-provided
         # type already exists or will be created elsewhere.
@@ -182,6 +228,8 @@ def create_computer_file_copy_instance(
     tags = ["file", "blob_store"]
     if type_concept_id == "#V#arxiv_pdf_file":
         tags.extend(["arxiv", "pdf"])
+    elif type_concept_id == "#V#arxiv_markdown_file":
+        tags.extend(["arxiv", "markdown"])
 
     concept_service.create_concept(
         name=name,

@@ -1407,7 +1407,9 @@ def _finalise_cached_paper(**kwargs):
         )
 
         from .arxiv_proxy_mcp import (
+            _arxiv_markdown_blob_key,
             _arxiv_pdf_blob_key,
+            _find_cached_markdown_for_arxiv_id,
             _find_cached_pdf_for_arxiv_id,
             _normalise_arxiv_id,
         )
@@ -1490,6 +1492,99 @@ def _finalise_cached_paper(**kwargs):
         except Exception:
             paper_concept_id = None
 
+        include_markdown = kwargs.get("include_markdown")
+        if include_markdown is None:
+            include_markdown = True
+
+        markdown_payload: dict[str, Any] | None = None
+        markdown_cached: Path | None = None
+        markdown_local_deleted = False
+        markdown_local_error = None
+
+        if include_markdown:
+            markdown_payload = {"status": "not_found"}
+            try:
+                markdown_cached = _find_cached_markdown_for_arxiv_id(
+                    storage_path, str(arxiv_id)
+                )
+                if markdown_cached is not None:
+                    markdown_data = markdown_cached.read_bytes()
+                    markdown_size = len(markdown_data)
+                    markdown_sha256 = hashlib.sha256(markdown_data).hexdigest()
+                    markdown_storage_key = _arxiv_markdown_blob_key(str(arxiv_id))
+
+                    markdown_stored = put_bytes_durable(
+                        key=markdown_storage_key,
+                        data=markdown_data,
+                        content_type="text/markdown",
+                        sha256=markdown_sha256,
+                        size_bytes=markdown_size,
+                        metadata={
+                            "source": "arxiv",
+                            "arxiv_id": stable_id,
+                            "original_path": str(markdown_cached),
+                            "format": "markdown",
+                        },
+                    )
+
+                    markdown_ref = markdown_stored.ref
+                    markdown_record = create_computer_file_copy_instance(
+                        type_concept_id="#V#arxiv_markdown_file",
+                        user_concept_id=str(user_concept_id),
+                        name=str(markdown_cached.name),
+                        sha256=markdown_sha256,
+                        size_bytes=markdown_size,
+                        content_type="text/markdown",
+                        blob_backend=str(markdown_ref.backend),
+                        blob_key=str(markdown_ref.key),
+                        blob_uri=str(markdown_ref.uri),
+                        metadata={
+                            "source": "arxiv",
+                            "arxiv_id": stable_id,
+                            "original_path": str(markdown_cached),
+                            "format": "markdown",
+                        },
+                    )
+
+                    try:
+                        from src.backend.services.arxiv_paper_link_service import (
+                            link_file_copy_to_arxiv_paper,
+                        )
+
+                        link_result = link_file_copy_to_arxiv_paper(
+                            user_concept_id=str(user_concept_id),
+                            arxiv_id=stable_id,
+                            file_copy_concept_id=str(markdown_record.concept_id),
+                        )
+                        if (
+                            paper_concept_id is None
+                            and isinstance(link_result, dict)
+                            and link_result.get("paper_concept_id")
+                        ):
+                            paper_concept_id = link_result.get("paper_concept_id")
+                    except Exception:
+                        pass
+
+                    markdown_payload = {
+                        "status": "uploaded",
+                        "file_path": str(markdown_cached),
+                        "size_bytes": markdown_size,
+                        "sha256": markdown_sha256,
+                        "storage": {
+                            "backend": markdown_ref.backend,
+                            "key": markdown_ref.key,
+                            "uri": markdown_ref.uri,
+                        },
+                        "computer_file_copy_concept_id": markdown_record.concept_id,
+                        "uploaded_at": markdown_record.uploaded_at,
+                        "local_cache_deleted": False,
+                        "local_cache_delete_error": None,
+                    }
+            except Exception as exc:
+                markdown_payload = {"status": "error", "error": str(exc)}
+        else:
+            markdown_payload = {"status": "skipped"}
+
         # Best-effort cache cleanup (delete local cached PDF) after durable upload.
         delete_local_cache = kwargs.get("delete_local_cache")
         if delete_local_cache is None:
@@ -1508,6 +1603,22 @@ def _finalise_cached_paper(**kwargs):
                     local_deleted = True
             except Exception as exc:  # pragma: no cover - best effort
                 local_error = str(exc)
+        if bool(delete_local_cache) and markdown_cached is not None:
+            try:
+                resolved_cache_root = storage_path.resolve()
+                resolved_markdown = markdown_cached.resolve()
+                if (
+                    resolved_cache_root in resolved_markdown.parents
+                    and resolved_markdown.is_file()
+                ):
+                    resolved_markdown.unlink()
+                    markdown_local_deleted = True
+            except Exception as exc:  # pragma: no cover - best effort
+                markdown_local_error = str(exc)
+
+        if markdown_payload is not None:
+            markdown_payload["local_cache_deleted"] = markdown_local_deleted
+            markdown_payload["local_cache_delete_error"] = markdown_local_error
 
         return {
             "success": True,
@@ -1525,6 +1636,7 @@ def _finalise_cached_paper(**kwargs):
             "uploaded_at": record.uploaded_at,
             "local_cache_deleted": local_deleted,
             "local_cache_delete_error": local_error,
+            "markdown": markdown_payload,
         }
     except BlobUploadError as exc:
         return {"success": False, "error": f"blob_store_upload_failed: {exc}"}
@@ -2619,12 +2731,14 @@ def _finalise_cached_paper_input_schema() -> Schema:
         optional={
             "name": (str, type(None)),
             "delete_local_cache": (bool, type(None)),
+            "include_markdown": (bool, type(None)),
         },
         allow_unknown=True,
         description=(
             "finalise_cached_paper input: arxiv_id (str, e.g., '2506.16596v2'); "
             "name (str, optional concept/display name override); "
-            "delete_local_cache (bool, optional; default true)"
+            "delete_local_cache (bool, optional; default true); "
+            "include_markdown (bool, optional; default true)"
         ),
     )
 
@@ -2643,6 +2757,7 @@ def _finalise_cached_paper_output_schema() -> Schema:
             "uploaded_at": (str, type(None)),
             "local_cache_deleted": (bool, type(None)),
             "local_cache_delete_error": (str, type(None)),
+            "markdown": (dict, type(None)),
             "message": (str, type(None)),
             "error": (str, type(None)),
         },
@@ -2651,7 +2766,8 @@ def _finalise_cached_paper_output_schema() -> Schema:
             "finalise_cached_paper output: success (bool), file_path (local cached PDF path), "
             "storage (dict with backend/key/uri), sha256 (str), size_bytes (int), "
             "computer_file_copy_concept_id (str) and uploaded_at (iso str), "
-            "local_cache_deleted (bool), local_cache_delete_error (str, optional), or error (str)."
+            "local_cache_deleted (bool), local_cache_delete_error (str, optional), "
+            "markdown (dict, optional), or error (str)."
         ),
     )
 

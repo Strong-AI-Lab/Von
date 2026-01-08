@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, List
@@ -211,10 +212,19 @@ class ArxivMCPProxy:
                 _LOG_TAG,
             )
 
+        started_at = time.time()
         result = await self._call_tool("download_paper", arguments)
-        return self._store_downloaded_pdf(result=result, arxiv_id=arxiv_id)
+        return self._store_downloaded_pdf(
+            result=result, arxiv_id=arxiv_id, download_started_at=started_at
+        )
 
-    def _store_downloaded_pdf(self, *, result: Any, arxiv_id: str) -> Dict[str, Any]:
+    def _store_downloaded_pdf(
+        self,
+        *,
+        result: Any,
+        arxiv_id: str,
+        download_started_at: float | None = None,
+    ) -> Dict[str, Any]:
         if (
             isinstance(result, dict)
             and "text" in result
@@ -260,9 +270,25 @@ class ArxivMCPProxy:
                         cached,
                     )
                 else:
-                    raise ArxivProxyError(
-                        "arXiv download succeeded but no file path was returned by arxiv-mcp-server"
-                    )
+                    recent = None
+                    if download_started_at is not None:
+                        recent = _find_recent_pdf_in_cache(
+                            self._config.storage_path,
+                            since=download_started_at,
+                        )
+                    if recent is not None:
+                        file_path = str(recent)
+                        result = dict(result)
+                        result["file_path"] = file_path
+                        logger.warning(
+                            "%s download_paper returned no file path; using newest PDF at %s",
+                            _LOG_TAG,
+                            recent,
+                        )
+                    else:
+                        raise ArxivProxyError(
+                            "arXiv download succeeded but no file path was returned by arxiv-mcp-server"
+                        )
 
         path = Path(file_path)
         if not path.is_absolute():
@@ -339,17 +365,12 @@ class ArxivMCPProxy:
             entry["size_bytes"] = path.stat().st_size
 
         # 2) Durable listing (blob store - local or Swift).
-        # Only include durable blob store objects when explicitly requested.
-        # This avoids accidentally listing papers from a shared/default local
-        # blob root during isolated unit tests.
-        env_configured = (
-            os.environ.get("VON_ARXIV_INCLUDE_DURABLE_LISTING") or ""
-        ).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        # Included by default; set VON_ARXIV_INCLUDE_DURABLE_LISTING=0 to opt out.
+        env_value = os.environ.get("VON_ARXIV_INCLUDE_DURABLE_LISTING")
+        env_configured = True
+        if env_value is not None:
+            env_normalised = env_value.strip().lower()
+            env_configured = env_normalised not in {"0", "false", "no", "off"}
 
         blob_store = None
         if env_configured:
@@ -501,7 +522,6 @@ def _find_cached_pdf_for_arxiv_id(storage_path: Path, arxiv_id: str) -> Path | N
         storage_path = Path(storage_path)
     except Exception:
         return None
-
     if not storage_path.exists():
         return None
 
@@ -545,6 +565,89 @@ def _find_cached_pdf_for_arxiv_id(storage_path: Path, arxiv_id: str) -> Path | N
         return best
     except Exception:
         return None
+
+
+def _find_cached_markdown_for_arxiv_id(
+    storage_path: Path, arxiv_id: str
+) -> Path | None:
+    """Best-effort fallback: locate an arXiv Markdown file in the cache directory."""
+
+    try:
+        storage_path = Path(storage_path)
+    except Exception:
+        return None
+    if not storage_path.exists():
+        return None
+
+    stable_id = _normalise_arxiv_id(arxiv_id)
+    safe_id = stable_id.replace("/", "_")
+    candidates: list[Path] = []
+
+    for stem in {stable_id, safe_id, f"arxiv_{stable_id}", f"arxiv_{safe_id}"}:
+        p = storage_path / f"{stem}.md"
+        if p.exists() and p.is_file():
+            candidates.append(p)
+
+    version = _extract_arxiv_version(stable_id)
+    if version is not None and "v" in stable_id.lower():
+        base_id = stable_id[: stable_id.lower().rfind("v")]
+        base_safe = base_id.replace("/", "_")
+        for stem in {base_id, base_safe, f"arxiv_{base_id}", f"arxiv_{base_safe}"}:
+            p = storage_path / f"{stem}.md"
+            if p.exists() and p.is_file():
+                candidates.append(p)
+
+    if candidates:
+        return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    try:
+        needle = safe_id.lower()
+        best: Path | None = None
+        best_mtime = -1.0
+        for p in storage_path.rglob("*.md"):
+            if not p.is_file():
+                continue
+            if needle not in p.name.lower():
+                continue
+            mtime = p.stat().st_mtime
+            if mtime > best_mtime:
+                best = p
+                best_mtime = mtime
+        return best
+    except Exception:
+        return None
+
+
+def _find_recent_pdf_in_cache(
+    storage_path: Path, *, since: float, max_age_sec: float = 180.0
+) -> Path | None:
+    try:
+        storage_path = Path(storage_path)
+    except Exception:
+        return None
+
+    if not storage_path.exists():
+        return None
+
+    now = time.time()
+    cutoff = max(since - 2.0, now - max_age_sec)
+    best: Path | None = None
+    best_mtime = cutoff
+
+    try:
+        for p in storage_path.rglob("*.pdf"):
+            if not p.is_file():
+                continue
+            mtime = p.stat().st_mtime
+            if mtime < cutoff:
+                continue
+            if mtime > best_mtime:
+                best = p
+                best_mtime = mtime
+    except Exception:
+        return None
+
+    return best
 
 
 # Singleton instance
@@ -593,6 +696,11 @@ def _arxiv_pdf_blob_key(arxiv_id: str) -> str:
     return f"arxiv/papers/{safe}.pdf"
 
 
+def _arxiv_markdown_blob_key(arxiv_id: str) -> str:
+    safe = _normalise_arxiv_id(arxiv_id).replace("/", "_")
+    return f"arxiv/papers/{safe}.md"
+
+
 def _coerce_mapping(value: Any) -> Dict[str, Any] | None:
     if isinstance(value, dict):
         return value
@@ -626,6 +734,8 @@ def _normalise_path_candidate(value: str) -> str | None:
             path = f"//{parsed.netloc}{path}"
         if re.match(r"^/[A-Za-z]:/", path):
             path = path[1:]
+        if path and path.lower().endswith(".md"):
+            path = path[:-3] + ".pdf"
         return path or None
 
     if "://" in candidate:
@@ -644,21 +754,13 @@ def _normalise_path_candidate(value: str) -> str | None:
         if match:
             return match.group(1)
 
+    if candidate.lower().endswith(".md"):
+        return candidate[:-3] + ".pdf"
+
     return None
 
 
 def _extract_download_file_path(result: Dict[str, Any]) -> str | None:
-    keys = {
-        "file_path",
-        "path",
-        "filepath",
-        "filename",
-        "pdf_path",
-        "local_path",
-        "output_path",
-        "uri",
-        "text",
-    }
     stack: list[Any] = [result]
     seen: set[int] = set()
 
@@ -677,8 +779,8 @@ def _extract_download_file_path(result: Dict[str, Any]) -> str | None:
 
         mapping = _coerce_mapping(item)
         if mapping is not None:
-            for key, value in mapping.items():
-                if key in keys and isinstance(value, str):
+            for value in mapping.values():
+                if isinstance(value, str):
                     maybe = _normalise_path_candidate(value)
                     if maybe:
                         return maybe

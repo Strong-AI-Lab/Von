@@ -431,6 +431,8 @@ def _normalise_path_candidate(value: str) -> str | None:
             path = f"//{parsed.netloc}{path}"
         if re.match(r"^/[A-Za-z]:/", path):
             path = path[1:]
+        if path and path.lower().endswith(".md"):
+            path = path[:-3] + ".pdf"
         return path or None
 
     if "://" in candidate:
@@ -449,11 +451,13 @@ def _normalise_path_candidate(value: str) -> str | None:
         if match:
             return match.group(1)
 
+    if candidate.lower().endswith(".md"):
+        return candidate[:-3] + ".pdf"
+
     return None
 
 
 def _extract_download_file_path(result: Dict[str, Any]) -> str | None:
-    keys = {"file_path", "path", "filepath", "filename", "uri", "text"}
     stack: list[Any] = [result]
     seen: set[int] = set()
 
@@ -472,8 +476,8 @@ def _extract_download_file_path(result: Dict[str, Any]) -> str | None:
 
         mapping = _coerce_mapping(item)
         if mapping is not None:
-            for key, value in mapping.items():
-                if key in keys and isinstance(value, str):
+            for value in mapping.values():
+                if isinstance(value, str):
                     maybe = _normalise_path_candidate(value)
                     if maybe:
                         return maybe
