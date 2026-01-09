@@ -31,6 +31,25 @@ class _StubLLMSequence:
         return self._responses.pop(0)
 
 
+class _StubOrchestrator:
+    def __init__(self, result):
+        self._result = result
+        self.calls: list[dict] = []
+
+    def configure_execution_caps(self, **_kwargs) -> None:
+        return None
+
+    def set_progress_callback(self, _callback) -> None:
+        return None
+
+    def run(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return self._result
+
+    def execute_workflow(self, *_args, **_kwargs):
+        return None
+
+
 def _make_app(monkeypatch, llm: _LLMProtocol) -> Flask:
     from src.backend.server.routes.von_routes import von_bp
 
@@ -241,3 +260,63 @@ def test_generate_narration_prompt_includes_preferred_and_max_speaking_seconds(
     assert "Speech timing hint" in system_text, system_text
     assert "preferred_speaking_seconds=20" in system_text
     assert "max_speaking_seconds=40" in system_text
+
+
+def test_presenter_mode_uses_tool_screen_when_screen_tag_missing(monkeypatch):
+    import json
+
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    app = _make_app(monkeypatch, llm)
+
+    tool_payload = {
+        "tool": "fetch_concept",
+        "status": "ok",
+        "duration_ms": 12,
+        "payload": {"concept_id": "#V#example"},
+    }
+    tool_message = {"role": "tool", "content": json.dumps(tool_payload)}
+    orchestrator_result = OrchestratorResult(
+        response_text="Plain response without presenter tags.",
+        extra_messages=[tool_message],
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(orchestrator_result)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Hello", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    expected_screen = (
+        "Tool results:\n\n"
+        "1. fetch_concept\n"
+        "Status: ok\n"
+        "Duration: 12 ms\n"
+        "Payload:\n"
+        "```json\n"
+        "{\n"
+        "  \"concept_id\": \"#V#example\"\n"
+        "}\n"
+        "```"
+    )
+
+    assert body["response"] == expected_screen
+    assert body["response_channels"] == {
+        "screen": expected_screen,
+        "spoken": "Short talk track.",
+        "format": "tool_results_fallback_v1",
+    }
+
+    llm_debug = body["llm_debug"]
+    assert llm_debug.get("spoken_backfill_second_pass_attempted") is True
+    assert llm_debug.get("spoken_backfill_second_pass_reason") == "missing_spoken"
+
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["prompt"] == "Generate <spoken> talk track"
