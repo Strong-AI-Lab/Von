@@ -2967,6 +2967,12 @@ async function refreshChatSessionTabs() {
         return;
     }
 
+    // Avoid UI flicker: if we have a last-known-good session list, keep it visible
+    // while refresh is in flight (and especially if the container was previously hidden).
+    if (container.hidden && Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0) {
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+    }
+
     if (pendingSessionTabsRefresh) {
         clearTimeout(pendingSessionTabsRefresh);
         pendingSessionTabsRefresh = null;
@@ -2978,7 +2984,7 @@ async function refreshChatSessionTabs() {
         const response = await fetch('/von/history/sessions?limit=50&summary=light', { cache: 'no-store' });
         const data = await response.json();
 
-        if (!response.ok || data?.authenticated === false) {
+        if (data?.authenticated === false) {
             container.innerHTML = '';
             container.hidden = true;
             lastRenderedSessionCount = 0;
@@ -2986,7 +2992,35 @@ async function refreshChatSessionTabs() {
             return;
         }
 
+        if (!response.ok) {
+            console.warn('[chatTab] Failed to refresh chat sessions (keeping existing tabs)', {
+                status: response.status,
+                data
+            });
+            if (Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0) {
+                container.hidden = false;
+            }
+            return;
+        }
+
         const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+
+        // If the server temporarily reports no sessions (e.g. after creating a new chat
+        // while history is still updating), keep the existing UI rather than hiding it.
+        if (sessions.length === 0) {
+            if (Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0) {
+                console.warn('[chatTab] Session list empty during refresh; keeping existing tabs');
+                setTimeout(() => scheduleChatSessionTabsRefresh(true), 2000);
+                return;
+            }
+
+            container.innerHTML = '';
+            container.hidden = true;
+            lastRenderedSessionCount = 0;
+            sessionTabsCache = [];
+            return;
+        }
+
         sessionTabsCache = sessions;
         const activeSessionId = (typeof data?.active_session_id === 'string' && data.active_session_id.trim())
             ? data.active_session_id.trim()
@@ -3002,6 +3036,15 @@ async function refreshChatSessionTabs() {
         renderChatSessionTabs(sessions, activeChatSessionId || activeSessionId);
     } catch (err) {
         console.error('Failed to load chat sessions:', err);
+
+        // If the refresh failed but we have cached tabs, ensure they remain visible.
+        if (Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0) {
+            try {
+                renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+            } catch (renderErr) {
+                console.error('Failed to re-render cached chat tabs:', renderErr);
+            }
+        }
     }
 }
 

@@ -35,6 +35,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 
 ## Tooling and Automation
 - Activate required external tool categories (Jira, Vontology, MongoDB, GitHub) without asking, when clearly needed.
+- Treat tool categories as opt-in per session: activate before first use, and occasionally check whether a matching tool deactivation call exists (to disable categories when no longer needed).
 - If a tool category is not enabled, request enabling it by exact name.
 - If Vontology or Vonrag MCP tools are not exposed in this session, use the stdio proxy scripts (`scripts/query_vontology_mcp.py`, `scripts/query_vonrag_mcp.py`) and check cached tool lists in `data/mcp_tool_cache/`.
 - After implementing a fix and tests pass, post a Jira summary comment and transition the issue to the correct state.
