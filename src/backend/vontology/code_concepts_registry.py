@@ -12,8 +12,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
+from ..models.text_value_models import RelationPredicate
+
 
 MENTIONED_IN_VON_CODE_ID = "#V#mentioned_in_von_code"
+MENTIONED_IN_VON_TEST_ID = "#V#mentioned_in_von_test"
 PREDICATE_TYPE_ID = "#V#predicate"
 
 
@@ -34,46 +37,117 @@ def _predicate_md(concept_id: str, display_name: str) -> str:
     )
 
 
-# These are the canonical text-relation predicates supported by the backend.
-#
+def _unique_ids(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+_TEXT_PREDICATE_IDS = [
+    f"#V#{RelationPredicate.HAS_NAME}",
+    f"#V#{RelationPredicate.HAS_DESCRIPTION}",
+    f"#V#{RelationPredicate.HAS_CONTENT}",
+    f"#V#{RelationPredicate.HAS_NOTE}",
+    f"#V#{RelationPredicate.HAS_INTERACTION}",
+    "#V#hasDefinition",
+]
+
+_FILE_METADATA_PREDICATE_IDS = [
+    "#V#has_original_filename",
+    "#V#has_sha256",
+    "#V#has_size_bytes",
+    "#V#has_upload_timestamp",
+    "#V#has_mime_type",
+    "#V#has_blob_backend",
+    "#V#has_blob_key",
+    "#V#has_blob_uri",
+]
+
+_WORKFLOW_PREDICATE_IDS = [
+    "#V#hasInitialStep",
+    "#V#has_initial_step",
+    "#V#hasStep",
+    "#V#has_step",
+    "#V#hasPrecondition",
+    "#V#has_precondition",
+    "#V#hasEffect",
+    "#V#has_effect",
+    "#V#invokesAction",
+    "#V#invokes_action",
+    "#V#nextStep",
+    "#V#next_step",
+    "#V#onTrueNextStep",
+    "#V#on_true_next_step",
+    "#V#onFalseNextStep",
+    "#V#on_false_next_step",
+    "#V#onFailureNextStep",
+    "#V#on_failure_next_step",
+    "#V#readsVariable",
+    "#V#reads_variable",
+    "#V#writesVariable",
+    "#V#writes_variable",
+]
+
+_RELATION_META_PREDICATE_IDS = [
+    "#V#salient_binary_predicate_for_type",
+    "#V#suggested_relations_for_type",
+    "#V#arg_num_is_instance",
+]
+
+_STRUCTURAL_PREDICATE_IDS = [
+    "#V#is_a_type_of",
+    "#V#has_subtype",
+    "#V#is_an_instance_of",
+    "#V#has_instance",
+    "#V#related_to",
+]
+
+_OTHER_PREDICATE_IDS = [
+    "#V#has_email",
+    "#V#hasRole",
+    "#V#memberOf",
+    "#V#member_of_organisation",
+    "#V#has_birthplace",
+    "#V#has_occupation",
+]
+
+# These are the canonical predicate concepts that we treat as built-in and
+# surfaced in the UI even when no Mongo concept document exists.
+_CODE_PREDICATE_IDS = _unique_ids(
+    [
+        *_TEXT_PREDICATE_IDS,
+        *_FILE_METADATA_PREDICATE_IDS,
+        *_WORKFLOW_PREDICATE_IDS,
+        *_RELATION_META_PREDICATE_IDS,
+        *_STRUCTURAL_PREDICATE_IDS,
+        *_OTHER_PREDICATE_IDS,
+    ]
+)
+
 # Note: The text-relations layer also supports non-#V# predicates (e.g. "hasContent"),
 # but the UI expects concept-like identifiers for cartouches and navigation.
 _CODE_PREDICATE_CONCEPTS: Dict[str, CodeConcept] = {
-    "#V#hasName": CodeConcept(
-        concept_id="#V#hasName",
-        display_name="hasName",
+    concept_id: CodeConcept(
+        concept_id=concept_id,
+        display_name=concept_id.replace("#V#", ""),
         kind="predicate",
-        md_content=_predicate_md("#V#hasName", "hasName"),
-    ),
-    "#V#hasDescription": CodeConcept(
-        concept_id="#V#hasDescription",
-        display_name="hasDescription",
-        kind="predicate",
-        md_content=_predicate_md("#V#hasDescription", "hasDescription"),
-    ),
-    "#V#hasContent": CodeConcept(
-        concept_id="#V#hasContent",
-        display_name="hasContent",
-        kind="predicate",
-        md_content=_predicate_md("#V#hasContent", "hasContent"),
-    ),
-    "#V#hasNote": CodeConcept(
-        concept_id="#V#hasNote",
-        display_name="hasNote",
-        kind="predicate",
-        md_content=_predicate_md("#V#hasNote", "hasNote"),
-    ),
-    "#V#hasInteraction": CodeConcept(
-        concept_id="#V#hasInteraction",
-        display_name="hasInteraction",
-        kind="predicate",
-        md_content=_predicate_md("#V#hasInteraction", "hasInteraction"),
-    ),
+        md_content=_predicate_md(concept_id, concept_id.replace("#V#", "")),
+    )
+    for concept_id in _CODE_PREDICATE_IDS
 }
 
 
 def iter_code_concepts() -> Iterable[CodeConcept]:
     return _CODE_PREDICATE_CONCEPTS.values()
+
+
+def list_code_predicate_ids() -> list[str]:
+    return list(_CODE_PREDICATE_IDS)
 
 
 def is_code_concept_id(concept_id: str) -> bool:

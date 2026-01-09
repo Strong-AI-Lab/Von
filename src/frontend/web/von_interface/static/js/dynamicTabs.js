@@ -469,8 +469,10 @@ function createDynamicConceptTab(conceptId, conceptName, tabId, kind, opts = {})
     // Get display names for the concept
     const displayNames = getConceptTypeDisplayNames(conceptId);
 
-    // Create tab button: singular for individual tabs, plural for type tabs
-    const buttonText = kind === 'individual' ? displayNames.singular : displayNames.plural;
+    // Create tab button: singular for individual/predicate tabs, plural for type tabs
+    const buttonText = (kind === 'individual' || kind === 'predicate')
+        ? displayNames.singular
+        : displayNames.plural;
     const tabButton = createTabButton(tabId, buttonText, conceptId, kind, opts);
 
     // After initial creation, asynchronously refine label using shortest name in current language
@@ -1738,7 +1740,10 @@ export function initializeDynamicTabs() {
                 console.warn('[dynamicTabs] open-concept-tab missing conceptId or conceptName');
                 return;
             }
-            const conceptIdStr = String(conceptId);
+            let conceptIdStr = String(conceptId);
+            if (kind === 'predicate' && !conceptIdStr.startsWith('#V#')) {
+                conceptIdStr = `#V#${conceptIdStr}`;
+            }
             if (!conceptIdStr.startsWith('#V#')) {
                 // Older datasets sometimes surface legacy IDs (e.g. GUIDs). Warn but allow them so the user can inspect/delete.
                 console.warn('[dynamicTabs] open-concept-tab conceptId does not use canonical #V# prefix:', conceptIdStr);
@@ -5070,6 +5075,12 @@ async function renderRelationships(conceptId, suffix, kind) {
         ];
         const structuralKeys = new Set(sections.map(s => s.key).concat(['has_instance']));
 
+        const toPredicateConceptId = (value) => {
+            if (!value) return value;
+            if (String(value).startsWith('#V#')) return value;
+            return `#V#${value}`;
+        };
+
         const wrapper = document.createElement('div');
         wrapper.className = 'relationships-wrapper';
 
@@ -5095,8 +5106,9 @@ async function renderRelationships(conceptId, suffix, kind) {
             // Make predicate header clickable to open concept tab
             predicateChip.addEventListener('click', () => {
                 try {
+                    const predicateId = toPredicateConceptId(s.key);
                     const evt = new CustomEvent('open-concept-tab', {
-                        detail: { conceptId: s.key, conceptName: s.title, kind: 'predicate', activate: true }
+                        detail: { conceptId: predicateId, conceptName: s.title, kind: 'predicate', activate: true }
                     });
                     document.dispatchEvent(evt);
                 } catch (e) {
@@ -5252,8 +5264,9 @@ async function renderRelationships(conceptId, suffix, kind) {
             // Make dynamic predicate header clickable
             predicateChip.addEventListener('click', () => {
                 try {
+                    const predicateId = toPredicateConceptId(dk);
                     const evt = new CustomEvent('open-concept-tab', {
-                        detail: { conceptId: dk, conceptName: titleText, kind: 'predicate', activate: true }
+                        detail: { conceptId: predicateId, conceptName: titleText, kind: 'predicate', activate: true }
                     });
                     document.dispatchEvent(evt);
                 } catch (e) {

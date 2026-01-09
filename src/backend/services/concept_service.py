@@ -31,7 +31,7 @@ import uuid  # Added for GUID generation
 import traceback  # Added for error logging
 from datetime import datetime, timezone  # Ensure timezone is imported
 import requests  # Added for requests.exceptions.ConnectionError
-from typing import Dict, Any, Optional, List, Tuple  # Added Tuple
+from typing import Dict, Any, Optional, List, Tuple, Iterable  # Added Tuple
 from pymongo.errors import PyMongoError  # Added for DB operations
 
 try:
@@ -850,6 +850,11 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
 
     update_payload["$set"]["updated_at"] = datetime.now(timezone.utc)
 
+    relationship_update = any(
+        key == "relationships" or key.startswith("relationships.")
+        for key in update_data.keys()
+    )
+
     try:
         # REFACTORING_NOTE: Using find_one_and_update to get the updated document back.
         # The `return_document=ReturnDocument.AFTER` option ensures the document after the update is returned.
@@ -867,6 +872,23 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
         else:
             id_filter = {"$or": [{"_id": concept_id}, {"concept_id": concept_id}]}
 
+        previous_relationships = None
+        previous_concept_id = None
+        if relationship_update:
+            try:
+                prior_doc = concepts_coll.find_one(
+                    id_filter, {"relationships": 1, "concept_id": 1}
+                )
+                if prior_doc:
+                    previous_relationships = prior_doc.get("relationships") or {}
+                    previous_concept_id = prior_doc.get("concept_id")
+            except Exception as prior_err:
+                logger.warning(
+                    "update_concept: failed to load prior relationships for %s: %s",
+                    concept_id,
+                    prior_err,
+                )
+
         updated_concept_doc = concepts_coll.find_one_and_update(
             id_filter, update_payload, return_document=ReturnDocument.AFTER
         )
@@ -883,6 +905,27 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
         # Ensure notes field uses proper getter function for consistency in API response
         if updated_concept_doc:
             updated_concept_doc["notes"] = get_concept_notes(updated_concept_doc)
+
+        if relationship_update:
+            try:
+                concept_identifier = (
+                    updated_concept_doc.get("concept_id")
+                    if updated_concept_doc
+                    else previous_concept_id
+                )
+                concept_identifier = concept_identifier or concept_id
+                if concept_identifier:
+                    ConceptsRepository.reconcile_relationships(
+                        concept_identifier,
+                        (updated_concept_doc or {}).get("relationships") or {},
+                        previous_relationships=previous_relationships,
+                    )
+            except Exception as reconcile_err:
+                logger.warning(
+                    "update_concept: relationship reconciliation best-effort failure for %s: %s",
+                    concept_id,
+                    reconcile_err,
+                )
 
         try:
             invalidate_phrase_cache()
@@ -1222,7 +1265,6 @@ def list_concepts(
             f"List concepts: query={query}, found {len(concepts_list)} concepts, total_count={total_count}"
         )
         return concepts_list, total_count
-
     except PyMongoError as e:
         logger.error(f"Database error in list_concepts: {e}", exc_info=True)
         # Propagate as a service-level exception
@@ -1232,6 +1274,37 @@ def list_concepts(
         raise ConceptServiceError(
             f"An unexpected error occurred while listing concepts: {str(e)}"
         )
+
+
+def iter_concept_ids() -> Iterable[str]:
+    """Yield concept_id values for all visible concepts.
+
+    This avoids pagination/count overhead when you need to scan the full set.
+    """
+    concepts_coll = ConceptsRepository.collection()
+    if concepts_coll is None:
+        raise ConceptServiceError("Database collection 'concepts' not available.")
+
+    query: MongoQuery = apply_concept_query_filter({})
+    cursor = ConceptsRepository.find(query, {"concept_id": 1})
+    for concept_doc in cursor:
+        cid = concept_doc.get("concept_id")
+        if isinstance(cid, str) and cid:
+            yield cid
+
+
+def iter_concept_relationship_docs() -> Iterable[Dict[str, Any]]:
+    """Yield concept_id, relationships, and metadata for all visible concepts."""
+    concepts_coll = ConceptsRepository.collection()
+    if concepts_coll is None:
+        raise ConceptServiceError("Database collection 'concepts' not available.")
+
+    query: MongoQuery = apply_concept_query_filter({})
+    cursor = ConceptsRepository.find(
+        query, {"concept_id": 1, "relationships": 1, "metadata": 1}
+    )
+    for concept_doc in cursor:
+        yield concept_doc
 
 
 # REFACTORING_NOTE: Functions for 'user_concept_tracking' collection will go here.

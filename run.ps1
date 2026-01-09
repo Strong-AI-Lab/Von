@@ -671,6 +671,32 @@ function Invoke-DailyBackupIfDue {
             $env:MONGO_ALLOW_LOCAL_FALLBACK = '0'
             & $pdmExe run python $backupScript --apply --out-dir $backupRoot --tag auto-daily 2>&1 | ForEach-Object { "[daily-backup] $_" }
             if ($LASTEXITCODE -ne 0) { throw "backup script failed with exit code $LASTEXITCODE" }
+            if (-not ($env:VON_DISABLE_CODE_MENTION_SCAN -and $env:VON_DISABLE_CODE_MENTION_SCAN.ToString() -match '^(1|true|yes)$')) {
+                $scanScript = Join-Path $root 'src/utilities/scan_code_concepts.py'
+                if (Test-Path $scanScript) {
+                    & $pdmExe run python $scanScript --sync-mentions --apply 2>&1 | ForEach-Object { "[code-mention-scan] $_" }
+                    if ($LASTEXITCODE -ne 0) { Write-Host "[code-mention-scan] ERROR exit=$LASTEXITCODE" }
+                }
+                else {
+                    Write-Host "[code-mention-scan] WARN: script missing ($scanScript)"
+                }
+            }
+            else {
+                Write-Host "[code-mention-scan] disabled via VON_DISABLE_CODE_MENTION_SCAN"
+            }
+            if (-not ($env:VON_DISABLE_CODE_PREDICATE_SYNC -and $env:VON_DISABLE_CODE_PREDICATE_SYNC.ToString() -match '^(1|true|yes)$')) {
+                $syncScript = Join-Path $root 'src/utilities/sync_code_predicates.py'
+                if (Test-Path $syncScript) {
+                    & $pdmExe run python $syncScript --retag-non-predicates 2>&1 | ForEach-Object { "[code-predicate-sync] $_" }
+                    if ($LASTEXITCODE -ne 0) { Write-Host "[code-predicate-sync] ERROR exit=$LASTEXITCODE" }
+                }
+                else {
+                    Write-Host "[code-predicate-sync] WARN: script missing ($syncScript)"
+                }
+            }
+            else {
+                Write-Host "[code-predicate-sync] disabled via VON_DISABLE_CODE_PREDICATE_SYNC"
+            }
             (Get-Date).ToUniversalTime().ToString('o') | Set-Content $sentinelPath
             Write-Host '[daily-backup] Completed.'
         }
@@ -1927,6 +1953,64 @@ Von Launcher Help
 '@ | Write-Host
 }
 
+function Invoke-CodeMentionScan {
+    param([string]$Reason = 'backup')
+    if ($env:VON_DISABLE_CODE_MENTION_SCAN -and $env:VON_DISABLE_CODE_MENTION_SCAN.ToString() -match '^(1|true|yes)$') {
+        Write-LauncherLog "[code-mention-scan] disabled via VON_DISABLE_CODE_MENTION_SCAN"
+        return
+    }
+    $scriptPath = 'src/utilities/scan_code_concepts.py'
+    $fullPath = Join-Path $Root $scriptPath
+    if (-not (Test-Path $fullPath)) {
+        Write-LauncherLog "[code-mention-scan] WARN: script missing ($scriptPath)"
+        return
+    }
+    $pdm = if (Test-Path (Join-Path $Root '.venv\\Scripts\\pdm.exe')) { Join-Path $Root '.venv\\Scripts\\pdm.exe' } else { 'pdm' }
+    Write-LauncherLog "[code-mention-scan] Running scan (reason=$Reason)"
+    $start = Get-Date
+    $output = & $pdm run python $scriptPath --sync-mentions --apply 2>&1
+    $end = Get-Date
+    $elapsedMs = [int]($end - $start).TotalMilliseconds
+    $rawOutPath = Join-Path $RunDir 'code_mention_scan_last_output.log'
+    try { $output | Out-File -FilePath $rawOutPath -Encoding UTF8 } catch { }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0) {
+        Write-LauncherLog "[code-mention-scan] OK (elapsed=${elapsedMs}ms)"
+    }
+    else {
+        Write-LauncherLog "[code-mention-scan] ERROR exit=$exitCode (elapsed=${elapsedMs}ms) see $rawOutPath"
+    }
+}
+
+function Invoke-CodePredicateSync {
+    param([string]$Reason = 'backup')
+    if ($env:VON_DISABLE_CODE_PREDICATE_SYNC -and $env:VON_DISABLE_CODE_PREDICATE_SYNC.ToString() -match '^(1|true|yes)$') {
+        Write-LauncherLog "[code-predicate-sync] disabled via VON_DISABLE_CODE_PREDICATE_SYNC"
+        return
+    }
+    $scriptPath = 'src/utilities/sync_code_predicates.py'
+    $fullPath = Join-Path $Root $scriptPath
+    if (-not (Test-Path $fullPath)) {
+        Write-LauncherLog "[code-predicate-sync] WARN: script missing ($scriptPath)"
+        return
+    }
+    $pdm = if (Test-Path (Join-Path $Root '.venv\\Scripts\\pdm.exe')) { Join-Path $Root '.venv\\Scripts\\pdm.exe' } else { 'pdm' }
+    Write-LauncherLog "[code-predicate-sync] Running sync (reason=$Reason)"
+    $start = Get-Date
+    $output = & $pdm run python $scriptPath --retag-non-predicates 2>&1
+    $end = Get-Date
+    $elapsedMs = [int]($end - $start).TotalMilliseconds
+    $rawOutPath = Join-Path $RunDir 'code_predicate_sync_last_output.log'
+    try { $output | Out-File -FilePath $rawOutPath -Encoding UTF8 } catch { }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0) {
+        Write-LauncherLog "[code-predicate-sync] OK (elapsed=${elapsedMs}ms)"
+    }
+    else {
+        Write-LauncherLog "[code-predicate-sync] ERROR exit=$exitCode (elapsed=${elapsedMs}ms) see $rawOutPath"
+    }
+}
+
 function Invoke-BackupNow {
     <#
         Run an on-demand DB backup without restarting the server.
@@ -1957,6 +2041,8 @@ function Invoke-BackupNow {
     $exitCode = $LASTEXITCODE
     if ($exitCode -eq 0) {
         Write-LauncherLog "[backup] OK"
+        try { Invoke-CodeMentionScan -Reason 'manual-backup' } catch { Write-LauncherLog "[code-mention-scan] WARN: $($_.Exception.Message)" }
+        try { Invoke-CodePredicateSync -Reason 'manual-backup' } catch { Write-LauncherLog "[code-predicate-sync] WARN: $($_.Exception.Message)" }
     }
     else {
         Write-LauncherLog "[backup] ERROR exit=$exitCode"

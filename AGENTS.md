@@ -9,11 +9,12 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 3. Never clobber `.env`. Only touch it if explicitly asked; never print its contents or secrets.
 4. It's fine to auto-start the server; don't wait for explicit user instruction. (Still obey system/developer constraints if stricter.)
 5. Use MCP tools (Vontology/Jira/Mongo) by default; explain if you must use another path.
-6. JIRA issues must be assigned on creation (assignee = current user unless told otherwise).
-7. Keep changes minimal, well-scoped, and add/update tests and docs where relevant.
-8. Prefer small, composable functions; avoid monolithic helpers.
-9. Always check VS Code Problems panel (or run `get_errors`) after edits and when errors are reported.
-10. Enable pre-commit guardrails: `git config core.hooksPath .githooks`.
+6. Do not use direct DB access methods for Vontology data; use Vontology routes/services (API/MCP) instead.
+7. JIRA issues must be assigned on creation (assignee = current user unless told otherwise).
+8. Keep changes minimal, well-scoped, and add/update tests and docs where relevant.
+9. Prefer small, composable functions; avoid monolithic helpers.
+10. Always check VS Code Problems panel (or run `get_errors`) after edits and when errors are reported. If the Problems panel is not available, run `pyright` as a proxy.
+11. Enable pre-commit guardrails: `git config core.hooksPath .githooks`.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
