@@ -1000,6 +1000,75 @@ def _extract_presenter_channels(text: str) -> dict[str, object] | None:
     }
 
 
+def _presenter_tag_present(text: str, tag: str) -> bool:
+    if not isinstance(text, str) or not text:
+        return False
+    pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
+    return bool(re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE))
+
+
+def _build_presenter_screen_from_tool_messages(
+    tool_messages: list[dict],
+) -> str | None:
+    if not tool_messages:
+        return None
+
+    import json
+
+    entries: list[str] = []
+    index = 0
+    for msg in tool_messages:
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        index += 1
+        parsed = None
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            parsed = None
+
+        if isinstance(parsed, dict):
+            tool_name = parsed.get("tool") or parsed.get("method") or "tool"
+            status = parsed.get("status")
+            duration_ms = parsed.get("duration_ms")
+            error = parsed.get("error")
+            payload = parsed.get("payload")
+
+            lines = [f"{index}. {tool_name}"]
+            if status:
+                lines.append(f"Status: {status}")
+            if duration_ms is not None:
+                lines.append(f"Duration: {duration_ms} ms")
+            if error:
+                lines.append(f"Error: {error}")
+            if payload is not None:
+                try:
+                    payload_text = json.dumps(
+                        payload,
+                        indent=2,
+                        sort_keys=True,
+                        ensure_ascii=True,
+                    )
+                except Exception:
+                    payload_text = str(payload)
+                lines.append("Payload:")
+                lines.append("```json")
+                lines.append(payload_text)
+                lines.append("```")
+            entries.append("\n".join(lines))
+        else:
+            raw = content.strip()
+            entries.append(f"{index}. Tool result\n```\n{raw}\n```")
+
+    if not entries:
+        return None
+
+    return "Tool results:\n\n" + "\n\n".join(entries)
+
+
 def _is_prompt_introspection_question(text: str) -> bool:
     lowered = (text or "").strip().lower()
     if not lowered:
@@ -2616,6 +2685,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
 
         presenter_channels = _extract_presenter_channels(response_text)
+        if presenter_mode_requested and tool_messages:
+            screen_tag_present = _presenter_tag_present(response_text, "screen")
+            screen_text = None
+            if isinstance(presenter_channels, dict):
+                screen_value = presenter_channels.get("screen")
+                if isinstance(screen_value, str) and screen_value.strip():
+                    screen_text = screen_value.strip()
+            if not screen_tag_present or not screen_text:
+                tool_screen = _build_presenter_screen_from_tool_messages(tool_messages)
+                if tool_screen:
+                    base_channels = (
+                        dict(presenter_channels)
+                        if isinstance(presenter_channels, dict)
+                        else {}
+                    )
+                    base_channels["screen"] = tool_screen
+                    base_channels["format"] = "tool_results_fallback_v1"
+                    presenter_channels = base_channels
 
         def _extract_spoken_only(text: str) -> str | None:
             if not isinstance(text, str) or not text:
@@ -2892,7 +2979,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         )
                         base_channels["screen"] = screen_text
                         base_channels["spoken"] = spoken_fallback
-                        base_channels["format"] = "narration_fallback_v1"
+                        existing_format = base_channels.get("format")
+                        base_channels["format"] = (
+                            existing_format
+                            if existing_format == "tool_results_fallback_v1"
+                            else "narration_fallback_v1"
+                        )
                         presenter_channels = base_channels
             except Exception:
                 # Defensive: never fail the request just because narration generation failed.
