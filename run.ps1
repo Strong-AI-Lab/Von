@@ -1258,43 +1258,48 @@ function Invoke-DailyGovernanceScan {
         catch { }
     }
     if (-not $shouldRun -and -not $force) { return }
-    $allowLocal = ($env:VON_GOV_SCAN_ALLOW_LOCAL -eq '1')
-    $scanner = 'scripts/mark_code_referenced_concepts.py'
+    $scanner = 'src/utilities/scan_code_concepts.py'
     if (-not (Test-Path (Join-Path $root $scanner))) { Write-LauncherLog "[governance-scan] scanner script missing ($scanner)"; return }
+    $includeDocstrings = $false
+    if ($env:VON_GOV_SCAN_INCLUDE_DOCSTRINGS -and $env:VON_GOV_SCAN_INCLUDE_DOCSTRINGS.ToString() -match '^(1|true|yes)$') {
+        $includeDocstrings = $true
+    }
     Write-LauncherLog "[governance-scan] Running governance concept tag scan (interval ${intervalHours}h; force=$force)"
     $pdm = if (Test-Path (Join-Path $root '.venv/Scripts/pdm.exe')) { (Join-Path $root '.venv/Scripts/pdm.exe') } else { 'pdm' }
-    $pdmArgs = @('run', 'python', $scanner, '--execute')
-    if ($allowLocal) { $pdmArgs += '--allow-local' }
+    $pdmArgs = @('run', 'python', $scanner, '--sync-mentions', '--apply')
+    if ($includeDocstrings) { $pdmArgs += '--include-docstrings' }
     $start = Get-Date
     $output = & $pdm @pdmArgs 2>&1
     $end = Get-Date
     $elapsedMs = [int]($end - $start).TotalMilliseconds
-    $added = $null; $already = $null; $notFound = $null; $success = $false
+    $updated = 0; $skipped = 0; $missing = 0; $virtual = 0; $warnings = 0
     $rawOutPath = Join-Path $runDir 'governance_scan_last_output.log'
     try { $output | Out-File -FilePath $rawOutPath -Encoding UTF8 } catch { }
+    $exitCode = $LASTEXITCODE
+    $parsed = $null
     try {
         $jsonStart = ($output | Select-String -Pattern '^\{' -SimpleMatch | Select-Object -First 1).LineNumber
         if ($jsonStart -gt 0) {
             $jsonText = ($output | Select-Object -Skip ($jsonStart - 1)) -join "`n"
-            $parsed = $null; try { $parsed = $jsonText | ConvertFrom-Json -ErrorAction Stop } catch { }
-            if ($parsed) {
-                $success = $parsed.success
-                $added = ($parsed.added | Measure-Object).Count
-                $already = ($parsed.already_marked | Measure-Object).Count
-                $notFound = ($parsed.not_found | Measure-Object).Count
-                if (-not $success -and $parsed.error) {
-                    Write-LauncherLog "[governance-scan] error=$($parsed.error)"
-                }
+            try { $parsed = $jsonText | ConvertFrom-Json -ErrorAction Stop } catch { }
+            if ($parsed -and $parsed.sync_result) {
+                $sync = $parsed.sync_result
+                $updated = if ($sync.updated) { ($sync.updated | Measure-Object).Count } else { 0 }
+                $skipped = if ($sync.skipped) { ($sync.skipped | Measure-Object).Count } else { 0 }
+                $missing = if ($sync.missing) { ($sync.missing | Measure-Object).Count } else { 0 }
+                $virtual = if ($sync.virtual) { ($sync.virtual | Measure-Object).Count } else { 0 }
+                $warnings = if ($sync.warnings) { ($sync.warnings | Measure-Object).Count } else { 0 }
             }
         }
     }
     catch { }
+    $success = ($exitCode -eq 0 -and $null -ne $parsed)
     if ($success) {
         try { Set-Content -Path $sentinel -Value ($now.ToString('o')) -Encoding UTF8 } catch { }
         $failureCount = 0
         $status = 'success'
-        if ($added -eq 0 -and $already -ge 0 -and $notFound -ge 0) { $status = 'no-op' }
-        Write-LauncherLog "[governance-scan] $status added=$added already=$already not_found=$notFound elapsed=${elapsedMs}ms failures=$failureCount"
+        if ($updated -eq 0 -and $missing -eq 0 -and $virtual -eq 0 -and $warnings -eq 0) { $status = 'no-op' }
+        Write-LauncherLog "[governance-scan] $status updated=$updated skipped=$skipped missing=$missing virtual=$virtual warnings=$warnings elapsed=${elapsedMs}ms failures=$failureCount"
     }
     else {
         # Enhanced hint logic: prefer parsed.error(s); else first error/trace line; else last 5 lines
@@ -1334,26 +1339,44 @@ function Invoke-ConceptDataAbsenceCheck {
         catch { }
     }
     if (-not $shouldRun -and -not $force) { return }
-    $scriptPath = 'scripts/maintenance/check_concept_data_absence.py'
-    if (-not (Test-Path (Join-Path $root $scriptPath))) { Write-LauncherLog "[concept-data-check] script missing ($scriptPath)"; return }
-    Write-LauncherLog "[concept-data-check] Running absence check (interval ${IntervalHours}h force=$force)"
+    $scriptPath = 'src/utilities/verify_predicate_concepts.py'
+    if (-not (Test-Path (Join-Path $root $scriptPath))) { Write-LauncherLog "[predicate-verify] script missing ($scriptPath)"; return }
+    Write-LauncherLog "[predicate-verify] Running predicate concept verification (interval ${IntervalHours}h force=$force)"
     $pdm = if (Test-Path (Join-Path $root '.venv/Scripts/pdm.exe')) { (Join-Path $root '.venv/Scripts/pdm.exe') } else { 'pdm' }
     $start = Get-Date
     $output = & $pdm run python $scriptPath 2>&1
     $end = Get-Date
     $elapsedMs = [int]($end - $start).TotalMilliseconds
-    $rawOutPath = Join-Path $runDir 'concept_data_absence_last_output.log'
+    $rawOutPath = Join-Path $runDir 'predicate_verify_last_output.log'
     try { $output | Out-File -FilePath $rawOutPath -Encoding UTF8 } catch { }
     $exitCode = $LASTEXITCODE
-    if ($exitCode -eq 0) {
-        try { Set-Content -Path $sentinel -Value ($now.ToString('o')) -Encoding UTF8 } catch { }
-        Write-LauncherLog "[concept-data-check] OK (elapsed=${elapsedMs}ms)"
+    $parsed = $null
+    $total = 0; $missing = 0; $virtual = 0; $warnings = 0
+    try {
+        $jsonStart = ($output | Select-String -Pattern '^\{' -SimpleMatch | Select-Object -First 1).LineNumber
+        if ($jsonStart -gt 0) {
+            $jsonText = ($output | Select-Object -Skip ($jsonStart - 1)) -join "`n"
+            try { $parsed = $jsonText | ConvertFrom-Json -ErrorAction Stop } catch { }
+            if ($parsed) {
+                $total = if ($parsed.total_registry) { [int]$parsed.total_registry } else { 0 }
+                $missing = if ($parsed.missing) { ($parsed.missing | Measure-Object).Count } else { 0 }
+                $virtual = if ($parsed.virtual) { ($parsed.virtual | Measure-Object).Count } else { 0 }
+                $warnings = if ($parsed.warnings) { ($parsed.warnings | Measure-Object).Count } else { 0 }
+            }
+        }
     }
-    elseif ($exitCode -eq 2) {
-        Write-LauncherLog "[concept-data-check] VIOLATION: concept_data reappeared (elapsed=${elapsedMs}ms) see $rawOutPath"
+    catch { }
+    if ($exitCode -eq 0 -and $null -ne $parsed) {
+        try { Set-Content -Path $sentinel -Value ($now.ToString('o')) -Encoding UTF8 } catch { }
+        if ($missing -eq 0 -and $virtual -eq 0) {
+            Write-LauncherLog "[predicate-verify] OK total=$total missing=$missing virtual=$virtual warnings=$warnings elapsed=${elapsedMs}ms"
+        }
+        else {
+            Write-LauncherLog "[predicate-verify] MISSING total=$total missing=$missing virtual=$virtual warnings=$warnings elapsed=${elapsedMs}ms see $rawOutPath"
+        }
     }
     else {
-        Write-LauncherLog "[concept-data-check] ERROR exit=$exitCode (elapsed=${elapsedMs}ms) see $rawOutPath"
+        Write-LauncherLog "[predicate-verify] ERROR exit=$exitCode (elapsed=${elapsedMs}ms) see $rawOutPath"
     }
 }
 
@@ -1814,7 +1837,9 @@ function Invoke-CleanupPreservedFields {
 }
 
 ## (Removed duplicate Invoke-RelationCoverageSummary stub here)
-## Residual Legacy Text Audit (concept_data / preserved_fields still present)
+# -----------------------------------------------------------------------------
+# Relationship Alias Audit (normalise legacy relationship keys)
+# -----------------------------------------------------------------------------
 function Invoke-ResidualLegacyTextAudit {
     param([int]$IntervalHours = 24)
     if ($env:VON_RESIDUAL_TEXT_AUDIT_DISABLE -eq '1') { return }
@@ -1833,31 +1858,50 @@ function Invoke-ResidualLegacyTextAudit {
         catch { }
     }
     if (-not $shouldRun -and -not $force) { return }
-    $scriptPath = 'scripts/maintenance/audit_residual_preserved_fields.py'
-    if (-not (Test-Path (Join-Path $root $scriptPath))) { Write-LauncherLog "[residual-text-audit] script missing ($scriptPath)"; return }
-    Write-LauncherLog "[residual-text-audit] Running residual legacy text audit (interval ${IntervalHours}h force=$force)"
+    $scriptPath = 'src/utilities/normalise_relationship_aliases.py'
+    if (-not (Test-Path (Join-Path $root $scriptPath))) { Write-LauncherLog "[relation-alias-audit] script missing ($scriptPath)"; return }
+    Write-LauncherLog "[relation-alias-audit] Running relationship alias audit (interval ${IntervalHours}h force=$force)"
     $pdm = if (Test-Path (Join-Path $root '.venv/Scripts/pdm.exe')) { (Join-Path $root '.venv/Scripts/pdm.exe') } else { 'pdm' }
     $start = Get-Date
-    $output = & $pdm run python $scriptPath 2>&1
+    $pdmArgsLocal = @('run', 'python', $scriptPath, '--dry-run')
+    $output = & $pdm @pdmArgsLocal 2>&1
     $end = Get-Date
     $elapsedMs = [int]($end - $start).TotalMilliseconds
-    $rawOutPath = Join-Path $runDir 'residual_text_audit_last_output.log'
+    $rawOutPath = Join-Path $runDir 'relation_alias_audit_last_output.log'
     try { $output | Out-File -FilePath $rawOutPath -Encoding UTF8 } catch { }
     $exitCode = $LASTEXITCODE
-    if ($exitCode -eq 0) {
-        try { Set-Content -Path $sentinel -Value ($now.ToString('o')) -Encoding UTF8 } catch { }
-        Write-LauncherLog "[residual-text-audit] OK (elapsed=${elapsedMs}ms)"
+    $parsed = $null
+    $updated = 0; $warnings = 0
+    try {
+        $jsonStart = ($output | Select-String -Pattern '^\{' -SimpleMatch | Select-Object -First 1).LineNumber
+        if ($jsonStart -gt 0) {
+            $jsonText = ($output | Select-Object -Skip ($jsonStart - 1)) -join "`n"
+            try { $parsed = $jsonText | ConvertFrom-Json -ErrorAction Stop } catch { }
+            if ($parsed -and $parsed.updated) {
+                $updated = ($parsed.updated.PSObject.Properties | Measure-Object).Count
+            }
+            if ($parsed -and $parsed.warnings) {
+                $warnings = ($parsed.warnings | Measure-Object).Count
+            }
+        }
     }
-    elseif ($exitCode -eq 2) {
-        Write-LauncherLog "[residual-text-audit] VIOLATION: residual legacy text fields detected (elapsed=${elapsedMs}ms) see $rawOutPath"
+    catch { }
+    if ($exitCode -eq 0 -and $null -ne $parsed) {
+        try { Set-Content -Path $sentinel -Value ($now.ToString('o')) -Encoding UTF8 } catch { }
+        if ($updated -eq 0) {
+            Write-LauncherLog "[relation-alias-audit] OK updated=$updated warnings=$warnings elapsed=${elapsedMs}ms"
+        }
+        else {
+            Write-LauncherLog "[relation-alias-audit] DETECTED updated=$updated warnings=$warnings elapsed=${elapsedMs}ms see $rawOutPath"
+        }
     }
     else {
-        Write-LauncherLog "[residual-text-audit] ERROR exit=$exitCode (elapsed=${elapsedMs}ms) see $rawOutPath"
+        Write-LauncherLog "[relation-alias-audit] ERROR exit=$exitCode (elapsed=${elapsedMs}ms) see $rawOutPath"
     }
 }
 
 # -----------------------------------------------------------------------------
-# Cleanup Preserved Fields (concept_data.preserved_fields migration & purge)
+# Relationship Alias Cleanup (apply normalisation when enabled)
 # -----------------------------------------------------------------------------
 function Invoke-CleanupPreservedFields {
     param([int]$IntervalHours = 24)
@@ -1866,7 +1910,9 @@ function Invoke-CleanupPreservedFields {
     $runDir = Join-Path $root '.run'
     $sentinel = Join-Path $runDir 'last_cleanup_preserved_fields.txt'
     $force = ($env:VON_CLEANUP_PRESERVED_FORCE -eq '1')
-    $execute = ($env:VON_CLEANUP_PRESERVED_EXECUTE -eq '1')
+    $execute = $false
+    if ($env:VON_RELATION_ALIAS_EXECUTE -eq '1') { $execute = $true }
+    elseif ($env:VON_CLEANUP_PRESERVED_EXECUTE -eq '1') { $execute = $true }
     $now = Get-Date
     $shouldRun = $true
     if (-not $force -and (Test-Path $sentinel)) {
@@ -1878,10 +1924,10 @@ function Invoke-CleanupPreservedFields {
         catch { }
     }
     if (-not $shouldRun -and -not $force) { return }
-    $scriptPath = 'scripts/maintenance/cleanup_preserved_fields.py'
-    if (-not (Test-Path (Join-Path $root $scriptPath))) { Write-LauncherLog "[cleanup-preserved-fields] script missing ($scriptPath)"; return }
-    $mode = if ($execute) { 'execute' } else { 'dry-run' }
-    Write-LauncherLog "[cleanup-preserved-fields] Running cleanup (mode=$mode interval ${IntervalHours}h force=$force)"
+    $scriptPath = 'src/utilities/normalise_relationship_aliases.py'
+    if (-not (Test-Path (Join-Path $root $scriptPath))) { Write-LauncherLog "[relation-alias-cleanup] script missing ($scriptPath)"; return }
+    $mode = if ($execute) { 'apply' } else { 'dry-run' }
+    Write-LauncherLog "[relation-alias-cleanup] Running normalisation (mode=$mode interval ${IntervalHours}h force=$force)"
     $pdm = if (Test-Path (Join-Path $root '.venv/Scripts/pdm.exe')) { (Join-Path $root '.venv/Scripts/pdm.exe') } else { 'pdm' }
     $start = Get-Date
     $pdmArgsLocal = @('run', 'python', $scriptPath)
@@ -1889,19 +1935,39 @@ function Invoke-CleanupPreservedFields {
     $output = & $pdm @pdmArgsLocal 2>&1
     $end = Get-Date
     $elapsedMs = [int]($end - $start).TotalMilliseconds
-    $rawOutPath = Join-Path $runDir 'cleanup_preserved_fields_last_output.log'
+    $rawOutPath = Join-Path $runDir 'relation_alias_cleanup_last_output.log'
     try { $output | Out-File -FilePath $rawOutPath -Encoding UTF8 } catch { }
     $exitCode = $LASTEXITCODE
-    if ($exitCode -eq 0) {
-        try { Set-Content -Path $sentinel -Value ($now.ToString('o')) -Encoding UTF8 } catch { }
-        if ($execute) { Write-LauncherLog "[cleanup-preserved-fields] OK executed (elapsed=${elapsedMs}ms)" }
-        else { Write-LauncherLog "[cleanup-preserved-fields] OK no legacy fields detected (elapsed=${elapsedMs}ms)" }
+    $parsed = $null
+    $updated = 0; $warnings = 0
+    try {
+        $jsonStart = ($output | Select-String -Pattern '^\{' -SimpleMatch | Select-Object -First 1).LineNumber
+        if ($jsonStart -gt 0) {
+            $jsonText = ($output | Select-Object -Skip ($jsonStart - 1)) -join "`n"
+            try { $parsed = $jsonText | ConvertFrom-Json -ErrorAction Stop } catch { }
+            if ($parsed -and $parsed.updated) {
+                $updated = ($parsed.updated.PSObject.Properties | Measure-Object).Count
+            }
+            if ($parsed -and $parsed.warnings) {
+                $warnings = ($parsed.warnings | Measure-Object).Count
+            }
+        }
     }
-    elseif ($exitCode -eq 2 -and -not $execute) {
-        Write-LauncherLog "[cleanup-preserved-fields] DETECTED legacy preserved_fields (elapsed=${elapsedMs}ms) enable VON_CLEANUP_PRESERVED_EXECUTE=1 to migrate. See $rawOutPath"
+    catch { }
+    if ($exitCode -eq 0 -and $null -ne $parsed) {
+        try { Set-Content -Path $sentinel -Value ($now.ToString('o')) -Encoding UTF8 } catch { }
+        if ($execute) {
+            Write-LauncherLog "[relation-alias-cleanup] OK applied updated=$updated warnings=$warnings elapsed=${elapsedMs}ms"
+        }
+        elseif ($updated -eq 0) {
+            Write-LauncherLog "[relation-alias-cleanup] OK updated=$updated warnings=$warnings elapsed=${elapsedMs}ms"
+        }
+        else {
+            Write-LauncherLog "[relation-alias-cleanup] DETECTED updated=$updated warnings=$warnings elapsed=${elapsedMs}ms enable VON_RELATION_ALIAS_EXECUTE=1 to apply. See $rawOutPath"
+        }
     }
     else {
-        Write-LauncherLog "[cleanup-preserved-fields] ERROR exit=$exitCode (elapsed=${elapsedMs}ms) see $rawOutPath"
+        Write-LauncherLog "[relation-alias-cleanup] ERROR exit=$exitCode (elapsed=${elapsedMs}ms) see $rawOutPath"
     }
 }
 
