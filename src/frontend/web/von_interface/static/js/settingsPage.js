@@ -45,6 +45,39 @@ let runtimeStatusInFlight = false;
 
 let __vonIsAdminOrOwner = false;
 
+function _focusCurrentUserSettingsSection() {
+  try {
+    const section = document.getElementById('current-user-settings');
+    const authContainer = document.getElementById('authenticationStatus');
+    const target = section || authContainer;
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    setTimeout(() => {
+      try {
+        const loginButton = document.querySelector('#authenticationStatus button');
+        if (loginButton && typeof loginButton.focus === 'function') {
+          loginButton.focus();
+        }
+      } catch { }
+    }, 250);
+  } catch { }
+}
+
+// Allow parent (main app) to request focus on the login area from elsewhere (e.g. chat tabs placeholder).
+try {
+  window.addEventListener('message', (event) => {
+    try {
+      if (event.origin !== window.location.origin) return;
+      const type = event?.data?.type;
+      if (type === 'von:focus-current-user-settings') {
+        _focusCurrentUserSettingsSection();
+      }
+    } catch { }
+  });
+} catch { }
+
 function _setWriteConservatismOverrideBadgeEnabled(enabled) {
   try {
     const badge = document.getElementById('disableWriteToolConservatismOnBadge');

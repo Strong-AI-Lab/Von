@@ -2961,15 +2961,129 @@ function scheduleChatSessionTabsRefresh(force = false) {
     }, Math.max(500, SESSION_TABS_REFRESH_COOLDOWN_MS - elapsed));
 }
 
+function openSettingsToLogin() {
+    try {
+        const settingsTabButton = document.querySelector('.tab-button[data-tab="settingsTab"]');
+        if (settingsTabButton) {
+            settingsTabButton.click();
+        }
+
+        const sendFocusMessage = (attempt = 0) => {
+            const frame = document.getElementById('settingsFrame');
+            const targetWindow = frame?.contentWindow;
+            if (targetWindow) {
+                try {
+                    targetWindow.postMessage({ type: 'von:focus-current-user-settings' }, window.location.origin);
+                } catch (_) {
+                    // Best-effort
+                }
+
+                if (attempt < 8) {
+                    setTimeout(() => sendFocusMessage(attempt + 1), 250);
+                }
+                return;
+            }
+
+            if (attempt < 8) {
+                setTimeout(() => sendFocusMessage(attempt + 1), 250);
+            }
+        };
+
+        sendFocusMessage(0);
+    } catch (err) {
+        console.warn('[chatTab] Failed to open Settings for login:', err);
+        try { showToast('Unable to open Settings for login.', true); } catch (_) { }
+    }
+}
+
+function renderChatSessionTabsPlaceholder(mode = 'loading') {
+    const container = getChatSessionTabsContainer();
+    if (!container) {
+        return;
+    }
+
+    container.hidden = false;
+    container.innerHTML = '';
+
+    const fragment = document.createDocumentFragment();
+
+    const allowNewChat = mode !== 'unauthenticated';
+    if (allowNewChat) {
+        const newTab = document.createElement('button');
+        newTab.type = 'button';
+        newTab.className = 'chat-session-tab chat-session-tab-new';
+        newTab.title = 'New chat';
+        newTab.setAttribute('aria-label', 'New chat');
+        newTab.textContent = '+';
+        newTab.addEventListener('click', () => {
+            void promptAndCreateChatSession();
+        });
+        fragment.appendChild(newTab);
+    }
+
+    const placeholder = document.createElement('div');
+    placeholder.className = 'chat-session-tabs-placeholder';
+
+    if (mode === 'unauthenticated') {
+        placeholder.textContent = 'Log in to load your saved chats.';
+    } else if (mode === 'error') {
+        placeholder.textContent = 'Unable to load chats right now (will retry).';
+    } else if (mode === 'empty') {
+        placeholder.textContent = 'No saved chats yet.';
+    } else {
+        placeholder.textContent = 'Loading chats…';
+        placeholder.classList.add('is-loading');
+    }
+
+    fragment.appendChild(placeholder);
+
+    if (mode === 'unauthenticated') {
+        const loginTab = document.createElement('button');
+        loginTab.type = 'button';
+        loginTab.className = 'chat-session-tab';
+        loginTab.title = 'Open Settings to log in';
+        loginTab.setAttribute('aria-label', 'Open Settings to log in');
+        loginTab.textContent = 'Log in';
+        loginTab.addEventListener('click', () => {
+            openSettingsToLogin();
+        });
+        fragment.appendChild(loginTab);
+    }
+
+    if (mode === 'error') {
+        const retryTab = document.createElement('button');
+        retryTab.type = 'button';
+        retryTab.className = 'chat-session-tab';
+        retryTab.title = 'Retry loading chats';
+        retryTab.setAttribute('aria-label', 'Retry loading chats');
+        retryTab.textContent = 'Retry';
+        retryTab.addEventListener('click', () => {
+            scheduleChatSessionTabsRefresh(true);
+        });
+        fragment.appendChild(retryTab);
+    }
+
+    container.appendChild(fragment);
+}
+
 async function refreshChatSessionTabs() {
     const container = getChatSessionTabsContainer();
     if (!container) {
         return;
     }
 
+    const hasCachedTabs = Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0;
+    const containerLooksEmpty = container.hidden || !container.firstElementChild;
+
+    // If we're about to load sessions and there's nothing visible yet, keep a placeholder
+    // in the tabs bar so the controls don't disappear.
+    if (!hasCachedTabs && containerLooksEmpty) {
+        renderChatSessionTabsPlaceholder('loading');
+    }
+
     // Avoid UI flicker: if we have a last-known-good session list, keep it visible
     // while refresh is in flight (and especially if the container was previously hidden).
-    if (container.hidden && Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0) {
+    if (container.hidden && hasCachedTabs) {
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
     }
 
@@ -2985,8 +3099,7 @@ async function refreshChatSessionTabs() {
         const data = await response.json();
 
         if (data?.authenticated === false) {
-            container.innerHTML = '';
-            container.hidden = true;
+            renderChatSessionTabsPlaceholder('unauthenticated');
             lastRenderedSessionCount = 0;
             sessionTabsCache = [];
             return;
@@ -2997,8 +3110,11 @@ async function refreshChatSessionTabs() {
                 status: response.status,
                 data
             });
-            if (Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0) {
+            if (hasCachedTabs) {
                 container.hidden = false;
+            } else {
+                renderChatSessionTabsPlaceholder('error');
+                setTimeout(() => scheduleChatSessionTabsRefresh(true), 2000);
             }
             return;
         }
@@ -3008,16 +3124,16 @@ async function refreshChatSessionTabs() {
         // If the server temporarily reports no sessions (e.g. after creating a new chat
         // while history is still updating), keep the existing UI rather than hiding it.
         if (sessions.length === 0) {
-            if (Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0) {
+            if (hasCachedTabs) {
                 console.warn('[chatTab] Session list empty during refresh; keeping existing tabs');
                 setTimeout(() => scheduleChatSessionTabsRefresh(true), 2000);
                 return;
             }
 
-            container.innerHTML = '';
-            container.hidden = true;
-            lastRenderedSessionCount = 0;
-            sessionTabsCache = [];
+            // Keep a placeholder visible; this is common right after reload if history
+            // is still warming up.
+            renderChatSessionTabsPlaceholder('loading');
+            setTimeout(() => scheduleChatSessionTabsRefresh(true), 2000);
             return;
         }
 
@@ -3044,6 +3160,8 @@ async function refreshChatSessionTabs() {
             } catch (renderErr) {
                 console.error('Failed to re-render cached chat tabs:', renderErr);
             }
+        } else {
+            renderChatSessionTabsPlaceholder('error');
         }
     }
 }
@@ -3055,8 +3173,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     }
 
     if (!Array.isArray(sessions) || sessions.length === 0) {
-        container.innerHTML = '';
-        container.hidden = true;
+        renderChatSessionTabsPlaceholder('empty');
         lastRenderedSessionCount = 0;
         sessionTabsCache = [];
         return;

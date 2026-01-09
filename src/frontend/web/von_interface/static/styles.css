@@ -3206,6 +3206,24 @@ footer {
     text-overflow: ellipsis;
 }
 
+.chat-session-tabs-placeholder {
+    flex: 1 1 auto;
+    min-width: 220px;
+    border: 1px dashed #cbd5e1;
+    background: #f8fafc;
+    color: #475569;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 13px;
+    line-height: 1.2;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.chat-session-tabs-placeholder.is-loading {
+    color: #64748b;
+}
+
 .chat-session-loading {
     text-align: center;
     padding: 16px;
