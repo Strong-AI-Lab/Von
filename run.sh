@@ -563,6 +563,44 @@ run_backup() {
     else
         "$pdm" run python "$backup_script" --apply --out-dir "$out_dir" --tag "$BACKUP_TAG"
     fi
+    local backup_exit=$?
+    if [ "$backup_exit" -eq 0 ]; then
+        if [ -z "${VON_DISABLE_CODE_MENTION_SCAN:-}" ] || ! printf '%s' "$VON_DISABLE_CODE_MENTION_SCAN" | grep -qiE '^(1|true|yes)$'; then
+            local scan_script="${ROOT}/src/utilities/scan_code_concepts.py"
+            if [ -f "$scan_script" ]; then
+                log "[code-mention-scan] Running scan (reason=manual-backup)"
+                "$pdm" run python "$scan_script" --sync-mentions --apply
+                local scan_exit=$?
+                if [ "$scan_exit" -eq 0 ]; then
+                    log "[code-mention-scan] OK"
+                else
+                    log "[code-mention-scan] ERROR exit=$scan_exit"
+                fi
+            else
+                log "[code-mention-scan] WARN: script missing ($scan_script)"
+            fi
+        else
+            log "[code-mention-scan] disabled via VON_DISABLE_CODE_MENTION_SCAN"
+        fi
+        if [ -z "${VON_DISABLE_CODE_PREDICATE_SYNC:-}" ] || ! printf '%s' "$VON_DISABLE_CODE_PREDICATE_SYNC" | grep -qiE '^(1|true|yes)$'; then
+            local sync_script="${ROOT}/src/utilities/sync_code_predicates.py"
+            if [ -f "$sync_script" ]; then
+                log "[code-predicate-sync] Running sync (reason=manual-backup)"
+                "$pdm" run python "$sync_script" --retag-non-predicates
+                local sync_exit=$?
+                if [ "$sync_exit" -eq 0 ]; then
+                    log "[code-predicate-sync] OK"
+                else
+                    log "[code-predicate-sync] ERROR exit=$sync_exit"
+                fi
+            else
+                log "[code-predicate-sync] WARN: script missing ($sync_script)"
+            fi
+        else
+            log "[code-predicate-sync] disabled via VON_DISABLE_CODE_PREDICATE_SYNC"
+        fi
+    fi
+    return "$backup_exit"
 }
 
 run_autoupdate() {

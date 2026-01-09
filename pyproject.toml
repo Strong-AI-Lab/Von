@@ -154,7 +154,7 @@ dev = [
     "pytest-mock>=3.14.0",
     "pytest-cov>=6.1.1",
     "mongomock>=4.3.0",
-    "pyright>=1.1.405",
+    "pyright==1.1.408",
     "blinker>=1.9.0",
     "pymongo>=4.15.1",
     "annotated-types>=0.7.0",

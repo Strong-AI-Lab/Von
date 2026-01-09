@@ -193,6 +193,7 @@ def test_instances_includes_virtual_code_concepts_for_mentioned_in_von_code(
     payload = resp.get_json()
     ids = {item.get("id") for item in payload.get("instances") or []}
     assert "#V#hasContent" in ids
+    assert "#V#has_blob_uri" in ids
 
 
 def test_relationships_route_allows_virtual_code_predicate(app_client, monkeypatch):
@@ -216,6 +217,70 @@ def test_relationships_route_allows_virtual_code_predicate(app_client, monkeypat
     payload = resp.get_json()
     assert payload.get("success") is True
     assert payload.get("concept_id") == "#V#hasContent"
+
+
+def test_relationships_route_normalises_has_subtypes_alias(app_client, monkeypatch):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {
+            "concept_id": "#V#parent",
+            "relationships": {"has_subtypes": ["#V#child"]},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.get_most_salient_type",
+        lambda *a, **k: None,
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/relationships?identifier=%23V%23parent"
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    rel = payload.get("relationships") or {}
+
+    assert "has_subtypes" not in rel
+    assert rel.get("has_subtype") == [
+        {"id": "#V#child", "name": "#V#child", "kind": "individual"}
+    ]
+
+
+def test_relationships_route_normalises_is_a_type_ofs_alias(app_client, monkeypatch):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {
+            "concept_id": "#V#child",
+            "relationships": {"is_a_type_ofs": ["#V#parent"]},
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find",
+        lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.get_most_salient_type",
+        lambda *a, **k: None,
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/relationships?identifier=%23V%23child"
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    rel = payload.get("relationships") or {}
+
+    assert "is_a_type_ofs" not in rel
+    assert rel.get("is_a_type_of") == [
+        {"id": "#V#parent", "name": "#V#parent", "kind": "individual"}
+    ]
 
 
 def test_upsert_name_for_virtual_code_predicate_concept(app_client, monkeypatch):

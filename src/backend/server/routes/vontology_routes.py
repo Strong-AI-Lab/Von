@@ -2669,14 +2669,34 @@ def get_relationships_route():
                 404,
             )
 
-        rel = doc.get("relationships") or {}
-
         def _norm_list(val):
             if isinstance(val, list):
                 return [v for v in val if isinstance(v, str) and v.strip()]
             if isinstance(val, str) and val.strip():
                 return [val]
             return []
+
+        def _normalise_relationship_aliases(rel_map):
+            if not isinstance(rel_map, dict):
+                return {}
+            rel_map = dict(rel_map)
+            alias_map = {
+                "has_subtypes": "has_subtype",
+                "is_a_type_ofs": "is_a_type_of",
+                "is_an_instance_ofs": "is_an_instance_of",
+                "has_instances": "has_instance",
+                "related_tos": "related_to",
+            }
+            for alias, canonical in alias_map.items():
+                alias_vals = _norm_list(rel_map.get(alias))
+                if not alias_vals:
+                    continue
+                canonical_vals = _norm_list(rel_map.get(canonical))
+                rel_map[canonical] = sorted(set(canonical_vals + alias_vals))
+                rel_map.pop(alias, None)
+            return rel_map
+
+        rel = _normalise_relationship_aliases(doc.get("relationships") or {})
 
         structural_kinds = [
             "is_a_type_of",
