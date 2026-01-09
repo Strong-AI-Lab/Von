@@ -180,14 +180,93 @@ pdm_cmd() {
     fi
 }
 
+python_cmd() {
+    if command -v python3 >/dev/null 2>&1; then
+        echo "python3"
+    elif command -v python >/dev/null 2>&1; then
+        echo "python"
+    else
+        echo ""
+    fi
+}
+
+now_iso() {
+    date -Iseconds 2>/dev/null || date
+}
+
+read_failure_count() {
+    local meta="$1"
+    if [ ! -f "$meta" ]; then
+        echo 0
+        return 0
+    fi
+    local count
+    count="$(grep -Eo '"failure_count"[[:space:]]*:[[:space:]]*[0-9]+' "$meta" 2>/dev/null | head -n 1 | grep -Eo '[0-9]+' || true)"
+    if [ -z "$count" ]; then
+        count=0
+    fi
+    echo "$count"
+}
+
+write_failure_count() {
+    local meta="$1"
+    local count="$2"
+    printf '{"failure_count": %s}\n' "$count" > "$meta" 2>/dev/null || true
+}
+
+parse_iso_epoch() {
+    local iso="$1"
+    local epoch=""
+    epoch="$(date -d "$iso" +%s 2>/dev/null || true)"
+    if [ -z "$epoch" ]; then
+        epoch="$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$iso" +%s 2>/dev/null || true)"
+    fi
+    echo "$epoch"
+}
+
+should_run_interval() {
+    local sentinel="$1"
+    local interval_hours="$2"
+    local force="$3"
+    if [ "$force" -eq 1 ]; then
+        return 0
+    fi
+    if [ ! -f "$sentinel" ]; then
+        return 0
+    fi
+    local last
+    last="$(cat "$sentinel" 2>/dev/null || true)"
+    if [ -z "$last" ]; then
+        return 0
+    fi
+    local last_epoch
+    last_epoch="$(parse_iso_epoch "$last")"
+    if [ -z "$last_epoch" ]; then
+        return 0
+    fi
+    local now_epoch
+    now_epoch="$(date +%s)"
+    local elapsed_hours=$(( (now_epoch - last_epoch) / 3600 ))
+    if [ "$elapsed_hours" -lt "$interval_hours" ]; then
+        return 1
+    fi
+    return 0
+}
+
 health_ok() {
     local url="http://localhost:${PORT}/health"
+    local timeout=5
+    if printf '%s' "${VON_HEALTH_HTTP_TIMEOUT:-}" | grep -qE '^[0-9]+$'; then
+        if [ "$VON_HEALTH_HTTP_TIMEOUT" -gt 0 ] && [ "$VON_HEALTH_HTTP_TIMEOUT" -lt 61 ]; then
+            timeout="$VON_HEALTH_HTTP_TIMEOUT"
+        fi
+    fi
     if command -v curl >/dev/null 2>&1; then
-        curl -sS --max-time 5 --fail "$url" >/dev/null 2>&1
+        curl -sS --max-time "$timeout" --fail "$url" >/dev/null 2>&1
         return $?
     fi
     if command -v wget >/dev/null 2>&1; then
-        wget -q -T 5 -O /dev/null "$url" >/dev/null 2>&1
+        wget -q -T "$timeout" -O /dev/null "$url" >/dev/null 2>&1
         return $?
     fi
     return 1
@@ -455,6 +534,365 @@ stop_server() {
     stop_rag_worker || true
 }
 
+log_mongo_status() {
+    local json=""
+    if command -v curl >/dev/null 2>&1; then
+        json="$(curl -sS --max-time 5 "http://localhost:${PORT}/api/system/db_status" 2>/dev/null || true)"
+    elif command -v wget >/dev/null 2>&1; then
+        json="$(wget -q -T 5 -O - "http://localhost:${PORT}/api/system/db_status" 2>/dev/null || true)"
+    fi
+    if [ -z "$json" ]; then
+        log "Mongo: status unavailable"
+        return 0
+    fi
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        log "Mongo: status unavailable"
+        return 0
+    fi
+    local line=""
+    set +e
+    line="$(printf '%s' "$json" | "$py" -c 'import json,sys
+try:
+    data=json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+using_fallback=data.get("using_fallback")
+atlas=data.get("atlas_detected")
+host=data.get("effective_host")
+if using_fallback:
+    label="Mongo: local fallback"
+elif atlas:
+    label="Mongo: Atlas"
+else:
+    label="Mongo: "+(host or "unknown")
+if host and label.startswith("Mongo: local fallback"):
+    label=f"Mongo: local fallback ({host})"
+elif host and label.startswith("Mongo: Atlas"):
+    label=f"Mongo: Atlas ({host})"
+elif host and label.startswith("Mongo: "):
+    label=f"Mongo: {host}"
+print(label)' 2>/dev/null)"
+    local rc=$?
+    set -e
+    if [ $rc -ne 0 ] || [ -z "$line" ]; then
+        log "Mongo: status unavailable"
+        return 0
+    fi
+    log "$line"
+}
+
+parse_scan_counts() {
+    local output="$1"
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 1
+    fi
+    local result=""
+    set +e
+    result="$(printf '%s' "$output" | "$py" -c 'import json,sys,re
+text=sys.stdin.read()
+m=re.search(r"\\{", text)
+if not m:
+    sys.exit(1)
+data=json.loads(text[m.start():])
+sync=data.get("sync_result") or {}
+def cnt(val):
+    return len(val) if isinstance(val, list) else 0
+print(f"{cnt(sync.get(\"updated\"))}|{cnt(sync.get(\"skipped\"))}|{cnt(sync.get(\"missing\"))}|{cnt(sync.get(\"virtual\"))}|{cnt(sync.get(\"warnings\"))}")' 2>/dev/null)"
+    local rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+        return 1
+    fi
+    printf '%s' "$result"
+}
+
+parse_predicate_counts() {
+    local output="$1"
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 1
+    fi
+    local result=""
+    set +e
+    result="$(printf '%s' "$output" | "$py" -c 'import json,sys,re
+text=sys.stdin.read()
+m=re.search(r"\\{", text)
+if not m:
+    sys.exit(1)
+data=json.loads(text[m.start():])
+total=int(data.get("total_registry") or 0)
+missing=len(data.get("missing") or [])
+virtual=len(data.get("virtual") or [])
+warnings=len(data.get("warnings") or [])
+print(f"{total}|{missing}|{virtual}|{warnings}")' 2>/dev/null)"
+    local rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+        return 1
+    fi
+    printf '%s' "$result"
+}
+
+parse_relation_alias_counts() {
+    local output="$1"
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 1
+    fi
+    local result=""
+    set +e
+    result="$(printf '%s' "$output" | "$py" -c 'import json,sys,re
+text=sys.stdin.read()
+m=re.search(r"\\{", text)
+if not m:
+    sys.exit(1)
+data=json.loads(text[m.start():])
+updated=len((data.get("updated") or {}).keys())
+warnings=len(data.get("warnings") or [])
+print(f"{updated}|{warnings}")' 2>/dev/null)"
+    local rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+        return 1
+    fi
+    printf '%s' "$result"
+}
+
+run_governance_scan() {
+    if [ "${VON_GOV_SCAN_DISABLE:-}" = "1" ]; then
+        return 0
+    fi
+    local interval_hours=24
+    if printf '%s' "${VON_GOV_SCAN_INTERVAL_HOURS:-}" | grep -qE '^[0-9]+$'; then
+        interval_hours="$VON_GOV_SCAN_INTERVAL_HOURS"
+    fi
+    local force=0
+    if [ "${VON_GOV_SCAN_FORCE:-}" = "1" ]; then
+        force=1
+    fi
+    local sentinel="${RUN_DIR}/last_governance_scan.txt"
+    local meta="${RUN_DIR}/governance_scan_meta.json"
+    local failure_count
+    failure_count="$(read_failure_count "$meta")"
+    local backoff="$interval_hours"
+    if [ "$failure_count" -gt 0 ]; then
+        local schedule=(1 3 6 12 24)
+        local idx=$((failure_count - 1))
+        if [ "$idx" -ge "${#schedule[@]}" ]; then
+            idx=$((${#schedule[@]} - 1))
+        fi
+        backoff="${schedule[$idx]}"
+    fi
+    if ! should_run_interval "$sentinel" "$backoff" "$force"; then
+        return 0
+    fi
+    local scan_script="${ROOT}/src/utilities/scan_code_concepts.py"
+    if [ ! -f "$scan_script" ]; then
+        log "[governance-scan] scanner script missing ($scan_script)"
+        return 0
+    fi
+    local pdm
+    pdm="$(pdm_cmd)"
+    local include_docstrings=0
+    if printf '%s' "${VON_GOV_SCAN_INCLUDE_DOCSTRINGS:-}" | grep -qiE '^(1|true|yes)$'; then
+        include_docstrings=1
+    fi
+    log "[governance-scan] Running governance concept tag scan (interval ${interval_hours}h; force=$force)"
+    local output=""
+    local exit_code=0
+    set +e
+    if [ "$include_docstrings" -eq 1 ]; then
+        output="$("$pdm" run python "$scan_script" --sync-mentions --apply --include-docstrings 2>&1)"
+        exit_code=$?
+    else
+        output="$("$pdm" run python "$scan_script" --sync-mentions --apply 2>&1)"
+        exit_code=$?
+    fi
+    set -e
+    local raw_out="${RUN_DIR}/governance_scan_last_output.log"
+    printf '%s\n' "$output" > "$raw_out" 2>/dev/null || true
+    local counts=""
+    counts="$(parse_scan_counts "$output" || true)"
+    if [ "$exit_code" -eq 0 ] && [ -n "$counts" ]; then
+        local updated skipped missing virtual warnings
+        IFS='|' read -r updated skipped missing virtual warnings <<<"$counts"
+        printf '%s\n' "$(now_iso)" > "$sentinel" 2>/dev/null || true
+        failure_count=0
+        local status="success"
+        if [ "$updated" -eq 0 ] && [ "$missing" -eq 0 ] && [ "$virtual" -eq 0 ] && [ "$warnings" -eq 0 ]; then
+            status="no-op"
+        fi
+        log "[governance-scan] $status updated=$updated skipped=$skipped missing=$missing virtual=$virtual warnings=$warnings failures=$failure_count"
+    else
+        failure_count=$((failure_count + 1))
+        printf '%s\n' "$(now_iso)" > "$sentinel" 2>/dev/null || true
+        local hint=""
+        hint="$(printf '%s\n' "$output" | grep -E 'Traceback|ERROR|Error|Exception' | head -n 1 || true)"
+        if [ -z "$hint" ]; then
+            hint="$(printf '%s\n' "$output" | tail -n 5 | tr '\n' '|' | sed 's/|$//' || true)"
+        fi
+        log "[governance-scan] FAILED failures=$failure_count hint=$hint"
+        log "[governance-scan] raw_output=$raw_out"
+    fi
+    write_failure_count "$meta" "$failure_count"
+}
+
+run_predicate_verify() {
+    local interval_hours=24
+    local force=0
+    if [ "${VON_CONCEPT_DATA_ABSENCE_FORCE:-}" = "1" ]; then
+        force=1
+    fi
+    if [ "${VON_CONCEPT_DATA_ABSENCE_DISABLE:-}" = "1" ]; then
+        return 0
+    fi
+    local sentinel="${RUN_DIR}/last_concept_data_absence_check.txt"
+    if ! should_run_interval "$sentinel" "$interval_hours" "$force"; then
+        return 0
+    fi
+    local script="${ROOT}/src/utilities/verify_predicate_concepts.py"
+    if [ ! -f "$script" ]; then
+        log "[predicate-verify] script missing ($script)"
+        return 0
+    fi
+    log "[predicate-verify] Running predicate concept verification (interval ${interval_hours}h force=$force)"
+    local pdm
+    pdm="$(pdm_cmd)"
+    local output=""
+    local exit_code=0
+    set +e
+    output="$("$pdm" run python "$script" 2>&1)"
+    exit_code=$?
+    set -e
+    local raw_out="${RUN_DIR}/predicate_verify_last_output.log"
+    printf '%s\n' "$output" > "$raw_out" 2>/dev/null || true
+    local counts=""
+    counts="$(parse_predicate_counts "$output" || true)"
+    if [ "$exit_code" -eq 0 ] && [ -n "$counts" ]; then
+        local total missing virtual warnings
+        IFS='|' read -r total missing virtual warnings <<<"$counts"
+        printf '%s\n' "$(now_iso)" > "$sentinel" 2>/dev/null || true
+        if [ "$missing" -eq 0 ] && [ "$virtual" -eq 0 ]; then
+            log "[predicate-verify] OK total=$total missing=$missing virtual=$virtual warnings=$warnings"
+        else
+            log "[predicate-verify] MISSING total=$total missing=$missing virtual=$virtual warnings=$warnings see $raw_out"
+        fi
+    else
+        log "[predicate-verify] ERROR exit=$exit_code see $raw_out"
+    fi
+}
+
+run_relation_alias_audit() {
+    local interval_hours=24
+    local force=0
+    if [ "${VON_RESIDUAL_TEXT_AUDIT_FORCE:-}" = "1" ]; then
+        force=1
+    fi
+    if [ "${VON_RESIDUAL_TEXT_AUDIT_DISABLE:-}" = "1" ]; then
+        return 0
+    fi
+    local sentinel="${RUN_DIR}/last_residual_text_audit.txt"
+    if ! should_run_interval "$sentinel" "$interval_hours" "$force"; then
+        return 0
+    fi
+    local script="${ROOT}/src/utilities/normalise_relationship_aliases.py"
+    if [ ! -f "$script" ]; then
+        log "[relation-alias-audit] script missing ($script)"
+        return 0
+    fi
+    log "[relation-alias-audit] Running relationship alias audit (interval ${interval_hours}h force=$force)"
+    local pdm
+    pdm="$(pdm_cmd)"
+    local output=""
+    local exit_code=0
+    set +e
+    output="$("$pdm" run python "$script" --dry-run 2>&1)"
+    exit_code=$?
+    set -e
+    local raw_out="${RUN_DIR}/relation_alias_audit_last_output.log"
+    printf '%s\n' "$output" > "$raw_out" 2>/dev/null || true
+    local counts=""
+    counts="$(parse_relation_alias_counts "$output" || true)"
+    if [ "$exit_code" -eq 0 ] && [ -n "$counts" ]; then
+        local updated warnings
+        IFS='|' read -r updated warnings <<<"$counts"
+        printf '%s\n' "$(now_iso)" > "$sentinel" 2>/dev/null || true
+        if [ "$updated" -eq 0 ]; then
+            log "[relation-alias-audit] OK updated=$updated warnings=$warnings"
+        else
+            log "[relation-alias-audit] DETECTED updated=$updated warnings=$warnings see $raw_out"
+        fi
+    else
+        log "[relation-alias-audit] ERROR exit=$exit_code see $raw_out"
+    fi
+}
+
+run_relation_alias_cleanup() {
+    local interval_hours=24
+    local force=0
+    if [ "${VON_CLEANUP_PRESERVED_FORCE:-}" = "1" ]; then
+        force=1
+    fi
+    if [ "${VON_CLEANUP_PRESERVED_DISABLE:-}" = "1" ]; then
+        return 0
+    fi
+    local execute=0
+    if [ "${VON_RELATION_ALIAS_EXECUTE:-}" = "1" ] || [ "${VON_CLEANUP_PRESERVED_EXECUTE:-}" = "1" ]; then
+        execute=1
+    fi
+    local sentinel="${RUN_DIR}/last_cleanup_preserved_fields.txt"
+    if ! should_run_interval "$sentinel" "$interval_hours" "$force"; then
+        return 0
+    fi
+    local script="${ROOT}/src/utilities/normalise_relationship_aliases.py"
+    if [ ! -f "$script" ]; then
+        log "[relation-alias-cleanup] script missing ($script)"
+        return 0
+    fi
+    local mode="dry-run"
+    if [ "$execute" -eq 1 ]; then
+        mode="apply"
+    fi
+    log "[relation-alias-cleanup] Running normalisation (mode=$mode interval ${interval_hours}h force=$force)"
+    local pdm
+    pdm="$(pdm_cmd)"
+    local output=""
+    local exit_code=0
+    set +e
+    if [ "$execute" -eq 1 ]; then
+        output="$("$pdm" run python "$script" 2>&1)"
+        exit_code=$?
+    else
+        output="$("$pdm" run python "$script" --dry-run 2>&1)"
+        exit_code=$?
+    fi
+    set -e
+    local raw_out="${RUN_DIR}/relation_alias_cleanup_last_output.log"
+    printf '%s\n' "$output" > "$raw_out" 2>/dev/null || true
+    local counts=""
+    counts="$(parse_relation_alias_counts "$output" || true)"
+    if [ "$exit_code" -eq 0 ] && [ -n "$counts" ]; then
+        local updated warnings
+        IFS='|' read -r updated warnings <<<"$counts"
+        printf '%s\n' "$(now_iso)" > "$sentinel" 2>/dev/null || true
+        if [ "$execute" -eq 1 ]; then
+            log "[relation-alias-cleanup] OK applied updated=$updated warnings=$warnings"
+        elif [ "$updated" -eq 0 ]; then
+            log "[relation-alias-cleanup] OK updated=$updated warnings=$warnings"
+        else
+            log "[relation-alias-cleanup] DETECTED updated=$updated warnings=$warnings enable VON_RELATION_ALIAS_EXECUTE=1 to apply. See $raw_out"
+        fi
+    else
+        log "[relation-alias-cleanup] ERROR exit=$exit_code see $raw_out"
+    fi
+}
+
 status_server() {
     # Match run.ps1: if PID file stale, try to sync from current listener.
     if [ -f "$PID_FILE" ]; then
@@ -476,7 +914,12 @@ status_server() {
         else
             log "RUNNING PID=$pid Healthy=false"
         fi
+        log_mongo_status
         log "Log: $CURRENT_LOG"
+        run_governance_scan || true
+        run_predicate_verify || true
+        run_relation_alias_audit || true
+        run_relation_alias_cleanup || true
     else
         if [ -f "$PID_FILE" ]; then
             log "STALE: PID file exists but process missing."
