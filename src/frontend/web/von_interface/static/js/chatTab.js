@@ -32,6 +32,14 @@ const SESSION_TABS_REFRESH_COOLDOWN_MS = 15_000;
 let lastSessionTabsRefreshMs = 0;
 let pendingSessionTabsRefresh = null;
 let lastRenderedSessionCount = 0;
+
+// Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
+// Stored locally only; intended to feed future introspection.
+const LS_CHAT_TABS_LOAD_STATS = 'von:chatSessionTabsLoadStats';
+let chatTabsFirstLoadStartPerfMs = null;
+let chatTabsFirstLoadStartEpochMs = null;
+let chatTabsLoadingTickerId = null;
+let chatTabsLoadingTickerLastRenderedSec = -1;
 let chatSessionMenuEl = null;
 let activeHistoryRequest = null;
 let historyRequestCounter = 0;
@@ -2961,6 +2969,120 @@ function scheduleChatSessionTabsRefresh(force = false) {
     }, Math.max(500, SESSION_TABS_REFRESH_COOLDOWN_MS - elapsed));
 }
 
+function _chatTabsNowPerfMs() {
+    try {
+        if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+            return performance.now();
+        }
+    } catch (_) {
+        // ignore
+    }
+    return Date.now();
+}
+
+function _getChatTabsLoadStats() {
+    try {
+        const raw = localStorage.getItem(LS_CHAT_TABS_LOAD_STATS);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        const emaMs = Number(parsed.ema_ms);
+        const samples = Number(parsed.samples);
+        const lastMs = Number(parsed.last_ms);
+        return {
+            ema_ms: Number.isFinite(emaMs) ? emaMs : null,
+            samples: Number.isFinite(samples) ? samples : 0,
+            last_ms: Number.isFinite(lastMs) ? lastMs : null,
+            last_at: typeof parsed.last_at === 'string' ? parsed.last_at : null
+        };
+    } catch (_) {
+        return null;
+    }
+}
+
+function _storeChatTabsLoadStats(durationMs) {
+    const ms = Number(durationMs);
+    if (!Number.isFinite(ms) || ms <= 0) return;
+
+    const existing = _getChatTabsLoadStats() || { ema_ms: null, samples: 0, last_ms: null, last_at: null };
+    const prev = Number(existing.ema_ms);
+    const hasPrev = Number.isFinite(prev) && prev > 0;
+    const alpha = 0.30;
+    const ema = hasPrev ? (prev * (1 - alpha) + ms * alpha) : ms;
+    const samples = (Number.isFinite(existing.samples) ? existing.samples : 0) + 1;
+
+    try {
+        localStorage.setItem(LS_CHAT_TABS_LOAD_STATS, JSON.stringify({
+            ema_ms: Math.round(ema),
+            samples,
+            last_ms: Math.round(ms),
+            last_at: new Date().toISOString()
+        }));
+    } catch (_) {
+        // ignore localStorage failures
+    }
+}
+
+function _stopChatTabsLoadingTicker() {
+    if (chatTabsLoadingTickerId) {
+        clearInterval(chatTabsLoadingTickerId);
+        chatTabsLoadingTickerId = null;
+    }
+    chatTabsLoadingTickerLastRenderedSec = -1;
+}
+
+function _startChatTabsLoadingTicker() {
+    _stopChatTabsLoadingTicker();
+
+    chatTabsLoadingTickerId = setInterval(() => {
+        try {
+            const container = getChatSessionTabsContainer();
+            if (!container || container.hidden) {
+                _stopChatTabsLoadingTicker();
+                return;
+            }
+
+            const placeholder = container.querySelector('.chat-session-tabs-placeholder.is-loading');
+            if (!placeholder) {
+                _stopChatTabsLoadingTicker();
+                return;
+            }
+
+            const telemetryEl = placeholder.querySelector('.chat-session-tabs-placeholder-telemetry');
+            if (!telemetryEl) {
+                return;
+            }
+
+            if (!Number.isFinite(chatTabsFirstLoadStartPerfMs)) {
+                telemetryEl.textContent = '';
+                return;
+            }
+
+            const elapsedMs = Math.max(0, _chatTabsNowPerfMs() - chatTabsFirstLoadStartPerfMs);
+            const elapsedSec = Math.floor(elapsedMs / 1000);
+            if (elapsedSec === chatTabsLoadingTickerLastRenderedSec) {
+                return;
+            }
+            chatTabsLoadingTickerLastRenderedSec = elapsedSec;
+
+            const stats = _getChatTabsLoadStats();
+            const expectedMs = Number(stats?.ema_ms);
+            const hasExpected = Number.isFinite(expectedMs) && expectedMs > 250;
+            const etaSec = hasExpected ? Math.max(0, Math.round((expectedMs - elapsedMs) / 1000)) : null;
+
+            const parts = [];
+            parts.push(`elapsed ${elapsedSec}s`);
+            if (etaSec !== null) {
+                parts.push(`ETA ~${etaSec}s`);
+            }
+
+            telemetryEl.textContent = parts.length ? `• ${parts.join(' • ')}` : '';
+        } catch (_) {
+            // Best-effort ticker.
+        }
+    }, 500);
+}
+
 function openSettingsToLogin() {
     try {
         const settingsTabButton = document.querySelector('.tab-button[data-tab="settingsTab"]');
@@ -3024,16 +3146,25 @@ function renderChatSessionTabsPlaceholder(mode = 'loading') {
     const placeholder = document.createElement('div');
     placeholder.className = 'chat-session-tabs-placeholder';
 
+    const primary = document.createElement('span');
+    primary.className = 'chat-session-tabs-placeholder-primary';
+
+    const telemetry = document.createElement('span');
+    telemetry.className = 'chat-session-tabs-placeholder-telemetry';
+
     if (mode === 'unauthenticated') {
-        placeholder.textContent = 'Log in to load your saved chats.';
+        primary.textContent = 'Log in to load your saved chats.';
     } else if (mode === 'error') {
-        placeholder.textContent = 'Unable to load chats right now (will retry).';
+        primary.textContent = 'Unable to load chats right now (will retry).';
     } else if (mode === 'empty') {
-        placeholder.textContent = 'No saved chats yet.';
+        primary.textContent = 'No saved chats yet.';
     } else {
-        placeholder.textContent = 'Loading chats…';
+        primary.textContent = 'Loading chats…';
         placeholder.classList.add('is-loading');
     }
+
+    placeholder.appendChild(primary);
+    placeholder.appendChild(telemetry);
 
     fragment.appendChild(placeholder);
 
@@ -3078,7 +3209,12 @@ async function refreshChatSessionTabs() {
     // If we're about to load sessions and there's nothing visible yet, keep a placeholder
     // in the tabs bar so the controls don't disappear.
     if (!hasCachedTabs && containerLooksEmpty) {
+        if (!Number.isFinite(chatTabsFirstLoadStartPerfMs)) {
+            chatTabsFirstLoadStartPerfMs = _chatTabsNowPerfMs();
+            chatTabsFirstLoadStartEpochMs = Date.now();
+        }
         renderChatSessionTabsPlaceholder('loading');
+        _startChatTabsLoadingTicker();
     }
 
     // Avoid UI flicker: if we have a last-known-good session list, keep it visible
@@ -3099,6 +3235,7 @@ async function refreshChatSessionTabs() {
         const data = await response.json();
 
         if (data?.authenticated === false) {
+            _stopChatTabsLoadingTicker();
             renderChatSessionTabsPlaceholder('unauthenticated');
             lastRenderedSessionCount = 0;
             sessionTabsCache = [];
@@ -3113,6 +3250,7 @@ async function refreshChatSessionTabs() {
             if (hasCachedTabs) {
                 container.hidden = false;
             } else {
+                _stopChatTabsLoadingTicker();
                 renderChatSessionTabsPlaceholder('error');
                 setTimeout(() => scheduleChatSessionTabsRefresh(true), 2000);
             }
@@ -3132,9 +3270,29 @@ async function refreshChatSessionTabs() {
 
             // Keep a placeholder visible; this is common right after reload if history
             // is still warming up.
+            if (!Number.isFinite(chatTabsFirstLoadStartPerfMs)) {
+                chatTabsFirstLoadStartPerfMs = _chatTabsNowPerfMs();
+                chatTabsFirstLoadStartEpochMs = Date.now();
+            }
             renderChatSessionTabsPlaceholder('loading');
+            _startChatTabsLoadingTicker();
             setTimeout(() => scheduleChatSessionTabsRefresh(true), 2000);
             return;
+        }
+
+        if (Number.isFinite(chatTabsFirstLoadStartPerfMs)) {
+            const durationMs = Math.max(0, _chatTabsNowPerfMs() - chatTabsFirstLoadStartPerfMs);
+            _storeChatTabsLoadStats(durationMs);
+            const stats = _getChatTabsLoadStats();
+            console.info('[chatTab] Chat sessions loaded', {
+                duration_ms: Math.round(durationMs),
+                ema_ms: stats?.ema_ms ?? null,
+                samples: stats?.samples ?? 0,
+                start_epoch_ms: chatTabsFirstLoadStartEpochMs
+            });
+            chatTabsFirstLoadStartPerfMs = null;
+            chatTabsFirstLoadStartEpochMs = null;
+            _stopChatTabsLoadingTicker();
         }
 
         sessionTabsCache = sessions;
@@ -3161,12 +3319,14 @@ async function refreshChatSessionTabs() {
                 console.error('Failed to re-render cached chat tabs:', renderErr);
             }
         } else {
+            _stopChatTabsLoadingTicker();
             renderChatSessionTabsPlaceholder('error');
         }
     }
 }
 
 function renderChatSessionTabs(sessions, activeSessionId) {
+    _stopChatTabsLoadingTicker();
     const container = getChatSessionTabsContainer();
     if (!container) {
         return;

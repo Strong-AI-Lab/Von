@@ -3220,6 +3220,18 @@ footer {
     user-select: none;
 }
 
+.chat-session-tabs-placeholder-primary {
+    display: block;
+    font-weight: 600;
+}
+
+.chat-session-tabs-placeholder-telemetry {
+    display: block;
+    margin-top: 4px;
+    font-size: 12px;
+    color: #64748b;
+}
+
 .chat-session-tabs-placeholder.is-loading {
     color: #64748b;
 }
