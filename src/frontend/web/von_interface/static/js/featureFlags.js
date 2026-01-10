@@ -5,6 +5,7 @@ const rawFlags = (() => {
 })();
 
 const expertTabsEnabled = Boolean(rawFlags.expertTabsEnabled);
+const expertFooterEnabled = Boolean(rawFlags.expertFooterEnabled);
 
 export function isExpertTabsEnabled() {
   return expertTabsEnabled;
@@ -22,9 +23,14 @@ export function isImportExportEnabled() {
   return expertTabsEnabled;
 }
 
+export function isExpertFooterEnabled() {
+  return expertFooterEnabled;
+}
+
 export function getFeatureFlags() {
   return {
     expertTabsEnabled,
+    expertFooterEnabled,
     annotationEnabled: expertTabsEnabled,
     vontologyEnabled: expertTabsEnabled,
     importExportEnabled: expertTabsEnabled

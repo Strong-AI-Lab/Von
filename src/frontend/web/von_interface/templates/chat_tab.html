@@ -4,7 +4,7 @@
     <!-- Header with Von intro -->
     <div class="chat-header">
       <h2 class="main-title">Talk to Von Neumarkt</h2>
-      <div class="chat-header-controls" role="group" aria-label="Chat tools">
+      <div class="chat-header-controls" role="group" aria-label="Conversation tools">
         <button id="exportConversationMarkdownBtn" class="chat-export-btn" type="button"
           title="Copy conversation as Markdown formatted transcript" aria-label="Export conversation as Markdown">
           <span class="btn-icon">MD</span>
@@ -16,7 +16,7 @@
       </div>
     </div>
 
-    <div id="chatSessionTabs" class="chat-session-tabs" role="tablist" aria-label="Chat sessions"></div>
+    <div id="chatSessionTabs" class="chat-session-tabs" role="tablist" aria-label="Conversation sessions"></div>
 
     <div id="historyBanner" class="history-banner hidden" role="status" aria-live="polite">
       <span id="historyBannerText" class="history-banner-text">Older conversation available</span>
@@ -53,10 +53,10 @@
         Dictate
       </button>
       <button id="resetButton" class="btn btn-secondary" type="button"
-        title="End this chat (resets Von's context while keeping the conversation view)">End chat</button>
+        title="End this conversation (resets Von's context while keeping the conversation view)">End conversation</button>
 
       <button id="uploadFileButton" class="btn btn-secondary" type="button"
-        title="Upload a file (or drag and drop onto chat)">Upload File</button>
+        title="Upload a file (or drag and drop onto the conversation)">Upload File</button>
       <input id="uploadFileInput" class="visually-hidden" type="file" aria-label="Upload file" />
 
       {% if expert_tabs_enabled %}

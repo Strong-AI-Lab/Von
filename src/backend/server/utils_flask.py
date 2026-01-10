@@ -180,10 +180,14 @@ def create_flask_app(
 
     @app.context_processor
     def inject_feature_flags():
-        from ..services.feature_flags import get_expert_tabs_enabled
+        from ..services.feature_flags import (
+            get_expert_footer_enabled,
+            get_expert_tabs_enabled,
+        )
 
         return {
             "expert_tabs_enabled": get_expert_tabs_enabled(),
+            "expert_footer_enabled": get_expert_footer_enabled(),
         }
 
     # --- Register Blueprints ---

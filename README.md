@@ -166,6 +166,7 @@ Visit `http://localhost:5000` and explore the pre-loaded concepts in the interfa
 ### 5. **UI Feature Flags**
 
 - `VON_EXPERT_TABS_ENABLED=1` enables the expert tabs (Vontology, Import/Export, Annotation) and annotation controls. Default behaviour is disabled unless set.
+- `VON_EXPERT_FOOTER_ENABLED=1` enables the PID/RAG status footer and modal. Default behaviour is disabled unless set.
 
 ### 6. **Run:**
 
