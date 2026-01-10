@@ -331,10 +331,12 @@
             <h2>Agent Configuration</h2>
 
             <h3>Gmail Integration</h3>
-            <label for="gmailProfileInput">Gmail profile ID (for MCP tools):</label>
-            <input type="text" id="gmailProfileInput" placeholder="e.g., von-mail" />
-            <small class="settings-note">Profile IDs must match the backend Gmail profiles configured via environment
-                (VON_GMAIL_PROFILES). Leave blank to disable Gmail calls.</small>
+            <label for="gmailProfileSelect">Gmail profile ID (for MCP tools):</label>
+            <select id="gmailProfileSelect">
+                <option value="">None (disable Gmail calls)</option>
+            </select>
+            <small class="settings-note">Profiles are loaded from <code>VON_GMAIL_PROFILES</code>. Selection is stored
+                only in this browser. Leave blank to disable Gmail calls.</small>
 
             <h4 class="mt-2">Agent Gmail OAuth</h4>
             <p class="settings-note">Authorise a Gmail profile for agent tools. This does <strong>not</strong> log you
@@ -347,7 +349,9 @@
                 <span class="settings-note ml-2">Ensure popups are allowed for this site.</span>
             </div>
             <div id="agentGmailOauthStatus" class="settings-note mt-1">Agent Gmail OAuth: unknown</div>
+            <div id="agentGmailOauthLastRefreshed" class="settings-note">Last refreshed: —</div>
             <div id="gmailProfileStatus" class="settings-note">Gmail profile target: unknown</div>
+            <div id="gmailProfilesStatus" class="settings-note">Gmail profiles: unknown</div>
 
             <h3 class="mt-3">Tool Execution Caps</h3>
             <p class="settings-note">Controls internal MCP tool chaining. Changes apply immediately for new chat turns.
@@ -509,10 +513,10 @@
         }
 
         function getSelectedGmailProfileId() {
-            const input = document.getElementById('gmailProfileInput');
-            const raw = input?.value ?? '';
-            const fromInput = String(raw).trim();
-            if (fromInput) return fromInput;
+            const select = document.getElementById('gmailProfileSelect');
+            const raw = select?.value ?? '';
+            const fromSelect = String(raw).trim();
+            if (fromSelect) return fromSelect;
             try { return (localStorage.getItem('von_gmail_profile') || '').trim(); } catch { return ''; }
         }
 
@@ -542,19 +546,29 @@
                 } else {
                     el.textContent = 'Agent Gmail OAuth: not authorised';
                 }
-            } catch (error) {
-                console.warn('Failed to fetch agent Gmail OAuth status', error);
-                el.textContent = 'Agent Gmail OAuth: error (failed to fetch)';
+                } catch (error) {
+                    console.warn('Failed to fetch agent Gmail OAuth status', error);
+                    el.textContent = 'Agent Gmail OAuth: error (failed to fetch)';
+                } finally {
+                    if (typeof window.updateGmailOauthLastRefreshed === 'function') {
+                        window.updateGmailOauthLastRefreshed();
+                    }
+                    if (typeof window.refreshGmailProfileStatusList === 'function') {
+                        window.refreshGmailProfileStatusList();
+                    }
+                }
             }
-        }
 
         function updateGmailProfileStatus() {
             try {
                 const el = document.getElementById('gmailProfileStatus');
                 if (!el) return;
-                const profileId = localStorage.getItem('von_gmail_profile') || '';
+                const profileId = getSelectedGmailProfileId();
                 el.textContent = profileId ? `Gmail profile target: ${profileId}` : 'Gmail profile target: none (disabled)';
                 refreshAgentGmailOauthStatus();
+                if (typeof window.refreshGmailProfileStatusList === 'function') {
+                    window.refreshGmailProfileStatusList();
+                }
             } catch (e) {
                 console.warn('Failed to update Gmail profile status', e);
             }
@@ -622,7 +636,7 @@
         function authoriseAgentGmail() {
             const profileId = getSelectedGmailProfileId();
             if (!profileId) {
-                alert('Please enter a Gmail profile ID first.');
+                alert('Please select a Gmail profile first.');
                 return;
             }
 
@@ -690,7 +704,7 @@
         async function revokeAgentGmail() {
             const profileId = getSelectedGmailProfileId();
             if (!profileId) {
-                alert('Please enter a Gmail profile ID first.');
+                alert('Please select a Gmail profile first.');
                 return;
             }
 

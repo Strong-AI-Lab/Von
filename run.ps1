@@ -708,7 +708,12 @@ function Invoke-DailyBackupIfDue {
 
 # Backward-compatible convenience: if called as ".\run.ps1 -BackupDryRun" (no explicit action)
 # then run the backup action, even if the server is already running.
-if ($Action -eq 'start' -and ($BackupDryRun -or $BackupTag -or $BackupOutDir)) {
+if ($Action -eq 'start' -and (
+    $PSBoundParameters.ContainsKey('BackupDryRun') -or
+    $PSBoundParameters.ContainsKey('BackupTag') -or
+    $PSBoundParameters.ContainsKey('BackupOutDir')
+)) {
+    Write-LauncherLog "Start requested with backup flags; running backup action only."
     $Action = 'backup'
 }
 

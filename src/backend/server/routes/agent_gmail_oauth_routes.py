@@ -14,6 +14,7 @@ from ...services.agent_gmail_token_store import (
     get_agent_gmail_token_status,
     revoke_agent_gmail_tokens,
 )
+from ...integrations.google.gmail_service import list_profile_ids_from_env
 
 agent_gmail_oauth_bp = Blueprint("agent_gmail_oauth_bp", __name__)
 
@@ -32,11 +33,41 @@ def _get_service() -> AgentGmailOAuthService:
     return _agent_gmail_oauth_service
 
 
+def _validate_profile_id(profile_id: str):
+    available_profiles = list_profile_ids_from_env()
+    if not available_profiles:
+        return (
+            jsonify(
+                {
+                    "error": "gmail_profiles_not_configured",
+                    "detail": "No Gmail profiles are configured on the server.",
+                }
+            ),
+            400,
+        )
+    if profile_id not in available_profiles:
+        return (
+            jsonify(
+                {
+                    "error": "unknown_gmail_profile",
+                    "detail": "gmail_profile is not configured on the server.",
+                    "available_profiles": available_profiles,
+                }
+            ),
+            400,
+        )
+    return None
+
+
 @agent_gmail_oauth_bp.route("/api/agent/gmail/oauth/start")
 def start_agent_gmail_oauth():
     profile_id = (request.args.get("profile_id") or "").strip()
     if not profile_id:
         return jsonify({"error": "missing_profile_id"}), 400
+
+    validation_error = _validate_profile_id(profile_id)
+    if validation_error:
+        return validation_error
 
     service = _get_service()
     try:
@@ -253,6 +284,10 @@ def agent_gmail_oauth_status():
     if not profile_id:
         return jsonify({"error": "missing_profile_id"}), 400
 
+    validation_error = _validate_profile_id(profile_id)
+    if validation_error:
+        return validation_error
+
     status = get_agent_gmail_token_status(profile_id)
     return jsonify(
         {
@@ -275,6 +310,10 @@ def agent_gmail_oauth_revoke():
 
     if not profile_id:
         return jsonify({"error": "missing_profile_id"}), 400
+
+    validation_error = _validate_profile_id(profile_id)
+    if validation_error:
+        return validation_error
 
     deleted = revoke_agent_gmail_tokens(profile_id)
     return jsonify({"success": True, "profile_id": profile_id, "revoked": deleted})
