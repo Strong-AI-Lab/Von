@@ -41,7 +41,7 @@ let chatTabsFirstLoadStartPerfMs = null;
 let chatTabsFirstLoadStartEpochMs = null;
 let chatTabsLoadingTickerId = null;
 let chatTabsLoadingTickerLastRenderedSec = -1;
-let conversationsessionMenuEl = null;
+let chatSessionMenuEl = null;
 let activeHistoryRequest = null;
 let historyRequestCounter = 0;
 const HISTORY_SEGMENT_SIZE = 200;
@@ -3423,7 +3423,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             event.preventDefault();
             openChatSessionMenu(event.clientX, event.clientY, [
                 {
-                    label: 'Rename chat',
+                    label: 'Rename',
                     onClick: () => {
                         void promptRenameChatSession(sid, session?.session_name || displayName);
                     }
@@ -3447,7 +3447,7 @@ function shouldShowChatTabMenu() {
 
 function ensureChatSessionMenu() {
     if (chatSessionMenuEl) {
-        return conversationsessionMenuEl;
+        return chatSessionMenuEl;
     }
 
     const menu = document.createElement('div');
@@ -3468,7 +3468,7 @@ function ensureChatSessionMenu() {
         }
     });
 
-    conversationsessionMenuEl = menu;
+    chatSessionMenuEl = menu;
     return menu;
 }
 
@@ -3510,8 +3510,8 @@ function closeChatSessionMenu() {
     if (!chatSessionMenuEl) {
         return;
     }
-    conversationsessionMenuEl.classList.remove('open');
-    conversationsessionMenuEl.setAttribute('aria-hidden', 'true');
+    chatSessionMenuEl.classList.remove('open');
+    chatSessionMenuEl.setAttribute('aria-hidden', 'true');
 }
 
 function setupChatTabContextMenu() {
