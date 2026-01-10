@@ -169,3 +169,32 @@ Next time:
 2. Search codebase for handlers in `mcp_stdio_server.py`
 3. Ask explicitly: "What Vontology operations can I do via MCP?"
 4. If uncertain, request tool availability explicitly
+
+---
+
+## DevOps note: MCP flakiness in VS Code Insiders (2026-01-10)
+
+### Symptom
+- MCP tool visibility was inconsistent: `list_mcp_resources` only showed MongoDB even when other servers were configured.
+- Atlassian MCP felt flaky; no obvious start errors in normal Output logs.
+
+### What we did
+- Merged workspace and user MCP configs so they match:
+  - `C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von\\.vscode\\mcp.json`
+  - `C:\\Users\\witbr\\AppData\\Roaming\\Code - Insiders\\User\\mcp.json`
+- Switched stdio servers to absolute paths for reliability:
+  - `pdm.exe` and `uv.exe` explicit paths
+  - `cwd` and arXiv storage paths set to `C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von`
+- Verified tool-level access (not resources):
+  - Vontology: `mcp__vontology__get_context`
+  - VonRAG: `mcp__vonrag__rag_list_collections`
+  - Atlassian: `mcp__atlassian__getAccessibleAtlassianResources`
+
+### Notes from DevTools console
+- Repeated warnings about user-level MCP config overwriting workspace config are expected.
+- MCP registry fetch from `api.github.com/copilot/mcp_registry` returned 404; this did not block local stdio tools.
+- No MCP spawn errors surfaced in the console; MCP resources list still only showed MongoDB, which is expected for tool-only servers.
+
+### Next time
+- If Atlassian MCP misbehaves, follow the restart steps in `AGENTS.md` (MCP server restart, window reload, sign-out/in).
+- Prefer tool calls to validate server health, not `list_mcp_resources`.

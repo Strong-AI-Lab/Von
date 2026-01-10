@@ -7,7 +7,7 @@ Rules of thumb:
 - Prefer pointers over prose.
 - When something is no longer relevant, delete it (or move it to the archive).
 
-Last updated: 2026-01-09
+Last updated: 2026-01-10
 
 ---
 
@@ -20,6 +20,10 @@ Last updated: 2026-01-09
 - Keep Phase/initiative tracking in Jira rather than in this file.
 
 ## Quick operational notes
+
+### MCP access (Vontology/VonRAG)
+- MCP resources list may only show MongoDB; Vontology/VonRAG expose tools, not resources.
+- Validate access with tool calls like `mcp__vontology__get_context` and `mcp__vonrag__rag_list_collections`.
 
 ### Safe `.env` lookup
 If you need values from `.env`, prefer the allowlisted helper script instead of reading the file directly:
