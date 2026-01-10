@@ -26,6 +26,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - Preserve raw user-authored text when it is rendered/transformed; store originals in dataset/raw attributes where applicable.
 - Users may update this file; retain any user changes.
 - Add a regression test for every state/format-loss bug (load -> edit -> save -> re-edit).
+- Prefer lightweight telemetry where practical (timings, counters, and error summaries) to support UX and future introspection.
 - For high-risk state changes (auth/org handling, DB writes, Vontology mutations), use a single authoritative pathway and reuse it consistently.
 - When uncertain, ask succinctly; do not guess or fabricate behaviour.
 - When working on a task that may involve changes, you may open a branch based on the Jira task name (e.g. `JVNAUTOSCI-956-short-title`).
