@@ -163,8 +163,11 @@ Visit `http://localhost:5000` and explore the pre-loaded concepts in the interfa
 2. Set `GOOGLE_API_KEY` in `.env`
 3. Select Gemini model in Von's Settings panel
 
+### 5. **UI Feature Flags**
 
-### 5. **Run:**
+- `VON_EXPERT_TABS_ENABLED=1` enables the expert tabs (Vontology, Import/Export, Annotation) and annotation controls. Default behaviour is disabled unless set.
+
+### 6. **Run:**
 
 **Windows (PowerShell):**
 ```powershell
@@ -182,7 +185,7 @@ Visit `http://localhost:5000` and explore the pre-loaded concepts in the interfa
 # Open browser to http://localhost:5000
 ```
 
-### 6. **Stop:**
+### 7. **Stop:**
 
 **Windows (PowerShell):**
 ```powershell
@@ -196,7 +199,7 @@ Visit `http://localhost:5000` and explore the pre-loaded concepts in the interfa
 ./run.sh stop
 ```
 
-### 7. **Basic Usage:**
+### 8. **Basic Usage:**
 -  Browse the Vontology tree to explore knowledge structure
 -  Create your first concepts and entities, and make relations between them to construct your own ontological knowledge
 -  Configure your preferred LLM provider in Settings (Ollama local models by default)

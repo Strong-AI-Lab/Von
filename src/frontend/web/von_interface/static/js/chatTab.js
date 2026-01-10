@@ -1,5 +1,6 @@
 // Chat Tab Module
 import { annotateTurn, getUserContext } from './apiService.js';
+import { isAnnotationEnabled } from './featureFlags.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { elements, renderSpanSuggestions } from './domUtils.js';
@@ -4470,6 +4471,15 @@ export function initializeChatTab() {
     if (!sendButton || !resetButton || !promptInput) {
         console.error("Chat tab elements not found");
         return;
+    }
+
+    if (!isAnnotationEnabled() && annotationToggle) {
+        const label = annotationToggle.closest('.annotation-toggle');
+        if (label) {
+            label.remove();
+        } else {
+            annotationToggle.remove();
+        }
     }
 
     if (uploadFileButton && uploadFileInput) {

@@ -83,8 +83,10 @@
       <div class="desc-actions text-block-actions">
         <button id="typeCopyDescription" class="round-icon-button" title="Copy description to clipboard"
           aria-label="Copy description to clipboard" data-icon="copy" data-keep-title="true"></button>
+        {% if expert_tabs_enabled %}
         <button id="typeAnnotateDescription" class="round-icon-button" title="Annotate description"
           aria-label="Annotate description" data-icon="annotate" data-keep-title="true"></button>
+        {% endif %}
         <button id="typeEditDescriptionButton" class="round-icon-button" title="Edit description"
           aria-label="Edit description" data-icon="edit" data-keep-title="true"></button>
         <button id="typeDeleteDescriptionButton" class="round-icon-button" title="Delete description"

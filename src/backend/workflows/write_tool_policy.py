@@ -80,6 +80,51 @@ def compute_allowed_write_tools(
     )
 
 
+def prompt_explicitly_denies_write(prompt: str) -> bool:
+    """Return True when the user explicitly forbids write-side effects."""
+
+    if not isinstance(prompt, str):
+        return False
+
+    lowered = prompt.lower()
+    import re
+
+    verbs = (
+        "create",
+        "add",
+        "insert",
+        "upsert",
+        "update",
+        "edit",
+        "change",
+        "delete",
+        "remove",
+        "rename",
+        "merge",
+        "link",
+        "unlink",
+        "set",
+        "download",
+        "fetch",
+        "save",
+        "store",
+        "cache",
+        "archive",
+        "persist",
+        "upload",
+        "finalise",
+        "finalize",
+    )
+
+    return any(
+        re.search(
+            rf"\b(?:do not|don't|dont|never)\s+{re.escape(verb)}\b",
+            lowered,
+        )
+        for verb in verbs
+    )
+
+
 def _prompt_allows_vontology_mutation(prompt: str) -> bool:
     """Return True when the user explicitly requests a Vontology mutation."""
 

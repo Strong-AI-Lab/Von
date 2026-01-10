@@ -10,6 +10,11 @@
   <!-- Favicon -->
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
 
+  <script>
+    window.__VON_FEATURE_FLAGS__ = {
+      expertTabsEnabled: {{ 'true' if expert_tabs_enabled else 'false' }}
+    };
+  </script>
 
 </head>
 
@@ -61,11 +66,17 @@
   <div class="tab-container" id="tabContainer">
     <div class="tab-button active" data-tab="chatTab">Chat</div>
     <!-- Vontology Tab Button moved before Entity -->
+    {% if expert_tabs_enabled %}
     <div class="tab-button" data-tab="vontologyTab">Vontology</div>
+    {% endif %}
     <!-- Concept tabs will be dynamically created here -->
+    {% if expert_tabs_enabled %}
     <div class="tab-button" data-tab="importExportTab">Import/Export</div>
+    {% endif %}
     <div class="tab-button" data-tab="settingsTab">Settings</div> <!-- Added Settings Tab -->
+    {% if expert_tabs_enabled %}
     <div class="tab-button" data-tab="annotationTab">Annotation</div>
+    {% endif %}
   </div>
 
   <!-- Tab Content Area -->
@@ -74,16 +85,20 @@
     {% include 'chat_tab.html' %}
 
     <!-- Vontology Tab Content -->
+    {% if expert_tabs_enabled %}
     <div id="vontologyTab" class="tab-content">
       <!-- Content will be loaded dynamically -->
       <div class="loading">Loading vontology interface...</div>
     </div>
+    {% endif %}
 
     <!-- Import/Export Tab Content -->
+    {% if expert_tabs_enabled %}
     <div id="importExportTab" class="tab-content">
       <!-- Content will be loaded dynamically -->
       <div class="loading">Loading import/export interface...</div>
     </div>
+    {% endif %}
 
     <!-- Dynamic concept tabs will be created here -->
 
@@ -96,9 +111,11 @@
     </div>
 
     <!-- Annotation Tab Content (loaded dynamically) -->
+    {% if expert_tabs_enabled %}
     <div id="annotationTab" class="tab-content">
       <div class="loading">Loading annotation interface...</div>
     </div>
+    {% endif %}
 
   </div>
 

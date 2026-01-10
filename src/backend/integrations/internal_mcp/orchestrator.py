@@ -50,7 +50,10 @@ from ...workflows.engine import WorkflowExecutor
 from ...workflows.workflow_registry import WorkflowRegistry
 from ...workflows.workflow_selector import WorkflowSelector
 
-from src.backend.workflows.write_tool_policy import compute_allowed_write_tools
+from src.backend.workflows.write_tool_policy import (
+    compute_allowed_write_tools,
+    prompt_explicitly_denies_write,
+)
 
 
 @dataclass(frozen=True)
@@ -454,13 +457,14 @@ class InternalMCPChatOrchestrator:
             )
 
             if get_disable_write_tool_conservatism():
-                allowed = sorted({str(tool) for tool in requested_tools if tool})
-                return WorkflowActionResult(
-                    outputs={
-                        "allowed_write_tools": allowed,
-                        "write_policy_reason": "write_conservatism_disabled_by_admin_setting",
-                    }
-                )
+                if not prompt_explicitly_denies_write(prompt):
+                    allowed = sorted({str(tool) for tool in requested_tools if tool})
+                    return WorkflowActionResult(
+                        outputs={
+                            "allowed_write_tools": allowed,
+                            "write_policy_reason": "write_conservatism_disabled_by_admin_setting",
+                        }
+                    )
         except Exception:
             # Defensive: do not fail policy evaluation if Settings storage is unavailable.
             pass
