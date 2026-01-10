@@ -11,7 +11,7 @@ if src_root not in sys.path:
     sys.path.insert(0, src_root)
 
 
-from flask import Flask, render_template  # Added render_template
+from flask import Flask, render_template, abort  # Added render_template
 from pathlib import Path  # ADDED
 import logging  # Import logging
 import argparse
@@ -24,6 +24,7 @@ from src.backend.server.routes.von_routes import von_bp  # type: ignore
 from src.backend.server.routes.vontology_routes import vontology_bp  # type: ignore
 from src.backend.server.routes.settings_routes import settings_bp  # type: ignore
 from src.backend.languagemodels.llm_interface import OllamaClient  # type: ignore
+from src.backend.services.feature_flags import get_expert_tabs_enabled
 
 
 # Add src directory to Python path FIRST, before any backend imports
@@ -137,6 +138,7 @@ _apply_dotenv_overrides(
         "ATLASSIAN_API_EMAIL",
         "ATLASSIAN_API_TOKEN",
         "TAVILY_API_KEY",
+        "VON_EXPERT_TABS_ENABLED",
     }
 )
 
@@ -274,11 +276,15 @@ def main():
     @app.route("/vontology_tab")
     def serve_vontology_tab_route():
         """Serves the vontology tab template."""
+        if not get_expert_tabs_enabled():
+            abort(404)
         return render_template("vontology_tab.html")
 
     @app.route("/import_export_tab")
     def serve_import_export_tab_route():
         """Serves the import/export tab template."""
+        if not get_expert_tabs_enabled():
+            abort(404)
         return render_template("import_export_tab.html")
 
     @app.route("/entity_tab")
@@ -294,6 +300,8 @@ def main():
     @app.route("/annotation_tab")
     def serve_annotation_tab_route():
         """Serves the annotation demo tab template."""
+        if not get_expert_tabs_enabled():
+            abort(404)
         return render_template("annotation_tab.html")
 
     @app.route("/settings_tab")

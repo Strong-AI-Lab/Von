@@ -59,6 +59,7 @@
         title="Upload a file (or drag and drop onto chat)">Upload File</button>
       <input id="uploadFileInput" class="visually-hidden" type="file" aria-label="Upload file" />
 
+      {% if expert_tabs_enabled %}
       <label class="annotation-toggle" title="Enable concept annotations in chat responses">
         <input type="checkbox" id="annotationToggle">
         <span class="eye-icon">
@@ -70,6 +71,7 @@
         </span>
         <span class="toggle-label">Annotations</span>
       </label>
+      {% endif %}
 
       <label class="annotation-toggle" title="Speak Von responses aloud">
         <input type="checkbox" id="ttsToggle">

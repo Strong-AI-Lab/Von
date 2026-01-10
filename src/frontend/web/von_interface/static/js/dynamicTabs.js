@@ -6,6 +6,7 @@
 import { initializeAnnotationTab } from './annotationTab.js';
 import { fetchConceptListWithSuffix, fetchSubtypesWithSuffix, initializeNamesForm, loadConceptAttributes, loadConceptNames, selectConceptWithSuffix } from './conceptTab.js';
 import { getCurrentUserConceptId } from './domUtils.js';
+import { isAnnotationEnabled } from './featureFlags.js';
 import { DEFAULT_LANGUAGE } from './languageConfig.js';
 import { detectMarkdown, renderSmartTextAsync } from './markdownUtils.js';
 import { destroyPredicateView, initializePredicateView } from './predicateView.js';
@@ -17,6 +18,7 @@ import { getKeyConceptIds, updateTabHeaderStarButtons, updateTreeKeyConceptBadge
 let dynamicConceptTabs = new Map();
 let dynamicAnnotationTabs = new Map();
 let annotationTabCounter = 0;
+const annotationEnabled = isAnnotationEnabled();
 // Singleton context menu element for tab operations (created lazily)
 let tabContextMenu = null;
 let currentContextMenuTarget = null; // The tab button element for which menu opened
@@ -900,6 +902,10 @@ function closeDynamicAnnotationTab(tabId) {
 
 // Create and load a dynamic annotation tab
 function createAnnotationTab(text, conceptName, source) {
+    if (!annotationEnabled) {
+        console.warn('[dynamicTabs] Annotation tabs are disabled by feature flag.');
+        return;
+    }
     const suffix = `ann${++annotationTabCounter}`;
     const tabId = `annotationTab_${suffix}`;
     const icon = source === 'description' ? 'D' : 'N';
@@ -943,6 +949,10 @@ function createAnnotationTab(text, conceptName, source) {
 async function loadAnnotationTabContent(tabId, suffix, text) {
     const info = dynamicAnnotationTabs.get(tabId);
     if (!info) return;
+    if (!annotationEnabled) {
+        info.content.innerHTML = '<div class="error">Annotation tabs are disabled.</div>';
+        return;
+    }
     try {
         const response = await fetch('/annotation_tab');
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1784,6 +1794,9 @@ export function initializeDynamicTabs() {
     // Listen for requests to open annotation tabs for descriptions or notes
     document.addEventListener('open-annotation-tab', (evt) => {
         try {
+            if (!annotationEnabled) {
+                return;
+            }
             const detail = evt.detail || {};
             const { text, conceptName, source } = detail;
             createAnnotationTab(text || '', conceptName || 'Annotation', source);
@@ -1800,6 +1813,7 @@ export function initializeDynamicTabs() {
             const target = e.target;
             if (!target) return;
             if (target.classList && target.classList.contains('note-annotate-btn')) {
+                if (!annotationEnabled) return;
                 // Avoid double handling if a direct listener already marked the button
                 if (target.dataset.hasDirectAnnotate === '1') return; // direct listener exists
                 if (target.dataset.annotationDelegated === '1') return; // already handled once
@@ -1831,6 +1845,7 @@ export function initializeDynamicTabs() {
         try {
             const t = e.target;
             if (!t || !t.id || !/^typeAnnotateDescription_/.test(t.id)) return;
+            if (!annotationEnabled) return;
             // If a direct listener already exists (populateTypeDescription wired), skip
             if (t.dataset.descAnnotateDirect === '1') return;
             const suffix = t.id.replace('typeAnnotateDescription_', '');
@@ -2118,6 +2133,10 @@ async function ensureUnifiedDescriptionSection(conceptId, suffix) {
             }
         }
 
+        const annotateButtonHtml = annotationEnabled
+            ? `<button id="typeAnnotateDescription_${suffix}" class="round-icon-button" title="Annotate description" aria-label="Annotate description" data-icon="annotate" data-keep-title="true"></button>`
+            : '';
+
         // 2. Heuristic: if still no section but we see a legacy rectangular "Edit Description" button somewhere, build a new modern section
         if (!descSection) {
             const legacyEditBtn = Array.from(step1.querySelectorAll('button'))
@@ -2135,7 +2154,7 @@ async function ensureUnifiedDescriptionSection(conceptId, suffix) {
                   <textarea id="typeDescriptionTextarea_${suffix}" class="description-editor hidden" placeholder="Enter description..." rows="6"></textarea>
                   <div class="desc-actions text-block-actions">
                     <button id="typeCopyDescription_${suffix}" class="round-icon-button" title="Copy description to clipboard" aria-label="Copy description to clipboard" data-icon="copy" data-keep-title="true"></button>
-                    <button id="typeAnnotateDescription_${suffix}" class="round-icon-button" title="Annotate description" aria-label="Annotate description" data-icon="annotate" data-keep-title="true"></button>
+                    ${annotateButtonHtml}
                     <button id="typeEditDescriptionButton_${suffix}" class="round-icon-button" title="Edit description" aria-label="Edit description" data-icon="edit" data-keep-title="true"></button>
                     <button id="typeDeleteDescriptionButton_${suffix}" class="round-icon-button" title="Delete description" aria-label="Delete description" data-icon="delete" data-keep-title="true"></button>
                   </div>
@@ -2167,7 +2186,7 @@ async function ensureUnifiedDescriptionSection(conceptId, suffix) {
                   <textarea id="typeDescriptionTextarea_${suffix}" class="description-editor hidden" placeholder="Enter description..." rows="6"></textarea>
                   <div class="desc-actions text-block-actions">
                     <button id="typeCopyDescription_${suffix}" class="round-icon-button" title="Copy description to clipboard" aria-label="Copy description to clipboard" data-icon="copy" data-keep-title="true"></button>
-                    <button id="typeAnnotateDescription_${suffix}" class="round-icon-button" title="Annotate description" aria-label="Annotate description" data-icon="annotate" data-keep-title="true"></button>
+                    ${annotateButtonHtml}
                     <button id="typeEditDescriptionButton_${suffix}" class="round-icon-button" title="Edit description" aria-label="Edit description" data-icon="edit" data-keep-title="true"></button>
                     <button id="typeDeleteDescriptionButton_${suffix}" class="round-icon-button" title="Delete description" aria-label="Delete description" data-icon="delete" data-keep-title="true"></button>
                   </div>
@@ -2250,7 +2269,7 @@ async function ensureDescriptionActionsIntegrity(conceptId, suffix, opts = {}) {
         const requiredIds = [
             `typeDescriptionDisplay_${suffix}`,
             `typeCopyDescription_${suffix}`,
-            `typeAnnotateDescription_${suffix}`,
+            ...(annotationEnabled ? [`typeAnnotateDescription_${suffix}`] : []),
             `typeEditDescriptionButton_${suffix}`,
             `typeDeleteDescriptionButton_${suffix}`,
             `typeDescriptionTextarea_${suffix}`,
@@ -2270,10 +2289,12 @@ async function ensureDescriptionActionsIntegrity(conceptId, suffix, opts = {}) {
                 const a = document.createElement('div'); a.className = 'desc-actions text-block-actions'; section.appendChild(a); return a;
             })();
             const ensureBtn = (id, icon, label) => {
+                if (icon === 'annotate' && !annotationEnabled) return null;
                 let btn = document.getElementById(id);
                 if (!btn) { btn = document.createElement('button'); btn.id = id; actions.appendChild(btn); }
                 btn.classList.add('round-icon-button');
                 btn.dataset.icon = icon; btn.title = label; btn.setAttribute('aria-label', label);
+                return btn;
             };
             if (!document.getElementById(`typeCopyDescription_${suffix}`)) ensureBtn(`typeCopyDescription_${suffix}`, 'copy', 'Copy description to clipboard');
             if (!document.getElementById(`typeAnnotateDescription_${suffix}`)) ensureBtn(`typeAnnotateDescription_${suffix}`, 'annotate', 'Annotate description');
@@ -2446,6 +2467,7 @@ function upgradeLegacyDescriptionActions(descSection, suffix) {
         wrapper.appendChild(actions);
     }
     const ensureBtn = (id, icon, title) => {
+        if (icon === 'annotate' && !annotationEnabled) return null;
         let btn = descSection.querySelector(`#${id}`);
         if (!btn) {
             btn = document.createElement('button');
@@ -2532,6 +2554,7 @@ function attachConceptIdCopyChip(headerH2, conceptId, kind) {
 
             // Helper to create or transform a button
             const ensureBtn = (id, icon, title) => {
+                if (icon === 'annotate' && !annotationEnabled) return null;
                 let btn = descSection.querySelector(`#${id}`);
                 if (!btn) {
                     btn = document.createElement('button');
@@ -3079,7 +3102,7 @@ async function populateTypeDescription(conceptId, suffix) {
         const statusEl = document.getElementById(`typeDescriptionStatus_${suffix}`);
         // Capture missing buttons before potential reconstruction (so we can force rebind if we add them)
         const preMissingButtons = [];
-        ['Copy', 'Annotate', 'Edit', 'Delete'].forEach(kind => {
+        ['Copy', ...(annotationEnabled ? ['Annotate'] : []), 'Edit', 'Delete'].forEach(kind => {
             const id = `type${kind}Description_${suffix}`.replace('EditDescription_', 'EditDescriptionButton_').replace('DeleteDescription_', 'DeleteDescriptionButton_');
             if (!document.getElementById(id)) preMissingButtons.push(id);
         });
@@ -3096,6 +3119,7 @@ async function populateTypeDescription(conceptId, suffix) {
                 if (wrapper && wrapper.appendChild) wrapper.appendChild(actionsContainer); else display.parentNode.appendChild(actionsContainer);
             }
             const mk = (id, icon, label) => {
+                if (icon === 'annotate' && !annotationEnabled) return;
                 let btn = descSection.querySelector(`#${id}`);
                 if (!btn) {
                     btn = document.createElement('button');
@@ -3117,7 +3141,7 @@ async function populateTypeDescription(conceptId, suffix) {
         const listenersBound = display && display.dataset.descEvents === '1';
         const requiredBtnIds = [
             `typeCopyDescription_${suffix}`,
-            `typeAnnotateDescription_${suffix}`,
+            ...(annotationEnabled ? [`typeAnnotateDescription_${suffix}`] : []),
             `typeEditDescriptionButton_${suffix}`,
             `typeDeleteDescriptionButton_${suffix}`
         ];
@@ -3154,7 +3178,7 @@ async function populateTypeDescription(conceptId, suffix) {
                                                     <textarea id="typeDescriptionTextarea_${suffix}" class="description-editor hidden" rows="6"></textarea>
                                                     <div class="desc-actions text-block-actions">
                                                         <button id="typeCopyDescription_${suffix}" class="round-icon-button" data-icon="copy"></button>
-                                                        <button id="typeAnnotateDescription_${suffix}" class="round-icon-button" data-icon="annotate"></button>
+                                                        ${annotationEnabled ? `<button id="typeAnnotateDescription_${suffix}" class="round-icon-button" data-icon="annotate"></button>` : ''}
                                                         <button id="typeEditDescriptionButton_${suffix}" class="round-icon-button" data-icon="edit"></button>
                                                         <button id="typeDeleteDescriptionButton_${suffix}" class="round-icon-button" data-icon="delete"></button>
                                                     </div>
@@ -3532,6 +3556,9 @@ async function populateNotesSection(conceptId, suffix) {
                 const viewStyle = isMarkdown
                     ? 'white-space:normal;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:auto;'
                     : 'white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:220px;overflow:auto;';
+                const annotateButton = annotationEnabled
+                    ? '<button type="button" class="round-icon-button note-annotate-btn" title="Annotate note" aria-label="Annotate note" data-icon="annotate" data-keep-title="true"></button>'
+                    : '';
                 item.innerHTML = `
                                                  <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="${viewStyle}">${displayHtml}</div>
                    <div class="note-edit hidden" style="margin-top:4px;">
@@ -3545,7 +3572,7 @@ async function populateNotesSection(conceptId, suffix) {
                    <div class="note-actions text-block-actions">
                              <button type="button" class="round-icon-button note-copy-btn" title="Copy note to clipboard" aria-label="Copy note to clipboard" data-icon="copy" data-keep-title="true"></button>
                              <button type="button" class="round-icon-button note-expand-btn" title="Show more" aria-label="Show full note" data-icon="expand" data-keep-title="true" ${truncated ? '' : 'style="display:none;"'}></button>
-                             <button type="button" class="round-icon-button note-annotate-btn" title="Annotate note" aria-label="Annotate note" data-icon="annotate" data-keep-title="true"></button>
+                             ${annotateButton}
                              <button type="button" class="round-icon-button note-edit-btn" title="Edit note" aria-label="Edit note" data-icon="edit" data-keep-title="true"></button>
                              <button type="button" class="round-icon-button note-delete-btn" title="Delete note" aria-label="Delete note" data-icon="delete" data-keep-title="true"></button>
                    </div>`;
@@ -3735,7 +3762,7 @@ async function populateNotesSection(conceptId, suffix) {
                 resetDelete();
             });
 
-            if (annotateBtn) {
+            if (annotateBtn && annotationEnabled) {
                 annotateBtn.dataset.hasDirectAnnotate = '1';
                 annotateBtn.addEventListener('click', () => {
                     const info = dynamicConceptTabs.get(currentConceptId);
@@ -3744,6 +3771,8 @@ async function populateNotesSection(conceptId, suffix) {
                         detail: { text: note.text || '', conceptName, source: 'note' }
                     }));
                 });
+            } else if (annotateBtn) {
+                annotateBtn.remove();
             }
         };
 
@@ -3908,6 +3937,9 @@ async function populateContentSection(conceptId, suffix) {
                 const viewStyle = isMarkdown
                     ? 'white-space:normal;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:auto;'
                     : 'white-space:pre-wrap;font-size:0.85rem;line-height:1.25;max-height:250px;overflow:auto;';
+                const annotateButton = annotationEnabled
+                    ? '<button type="button" class="round-icon-button content-annotate-btn" title="Annotate content" aria-label="Annotate content" data-icon="annotate"></button>'
+                    : '';
                 item.innerHTML = `
                                                  <div class="${viewClasses}" data-full="${safeText}" data-truncated="${truncated ? '1' : '0'}" style="${viewStyle}">${displayHtml}</div>
                    <div class="content-edit hidden" style="margin-top:4px;">
@@ -3921,7 +3953,7 @@ async function populateContentSection(conceptId, suffix) {
                    <div class="content-actions text-block-actions">
                              <button type="button" class="round-icon-button content-copy-btn" title="Copy content to clipboard" aria-label="Copy content to clipboard" data-icon="copy"></button>
                              <button type="button" class="round-icon-button content-expand-btn" title="Show more" aria-label="Show full content" data-icon="expand" ${truncated ? '' : 'style="display:none;"'}></button>
-                             <button type="button" class="round-icon-button content-annotate-btn" title="Annotate content" aria-label="Annotate content" data-icon="annotate"></button>
+                             ${annotateButton}
                              <button type="button" class="round-icon-button content-edit-btn" title="Edit content" aria-label="Edit content" data-icon="edit"></button>
                              <button type="button" class="round-icon-button content-delete-btn" title="Delete content" aria-label="Delete content" data-icon="delete"></button>
                    </div>`;
@@ -4111,7 +4143,7 @@ async function populateContentSection(conceptId, suffix) {
                 resetDelete();
             });
 
-            if (annotateBtn) {
+            if (annotateBtn && annotationEnabled) {
                 annotateBtn.dataset.hasDirectAnnotate = '1';
                 annotateBtn.addEventListener('click', () => {
                     const info = dynamicConceptTabs.get(currentConceptId);
@@ -4120,6 +4152,8 @@ async function populateContentSection(conceptId, suffix) {
                         detail: { text: content.text || '', conceptName, source: 'content' }
                     }));
                 });
+            } else if (annotateBtn) {
+                annotateBtn.remove();
             }
         };
 

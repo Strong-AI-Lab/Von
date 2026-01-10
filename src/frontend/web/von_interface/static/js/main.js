@@ -1,5 +1,6 @@
 import { initializeDomElements, initializeInfoPopup, loadAndDisplayGlobalModelInFooter } from './domUtils.js';
 import { closeDynamicConceptTab, createOrActivateConceptTab } from './dynamicTabs.js';
+import { isExpertTabsEnabled } from './featureFlags.js';
 import { getLanguageDisplayName } from './languageConfig.js';
 import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
@@ -12,6 +13,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   initializeDomElements();
   initializeInfoPopup();
+  applyExpertTabGuards();
   setupTabNavigation();
   setupSettingsFrameResizing();
 
@@ -127,6 +129,30 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadTabData(initialTabId);
   console.log("Initial data loads complete.");
 });
+
+function applyExpertTabGuards() {
+  if (isExpertTabsEnabled()) return;
+
+  const guardedTabs = ['vontologyTab', 'importExportTab', 'annotationTab'];
+  guardedTabs.forEach((tabId) => {
+    const button = document.querySelector(`.tab-button[data-tab="${tabId}"]`);
+    if (button) {
+      button.remove();
+    }
+    const content = document.getElementById(tabId);
+    if (content) {
+      content.remove();
+    }
+  });
+
+  const annotationToggle = document.getElementById('annotationToggle');
+  const annotationLabel = annotationToggle ? annotationToggle.closest('.annotation-toggle') : null;
+  if (annotationLabel) {
+    annotationLabel.remove();
+  } else if (annotationToggle) {
+    annotationToggle.remove();
+  }
+}
 
 // Function to handle iframe resizing
 function setupSettingsFrameResizing() {

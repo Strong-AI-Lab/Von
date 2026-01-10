@@ -1,8 +1,15 @@
 import { fetchConceptList, initializeConceptTab, updateConceptTabUI } from './conceptTab.js';
 import { elements } from './domUtils.js';
 import { initializeDynamicTabs, loadDynamicConceptTabContent } from './dynamicTabs.js';
+import { isExpertTabsEnabled } from './featureFlags.js';
 import { initializeImportExportTab } from './importExportTab.js';
 import { initializeVontologyTab } from './vontology.js';
+
+const GUARDED_TAB_IDS = new Set(['vontologyTab', 'importExportTab', 'annotationTab']);
+
+function isTabGuarded(tabId) {
+  return !isExpertTabsEnabled() && GUARDED_TAB_IDS.has(tabId);
+}
 
 export function setupTabNavigation() {
   console.log("Setting up tab navigation...");
@@ -37,6 +44,10 @@ export function setupTabNavigation() {
 
 export function activateTab(tabId) {
   console.log(`Activating tab: ${tabId}`);
+  if (isTabGuarded(tabId)) {
+    console.warn(`[tabNavigation] Tab ${tabId} is disabled by feature flag; falling back to chat.`);
+    tabId = 'chatTab';
+  }
 
   // Re-query elements to include any dynamically created tabs
   const allTabContents = document.querySelectorAll('.tab-content');
@@ -79,6 +90,10 @@ export function activateTab(tabId) {
 }
 
 async function loadTabContent(tabId, contentElement) {
+  if (isTabGuarded(tabId)) {
+    console.warn(`[tabNavigation] Skipping load for disabled tab ${tabId}.`);
+    return;
+  }
   // Chat tab is embedded, no dynamic loading needed
   if (tabId === 'chatTab') {
     console.log('Chat tab content is embedded, skipping dynamic loading.');

@@ -178,6 +178,14 @@ def create_flask_app(
         "MODEL", "granite3.3:2b"
     )  # Keep default for now, but be aware
 
+    @app.context_processor
+    def inject_feature_flags():
+        from ..services.feature_flags import get_expert_tabs_enabled
+
+        return {
+            "expert_tabs_enabled": get_expert_tabs_enabled(),
+        }
+
     # --- Register Blueprints ---
     app.register_blueprint(von_bp, url_prefix="/von")  # MODIFIED
     app.register_blueprint(
