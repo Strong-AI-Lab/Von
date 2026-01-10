@@ -12,213 +12,6 @@
 
 <body class="settings-body">
     <div class="settings-container">
-        <section id="server-runtime-overview" class="runtime-overview">
-            <div class="runtime-header">
-                <div>
-                    <h2>Server Runtime</h2>
-                    <p class="settings-note">Live connection details for this Von instance. Values refresh
-                        automatically and can be copied for debugging or remote access.</p>
-                </div>
-                <button id="refreshRuntimeButton" type="button" class="btn-secondary">Refresh</button>
-            </div>
-            <div class="runtime-grid">
-                <div class="runtime-card">
-                    <div class="runtime-label">Local IP</div>
-                    <div class="runtime-value">
-                        <button id="settingsLocalIpValue" class="runtime-copy-button" type="button"
-                            title="Copy local IP address">—</button>
-                    </div>
-                    <div class="runtime-hint">LAN address; use for same-network clients.</div>
-                </div>
-                <div class="runtime-card">
-                    <div class="runtime-label">Public IP</div>
-                    <div class="runtime-value">
-                        <button id="settingsPublicIpValue" class="runtime-copy-button" type="button"
-                            title="Copy public IP address">—</button>
-                    </div>
-                    <div class="runtime-hint">What external services (e.g., Atlas) see.</div>
-                </div>
-                <div class="runtime-card">
-                    <div class="runtime-label">PID</div>
-                    <div class="runtime-value">
-                        <button id="settingsPidValue" class="runtime-copy-button" type="button"
-                            title="Copy server process ID">—</button>
-                    </div>
-                    <div class="runtime-hint">Process identifier for the running backend.</div>
-                </div>
-                <div class="runtime-card">
-                    <div class="runtime-label">Uptime</div>
-                    <div class="runtime-value" id="settingsUptimeValue" title="Process uptime">—</div>
-                    <div class="runtime-hint">Updated every few seconds.</div>
-                </div>
-                <div class="runtime-card">
-                    <div class="runtime-label">RAG Status</div>
-                    <div class="runtime-value" id="settingsRagSummary" title="RAG indexing summary">—</div>
-                    <div class="runtime-hint" id="settingsRagHint">Includes pending and indexed counts.</div>
-                </div>
-            </div>
-        </section>
-
-        <section id="premium-model-settings">
-            <h2>Premium Models (OpenAI)</h2>
-            <label for="openaiApiKeyEnvVar">OpenAI API Key Environment Variable:</label>
-            <input type="text" id="openaiApiKeyEnvVar" name="openai_api_key_env_var" value="OPENAI_API_KEY">
-            <button id="verifyOpenAiApiKeyButton" class="hidden">Verify Key and Load Models</button>
-            <div id="openaiModelsContainer" class="hidden">
-                <label for="openaiModelSelect">Select OpenAI Model:</label>
-                <select id="openaiModelSelect" name="openai_model">
-                    <!-- OpenAI models will be populated here -->
-                </select>
-            </div>
-            <div id="openaiStatusMessage" class="status-message" role="alert">
-                <!-- Status messages for OpenAI will appear here -->
-            </div>
-        </section>
-
-        <section id="ollima-settings">
-            <h2>Ollama Model Configuration</h2>
-
-            <!-- Ollama Hosts Management -->
-            <div id="ollamaHostsContainer">
-                <h3>Ollama Hosts</h3>
-                <p class="settings-note">
-                    Configure multiple Ollama server hosts. Set OLLAMA_HOSTS_LIST environment variable with
-                    comma-separated URLs,
-                    or add them manually below.
-                </p>
-
-                <div id="ollamaHostsList">
-                    <!-- Hosts will be populated here -->
-                </div>
-
-                <div class="inline-form">
-                    <input type="text" id="newOllamaHostUrl" placeholder="http://localhost:11434" class="flex-1">
-                    <button id="addOllamaHostButton" class="btn-azure">
-                        Add Host
-                    </button>
-                </div>
-
-                <button id="refreshOllamaHostsButton" class="btn-success mr-1">
-                    Refresh from Environment
-                </button>
-
-                <button id="loadOllamaModelsButton" class="btn-info">
-                    Load All Models
-                </button>
-            </div>
-
-            <!-- Remote Host Scanning Control -->
-            <div class="inline-form inline-form-tight mb-2 mt-3">
-                <input type="checkbox" id="disableRemoteOllamaScanToggle"
-                    aria-describedby="disableRemoteOllamaScanHelp" />
-                <label for="disableRemoteOllamaScanToggle" class="ml-1"
-                    title="When enabled, only local Ollama hosts (localhost/127.0.0.1) will be scanned for models; remote hosts will be skipped to avoid slow timeouts.">Disable
-                    remote Ollama host scanning</label>
-            </div>
-            <div>
-                <small id="disableRemoteOllamaScanHelp" class="settings-note">Enable this to prevent slow timeouts when
-                    scanning remote Ollama hosts. Only local hosts (localhost/127.0.0.1) will be scanned for available
-                    models.</small>
-            </div>
-
-            <!-- Model Selection -->
-            <label for="globalModelSelect">Global Ollama Model:</label>
-            <select id="globalModelSelect" name="global_ollama_model">
-                <option value="">Loading models...</option>
-            </select>
-
-            <div id="settingsStatusMessage" class="status-message" role="alert">
-                <!-- Messages will appear here -->
-            </div>
-        </section>
-
-        <section id="agent-configuration">
-            <h2>Agent Configuration</h2>
-
-            <h3>Gmail Integration</h3>
-            <label for="gmailProfileInput">Gmail profile ID (for MCP tools):</label>
-            <input type="text" id="gmailProfileInput" placeholder="e.g., von-mail" />
-            <small class="settings-note">Profile IDs must match the backend Gmail profiles configured via environment
-                (VON_GMAIL_PROFILES). Leave blank to disable Gmail calls.</small>
-
-            <h4 class="mt-2">Agent Gmail OAuth</h4>
-            <p class="settings-note">Authorise a Gmail profile for agent tools. This does <strong>not</strong> log you
-                in as an app user.</p>
-            <div class="inline-form inline-form-tight">
-                <button type="button" class="btn-primary" onclick="authoriseAgentGmail()">Authorise Agent Gmail</button>
-                <button type="button" class="btn-danger ml-2" onclick="revokeAgentGmail()">Revoke</button>
-                <button type="button" class="btn-secondary ml-2"
-                    onclick="refreshAgentGmailOauthStatus()">Refresh</button>
-                <span class="settings-note ml-2">Ensure popups are allowed for this site.</span>
-            </div>
-            <div id="agentGmailOauthStatus" class="settings-note mt-1">Agent Gmail OAuth: unknown</div>
-            <div id="gmailProfileStatus" class="settings-note">Gmail profile target: unknown</div>
-
-            <h3 class="mt-3">Tool Execution Caps</h3>
-            <p class="settings-note">Controls internal MCP tool chaining. Changes apply immediately for new chat turns.
-                Larger values can increase latency and tool load.</p>
-
-            <div class="inline-form inline-form-tight">
-                <label for="internalMcpMaxToolInvocations" class="mr-1">Max tool invocations per turn:</label>
-                <input type="number" id="internalMcpMaxToolInvocations" min="0" max="50" step="1" value="30"
-                    class="mr-2" />
-
-                <label for="internalMcpToolBatchCap" class="mr-1">Tool calls per batch:</label>
-                <input type="number" id="internalMcpToolBatchCap" min="1" max="50" step="1" value="10" />
-            </div>
-            <small class="settings-note">Defaults: 30 invocations, batch cap 10. Set invocations to 0 to disable tool
-                calls (chat still works).</small>
-
-            <div class="inline-form inline-form-tight mt-2">
-                <input type="checkbox" id="showToolUseDuringThinkingToggle"
-                    aria-describedby="showToolUseDuringThinkingHelp" />
-                <label for="showToolUseDuringThinkingToggle" class="ml-1"
-                    title="When enabled, the Conversations tab shows which internal MCP tool is being used while Von is thinking.">Show
-                    tool use during thinking</label>
-            </div>
-            <small id="showToolUseDuringThinkingHelp" class="settings-note">Default: enabled. Shows last tool name,
-                batch size, and remaining tool-call budget.</small>
-
-            <div id="disableWriteToolConservatismContainer" class="mt-3 hidden">
-                <h4>Admin Override</h4>
-                <div class="inline-form inline-form-tight">
-                    <input type="checkbox" id="disableWriteToolConservatismToggle"
-                        aria-describedby="disableWriteToolConservatismHelp" />
-                    <label for="disableWriteToolConservatismToggle" class="ml-1"
-                        title="When enabled, Von will require explicit user write intent before running internal MCP write tools.">
-                        Enable write-tool conservatism
-                        <span id="disableWriteToolConservatismOnBadge"
-                            class="write-policy-override-badge hidden">GATE ON</span>
-                    </label>
-                </div>
-                <small id="disableWriteToolConservatismHelp" class="settings-note">
-                    <strong>Default:</strong> Disabled. When enabled, write tools require explicit user intent. Admins/owners
-                    only. This is a global server setting.
-                </small>
-            </div>
-
-            <h3 class="mt-3">Jira Tool Guardrails</h3>
-            <p class="settings-note">Read-only visibility into the environment guardrails used by the internal MCP Jira
-                write tools. To change these values, update your environment and restart Von.</p>
-
-            <div class="inline-form inline-form-tight">
-                <span class="settings-note"><strong>Allowed Jira projects:</strong></span>
-                <button id="settingsJiraProjectAllowListValue" class="runtime-copy-button ml-2" type="button"
-                    title="Copy project allow-list">—</button>
-            </div>
-            <small class="settings-note">From <code>VON_JIRA_PROJECT_ALLOW_LIST</code>. Default:
-                <code>JVNAUTOSCI</code>.
-                Comma-separated project keys.</small>
-
-            <div class="inline-form inline-form-tight mt-2">
-                <span class="settings-note"><strong>Jira execute mode:</strong></span>
-                <button id="settingsJiraExecuteModeValue" class="runtime-copy-button ml-2" type="button"
-                    title="Copy execute-mode state">—</button>
-            </div>
-            <small class="settings-note">From <code>VON_INTERNAL_MCP_JIRA_EXECUTE_MODE</code>. When enabled, callers may
-                pass <code>execute=true</code> to run writes without per-call <code>approved=true</code>.</small>
-        </section>
-
         <section id="current-user-settings">
             <h2>Current User Configuration</h2>
 
@@ -389,6 +182,238 @@
             </div>
         </section>
 
+        <section id="premium-model-settings">
+            <h2>Premium Models (OpenAI)</h2>
+            <label for="openaiApiKeyEnvVar">OpenAI API Key Environment Variable:</label>
+            <input type="text" id="openaiApiKeyEnvVar" name="openai_api_key_env_var" value="OPENAI_API_KEY">
+            <button id="verifyOpenAiApiKeyButton" class="hidden">Verify Key and Load Models</button>
+            <div id="openaiModelsContainer" class="hidden">
+                <label for="openaiModelSelect">Select OpenAI Model:</label>
+                <select id="openaiModelSelect" name="openai_model">
+                    <!-- OpenAI models will be populated here -->
+                </select>
+            </div>
+            <div id="openaiStatusMessage" class="status-message" role="alert">
+                <!-- Status messages for OpenAI will appear here -->
+            </div>
+        </section>
+
+        <section id="ollima-settings">
+            <h2>Ollama Model Configuration</h2>
+
+            <!-- Ollama Hosts Management -->
+            <div id="ollamaHostsContainer">
+                <h3>Ollama Hosts</h3>
+                <p class="settings-note">
+                    Configure multiple Ollama server hosts. Set OLLAMA_HOSTS_LIST environment variable with
+                    comma-separated URLs,
+                    or add them manually below.
+                </p>
+
+                <div id="ollamaHostsList">
+                    <!-- Hosts will be populated here -->
+                </div>
+
+                <div class="inline-form">
+                    <input type="text" id="newOllamaHostUrl" placeholder="http://localhost:11434" class="flex-1">
+                    <button id="addOllamaHostButton" class="btn-azure">
+                        Add Host
+                    </button>
+                </div>
+
+                <button id="refreshOllamaHostsButton" class="btn-success mr-1">
+                    Refresh from Environment
+                </button>
+
+                <button id="loadOllamaModelsButton" class="btn-info">
+                    Load All Models
+                </button>
+            </div>
+
+            <!-- Remote Host Scanning Control -->
+            <div class="inline-form inline-form-tight mb-2 mt-3">
+                <input type="checkbox" id="disableRemoteOllamaScanToggle"
+                    aria-describedby="disableRemoteOllamaScanHelp" />
+                <label for="disableRemoteOllamaScanToggle" class="ml-1"
+                    title="When enabled, only local Ollama hosts (localhost/127.0.0.1) will be scanned for models; remote hosts will be skipped to avoid slow timeouts.">Disable
+                    remote Ollama host scanning</label>
+            </div>
+            <div>
+                <small id="disableRemoteOllamaScanHelp" class="settings-note">Enable this to prevent slow timeouts when
+                    scanning remote Ollama hosts. Only local hosts (localhost/127.0.0.1) will be scanned for available
+                    models.</small>
+            </div>
+
+            <!-- Model Selection -->
+            <label for="globalModelSelect">Global Ollama Model:</label>
+            <select id="globalModelSelect" name="global_ollama_model">
+                <option value="">Loading models...</option>
+            </select>
+
+            <div id="settingsStatusMessage" class="status-message" role="alert">
+                <!-- Messages will appear here -->
+            </div>
+        </section>
+
+        <section id="vontology-performance">
+            <h2>Vontology UI & Performance</h2>
+            <div class="inline-form inline-form-tight mb-2">
+                <input type="checkbox" id="preloadVontologyTreeToggle" aria-describedby="preloadVontologyTreeHelp" />
+                <label for="preloadVontologyTreeToggle" class="ml-1"
+                    title="When enabled, the Vontology tree preloads in the background while chat is active.">Preload
+                    Vontology tree in the background on page load</label>
+            </div>
+            <div>
+                <small id="preloadVontologyTreeHelp" class="settings-note">Default is off to avoid contention. When
+                    enabled, the Vontology tree loads early so the Vontology tab opens faster.</small>
+            </div>
+            <div class="inline-form inline-form-tight mb-2">
+                <input type="checkbox" id="fetchCountsOnLoadToggle" aria-describedby="fetchCountsOnLoadHelp" />
+                <label for="fetchCountsOnLoadToggle" class="ml-1"
+                    title="When enabled, entity counts are fetched during initial tree load; when disabled, the tree renders first and counts load in the background.">Fetch
+                    entity counts during initial tree load</label>
+            </div>
+            <div>
+                <small id="fetchCountsOnLoadHelp" class="settings-note">Disabling this can make initial tree display
+                    faster; counts will still appear shortly after as they are loaded lazily.</small>
+            </div>
+            <div id="vontologyPerformanceStatus" class="status-message hidden" role="alert"></div>
+        </section>
+
+        <section id="server-runtime-overview" class="runtime-overview">
+            <div class="runtime-header">
+                <div>
+                    <h2>Server Runtime</h2>
+                    <p class="settings-note">Live connection details for this Von instance. Values refresh
+                        automatically and can be copied for debugging or remote access.</p>
+                </div>
+                <button id="refreshRuntimeButton" type="button" class="btn-secondary">Refresh</button>
+            </div>
+            <div class="runtime-grid">
+                <div class="runtime-card">
+                    <div class="runtime-label">Local IP</div>
+                    <div class="runtime-value">
+                        <button id="settingsLocalIpValue" class="runtime-copy-button" type="button"
+                            title="Copy local IP address">—</button>
+                    </div>
+                    <div class="runtime-hint">LAN address; use for same-network clients.</div>
+                </div>
+                <div class="runtime-card">
+                    <div class="runtime-label">Public IP</div>
+                    <div class="runtime-value">
+                        <button id="settingsPublicIpValue" class="runtime-copy-button" type="button"
+                            title="Copy public IP address">—</button>
+                    </div>
+                    <div class="runtime-hint">What external services (e.g., Atlas) see.</div>
+                </div>
+                <div class="runtime-card">
+                    <div class="runtime-label">PID</div>
+                    <div class="runtime-value">
+                        <button id="settingsPidValue" class="runtime-copy-button" type="button"
+                            title="Copy server process ID">—</button>
+                    </div>
+                    <div class="runtime-hint">Process identifier for the running backend.</div>
+                </div>
+                <div class="runtime-card">
+                    <div class="runtime-label">Uptime</div>
+                    <div class="runtime-value" id="settingsUptimeValue" title="Process uptime">—</div>
+                    <div class="runtime-hint">Updated every few seconds.</div>
+                </div>
+                <div class="runtime-card">
+                    <div class="runtime-label">RAG Status</div>
+                    <div class="runtime-value" id="settingsRagSummary" title="RAG indexing summary">—</div>
+                    <div class="runtime-hint" id="settingsRagHint">Includes pending and indexed counts.</div>
+                </div>
+            </div>
+        </section>
+
+        <section id="agent-configuration">
+            <h2>Agent Configuration</h2>
+
+            <h3>Gmail Integration</h3>
+            <label for="gmailProfileInput">Gmail profile ID (for MCP tools):</label>
+            <input type="text" id="gmailProfileInput" placeholder="e.g., von-mail" />
+            <small class="settings-note">Profile IDs must match the backend Gmail profiles configured via environment
+                (VON_GMAIL_PROFILES). Leave blank to disable Gmail calls.</small>
+
+            <h4 class="mt-2">Agent Gmail OAuth</h4>
+            <p class="settings-note">Authorise a Gmail profile for agent tools. This does <strong>not</strong> log you
+                in as an app user.</p>
+            <div class="inline-form inline-form-tight">
+                <button type="button" class="btn-primary" onclick="authoriseAgentGmail()">Authorise Agent Gmail</button>
+                <button type="button" class="btn-danger ml-2" onclick="revokeAgentGmail()">Revoke</button>
+                <button type="button" class="btn-secondary ml-2"
+                    onclick="refreshAgentGmailOauthStatus()">Refresh</button>
+                <span class="settings-note ml-2">Ensure popups are allowed for this site.</span>
+            </div>
+            <div id="agentGmailOauthStatus" class="settings-note mt-1">Agent Gmail OAuth: unknown</div>
+            <div id="gmailProfileStatus" class="settings-note">Gmail profile target: unknown</div>
+
+            <h3 class="mt-3">Tool Execution Caps</h3>
+            <p class="settings-note">Controls internal MCP tool chaining. Changes apply immediately for new chat turns.
+                Larger values can increase latency and tool load.</p>
+
+            <div class="inline-form inline-form-tight">
+                <label for="internalMcpMaxToolInvocations" class="mr-1">Max tool invocations per turn:</label>
+                <input type="number" id="internalMcpMaxToolInvocations" min="0" max="50" step="1" value="30"
+                    class="mr-2" />
+
+                <label for="internalMcpToolBatchCap" class="mr-1">Tool calls per batch:</label>
+                <input type="number" id="internalMcpToolBatchCap" min="1" max="50" step="1" value="10" />
+            </div>
+            <small class="settings-note">Defaults: 30 invocations, batch cap 10. Set invocations to 0 to disable tool
+                calls (chat still works).</small>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <input type="checkbox" id="showToolUseDuringThinkingToggle"
+                    aria-describedby="showToolUseDuringThinkingHelp" />
+                <label for="showToolUseDuringThinkingToggle" class="ml-1"
+                    title="When enabled, the Conversations tab shows which internal MCP tool is being used while Von is thinking.">Show
+                    tool use during thinking</label>
+            </div>
+            <small id="showToolUseDuringThinkingHelp" class="settings-note">Default: enabled. Shows last tool name,
+                batch size, and remaining tool-call budget.</small>
+
+            <div id="disableWriteToolConservatismContainer" class="mt-3 hidden">
+                <h4>Admin Override</h4>
+                <div class="inline-form inline-form-tight">
+                    <input type="checkbox" id="disableWriteToolConservatismToggle"
+                        aria-describedby="disableWriteToolConservatismHelp" />
+                    <label for="disableWriteToolConservatismToggle" class="ml-1"
+                        title="When enabled, Von will require explicit user write intent before running internal MCP write tools.">
+                        Enable write-tool conservatism
+                        <span id="disableWriteToolConservatismOnBadge"
+                            class="write-policy-override-badge hidden">GATE ON</span>
+                    </label>
+                </div>
+                <small id="disableWriteToolConservatismHelp" class="settings-note">
+                    <strong>Default:</strong> Disabled. When enabled, write tools require explicit user intent. Admins/owners
+                    only. This is a global server setting.
+                </small>
+            </div>
+
+            <h3 class="mt-3">Jira Tool Guardrails</h3>
+            <p class="settings-note">Read-only visibility into the environment guardrails used by the internal MCP Jira
+                write tools. To change these values, update your environment and restart Von.</p>
+
+            <div class="inline-form inline-form-tight">
+                <span class="settings-note"><strong>Allowed Jira projects:</strong></span>
+                <button id="settingsJiraProjectAllowListValue" class="runtime-copy-button ml-2" type="button"
+                    title="Copy project allow-list">—</button>
+            </div>
+            <small class="settings-note">From <code>VON_JIRA_PROJECT_ALLOW_LIST</code>. Default:
+                <code>JVNAUTOSCI</code>.
+                Comma-separated project keys.</small>
+
+            <div class="inline-form inline-form-tight mt-2">
+                <span class="settings-note"><strong>Jira execute mode:</strong></span>
+                <button id="settingsJiraExecuteModeValue" class="runtime-copy-button ml-2" type="button"
+                    title="Copy execute-mode state">—</button>
+            </div>
+            <small class="settings-note">From <code>VON_INTERNAL_MCP_JIRA_EXECUTE_MODE</code>. When enabled, callers may
+                pass <code>execute=true</code> to run writes without per-call <code>approved=true</code>.</small>
+        </section>
+
         <section id="database-info">
             <h2>Database</h2>
             <div id="dbInfoContent">
@@ -432,31 +457,6 @@
                 <!-- Performance metrics populated dynamically -->
             </div>
             <small id="performanceMetricsTimestamp" class="text-muted"></small>
-        </section>
-
-        <section id="vontology-performance">
-            <h2>Vontology UI & Performance</h2>
-            <div class="inline-form inline-form-tight mb-2">
-                <input type="checkbox" id="preloadVontologyTreeToggle" aria-describedby="preloadVontologyTreeHelp" />
-                <label for="preloadVontologyTreeToggle" class="ml-1"
-                    title="When enabled, the Vontology tree preloads in the background while chat is active.">Preload
-                    Vontology tree in the background on page load</label>
-            </div>
-            <div>
-                <small id="preloadVontologyTreeHelp" class="settings-note">Default is off to avoid contention. When
-                    enabled, the Vontology tree loads early so the Vontology tab opens faster.</small>
-            </div>
-            <div class="inline-form inline-form-tight mb-2">
-                <input type="checkbox" id="fetchCountsOnLoadToggle" aria-describedby="fetchCountsOnLoadHelp" />
-                <label for="fetchCountsOnLoadToggle" class="ml-1"
-                    title="When enabled, entity counts are fetched during initial tree load; when disabled, the tree renders first and counts load in the background.">Fetch
-                    entity counts during initial tree load</label>
-            </div>
-            <div>
-                <small id="fetchCountsOnLoadHelp" class="settings-note">Disabling this can make initial tree display
-                    faster; counts will still appear shortly after as they are loaded lazily.</small>
-            </div>
-            <div id="vontologyPerformanceStatus" class="status-message hidden" role="alert"></div>
         </section>
 
         <section id="server-controls">
