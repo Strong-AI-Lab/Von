@@ -24,7 +24,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupDynamicLayout();
 
   // Ensure user context is loaded BEFORE initializing chat to prevent race condition
-  // where chat history loads with null user_id
+  // where conversation history loads with null user_id
   await ensureUserContext();
 
   // JVNAUTOSCI-954: report bounded, client-reported capability hints (speech/audio)
@@ -391,7 +391,11 @@ function startHealthPolling() {
   const ragModalClose = ragModal ? document.getElementById('ragStatusClose') : null;
   const ragModalCheck = ragModal ? document.getElementById('ragStatusCheck') : null;
   const ragChatBackfillBtn = ragModal ? document.getElementById('ragChatBackfill') : null;
-  if (!pidSpan) return;
+  const busyEl = document.getElementById('vontologyBusyIndicator');
+  const busySr = document.getElementById('vontologyBusySrStatus');
+  if (!localIpSpan && !publicIpSpan && !pidSpan && !uptimeSpan && !ragSpan && !ragModal && !busyEl) {
+    return;
+  }
   // Copy-to-clipboard behavior for local IP address
   if (localIpSpan) {
     localIpSpan.addEventListener('click', async (e) => {
@@ -421,17 +425,19 @@ function startHealthPolling() {
     });
   }
   // Copy-to-clipboard behavior for PID
-  pidSpan.addEventListener('click', async (e) => {
-    const pidText = pidSpan.textContent.trim();
-    if (!pidText || pidText === '?' || /[^0-9]/.test(pidText)) return;
-    try {
-      await navigator.clipboard.writeText(pidText);
-      pidSpan.classList.add('copied');
-      const oldTitle = pidSpan.title;
-      pidSpan.title = 'Copied!';
-      setTimeout(() => { pidSpan.classList.remove('copied'); pidSpan.title = oldTitle; }, 1200);
-    } catch (err) { console.warn('PID copy failed', err); }
-  });
+  if (pidSpan) {
+    pidSpan.addEventListener('click', async (e) => {
+      const pidText = pidSpan.textContent.trim();
+      if (!pidText || pidText === '?' || /[^0-9]/.test(pidText)) return;
+      try {
+        await navigator.clipboard.writeText(pidText);
+        pidSpan.classList.add('copied');
+        const oldTitle = pidSpan.title;
+        pidSpan.title = 'Copied!';
+        setTimeout(() => { pidSpan.classList.remove('copied'); pidSpan.title = oldTitle; }, 1200);
+      } catch (err) { console.warn('PID copy failed', err); }
+    });
+  }
   let startTimeIso = null;
   let lastIdentity = { pid: null, start: null };
   let reloadTriggered = false;
@@ -463,8 +469,6 @@ function startHealthPolling() {
   let healthPollInFlight = false;
   let healthPollQueuedImmediate = false;
   let healthPollTimerId = null;
-  const busyEl = document.getElementById('vontologyBusyIndicator');
-  const busySr = document.getElementById('vontologyBusySrStatus');
   let lastBusyState = null;
   function updateBusyIndicator() {
     if (!busyEl) return;
@@ -556,7 +560,7 @@ function startHealthPolling() {
                 titleParts.push(`session_ns=${sessNs}`);
               }
               if (chSessions || chMessages || chOk || chFail) {
-                titleParts.push(`Chat sessions=${chSessions}`);
+                titleParts.push(`Conversation sessions=${chSessions}`);
                 titleParts.push(`messages=${chMessages}`);
                 titleParts.push(`indexed=${chOk}`);
                 titleParts.push(`failed=${chFail}`);
@@ -565,9 +569,9 @@ function startHealthPolling() {
               if (p === 0) {
                 if (chSessions || chMessages || chOk || chFail) {
                   if (chFail > 0) {
-                    ragSpan.textContent = `KA ${i} • Chat ${chOk}/${chFail} failed`;
+                    ragSpan.textContent = `KA ${i} • Conversations ${chOk}/${chFail} failed`;
                   } else {
-                    ragSpan.textContent = `KA ${i} • Chat ${chOk}`;
+                    ragSpan.textContent = `KA ${i} • Conversations ${chOk}`;
                   }
                 } else {
                   ragSpan.textContent = `KA ${i}`;
@@ -576,7 +580,7 @@ function startHealthPolling() {
                 ragSpan.classList.remove('rag-active');
               } else {
                 if (chFail > 0) {
-                  ragSpan.textContent = `KA ${i} • ${p} pending • Chat ${chFail} failed`;
+                  ragSpan.textContent = `KA ${i} • ${p} pending • Conversations ${chFail} failed`;
                 } else {
                   ragSpan.textContent = `KA ${i} • ${p} pending`;
                 }
@@ -708,8 +712,8 @@ function startHealthPolling() {
                 const ns = activeNs || (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
 
                 const confirmMsg = forcedSessionId
-                  ? `Resume chat history reindex for namespace:\n\n${ns || '(no namespace)'}\n\nSession:\n${forcedSessionId}\n\nThis may take a few minutes.`
-                  : `Reindex chat history for namespace:\n\n${ns || '(no namespace)'}\n\nThis may take a few minutes.`;
+                  ? `Resume conversation history reindex for namespace:\n\n${ns || '(no namespace)'}\n\nSession:\n${forcedSessionId}\n\nThis may take a few minutes.`
+                  : `Reindex conversation history for namespace:\n\n${ns || '(no namespace)'}\n\nThis may take a few minutes.`;
                 if (!forceSkipConfirm) {
                   const ok = window.confirm(confirmMsg);
                   if (!ok) return;
@@ -731,7 +735,7 @@ function startHealthPolling() {
                 }
 
                 if (!targets.length) {
-                  ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>No missing chat history messages detected to reindex.</em></p>';
+                  ragModalBody.innerHTML = ragModalBody.innerHTML + '<hr/><p><em>No missing conversation history messages detected to reindex.</em></p>';
                   return;
                 }
 
@@ -746,7 +750,7 @@ function startHealthPolling() {
                 const msgProgressTextId = `ragReindexMsgProgressText_${progressToken}`;
                 ragModalBody.innerHTML = ragModalBody.innerHTML + [
                   '<hr/>',
-                  '<h3>Chat history reindex</h3>',
+                  '<h3>Conversation history reindex</h3>',
                   `<p><em>Reindex running…</em></p>`,
                   `<p><strong>Namespace:</strong> ${escapeHtml(ns || '(no namespace)')}</p>`,
                   `<p><strong>Sessions to reindex:</strong> ${targets.length}</p>`,
@@ -996,7 +1000,7 @@ function startHealthPolling() {
 
                 const summary = [
                   '<hr/>',
-                  '<h3>Chat history reindex result</h3>',
+                  '<h3>Conversation history reindex result</h3>',
                   '<ul>',
                   `<li><strong>Sessions targeted:</strong> ${aggregate.sessions_targeted}</li>`,
                   `<li><strong>Sessions completed:</strong> ${aggregate.sessions_completed}</li>`,
@@ -1035,8 +1039,8 @@ function startHealthPolling() {
 
               const reindexBtn = document.createElement('button');
               reindexBtn.className = 'btn-mini';
-              reindexBtn.textContent = 'Reindex chat history';
-              reindexBtn.title = 'Reindex chat history messages into RAG for your current namespace';
+              reindexBtn.textContent = 'Reindex conversation history';
+              reindexBtn.title = 'Reindex conversation history messages into RAG for your current namespace';
               reindexBtn.hidden = true;
               reindexBtn.addEventListener('click', async () => {
                 try {
@@ -1073,7 +1077,7 @@ function startHealthPolling() {
               const resumeBtn = document.createElement('button');
               resumeBtn.className = 'btn-mini';
               resumeBtn.textContent = 'Resume reindex';
-              resumeBtn.title = 'Resume chat history reindex from the last recorded failure (session + chunk start)';
+              resumeBtn.title = 'Resume conversation history reindex from the last recorded failure (session + chunk start)';
               resumeBtn.hidden = true;
               resumeBtn.addEventListener('click', async () => {
                 try {
@@ -1116,7 +1120,7 @@ function startHealthPolling() {
             if (ragChatBackfillBtn) {
               ragChatBackfillBtn.hidden = true;
               ragChatBackfillBtn.disabled = false;
-              ragChatBackfillBtn.title = 'Associate legacy chat history with your current namespace and re-index to RAG';
+              ragChatBackfillBtn.title = 'Associate legacy conversation history with your current namespace and re-index to RAG';
             }
 
             const controller3 = new AbortController();
@@ -1240,7 +1244,7 @@ function startHealthPolling() {
               const html = [
                 requestedNs ? `<p><strong>Requested namespace:</strong> ${escapeHtml(requestedNs)}</p>` : '',
                 sessionNs ? `<p><strong>Session namespace:</strong> ${escapeHtml(sessionNs)}</p>` : '',
-                '<p><em>Note:</em> interaction sessions may be stored under either a user-only namespace (e.g. <code>#V#user</code>) or a composite user@organisation namespace (e.g. <code>#V#user@org</code>). This status view scopes to the requested namespace and may include the user-only namespace for compatibility. Chat history is scoped by a composite user@organisation namespace.</p>',
+                '<p><em>Note:</em> interaction sessions may be stored under either a user-only namespace (e.g. <code>#V#user</code>) or a composite user@organisation namespace (e.g. <code>#V#user@org</code>). This status view scopes to the requested namespace and may include the user-only namespace for compatibility. Conversation history is scoped by a composite user@organisation namespace.</p>',
                 '<ul>',
                 `<li><strong>Indexed:</strong> ${indexed}</li>`,
                 `<li><strong>Pending:</strong> ${pending}</li>`,
@@ -1258,7 +1262,7 @@ function startHealthPolling() {
               ].join('');
               const chatHtml = [
                 '<hr/>',
-                '<h3>Chat history</h3>',
+                '<h3>Conversation history</h3>',
                 '<ul>',
                 (() => {
                   if (chInNs === null && chMissingNs === null && chOtherNs === null) {
@@ -1314,7 +1318,7 @@ function startHealthPolling() {
 
                 return [
                   '<details>',
-                  '<summary>Chat sessions indexing breakdown</summary>',
+                  '<summary>Conversation sessions indexing breakdown</summary>',
                   truncated,
                   '<ul>',
                   ...rows,
@@ -1386,7 +1390,7 @@ function startHealthPolling() {
           ragChatBackfillBtn._wired = true;
           ragChatBackfillBtn.addEventListener('click', async () => {
             try {
-              const ok = window.confirm('Backfill legacy chat history into your current namespace and re-index to RAG? This may take a minute.');
+              const ok = window.confirm('Backfill legacy conversation history into your current namespace and re-index to RAG? This may take a minute.');
               if (!ok) return;
               ragChatBackfillBtn.disabled = true;
 
@@ -1437,7 +1441,7 @@ function startHealthPolling() {
                 : '';
               const summary = [
                 '<hr/>',
-                '<h3>Chat history backfill</h3>',
+                '<h3>Conversation history backfill</h3>',
                 statusLine,
                 errorLine,
                 '<ul>',
@@ -1566,10 +1570,14 @@ function startHealthPolling() {
           }
         });
       }
-      if (newPid !== null) {
-        pidSpan.textContent = newPid;
-        pidSpan.parentElement.classList.remove('pid-error');
-      } else { pidSpan.textContent = '?'; }
+      if (pidSpan) {
+        if (newPid !== null) {
+          pidSpan.textContent = newPid;
+          pidSpan.parentElement.classList.remove('pid-error');
+        } else {
+          pidSpan.textContent = '?';
+        }
+      }
       if (newStart && !startTimeIso) {
         startTimeIso = newStart;
       }
@@ -1586,8 +1594,10 @@ function startHealthPolling() {
       failureCount = 0; // reset on success
     } catch (e) {
       failureCount++;
-      pidSpan.textContent = '-';
-      pidSpan.parentElement.classList.add('pid-error');
+      if (pidSpan) {
+        pidSpan.textContent = '-';
+        pidSpan.parentElement.classList.add('pid-error');
+      }
       // Exponential backoff on failures (5s,10s,20s,30s cap)
       nextDelay = Math.min(30000, 5000 * Math.pow(2, Math.min(failureCount - 1, 3)));
     }

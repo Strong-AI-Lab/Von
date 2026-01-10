@@ -15,7 +15,7 @@ describe('settingsPage RAG status summary', () => {
         expect(__testOnly_getPreferredRagNamespace()).toBe('#V#user@org');
     });
 
-    test('formats KA + Chat summary when chat counts available', () => {
+    test('formats KA + Conversation summary when chat counts available', () => {
         const ragData = {
             indexed: 10,
             pending: 0,
@@ -29,11 +29,11 @@ describe('settingsPage RAG status summary', () => {
         };
 
         const { summaryText, hintText, titleText } = __testOnly_formatRagSummaryForSettings(ragData, null);
-        expect(summaryText).toBe('KA 10 • Chat 1956');
-        expect(hintText).toContain('Chat indexed=1956');
-        expect(hintText).toContain('Chat failed=0');
+        expect(summaryText).toBe('KA 10 • Conversations 1956');
+        expect(hintText).toContain('Conversations indexed=1956');
+        expect(hintText).toContain('Conversations failed=0');
         expect(titleText).toContain('session_ns=#V#user@org');
-        expect(titleText).toContain('Chat sessions=42');
+        expect(titleText).toContain('Conversation sessions=42');
         expect(titleText).toContain('messages=1979');
     });
 
@@ -49,3 +49,4 @@ describe('settingsPage RAG status summary', () => {
         expect(summaryText).toBe('KA 5 • 3 pending');
     });
 });
+

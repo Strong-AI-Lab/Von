@@ -41,7 +41,7 @@ let chatTabsFirstLoadStartPerfMs = null;
 let chatTabsFirstLoadStartEpochMs = null;
 let chatTabsLoadingTickerId = null;
 let chatTabsLoadingTickerLastRenderedSec = -1;
-let chatSessionMenuEl = null;
+let conversationsessionMenuEl = null;
 let activeHistoryRequest = null;
 let historyRequestCounter = 0;
 const HISTORY_SEGMENT_SIZE = 200;
@@ -834,7 +834,7 @@ async function uploadFilesToVon(files) {
             const details = [];
             if (blobUri) details.push(`Blob: ${blobUri}`);
             if (blobBackend || blobKey) details.push(`Blob key: ${String(blobBackend || '')}:${String(blobKey || '')}`.replace(/^:/, ''));
-            if (historyRecorded) details.push('Recorded in chat history.');
+            if (historyRecorded) details.push('Recorded in Conversation history.');
             if (downloadUrl) details.push(`[Download attachment](${downloadUrl})`);
 
             appendMessage(
@@ -3154,13 +3154,13 @@ function renderChatSessionTabsPlaceholder(mode = 'loading') {
     telemetry.className = 'chat-session-tabs-placeholder-telemetry';
 
     if (mode === 'unauthenticated') {
-        primary.textContent = 'Log in to load your saved chats.';
+        primary.textContent = 'Log in to load your saved conversations.';
     } else if (mode === 'error') {
-        primary.textContent = 'Unable to load chats right now (will retry).';
+        primary.textContent = 'Unable to load conversations right now (will retry).';
     } else if (mode === 'empty') {
-        primary.textContent = 'No saved chats yet.';
+        primary.textContent = 'No saved conversations yet.';
     } else {
-        primary.textContent = 'Loading chats…';
+        primary.textContent = 'Loading conversations…';
         placeholder.classList.add('is-loading');
     }
 
@@ -3186,8 +3186,8 @@ function renderChatSessionTabsPlaceholder(mode = 'loading') {
         const retryTab = document.createElement('button');
         retryTab.type = 'button';
         retryTab.className = 'chat-session-tab';
-        retryTab.title = 'Retry loading chats';
-        retryTab.setAttribute('aria-label', 'Retry loading chats');
+        retryTab.title = 'Retry loading conversations';
+        retryTab.setAttribute('aria-label', 'Retry loading conversations');
         retryTab.textContent = 'Retry';
         retryTab.addEventListener('click', () => {
             scheduleChatSessionTabsRefresh(true);
@@ -3447,7 +3447,7 @@ function shouldShowChatTabMenu() {
 
 function ensureChatSessionMenu() {
     if (chatSessionMenuEl) {
-        return chatSessionMenuEl;
+        return conversationsessionMenuEl;
     }
 
     const menu = document.createElement('div');
@@ -3468,7 +3468,7 @@ function ensureChatSessionMenu() {
         }
     });
 
-    chatSessionMenuEl = menu;
+    conversationsessionMenuEl = menu;
     return menu;
 }
 
@@ -3510,8 +3510,8 @@ function closeChatSessionMenu() {
     if (!chatSessionMenuEl) {
         return;
     }
-    chatSessionMenuEl.classList.remove('open');
-    chatSessionMenuEl.setAttribute('aria-hidden', 'true');
+    conversationsessionMenuEl.classList.remove('open');
+    conversationsessionMenuEl.setAttribute('aria-hidden', 'true');
 }
 
 function setupChatTabContextMenu() {
@@ -3556,7 +3556,7 @@ async function promptRenameChatSession(sessionId, currentName) {
     }
     const trimmed = String(proposed || '').trim();
     if (!trimmed) {
-        alert('Chat name is required.');
+        alert('Conversation name is required.');
         return;
     }
     try {
@@ -3726,7 +3726,7 @@ async function switchToChatSession(sessionId) {
     const scrollableField = document.getElementById('scrollableField');
     if (!scrollableField) {
         setChatSessionTabLoading(sid, false);
-        return { ok: false, error: 'Chat panel unavailable.' };
+        return { ok: false, error: 'Conversation panel unavailable.' };
     }
 
     scrollableField.innerHTML = '<div class="chat-session-loading">Switching chat…</div>';
@@ -3966,9 +3966,9 @@ async function updateHistoryLength() {
                     historyLengthElement.textContent = 'History: unauthenticated';
                 } else {
                     const contextCount = transcriptTurns.length;
-                    const chatsText = (sessionCount === null) ? '— chats' : `${sessionCount} chats`;
-                    historyLengthElement.textContent = `History: ${chatsText} | this ${contextCount}`;
-                    historyLengthElement.title = `Chat history: ${sessionCount ?? '—'} chats • total ${historyLength} messages • this session ${contextCount} messages`;
+                    const conversationsText = (sessionCount === null) ? '- conversations' : `${sessionCount} conversations`;
+                    historyLengthElement.textContent = `History: ${conversationsText} | this ${contextCount}`;
+                    historyLengthElement.title = `Conversation history: ${sessionCount ?? '—'} conversations • total ${historyLength} messages • this session ${contextCount} messages`;
                 }
 
                 // Wire a lightweight history popup (scrollable list of sessions).
@@ -3990,7 +3990,7 @@ async function updateHistoryLength() {
                             body.innerHTML = '<p>Loading…</p>';
 
                             if (titleEl) {
-                                titleEl.textContent = 'Chat history';
+                                titleEl.textContent = 'Conversation history';
                             }
 
                             if (closeBtn && !closeBtn._wired) {
@@ -4003,13 +4003,13 @@ async function updateHistoryLength() {
 
                             // Fetch a fresh summary for the header.
                             let totalMessages = null;
-                            let chats = null;
+                            let conversations = null;
                             try {
                                 const lenRes = await fetch('/von/history/length', { cache: 'no-store' });
                                 if (lenRes.ok) {
                                     const lenJs = await lenRes.json();
                                     totalMessages = (typeof lenJs?.history_length === 'number') ? lenJs.history_length : null;
-                                    chats = (typeof lenJs?.session_count === 'number') ? lenJs.session_count : null;
+                                    conversations = (typeof lenJs?.session_count === 'number') ? lenJs.session_count : null;
                                 }
                             } catch (_) { /* ignore */ }
 
@@ -4037,9 +4037,9 @@ async function updateHistoryLength() {
 
                             const currentCount = transcriptTurns.length;
                             if (titleEl) {
-                                const chatsText2 = (chats === null) ? '— chats' : `${chats} chats`;
+                                const conversationsText2 = (chats === null) ? '— conversations' : `${chats} conversations`;
                                 const totalText2 = (totalMessages === null) ? '— total' : `${totalMessages} total`;
-                                titleEl.textContent = `Chat history — ${chatsText2} • ${totalText2} • this ${currentCount}`;
+                                titleEl.textContent = `Conversation history — ${conversationsText2} • ${totalText2} • this ${currentCount}`;
                             }
 
                             const rows = sessions.map((s) => {
@@ -4144,10 +4144,10 @@ async function updateHistoryLength() {
 
             scheduleChatSessionTabsRefresh();
         } else {
-            console.error('Failed to load chat history length:', data.error);
+            console.error('Failed to load Conversation history length:', data.error);
         }
     } catch (error) {
-        console.error('Error loading chat history length:', error);
+        console.error('Error loading Conversation history length:', error);
     }
 }
 
@@ -4270,7 +4270,7 @@ async function loadChatHistory(options = {}) {
         historySegmentsShown = segmentsReturned;
         totalHistorySegments = totalSegments;
         updateHistoryBanner();
-        console.log('No chat history to load or empty history');
+        console.log('No Conversation history to load or empty history');
         if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
             activeHistoryRequest = null;
         }
@@ -4279,7 +4279,7 @@ async function loadChatHistory(options = {}) {
         if (error?.name === 'AbortError') {
             return false;
         }
-        console.error('Error loading chat history:', error);
+        console.error('Error loading Conversation history:', error);
         updateHistoryBanner();
         if (activeHistoryRequest && activeHistoryRequest.id === requestId) {
             activeHistoryRequest = null;
@@ -6136,4 +6136,7 @@ export function __testOnly_resetChatTtsState() {
     }
 }
 export { formatChatTimestamp, showLlmDebugPopup, updateHistoryLength };
+
+
+
 

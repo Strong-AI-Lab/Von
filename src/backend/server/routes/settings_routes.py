@@ -38,7 +38,10 @@ from ...services.settings_service import (
     get_disable_write_tool_conservatism,
     set_disable_write_tool_conservatism,
 )
-from ...services.feature_flags import get_expert_tabs_enabled
+from ...services.feature_flags import (
+    get_expert_footer_enabled,
+    get_expert_tabs_enabled,
+)
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...languagemodels.llm_interface import OpenAIClient
 from ...db.repositories.concepts_repository import ConceptsRepository
@@ -548,6 +551,7 @@ def get_all_settings_data():
             "internal_mcp_tool_batch_cap": get_internal_mcp_tool_batch_cap(),
             "show_tool_use_during_thinking": get_show_tool_use_during_thinking(),
             "expert_tabs_enabled": get_expert_tabs_enabled(),
+            "expert_footer_enabled": get_expert_footer_enabled(),
             "jira_project_allow_list_raw": jira_allow_list_raw,
             "jira_project_allow_list_effective": jira_allow_list_effective,
             "internal_mcp_jira_execute_mode_raw": jira_execute_mode_raw,

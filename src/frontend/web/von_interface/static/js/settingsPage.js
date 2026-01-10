@@ -604,8 +604,8 @@ function formatRagSummaryForSettings(ragData, pendingFallback) {
     `skipped=${skipped}`
   ];
   if (hasChatCounts) {
-    hintParts.push(`Chat indexed=${chOk}`);
-    hintParts.push(`Chat failed=${chFail}`);
+    hintParts.push(`Conversations indexed=${chOk}`);
+    hintParts.push(`Conversations failed=${chFail}`);
   }
 
   const titleParts = [];
@@ -614,7 +614,7 @@ function formatRagSummaryForSettings(ragData, pendingFallback) {
     titleParts.push(`session_ns=${sessNs}`);
   }
   if (hasChatCounts) {
-    titleParts.push(`Chat sessions=${chSessions}`);
+    titleParts.push(`Conversation sessions=${chSessions}`);
     titleParts.push(`messages=${chMessages}`);
   }
   const titleText = titleParts.join(' • ');
@@ -623,13 +623,13 @@ function formatRagSummaryForSettings(ragData, pendingFallback) {
     if (hasChatCounts) {
       if (chFail > 0) {
         return {
-          summaryText: `KA ${indexed} • Chat ${chOk}/${chFail} failed`,
+          summaryText: `KA ${indexed} • Conversations ${chOk}/${chFail} failed`,
           hintText: hintParts.join(' • '),
           titleText
         };
       }
       return {
-        summaryText: `KA ${indexed} • Chat ${chOk}`,
+        summaryText: `KA ${indexed} • Conversations ${chOk}`,
         hintText: hintParts.join(' • '),
         titleText
       };
@@ -643,7 +643,7 @@ function formatRagSummaryForSettings(ragData, pendingFallback) {
 
   if (chFail > 0) {
     return {
-      summaryText: `KA ${indexed} • ${pendingCount} pending • Chat ${chFail} failed`,
+      summaryText: `KA ${indexed} • ${pendingCount} pending • Conversations ${chFail} failed`,
       hintText: hintParts.join(' • '),
       titleText
     };
@@ -672,7 +672,7 @@ function renderActiveNamespace() {
   nsEl.textContent = ns || '—';
   if (hintEl) {
     hintEl.textContent = ns
-      ? 'Used to scope RAG, chat history, and knowledge acquisition sessions.'
+      ? 'Used to scope RAG, conversation history, and knowledge acquisition sessions.'
       : 'No active namespace is set yet.';
   }
 }

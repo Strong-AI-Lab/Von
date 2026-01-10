@@ -20,3 +20,8 @@ def _read_env_flag(name: str, *, default: bool) -> bool:
 def get_expert_tabs_enabled() -> bool:
     """Return whether expert tabs should be enabled (safe default: disabled)."""
     return _read_env_flag("VON_EXPERT_TABS_ENABLED", default=False)
+
+
+def get_expert_footer_enabled() -> bool:
+    """Return whether expert footer status (PID/RAG) should be enabled."""
+    return _read_env_flag("VON_EXPERT_FOOTER_ENABLED", default=False)

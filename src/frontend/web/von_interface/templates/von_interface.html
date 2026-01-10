@@ -12,7 +12,8 @@
 
   <script>
     window.__VON_FEATURE_FLAGS__ = {
-      expertTabsEnabled: {{ 'true' if expert_tabs_enabled else 'false' }}
+      expertTabsEnabled: {{ 'true' if expert_tabs_enabled else 'false' }},
+      expertFooterEnabled: {{ 'true' if expert_footer_enabled else 'false' }}
     };
   </script>
 
@@ -64,7 +65,7 @@
 
   <!-- Tab Structure -->
   <div class="tab-container" id="tabContainer">
-    <div class="tab-button active" data-tab="chatTab">Chat</div>
+    <div class="tab-button active" data-tab="chatTab">Conversations</div>
     <!-- Vontology Tab Button moved before Entity -->
     {% if expert_tabs_enabled %}
     <div class="tab-button" data-tab="vontologyTab">Vontology</div>
@@ -125,44 +126,50 @@
       <span id="chat-history-length"></span>
     </p>
     <p id="languageIndicator" class="language-indicator">🌐 en-NZ</p>
-    <p id="serverPidFooter" class="pid-indicator" title="Server PID & uptime">
+    <p id="serverUptimeFooter" class="pid-indicator" title="Process uptime">
+      <span class="footer-label">Uptime:</span> <span id="serverUptimeValue" title="Process uptime">-</span>
+    </p>
+    {% if expert_footer_enabled %}
+    <p id="serverPidFooter" class="pid-indicator" title="Server PID & RAG">
       <span class="footer-label">PID:</span> <button id="serverPidValue" class="pid-copy-button" type="button"
         title="Click to copy PID">?</button>
       <span id="vontologyBusyIndicator" aria-hidden="true" title="Vontology operations in progress">⏳</span>
       <span id="vontologyBusySrStatus" class="visually-hidden" aria-live="polite"></span>
       <span class="footer-separator">|</span>
-      <span class="footer-label">Uptime:</span> <span id="serverUptimeValue" title="Process uptime">—</span>
-      <span class="footer-separator">|</span>
       <span class="footer-label">RAG:</span> <span id="ragIndexingValue" class="concept-footer-button"
         title="Click for detailed RAG status">—</span>
     </p>
+
+    {% endif %}
   </div>
 
   <!-- RAG Status Modal -->
+  {% if expert_footer_enabled %}
   <div id="ragStatusModal" class="modal" aria-hidden="true" role="dialog" aria-labelledby="ragStatusTitle">
     <div class="modal-content">
       <h2 id="ragStatusTitle">RAG Indexing Status</h2>
-      <div id="ragRuntimeHint" class="rag-runtime-hint" aria-live="polite">—</div>
+      <div id="ragRuntimeHint" class="rag-runtime-hint" aria-live="polite">-</div>
       <div id="ragStatusBody">
-        <p>Loading…</p>
+        <p>Loading.</p>
       </div>
       <div class="modal-actions">
         <button id="ragStatusCheck" type="button" class="btn-mini" title="Run integrity check">Run integrity
           check</button>
         <button id="ragChatBackfill" type="button" class="btn-mini"
-          title="Associate legacy chat history with your current namespace and re-index to RAG" hidden>Backfill chat
-          history</button>
+          title="Associate legacy conversation history with your current namespace and re-index to RAG" hidden>Backfill
+          conversation history</button>
       </div>
       <div class="modal-actions">
         <button id="ragStatusClose" type="button">Close</button>
       </div>
     </div>
   </div>
+  {% endif %}
 
   <!-- History Status Modal -->
   <div id="historyStatusModal" class="modal" aria-hidden="true" role="dialog" aria-labelledby="historyStatusTitle">
     <div class="modal-content">
-      <h2 id="historyStatusTitle">Chat history</h2>
+      <h2 id="historyStatusTitle">Conversation history</h2>
       <div id="historyStatusBody">
         <p>Loading…</p>
       </div>
