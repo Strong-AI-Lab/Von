@@ -14,13 +14,32 @@ class _FakeCollection:
     def __init__(self, docs):
         self._docs = docs
 
-    def find_one(self, query, projection=None):
-        user_id = query.get("user_id")
-        session_id = query.get("session_id")
-        for doc in self._docs:
-            if doc.get("user_id") != user_id:
+    def _matches_query(self, doc, query):
+        for key, value in query.items():
+            if key == "$or":
+                if not any(self._matches_query(doc, clause) for clause in value):
+                    return False
                 continue
-            if session_id and doc.get("session_id") != session_id:
+
+            if isinstance(value, dict):
+                if "$exists" in value:
+                    exists = key in doc
+                    if bool(value["$exists"]) != exists:
+                        return False
+                if "$eq" in value:
+                    if doc.get(key) != value["$eq"]:
+                        return False
+                if "$in" in value:
+                    if doc.get(key) not in value["$in"]:
+                        return False
+            else:
+                if doc.get(key) != value:
+                    return False
+        return True
+
+    def find_one(self, query, projection=None):
+        for doc in self._docs:
+            if not self._matches_query(doc, query):
                 continue
             if isinstance(projection, dict):
                 history_proj = projection.get("history")
@@ -37,6 +56,68 @@ class _FakeCollection:
                     return trimmed
             return doc
         return None
+
+    def aggregate(self, pipeline):
+        docs = list(self._docs)
+        for stage in pipeline:
+            if "$match" in stage:
+                query = stage["$match"]
+                docs = [doc for doc in docs if self._matches_query(doc, query)]
+                continue
+            if "$project" in stage:
+                projection = stage["$project"]
+                projected = []
+                for doc in docs:
+                    out = {}
+                    for key, spec in projection.items():
+                        if isinstance(spec, dict) and "$slice" in spec:
+                            slice_spec = spec["$slice"]
+                            history = list(doc.get("history") or [])
+                            if isinstance(slice_spec, list):
+                                if len(slice_spec) == 2:
+                                    source, count = slice_spec
+                                    if isinstance(source, str) and source.startswith("$"):
+                                        history = list(doc.get(source[1:]) or [])
+                                        if isinstance(count, int):
+                                            history = history[count:] if count < 0 else history[:count]
+                                        else:
+                                            history = []
+                                    else:
+                                        start, count = slice_spec
+                                        if isinstance(start, int) and start < 0:
+                                            start = len(history) + start
+                                        history = history[start : start + count]
+                                elif len(slice_spec) == 3:
+                                    source, start, count = slice_spec
+                                    if isinstance(source, str) and source.startswith("$"):
+                                        history = list(doc.get(source[1:]) or [])
+                                    if isinstance(start, int) and start < 0:
+                                        start = len(history) + start
+                                    history = history[start : start + count]
+                            elif isinstance(slice_spec, int):
+                                history = history[slice_spec:]
+                            out[key] = history
+                            continue
+                        if isinstance(spec, dict) and "$size" in spec:
+                            field = spec["$size"]
+                            if isinstance(field, str) and field.startswith("$"):
+                                field_name = field[1:]
+                                target = doc.get(field_name)
+                                out[key] = len(target) if isinstance(target, list) else 0
+                            else:
+                                out[key] = 0
+                            continue
+                        if spec in (1, True):
+                            out[key] = doc.get(key)
+                            continue
+                        if isinstance(spec, str) and spec.startswith("$"):
+                            out[key] = doc.get(spec[1:])
+                            continue
+                        out[key] = spec
+                    projected.append(out)
+                docs = projected
+                continue
+        return iter(docs)
 
 
 def test_get_chat_history_segments_skips_empty_segments(monkeypatch):
@@ -220,6 +301,42 @@ def test_get_chat_history_segments_reports_truncation(monkeypatch):
 
     assert isinstance(segments, list)
     assert meta["history_truncated"] is True
+
+
+def test_get_chat_history_segments_offsets_locations_with_tail_limit(monkeypatch):
+    from src.backend.services import chat_history_service
+
+    docs = [
+        {
+            "_id": "1",
+            "user_id": "#V#u",
+            "session_id": "s1",
+            "history": [
+                {"role": "user", "content": "m1"},
+                {"role": "assistant", "content": "m2"},
+                {"role": "user", "content": "m3"},
+                {"role": "assistant", "content": "m4"},
+                {"role": "user", "content": "m5"},
+            ],
+        }
+    ]
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_collection_service",
+        lambda: _FakeCollection(docs),
+    )
+
+    segments = chat_history_service.get_chat_history_segments(
+        "#V#u",
+        "s1",
+        include_locations=True,
+        history_tail_limit=2,
+    )
+
+    assert len(segments) == 1
+    assert [m["content"] for m in segments[0]] == ["m4", "m5"]
+    assert [m["history_location"]["history_index"] for m in segments[0]] == [3, 4]
 
 
 def test_get_chat_history_debug_entry_returns_payload(monkeypatch):
