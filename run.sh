@@ -39,6 +39,11 @@ UPDATE_INTERVAL_MINUTES=60
 UPDATE_BRANCH="main"
 UPDATE_NO_RESTART_IF_RUNNING=0
 NO_BACKUP_MIGRATE=0
+DISABLE_LOG_READY=0
+HEALTH_DEBUG=0
+SHOW_RELATION_COVERAGE=0
+BACKUP_FLAGS_SET=0
+READY_LOG_PATTERNS=("Running with Waitress" "Press CTRL+C to quit" "Flask app running")
 
 EXTRA_ARGS=()
 
@@ -60,9 +65,25 @@ while [ $# -gt 0 ]; do
         --skip-health) SKIP_HEALTH=1; shift ;;
         -HealthTimeoutSec) HEALTH_TIMEOUT_SEC="$2"; shift 2 ;;
         -HealthGraceSec) HEALTH_GRACE_SEC="$2"; shift 2 ;;
-        -BackupDryRun) BACKUP_DRY_RUN=1; shift ;;
-        -BackupTag) BACKUP_TAG="$2"; shift 2 ;;
-        -BackupOutDir) BACKUP_OUT_DIR="$2"; shift 2 ;;
+        -ReadyLogPatterns)
+            if [ $# -ge 2 ]; then
+                IFS=',' read -r -a READY_LOG_PATTERNS <<<"$2"
+                # Trim whitespace on each pattern.
+                for i in "${!READY_LOG_PATTERNS[@]}"; do
+                    local_pattern="${READY_LOG_PATTERNS[$i]}"
+                    local_pattern="${local_pattern#"${local_pattern%%[![:space:]]*}"}"
+                    local_pattern="${local_pattern%"${local_pattern##*[![:space:]]}"}"
+                    READY_LOG_PATTERNS[$i]="$local_pattern"
+                done
+            fi
+            shift 2
+            ;;
+        -DisableLogReady) DISABLE_LOG_READY=1; shift ;;
+        -HealthDebug) HEALTH_DEBUG=1; shift ;;
+        -ShowRelationCoverage) SHOW_RELATION_COVERAGE=1; shift ;;
+        -BackupDryRun) BACKUP_DRY_RUN=1; BACKUP_FLAGS_SET=1; shift ;;
+        -BackupTag) BACKUP_TAG="$2"; BACKUP_FLAGS_SET=1; shift 2 ;;
+        -BackupOutDir) BACKUP_OUT_DIR="$2"; BACKUP_FLAGS_SET=1; shift 2 ;;
         -UpdateIntervalMinutes) UPDATE_INTERVAL_MINUTES="$2"; shift 2 ;;
         -UpdateBranch) UPDATE_BRANCH="$2"; shift 2 ;;
         -UpdateNoRestartIfRunning) UPDATE_NO_RESTART_IF_RUNNING=1; shift ;;
@@ -83,6 +104,202 @@ RAG_PID_FILE="${RUN_DIR}/rag_worker.pid"
 RAG_LOG_FILE="${LOGS_DIR}/rag_worker_${TS}.log"
 TOKEN_FILE="${RUN_DIR}/admin_token.txt"
 SENTINEL_BROWSER="${RUN_DIR}/browser_opened_once"
+LOCAL_BACKUPS="${ROOT}/backups"
+BACKUP_ROOT=""
+REMOTE_BACKUP_ROOT=""
+REPAIR_ATTEMPTED=0
+
+same_path() {
+    local a="$1"
+    local b="$2"
+    if [ -z "$a" ] || [ -z "$b" ]; then
+        return 1
+    fi
+    local ra=""
+    local rb=""
+    ra="$(cd "$a" 2>/dev/null && pwd -P)" || return 1
+    rb="$(cd "$b" 2>/dev/null && pwd -P)" || return 1
+    [ "$ra" = "$rb" ]
+}
+
+resolve_backup_root() {
+    local preferred=""
+    if [ -n "${VON_BACKUP_ROOT:-}" ]; then
+        preferred="${VON_BACKUP_ROOT}"
+        preferred="${preferred#\"}"
+        preferred="${preferred%\"}"
+        if mkdir -p "$preferred" 2>/dev/null; then
+            BACKUP_ROOT="$preferred"
+        else
+            log "[backup] WARN: Cannot create/write VON_BACKUP_ROOT='${preferred}'; falling back to automatic selection."
+        fi
+    fi
+
+    REMOTE_BACKUP_ROOT=""
+    if [ -d "/Volumes/von_backups" ] && [ -w "/Volumes/von_backups" ]; then
+        REMOTE_BACKUP_ROOT="/Volumes/von_backups"
+    elif [ -d "/mnt/von_backups" ] && [ -w "/mnt/von_backups" ]; then
+        REMOTE_BACKUP_ROOT="/mnt/von_backups"
+    fi
+
+    if [ -z "$BACKUP_ROOT" ]; then
+        if [ -n "$REMOTE_BACKUP_ROOT" ]; then
+            BACKUP_ROOT="$REMOTE_BACKUP_ROOT"
+        else
+            BACKUP_ROOT="$LOCAL_BACKUPS"
+        fi
+    fi
+
+    mkdir -p "$BACKUP_ROOT" 2>/dev/null || true
+}
+
+resolve_backup_out_dir() {
+    local requested="$1"
+    local fallback="$2"
+    local reason="$3"
+    local effective="$requested"
+    if [ -z "$effective" ]; then
+        effective="$fallback"
+    fi
+    if ! mkdir -p "$effective" 2>/dev/null; then
+        log "[backup] WARN: Cannot create/write ${effective} (${reason}); falling back to local backups: ${fallback}"
+        effective="$fallback"
+        mkdir -p "$effective" 2>/dev/null || true
+    fi
+    printf '%s' "$effective"
+}
+
+mtime_epoch() {
+    local path="$1"
+    if command -v stat >/dev/null 2>&1; then
+        if stat -c %Y "$path" >/dev/null 2>&1; then
+            stat -c %Y "$path" 2>/dev/null || true
+            return 0
+        fi
+        if stat -f %m "$path" >/dev/null 2>&1; then
+            stat -f %m "$path" 2>/dev/null || true
+            return 0
+        fi
+    fi
+    return 1
+}
+
+migrate_local_backups() {
+    local moved=0
+    local copied=0
+    local remote_root="$REMOTE_BACKUP_ROOT"
+    if [ -z "$remote_root" ]; then
+        log "[backup-migrate] summary moved=$moved copied=$copied (no remote backup root)"
+        return 0
+    fi
+
+    if [ ! -d "$LOCAL_BACKUPS" ]; then
+        mkdir -p "$LOCAL_BACKUPS" 2>/dev/null || {
+            log "[backup-migrate] summary moved=$moved copied=$copied (cannot create local backups dir)"
+            return 0
+        }
+    fi
+
+    if same_path "$LOCAL_BACKUPS" "$remote_root"; then
+        log "[backup-migrate] summary moved=$moved copied=$copied (remote backup root is local)"
+        return 0
+    fi
+
+    if ! mkdir -p "$remote_root" 2>/dev/null; then
+        log "[backup-migrate] summary moved=$moved copied=$copied (create dest failed)"
+        return 0
+    fi
+
+    local candidates=()
+    while IFS= read -r entry; do
+        if [ -z "$entry" ]; then
+            continue
+        fi
+        if printf '%s' "$entry" | grep -qE '_[0-9]{8}_[0-9]{6}Z?'; then
+            if [ -d "${LOCAL_BACKUPS}/${entry}" ] || printf '%s' "$entry" | grep -qE '\.zip(\.enc)?$'; then
+                candidates+=("$entry")
+            fi
+        fi
+    done < <(ls -1t "$LOCAL_BACKUPS" 2>/dev/null || true)
+
+    local newest=""
+    if [ "${#candidates[@]}" -gt 0 ]; then
+        newest="${candidates[0]}"
+    fi
+
+    if [ "${#candidates[@]}" -gt 1 ]; then
+        local i
+        for ((i=1; i<${#candidates[@]}; i++)); do
+            local item="${candidates[$i]}"
+            if [ -e "${remote_root}/${item}" ]; then
+                continue
+            fi
+            log "[backup-migrate] Moving ${item} -> ${remote_root}"
+            if mv "${LOCAL_BACKUPS}/${item}" "${remote_root}/" 2>/dev/null; then
+                moved=$((moved+1))
+            else
+                log "[backup-migrate] WARN move failed ${item}"
+            fi
+        done
+    fi
+
+    if [ -n "$newest" ] && [ ! -e "${remote_root}/${newest}" ]; then
+        log "[backup-migrate] Copying newest ${newest} to backup root (preserve local copy)"
+        if [ -d "${LOCAL_BACKUPS}/${newest}" ]; then
+            if cp -a "${LOCAL_BACKUPS}/${newest}" "${remote_root}/" 2>/dev/null; then
+                copied=$((copied+1))
+            fi
+        else
+            if cp -a "${LOCAL_BACKUPS}/${newest}" "${remote_root}/" 2>/dev/null; then
+                copied=$((copied+1))
+            fi
+        fi
+    fi
+
+    local remote_candidates=()
+    while IFS= read -r entry; do
+        if [ -z "$entry" ]; then
+            continue
+        fi
+        if printf '%s' "$entry" | grep -qE '_[0-9]{8}_[0-9]{6}Z?'; then
+            if [ -d "${remote_root}/${entry}" ] || printf '%s' "$entry" | grep -qE '\.zip(\.enc)?$'; then
+                remote_candidates+=("$entry")
+            fi
+        fi
+    done < <(ls -1t "$remote_root" 2>/dev/null || true)
+
+    local remote_newest=""
+    if [ "${#remote_candidates[@]}" -gt 0 ]; then
+        remote_newest="${remote_candidates[0]}"
+    fi
+
+    if [ -n "$remote_newest" ]; then
+        local local_path="${LOCAL_BACKUPS}/${remote_newest}"
+        local remote_path="${remote_root}/${remote_newest}"
+        local needs_downsync=0
+        if [ ! -e "$local_path" ]; then
+            needs_downsync=1
+        else
+            local remote_mtime
+            local local_mtime
+            remote_mtime="$(mtime_epoch "$remote_path" || true)"
+            local_mtime="$(mtime_epoch "$local_path" || true)"
+            if [ -n "$remote_mtime" ] && [ -n "$local_mtime" ] && [ "$remote_mtime" -gt "$local_mtime" ]; then
+                needs_downsync=1
+            fi
+        fi
+        if [ "$needs_downsync" -eq 1 ]; then
+            log "[backup-migrate] Down-sync newer ${remote_newest} -> local backups"
+            if [ -d "$remote_path" ]; then
+                cp -a "$remote_path" "$LOCAL_BACKUPS/" 2>/dev/null || log "[backup-migrate] WARN down-sync failed ${remote_newest}"
+            else
+                cp -a "$remote_path" "$LOCAL_BACKUPS/" 2>/dev/null || log "[backup-migrate] WARN down-sync failed ${remote_newest}"
+            fi
+        fi
+    fi
+
+    log "[backup-migrate] summary moved=$moved copied=$copied"
+}
 
 rotate_logs() {
     # Keep last N logs per port; ignore failures.
@@ -105,6 +322,21 @@ rotate_logs() {
         rm -f "${files[$i]}" 2>/dev/null || true
     done
 }
+
+# Resolve backup root and migrate local backups if configured.
+resolve_backup_root
+if [ "$NO_BACKUP_MIGRATE" -eq 0 ]; then
+    migrate_local_backups
+else
+    log "[backup-migrate] disabled via -NoBackupMigrate"
+fi
+
+# Backward-compatible convenience: if start action is combined with backup flags,
+# run the backup action instead of starting the server.
+if [ "$ACTION" = "start" ] && [ "$BACKUP_FLAGS_SET" -eq 1 ]; then
+    log "Start requested with backup flags; running backup action only."
+    ACTION="backup"
+fi
 
 export PYTHONPATH="${ROOT}"
 export PYTHONUNBUFFERED=1
@@ -194,6 +426,13 @@ now_iso() {
     date -Iseconds 2>/dev/null || date
 }
 
+is_truthy() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|y|Y) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 read_failure_count() {
     local meta="$1"
     if [ ! -f "$meta" ]; then
@@ -222,6 +461,36 @@ parse_iso_epoch() {
         epoch="$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$iso" +%s 2>/dev/null || true)"
     fi
     echo "$epoch"
+}
+
+pidfile_uptime_minutes() {
+    if [ ! -f "$PID_FILE" ]; then
+        return 1
+    fi
+    local start_line=""
+    start_line="$(grep -E '^START=' "$PID_FILE" 2>/dev/null | head -n 1 || true)"
+    if [ -z "$start_line" ]; then
+        return 1
+    fi
+    local start_value="${start_line#START=}"
+    if [ -z "$start_value" ]; then
+        return 1
+    fi
+    local start_epoch=""
+    start_epoch="$(parse_iso_epoch "$start_value")"
+    if [ -z "$start_epoch" ]; then
+        return 1
+    fi
+    local now_epoch=""
+    now_epoch="$(date +%s 2>/dev/null || true)"
+    if [ -z "$now_epoch" ]; then
+        return 1
+    fi
+    local diff=$(( (now_epoch - start_epoch) / 60 ))
+    if [ "$diff" -lt 0 ]; then
+        diff=0
+    fi
+    printf '%s' "$diff"
 }
 
 should_run_interval() {
@@ -254,21 +523,37 @@ should_run_interval() {
 }
 
 health_ok() {
-    local url="http://localhost:${PORT}/health"
     local timeout=5
     if printf '%s' "${VON_HEALTH_HTTP_TIMEOUT:-}" | grep -qE '^[0-9]+$'; then
         if [ "$VON_HEALTH_HTTP_TIMEOUT" -gt 0 ] && [ "$VON_HEALTH_HTTP_TIMEOUT" -lt 61 ]; then
             timeout="$VON_HEALTH_HTTP_TIMEOUT"
         fi
     fi
-    if command -v curl >/dev/null 2>&1; then
-        curl -sS --max-time "$timeout" --fail "$url" >/dev/null 2>&1
-        return $?
-    fi
-    if command -v wget >/dev/null 2>&1; then
-        wget -q -T "$timeout" -O /dev/null "$url" >/dev/null 2>&1
-        return $?
-    fi
+    local hosts=("127.0.0.1" "localhost")
+    local host
+    for host in "${hosts[@]}"; do
+        local url="http://${host}:${PORT}/health"
+        if command -v curl >/dev/null 2>&1; then
+            local code
+            code="$(curl -sS --max-time "$timeout" -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || true)"
+            if [ "$code" = "200" ]; then
+                return 0
+            fi
+            if [ "$HEALTH_DEBUG" -eq 1 ] && [ -n "$code" ]; then
+                log "Health attempt $url status=$code"
+            fi
+            continue
+        fi
+        if command -v wget >/dev/null 2>&1; then
+            if wget -q -T "$timeout" -O /dev/null "$url" >/dev/null 2>&1; then
+                return 0
+            fi
+            if [ "$HEALTH_DEBUG" -eq 1 ]; then
+                log "Health attempt failed $url"
+            fi
+            continue
+        fi
+    done
     return 1
 }
 
@@ -314,6 +599,69 @@ get_listening_pid_by_port() {
         # Fallback: netstat output parsing is messy; keep minimal.
         netstat -anp 2>/dev/null | grep -E "[:\.]$port\s" | grep LISTEN 2>/dev/null | sed -n 's#.*/\([0-9][0-9]*\)$#\1#p' | head -n 1
         return 0
+    fi
+    return 0
+}
+
+port_listening() {
+    local pid
+    pid="$(get_listening_pid_by_port "$PORT" || true)"
+    [ -n "$pid" ]
+}
+
+log_ready() {
+    if [ "$DISABLE_LOG_READY" -eq 1 ]; then
+        return 1
+    fi
+    local log_path="$1"
+    if [ ! -f "$log_path" ]; then
+        return 1
+    fi
+    local tail=""
+    tail="$(tail -n 400 "$log_path" 2>/dev/null || true)"
+    local pattern
+    for pattern in "${READY_LOG_PATTERNS[@]}"; do
+        if [ -n "$pattern" ] && printf '%s' "$tail" | grep -F -q "$pattern"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+sync_pidfile_to_listener() {
+    local listener
+    listener="$(get_listening_pid_by_port "$PORT" || true)"
+    if [ -z "$listener" ]; then
+        return 0
+    fi
+    local cmdline=""
+    if command -v ps >/dev/null 2>&1; then
+        cmdline="$(ps -p "$listener" -o args= 2>/dev/null || true)"
+    fi
+    if [ -n "$cmdline" ] && ! printf '%s' "$cmdline" | grep -q "src/workflows/von/main.py"; then
+        return 0
+    fi
+    local current=""
+    current="$(get_pid || true)"
+    if [ -z "$current" ] || [ "$current" != "$listener" ]; then
+        write_pidfile "$listener"
+        log "Synchronized PID file to listener PID=${listener}"
+    fi
+}
+
+refine_pid_to_child() {
+    local parent_pid="$1"
+    if [ -z "$parent_pid" ]; then
+        return 0
+    fi
+    if command -v pgrep >/dev/null 2>&1; then
+        local child
+        child="$(pgrep -P "$parent_pid" -f "src/workflows/von/main.py" 2>/dev/null | head -n 1 || true)"
+        if [ -n "$child" ] && [ "$child" != "$parent_pid" ]; then
+            write_pidfile "$child"
+            log "Updated PID file to python process PID=$child (was wrapper PID=$parent_pid)."
+            return 0
+        fi
     fi
     return 0
 }
@@ -397,35 +745,91 @@ start_server() {
     if [ "$SKIP_HEALTH" -eq 1 ]; then
         log "Skipping health wait (use ./run.sh status to check)."
     else
-        local deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SEC ))
-        local listening_logged=0
+        local max_attempts=$((HEALTH_TIMEOUT_SEC * 2))
+        local attempt=0
         local healthy=0
-        while [ $(date +%s) -lt $deadline ]; do
+        local listening_logged=0
+        while [ "$attempt" -lt "$max_attempts" ]; do
+            sleep 0.5
+
+            if [ "$listening_logged" -eq 0 ] && ! kill -0 "$pid" >/dev/null 2>&1; then
+                log "ERROR: Server process exited early before listening on port $PORT. Showing last 40 log lines:"
+                local log_tail=""
+                if [ -f "$CURRENT_LOG" ]; then
+                    log_tail="$(tail -n 40 "$CURRENT_LOG" 2>/dev/null || true)"
+                    if [ -n "$log_tail" ]; then
+                        printf '%s\n' "$log_tail"
+                    fi
+                fi
+
+                if [ "$REPAIR_ATTEMPTED" -eq 0 ] && printf '%s' "$log_tail" | grep -qE "ModuleNotFoundError|ImportError"; then
+                    local repair_script="${ROOT}/setup_py.sh"
+                    if [ -f "$repair_script" ]; then
+                        log "Detected missing dependencies. Attempting auto-repair..."
+                        REPAIR_ATTEMPTED=1
+                        set +e
+                        bash "$repair_script"
+                        local repair_exit=$?
+                        set -e
+                        if [ "$repair_exit" -eq 0 ]; then
+                            log "Repair completed successfully. Retrying server start..."
+                            start_server
+                            return 0
+                        fi
+                        log "Repair failed."
+                    fi
+                fi
+
+                log "Aborting start. (Use -HealthDebug for verbose retries)"
+                return 1
+            fi
+
+            if [ "$listening_logged" -eq 0 ] && port_listening; then
+                log "Port $PORT is listening; waiting for /health..."
+                listening_logged=1
+            fi
+
             if health_ok; then
                 healthy=1
                 break
             fi
-            if [ $listening_logged -eq 0 ]; then
-                # We don't have a cheap cross-platform 'listening' check; log once after a brief delay.
-                listening_logged=1
-                log "Waiting for /health..."
+            if [ "$HEALTH_DEBUG" -eq 1 ] && [ $((attempt % 4)) -eq 0 ]; then
+                log "Health not ready yet (attempt ${attempt}/${max_attempts})"
             fi
-            sleep 0.5
+            if log_ready "$CURRENT_LOG"; then
+                log "Detected readiness log pattern; marking healthy (log shortcut)."
+                healthy=1
+                break
+            fi
+            attempt=$((attempt + 1))
         done
 
-        if [ $healthy -ne 1 ] && [ "$HEALTH_GRACE_SEC" -gt 0 ]; then
+        if [ "$healthy" -ne 1 ] && [ "$listening_logged" -eq 1 ] && [ "$HEALTH_GRACE_SEC" -gt 0 ]; then
             log "Extending wait up to ${HEALTH_GRACE_SEC}s for /health (phase 2)..."
-            local grace_deadline=$(( $(date +%s) + HEALTH_GRACE_SEC ))
-            while [ $(date +%s) -lt $grace_deadline ]; do
+            local grace_attempts=$((HEALTH_GRACE_SEC * 2))
+            local g=0
+            while [ "$g" -lt "$grace_attempts" ] && [ "$healthy" -ne 1 ]; do
+                sleep 0.5
                 if health_ok; then
                     healthy=1
                     break
                 fi
-                sleep 0.5
+                if [ "$HEALTH_DEBUG" -eq 1 ] && [ $((g % 10)) -eq 0 ]; then
+                    log "Grace wait health not ready ($((g / 2))s/${HEALTH_GRACE_SEC}s)"
+                fi
+                if log_ready "$CURRENT_LOG"; then
+                    log "Detected readiness log pattern during grace; marking healthy (log shortcut)."
+                    healthy=1
+                    break
+                fi
+                if [ $((g % 10)) -eq 0 ]; then
+                    log "Still waiting for /health... $((g / 2))s/${HEALTH_GRACE_SEC}s grace"
+                fi
+                g=$((g + 1))
             done
         fi
 
-        if [ $healthy -eq 1 ]; then
+        if [ "$healthy" -eq 1 ]; then
             log "Server healthy (http://localhost:$PORT)"
             if [ $NO_BROWSER -eq 0 ]; then
                 local should_open=0
@@ -446,14 +850,28 @@ start_server() {
                     log "Browser already opened previously (use -ForceBrowser to open again)."
                 fi
             fi
+        elif [ "$listening_logged" -eq 1 ]; then
+            log "WARNING: Port is listening but /health did not respond in $((HEALTH_TIMEOUT_SEC + HEALTH_GRACE_SEC))s; continuing (service may still be initialising)."
+            log_mongo_status
         else
-            log "WARNING: Server not healthy after ${HEALTH_TIMEOUT_SEC}s (+${HEALTH_GRACE_SEC}s grace); check logs: $CURRENT_LOG"
+            log "WARNING: Server not healthy after initial ${HEALTH_TIMEOUT_SEC}s (port not listening); check logs: $CURRENT_LOG"
         fi
     fi
 
+    # Best-effort PID refinement to the python child (if available).
+    sleep 0.4
+    refine_pid_to_child "$pid"
+    sync_pidfile_to_listener
+
+    log "Admin token file: $TOKEN_FILE"
+    if [ "$SHOW_RELATION_COVERAGE" -eq 1 ]; then
+        run_relation_coverage_summary || true
+    fi
+    run_daily_backup_if_due || true
+    run_test_db_refresh_if_due || true
+
     # Start RAG worker best-effort (mirrors run.ps1)
     start_rag_worker_bg || true
-    log "Admin token file: $TOKEN_FILE"
 }
 
 stop_server() {
@@ -664,6 +1082,432 @@ print(f"{updated}|{warnings}")' 2>/dev/null)"
     printf '%s' "$result"
 }
 
+run_code_mention_scan() {
+    local reason="${1:-backup}"
+    if is_truthy "${VON_DISABLE_CODE_MENTION_SCAN:-}"; then
+        log "[code-mention-scan] disabled via VON_DISABLE_CODE_MENTION_SCAN"
+        return 0
+    fi
+    local script_path="${ROOT}/src/utilities/scan_code_concepts.py"
+    if [ ! -f "$script_path" ]; then
+        log "[code-mention-scan] WARN: script missing ($script_path)"
+        return 0
+    fi
+    local pdm
+    pdm="$(pdm_cmd)"
+    log "[code-mention-scan] Running scan (reason=$reason)"
+    local output=""
+    local exit_code=0
+    set +e
+    output="$("$pdm" run python "$script_path" --sync-mentions --apply 2>&1)"
+    exit_code=$?
+    set -e
+    local raw_out="${RUN_DIR}/code_mention_scan_last_output.log"
+    printf '%s\n' "$output" > "$raw_out" 2>/dev/null || true
+    if [ "$exit_code" -eq 0 ]; then
+        log "[code-mention-scan] OK"
+    else
+        log "[code-mention-scan] ERROR exit=$exit_code"
+    fi
+}
+
+run_code_predicate_sync() {
+    local reason="${1:-backup}"
+    if is_truthy "${VON_DISABLE_CODE_PREDICATE_SYNC:-}"; then
+        log "[code-predicate-sync] disabled via VON_DISABLE_CODE_PREDICATE_SYNC"
+        return 0
+    fi
+    local script_path="${ROOT}/src/utilities/sync_code_predicates.py"
+    if [ ! -f "$script_path" ]; then
+        log "[code-predicate-sync] WARN: script missing ($script_path)"
+        return 0
+    fi
+    local pdm
+    pdm="$(pdm_cmd)"
+    log "[code-predicate-sync] Running sync (reason=$reason)"
+    local output=""
+    local exit_code=0
+    set +e
+    output="$("$pdm" run python "$script_path" --retag-non-predicates 2>&1)"
+    exit_code=$?
+    set -e
+    local raw_out="${RUN_DIR}/code_predicate_sync_last_output.log"
+    printf '%s\n' "$output" > "$raw_out" 2>/dev/null || true
+    if [ "$exit_code" -eq 0 ]; then
+        log "[code-predicate-sync] OK"
+    else
+        log "[code-predicate-sync] ERROR exit=$exit_code"
+    fi
+}
+
+cron_due() {
+    local schedule="$1"
+    local last_iso="$2"
+    local now_iso="$3"
+    local py
+    py="$(python_cmd)"
+    if [ -z "$py" ]; then
+        return 2
+    fi
+    local script
+    script=$'import sys,datetime,re\nschedule=sys.argv[1]\nlast_iso=sys.argv[2]\nnow_iso=sys.argv[3]\n'
+    script+=$'def parse_dt(value):\n    if not value:\n        return None\n    txt=value.strip()\n    if txt.endswith("Z"):\n        txt=txt[:-1] + "+00:00"\n    try:\n        dt=datetime.datetime.fromisoformat(txt)\n    except Exception:\n        return None\n    if dt.tzinfo is None:\n        dt=dt.replace(tzinfo=datetime.timezone.utc)\n    return dt.astimezone(datetime.timezone.utc)\n'
+    script+=$'def token_to_int(tok,min_v,max_v,name_map=None,is_dow=False):\n    tok=tok.strip()\n    if tok.isdigit():\n        v=int(tok)\n        if is_dow and v==7:\n            v=0\n        if v<min_v or v>max_v:\n            raise ValueError(tok)\n        return v\n    if name_map:\n        key=tok.upper()\n        if key in name_map:\n            v=int(name_map[key])\n            if is_dow and v==7:\n                v=0\n            if v<min_v or v>max_v:\n                raise ValueError(tok)\n            return v\n    raise ValueError(tok)\n'
+    script+=$'def parse_field(field,min_v,max_v,name_map=None,is_dow=False):\n    allowed=[False]*(max_v+1)\n    is_star=False\n    field=field.strip()\n    if not field:\n        raise ValueError("empty")\n    if field=="*":\n        is_star=True\n        for v in range(min_v,max_v+1):\n            allowed[v]=True\n    else:\n        for part in field.split(","):\n            part=part.strip()\n            if not part:\n                continue\n            m=re.match(r"([^/]+)(?:/(\\d+))?$",part)\n            if not m:\n                raise ValueError(part)\n            base=m.group(1).strip()\n            step=int(m.group(2)) if m.group(2) else 1\n            if step<1:\n                raise ValueError(part)\n            if base=="*":\n                start=min_v\n                end=max_v\n            elif "-" in base:\n                a,b=base.split("-",1)\n                start=token_to_int(a,min_v,max_v,name_map,is_dow)\n                end=token_to_int(b,min_v,max_v,name_map,is_dow)\n            else:\n                start=token_to_int(base,min_v,max_v,name_map,is_dow)\n                end=start\n            if start<min_v or end>max_v or start>end:\n                raise ValueError(part)\n            v=start\n            while v<=end:\n                vv=v\n                if is_dow and vv==7:\n                    vv=0\n                allowed[vv]=True\n                v+=step\n    values=[i for i in range(min_v,max_v+1) if allowed[i]]\n    if not values:\n        raise ValueError("empty")\n    return {"allowed":allowed,"values":values,"is_star":is_star}\n'
+    script+=$'def cron_match(cron,dt):\n    if not cron["month"]["allowed"][dt.month]:\n        return False\n    dom_ok=cron["dom"]["allowed"][dt.day]\n    dow=dt.weekday()+1\n    if dow==7:\n        dow=0\n    dow_ok=cron["dow"]["allowed"][dow]\n    if cron["dom"]["is_star"] and cron["dow"]["is_star"]:\n        day_ok=True\n    elif cron["dom"]["is_star"]:\n        day_ok=dow_ok\n    elif cron["dow"]["is_star"]:\n        day_ok=dom_ok\n    else:\n        day_ok=dom_ok or dow_ok\n    if not day_ok:\n        return False\n    if not cron["hour"]["allowed"][dt.hour]:\n        return False\n    if not cron["minute"]["allowed"][dt.minute]:\n        return False\n    return True\n'
+    script+=$'tokens=schedule.strip().split()\nif len(tokens)!=5:\n    sys.exit(2)\nmonth_names={"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}\ndow_names={"SUN":0,"MON":1,"TUE":2,"WED":3,"THU":4,"FRI":5,"SAT":6}\ntry:\n    cron={\n        "minute":parse_field(tokens[0],0,59),\n        "hour":parse_field(tokens[1],0,23),\n        "dom":parse_field(tokens[2],1,31),\n        "month":parse_field(tokens[3],1,12,month_names),\n        "dow":parse_field(tokens[4],0,7,dow_names,True),\n    }\nexcept Exception:\n    sys.exit(2)\nnow=parse_dt(now_iso) or datetime.datetime.now(datetime.timezone.utc)\nlast=parse_dt(last_iso)\nif last is None:\n    last=now-datetime.timedelta(days=370)\ndt=(last.replace(second=0,microsecond=0)+datetime.timedelta(minutes=1))\nlimit=now+datetime.timedelta(days=370)\nwhile dt<=limit:\n    if cron_match(cron,dt):\n        sys.stdout.write("1" if dt<=now else "0")\n        sys.exit(0)\n    dt+=datetime.timedelta(minutes=1)\nsys.exit(2)\n'
+    local out=""
+    set +e
+    out="$("$py" -c "$script" "$schedule" "$last_iso" "$now_iso" 2>/dev/null)"
+    local exit_code=$?
+    set -e
+    if [ "$exit_code" -ne 0 ]; then
+        return 2
+    fi
+    if [ "$out" = "1" ]; then
+        return 0
+    fi
+    return 1
+}
+
+run_daily_backup_if_due() {
+    if is_truthy "${VON_DISABLE_DAILY_BACKUP:-}"; then
+        return 0
+    fi
+    local schedule="${VON_BACKUP_SCHEDULE:-}"
+    if [ -n "$schedule" ]; then
+        schedule="${schedule#\"}"
+        schedule="${schedule%\"}"
+    fi
+    local interval_hours=24
+    if printf '%s' "${VON_BACKUP_INTERVAL_HOURS:-}" | grep -qE '^[0-9]+$'; then
+        interval_hours="${VON_BACKUP_INTERVAL_HOURS}"
+    fi
+    if [ "$interval_hours" -lt 1 ]; then
+        interval_hours=24
+    fi
+    local sentinel="${RUN_DIR}/last_backup_utc.txt"
+    local last=""
+    if [ -f "$sentinel" ]; then
+        last="$(tr -d '\r\n' < "$sentinel" 2>/dev/null || true)"
+    fi
+    local now
+    now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    local due=1
+    if [ -n "$schedule" ]; then
+        if cron_due "$schedule" "$last" "$now"; then
+            due=1
+        else
+            local cron_rc=$?
+            if [ "$cron_rc" -eq 2 ]; then
+                log "[daily-backup] WARN: Unsupported VON_BACKUP_SCHEDULE='${schedule}'; falling back to interval ${interval_hours}h."
+                schedule=""
+            else
+                due=0
+            fi
+        fi
+    fi
+    if [ -z "$schedule" ]; then
+        if [ -n "$last" ]; then
+            local last_epoch
+            last_epoch="$(parse_iso_epoch "$last")"
+            if [ -n "$last_epoch" ]; then
+                local now_epoch
+                now_epoch="$(date -u +%s)"
+                local elapsed_hours=$(( (now_epoch - last_epoch) / 3600 ))
+                if [ "$elapsed_hours" -lt "$interval_hours" ]; then
+                    due=0
+                fi
+            fi
+        fi
+    fi
+    if [ "$due" -eq 0 ]; then
+        return 0
+    fi
+
+    local pid_file="${RUN_DIR}/daily_backup.pid"
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid="$(tr -d '\r\n' < "$pid_file" 2>/dev/null || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+            return 0
+        fi
+        rm -f "$pid_file" 2>/dev/null || true
+    fi
+
+    local backup_script="${ROOT}/scripts/backup_von_db.py"
+    if [ ! -f "$backup_script" ]; then
+        log "[daily-backup] WARN: backup script missing: $backup_script (skipping)"
+        return 0
+    fi
+    local pdm
+    pdm="$(pdm_cmd)"
+    local out_dir
+    out_dir="$(resolve_backup_out_dir "$BACKUP_ROOT" "$LOCAL_BACKUPS" "daily-backup")"
+    log "[daily-backup] Launching background backup (interval ${interval_hours}h)..."
+    (
+        set +e
+        cd "$ROOT" || exit 1
+        export MONGO_ALLOW_LOCAL_FALLBACK=0
+        local output_log="${RUN_DIR}/daily_backup_last_output.log"
+        "$pdm" run python "$backup_script" --apply --out-dir "$out_dir" --tag auto-daily >> "$output_log" 2>&1
+        local exit_code=$?
+        if [ "$exit_code" -ne 0 ]; then
+            log "[daily-backup] ERROR exit=$exit_code"
+            exit 0
+        fi
+        run_code_mention_scan "daily-backup"
+        run_code_predicate_sync "daily-backup"
+        date -u +"%Y-%m-%dT%H:%M:%SZ" > "$sentinel" 2>/dev/null || true
+        log "[daily-backup] Completed."
+    ) &
+    printf '%s\n' "$!" > "$pid_file" 2>/dev/null || true
+}
+
+trigger_test_db_refresh() {
+    local reason="${1:-scheduled}"
+    if is_truthy "${VON_DISABLE_TEST_DB_REFRESH:-}"; then
+        return 0
+    fi
+    local refresh_script="${ROOT}/scripts/maintenance/refresh_test_db.py"
+    if [ ! -f "$refresh_script" ]; then
+        return 0
+    fi
+    local pid_file="${RUN_DIR}/test_db_refresh.pid"
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid="$(tr -d '\r\n' < "$pid_file" 2>/dev/null || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+            return 0
+        fi
+        rm -f "$pid_file" 2>/dev/null || true
+    fi
+    local pdm
+    pdm="$(pdm_cmd)"
+    local apply_flag=""
+    if is_truthy "${VON_TEST_DB_REFRESH_APPLY:-}"; then
+        apply_flag="--apply"
+    fi
+    log "[test-db-refresh] Launching background refresh (${reason})..."
+    (
+        set +e
+        cd "$ROOT" || exit 1
+        local output_log="${RUN_DIR}/test_db_refresh_last_output.log"
+        "$pdm" run python "$refresh_script" --drop-target $apply_flag >> "$output_log" 2>&1
+        local exit_code=$?
+        if [ "$exit_code" -eq 0 ]; then
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > "${RUN_DIR}/last_test_db_refresh_utc.txt" 2>/dev/null || true
+            log "[test-db-refresh] Completed."
+        else
+            log "[test-db-refresh] ERROR exit=$exit_code"
+        fi
+    ) &
+    printf '%s\n' "$!" > "$pid_file" 2>/dev/null || true
+}
+
+run_test_db_refresh_if_due() {
+    if is_truthy "${VON_DISABLE_TEST_DB_REFRESH:-}"; then
+        return 0
+    fi
+    local interval_hours=4
+    if printf '%s' "${VON_TEST_DB_REFRESH_INTERVAL_HOURS:-}" | grep -qE '^[0-9]+$'; then
+        interval_hours="${VON_TEST_DB_REFRESH_INTERVAL_HOURS}"
+    fi
+    if [ "$interval_hours" -lt 1 ]; then
+        interval_hours=4
+    fi
+    local sentinel="${RUN_DIR}/last_test_db_refresh_utc.txt"
+    local last=""
+    if [ -f "$sentinel" ]; then
+        last="$(tr -d '\r\n' < "$sentinel" 2>/dev/null || true)"
+    fi
+    if [ -n "$last" ]; then
+        local last_epoch
+        last_epoch="$(parse_iso_epoch "$last")"
+        if [ -n "$last_epoch" ]; then
+            local now_epoch
+            now_epoch="$(date -u +%s)"
+            local elapsed_hours=$(( (now_epoch - last_epoch) / 3600 ))
+            if [ "$elapsed_hours" -lt "$interval_hours" ]; then
+                return 0
+            fi
+        fi
+    fi
+    local count_script="${ROOT}/scripts/maintenance/count_concepts.py"
+    local refresh_script="${ROOT}/scripts/maintenance/refresh_test_db.py"
+    if [ ! -f "$count_script" ] || [ ! -f "$refresh_script" ]; then
+        return 0
+    fi
+    local pdm
+    pdm="$(pdm_cmd)"
+    local count_raw=""
+    set +e
+    count_raw="$("$pdm" run python "$count_script" 2>/dev/null)"
+    local exit_code=$?
+    set -e
+    if [ "$exit_code" -ne 0 ] || [ -z "$count_raw" ]; then
+        return 0
+    fi
+    if ! printf '%s' "$count_raw" | grep -qE '^[0-9]+$'; then
+        return 0
+    fi
+    local count="$count_raw"
+    if [ "$count" -lt 1000 ]; then
+        return 0
+    fi
+    log "[test-db-refresh] Launching background refresh (concepts=${count} interval=${interval_hours}h)..."
+    trigger_test_db_refresh "scheduled"
+}
+
+run_relation_coverage_summary() {
+    if is_truthy "${VON_RELATION_COVERAGE_DISABLE:-}"; then
+        return 0
+    fi
+    local script="${ROOT}/scripts/maintenance/relation_coverage_summary.py"
+    if [ ! -f "$script" ]; then
+        log "[relation-coverage] script missing ($script)"
+        return 0
+    fi
+    local pdm
+    pdm="$(pdm_cmd)"
+    local test_db_count=""
+    local count_script="${ROOT}/scripts/maintenance/count_concepts.py"
+    if [ -f "$count_script" ]; then
+        set +e
+        test_db_count="$(VON_DB_NAME=test_von_db "$pdm" run python "$count_script" 2>/dev/null)"
+        set -e
+        if ! printf '%s' "$test_db_count" | grep -qE '^[0-9]+$'; then
+            test_db_count=""
+        fi
+    fi
+    local output=""
+    local exit_code=0
+    set +e
+    output="$("$pdm" run python "$script" 2>&1)"
+    exit_code=$?
+    set -e
+    if [ "$exit_code" -ne 0 ]; then
+        log "[relation-coverage] ERROR exit=$exit_code"
+        return 0
+    fi
+    local line
+    while IFS= read -r line; do
+        if printf '%s' "$line" | grep -q '^Total concepts:'; then
+            if [ -n "$test_db_count" ]; then
+                log "[relation-coverage] ${line} | test_db=${test_db_count}"
+                if ! is_truthy "${VON_DISABLE_TEST_DB_REFRESH:-}"; then
+                    local primary_count=""
+                    primary_count="$(printf '%s' "$line" | grep -Eo '[0-9]+' | head -n 1 || true)"
+                    if [ -n "$primary_count" ] && [ "$test_db_count" -lt "$primary_count" ]; then
+                        trigger_test_db_refresh "mismatch"
+                    fi
+                fi
+            else
+                log "[relation-coverage] ${line}"
+            fi
+        elif printf '%s' "$line" | grep -qE '^(predicate|---)'; then
+            log "[relation-coverage] ${line}"
+        elif printf '%s' "$line" | grep -qE '^(hasDescription|hasNote|hasContent)'; then
+            log "[relation-coverage] ${line}"
+        fi
+    done <<<"$output"
+}
+
+run_residual_legacy_text_audit() {
+    if is_truthy "${VON_RESIDUAL_TEXT_AUDIT_DISABLE:-}"; then
+        return 0
+    fi
+    local interval_hours=24
+    local force=0
+    if is_truthy "${VON_RESIDUAL_TEXT_AUDIT_FORCE:-}"; then
+        force=1
+    fi
+    local sentinel="${RUN_DIR}/last_residual_text_audit.txt"
+    if ! should_run_interval "$sentinel" "$interval_hours" "$force"; then
+        return 0
+    fi
+    local script="${ROOT}/scripts/maintenance/audit_residual_preserved_fields.py"
+    if [ ! -f "$script" ]; then
+        log "[residual-text-audit] script missing ($script)"
+        return 0
+    fi
+    log "[residual-text-audit] Running residual legacy text audit (interval ${interval_hours}h force=$force)"
+    local pdm
+    pdm="$(pdm_cmd)"
+    local output=""
+    local exit_code=0
+    set +e
+    output="$("$pdm" run python "$script" 2>&1)"
+    exit_code=$?
+    set -e
+    local raw_out="${RUN_DIR}/residual_text_audit_last_output.log"
+    printf '%s\n' "$output" > "$raw_out" 2>/dev/null || true
+    if [ "$exit_code" -eq 0 ]; then
+        date -u +"%Y-%m-%dT%H:%M:%SZ" > "$sentinel" 2>/dev/null || true
+        log "[residual-text-audit] OK"
+    elif [ "$exit_code" -eq 2 ]; then
+        log "[residual-text-audit] VIOLATION: residual legacy text fields detected see $raw_out"
+    else
+        log "[residual-text-audit] ERROR exit=$exit_code see $raw_out"
+    fi
+}
+
+run_cleanup_preserved_fields() {
+    if is_truthy "${VON_CLEANUP_PRESERVED_DISABLE:-}"; then
+        return 0
+    fi
+    local interval_hours=24
+    local force=0
+    if is_truthy "${VON_CLEANUP_PRESERVED_FORCE:-}"; then
+        force=1
+    fi
+    local execute=0
+    if is_truthy "${VON_CLEANUP_PRESERVED_EXECUTE:-}"; then
+        execute=1
+    fi
+    local sentinel="${RUN_DIR}/last_cleanup_preserved_fields.txt"
+    if ! should_run_interval "$sentinel" "$interval_hours" "$force"; then
+        return 0
+    fi
+    local script="${ROOT}/scripts/maintenance/cleanup_preserved_fields.py"
+    if [ ! -f "$script" ]; then
+        log "[cleanup-preserved-fields] script missing ($script)"
+        return 0
+    fi
+    local mode="dry-run"
+    if [ "$execute" -eq 1 ]; then
+        mode="execute"
+    fi
+    log "[cleanup-preserved-fields] Running cleanup (mode=$mode interval ${interval_hours}h force=$force)"
+    local pdm
+    pdm="$(pdm_cmd)"
+    local output=""
+    local exit_code=0
+    set +e
+    if [ "$execute" -eq 1 ]; then
+        output="$("$pdm" run python "$script" 2>&1)"
+        exit_code=$?
+    else
+        output="$("$pdm" run python "$script" --dry-run 2>&1)"
+        exit_code=$?
+    fi
+    set -e
+    local raw_out="${RUN_DIR}/cleanup_preserved_fields_last_output.log"
+    printf '%s\n' "$output" > "$raw_out" 2>/dev/null || true
+    if [ "$exit_code" -eq 0 ]; then
+        date -u +"%Y-%m-%dT%H:%M:%SZ" > "$sentinel" 2>/dev/null || true
+        if [ "$execute" -eq 1 ]; then
+            log "[cleanup-preserved-fields] OK executed"
+        else
+            log "[cleanup-preserved-fields] OK no legacy fields detected"
+        fi
+    elif [ "$exit_code" -eq 2 ] && [ "$execute" -eq 0 ]; then
+        log "[cleanup-preserved-fields] DETECTED legacy preserved_fields enable VON_CLEANUP_PRESERVED_EXECUTE=1 to migrate. See $raw_out"
+    else
+        log "[cleanup-preserved-fields] ERROR exit=$exit_code see $raw_out"
+    fi
+}
+
 run_governance_scan() {
     if [ "${VON_GOV_SCAN_DISABLE:-}" = "1" ]; then
         return 0
@@ -739,6 +1583,12 @@ run_governance_scan() {
         fi
         log "[governance-scan] FAILED failures=$failure_count hint=$hint"
         log "[governance-scan] raw_output=$raw_out"
+        if is_truthy "${VON_GOV_SCAN_DEBUG:-}"; then
+            local line
+            while IFS= read -r line; do
+                log "[governance-scan][debug] $line"
+            done <<<"$output"
+        fi
     fi
     write_failure_count "$meta" "$failure_count"
 }
@@ -895,29 +1745,34 @@ run_relation_alias_cleanup() {
 
 status_server() {
     # Match run.ps1: if PID file stale, try to sync from current listener.
-    if [ -f "$PID_FILE" ]; then
-        local pid_in_file
-        pid_in_file="$(get_pid || true)"
-        if [ -n "$pid_in_file" ] && ! kill -0 "$pid_in_file" >/dev/null 2>&1; then
-            local listener
-            listener="$(get_listening_pid_by_port "$PORT" || true)"
-            if [ -n "$listener" ]; then
-                write_pidfile "$listener"
-            fi
-        fi
-    fi
+    sync_pidfile_to_listener
     local pid
     pid="$(get_pid || true)"
     if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+        local uptime=""
+        uptime="$(pidfile_uptime_minutes || true)"
         if health_ok; then
-            log "RUNNING PID=$pid Healthy=true"
+            if [ -n "$uptime" ]; then
+                log "RUNNING PID=$pid Uptime=${uptime} Healthy=true"
+            else
+                log "RUNNING PID=$pid Healthy=true"
+            fi
         else
-            log "RUNNING PID=$pid Healthy=false"
+            if [ -n "$uptime" ]; then
+                log "RUNNING PID=$pid Uptime=${uptime} Healthy=false"
+            else
+                log "RUNNING PID=$pid Healthy=false"
+            fi
         fi
         log_mongo_status
         log "Log: $CURRENT_LOG"
         run_governance_scan || true
         run_predicate_verify || true
+        run_residual_legacy_text_audit || true
+        run_cleanup_preserved_fields || true
+        if [ "$SHOW_RELATION_COVERAGE" -eq 1 ]; then
+            run_relation_coverage_summary || true
+        fi
         run_relation_alias_audit || true
         run_relation_alias_cleanup || true
     else
@@ -942,6 +1797,7 @@ show_logs() {
 }
 
 check_health() {
+    sync_pidfile_to_listener
     local pid="$(get_pid || true)"
     if [ -z "$pid" ] || ! kill -0 "$pid" >/dev/null 2>&1; then
         # Mirror run.ps1: if PID missing but port has a listener, treat as running (untracked)
@@ -983,19 +1839,9 @@ run_backup() {
     pdm="$(pdm_cmd)"
     local out_dir="$BACKUP_OUT_DIR"
     if [ -z "$out_dir" ]; then
-        out_dir="${VON_BACKUP_ROOT:-}"
+        out_dir="$BACKUP_ROOT"
     fi
-    if [ -z "$out_dir" ]; then
-        # Platform-friendly analogue of run.ps1's W: preference.
-        if [ -d "/Volumes/von_backups" ] && [ -w "/Volumes/von_backups" ]; then
-            out_dir="/Volumes/von_backups"
-        elif [ -d "/mnt/von_backups" ] && [ -w "/mnt/von_backups" ]; then
-            out_dir="/mnt/von_backups"
-        else
-            out_dir="${ROOT}/backups"
-        fi
-    fi
-    mkdir -p "$out_dir" 2>/dev/null || true
+    out_dir="$(resolve_backup_out_dir "$out_dir" "$LOCAL_BACKUPS" "manual-backup")"
     local mode="apply"
     if [ "$BACKUP_DRY_RUN" -eq 1 ]; then
         mode="dry-run"
@@ -1008,40 +1854,16 @@ run_backup() {
     fi
     local backup_exit=$?
     if [ "$backup_exit" -eq 0 ]; then
-        if [ -z "${VON_DISABLE_CODE_MENTION_SCAN:-}" ] || ! printf '%s' "$VON_DISABLE_CODE_MENTION_SCAN" | grep -qiE '^(1|true|yes)$'; then
-            local scan_script="${ROOT}/src/utilities/scan_code_concepts.py"
-            if [ -f "$scan_script" ]; then
-                log "[code-mention-scan] Running scan (reason=manual-backup)"
-                "$pdm" run python "$scan_script" --sync-mentions --apply
-                local scan_exit=$?
-                if [ "$scan_exit" -eq 0 ]; then
-                    log "[code-mention-scan] OK"
-                else
-                    log "[code-mention-scan] ERROR exit=$scan_exit"
-                fi
-            else
-                log "[code-mention-scan] WARN: script missing ($scan_script)"
-            fi
+        log "[backup] OK"
+        run_code_mention_scan "manual-backup"
+        run_code_predicate_sync "manual-backup"
+        if [ "$NO_BACKUP_MIGRATE" -eq 0 ]; then
+            migrate_local_backups
         else
-            log "[code-mention-scan] disabled via VON_DISABLE_CODE_MENTION_SCAN"
+            log "[backup-migrate] disabled via -NoBackupMigrate"
         fi
-        if [ -z "${VON_DISABLE_CODE_PREDICATE_SYNC:-}" ] || ! printf '%s' "$VON_DISABLE_CODE_PREDICATE_SYNC" | grep -qiE '^(1|true|yes)$'; then
-            local sync_script="${ROOT}/src/utilities/sync_code_predicates.py"
-            if [ -f "$sync_script" ]; then
-                log "[code-predicate-sync] Running sync (reason=manual-backup)"
-                "$pdm" run python "$sync_script" --retag-non-predicates
-                local sync_exit=$?
-                if [ "$sync_exit" -eq 0 ]; then
-                    log "[code-predicate-sync] OK"
-                else
-                    log "[code-predicate-sync] ERROR exit=$sync_exit"
-                fi
-            else
-                log "[code-predicate-sync] WARN: script missing ($sync_script)"
-            fi
-        else
-            log "[code-predicate-sync] disabled via VON_DISABLE_CODE_PREDICATE_SYNC"
-        fi
+    else
+        log "[backup] ERROR exit=$backup_exit"
     fi
     return "$backup_exit"
 }
@@ -1121,6 +1943,11 @@ Von Launcher Help
         -SkipHealth
         -HealthTimeoutSec <n>
         -HealthGraceSec <n>
+        -ReadyLogPatterns <p>
+        -DisableLogReady
+        -HealthDebug
+        -ShowRelationCoverage
+        -NoBackupMigrate
 
     Backup options:
         -BackupDryRun
