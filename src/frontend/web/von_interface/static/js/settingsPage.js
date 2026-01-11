@@ -42,8 +42,10 @@ const RUNTIME_REFRESH_MS = 12000;
 let runtimeIntervalId = null;
 let runtimeAbortController = null;
 let runtimeStatusInFlight = false;
+let gmailProfileStatusInFlight = false;
 
 let __vonIsAdminOrOwner = false;
+let availableGmailProfiles = [];
 
 function _focusCurrentUserSettingsSection() {
   try {
@@ -154,6 +156,147 @@ function safeLocalStorageSet(key, value) {
     // Ignore.
   }
 }
+
+function getStoredGmailProfile() {
+  try {
+    return String(localStorage.getItem(LS_GMAIL_PROFILE) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function setStoredGmailProfile(profileId) {
+  try {
+    const trimmed = String(profileId || '').trim();
+    if (trimmed) {
+      localStorage.setItem(LS_GMAIL_PROFILE, trimmed);
+    } else {
+      localStorage.removeItem(LS_GMAIL_PROFILE);
+    }
+  } catch {
+    // Ignore localStorage errors.
+  }
+}
+
+function normaliseGmailProfileList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item ?? '').trim()).filter(Boolean);
+  }
+  if (value && typeof value === 'object') {
+    return Object.keys(value).map((item) => String(item ?? '').trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function getProfilesFromSelect() {
+  const select = document.getElementById('gmailProfileSelect');
+  if (!select) return [];
+  return [...select.options]
+    .map((opt) => String(opt.value || '').trim())
+    .filter((value) => value);
+}
+
+function renderGmailProfileOptions(profiles, defaultProfile) {
+  const select = document.getElementById('gmailProfileSelect');
+  if (!select) return;
+
+  const sortedProfiles = [...profiles];
+  sortedProfiles.sort((a, b) => a.localeCompare(b));
+  availableGmailProfiles = sortedProfiles;
+
+  const storedProfile = getStoredGmailProfile();
+  const defaultCandidate = String(defaultProfile || '').trim();
+  const selectedProfile =
+    (storedProfile && sortedProfiles.includes(storedProfile) && storedProfile) ||
+    (defaultCandidate && sortedProfiles.includes(defaultCandidate) && defaultCandidate) ||
+    '';
+
+  select.replaceChildren();
+  const noneOption = document.createElement('option');
+  noneOption.value = '';
+  noneOption.textContent = 'None (disable Gmail calls)';
+  select.append(noneOption);
+
+  for (const profileId of sortedProfiles) {
+    const option = document.createElement('option');
+    option.value = profileId;
+    option.textContent = profileId;
+    select.append(option);
+  }
+
+  select.value = selectedProfile;
+  setStoredGmailProfile(selectedProfile);
+}
+
+async function refreshGmailProfileStatusList() {
+  const container = document.getElementById('gmailProfilesStatus');
+  if (!container) return;
+  if (gmailProfileStatusInFlight) return;
+  gmailProfileStatusInFlight = true;
+
+  try {
+    const profiles = availableGmailProfiles.length
+      ? availableGmailProfiles
+      : getProfilesFromSelect();
+
+    if (!profiles.length) {
+      container.textContent = 'Gmail profiles: none configured';
+      return;
+    }
+
+    container.textContent = 'Gmail profiles: loading...';
+
+    const results = await Promise.all(
+      profiles.map(async (profileId) => {
+        try {
+          const response = await fetch(
+            `/von/api/agent/gmail/oauth/status?profile_id=${encodeURIComponent(profileId)}`,
+            { cache: 'no-cache' }
+          );
+          const data = await response.json();
+          if (!response.ok) {
+            return { profileId, status: `error (${data?.error || response.status})` };
+          }
+          if (data?.has_tokens) {
+            const email = data.authorised_email || '(unknown email)';
+            const expiry = data.expires_at ? ` (expires ${data.expires_at})` : '';
+            return { profileId, status: `authorised as ${email}${expiry}` };
+          }
+          return { profileId, status: 'not authorised' };
+        } catch (error) {
+          return { profileId, status: 'error (failed to fetch)' };
+        }
+      })
+    );
+
+    container.replaceChildren();
+    for (const result of results) {
+      const row = document.createElement('div');
+      row.textContent = `${result.profileId}: ${result.status}`;
+      container.append(row);
+    }
+  } finally {
+    gmailProfileStatusInFlight = false;
+    if (typeof updateGmailOauthLastRefreshed === 'function') {
+      updateGmailOauthLastRefreshed();
+    }
+  }
+}
+
+window.refreshGmailProfileStatusList = refreshGmailProfileStatusList;
+
+function updateGmailOauthLastRefreshed() {
+  const el = document.getElementById('agentGmailOauthLastRefreshed');
+  if (!el) return;
+  try {
+    const stamp = new Date().toLocaleString('en-NZ');
+    el.textContent = `Last refreshed: ${stamp}`;
+  } catch {
+    el.textContent = 'Last refreshed: just now';
+  }
+}
+
+window.updateGmailOauthLastRefreshed = updateGmailOauthLastRefreshed;
 
 function clampNumber(value, minValue, maxValue, fallbackValue) {
   const num = Number(value);
@@ -922,16 +1065,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     persistCurrentUserPreferences();
   });
 
-  const gmailProfileInput = document.getElementById('gmailProfileInput');
-  if (gmailProfileInput) {
-    try { gmailProfileInput.value = localStorage.getItem(LS_GMAIL_PROFILE) || ''; } catch { gmailProfileInput.value = ''; }
+  const gmailProfileSelect = document.getElementById('gmailProfileSelect');
+  if (gmailProfileSelect) {
+    const storedProfile = getStoredGmailProfile();
+    if (storedProfile) {
+      gmailProfileSelect.value = storedProfile;
+    }
     updateGmailProfileStatus();
-    gmailProfileInput.addEventListener('input', () => {
-      try {
-        const val = gmailProfileInput.value.trim();
-        if (val) localStorage.setItem(LS_GMAIL_PROFILE, val); else localStorage.removeItem(LS_GMAIL_PROFILE);
-        updateGmailProfileStatus();
-      } catch { /* ignore localStorage errors */ }
+    gmailProfileSelect.addEventListener('change', () => {
+      const val = gmailProfileSelect.value.trim();
+      setStoredGmailProfile(val);
+      updateGmailProfileStatus();
     });
   }
 });
@@ -1033,19 +1177,24 @@ document.getElementById('salientForceButton')?.addEventListener('click', () => t
 document.getElementById('shutdownServerButton')?.addEventListener('click', shutdownServer);
 document.getElementById('refreshDeprecationMetricsButton')?.addEventListener('click', () => loadDeprecationMetrics(true));
 // Reset local preferences button
-document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () => {
-  try {
-    localStorage.removeItem(LS_USER_KEY);
-    localStorage.removeItem(LS_ORG_KEY);
-    localStorage.removeItem(LS_LANG_KEY);
-    localStorage.removeItem(LS_GMAIL_PROFILE);
+  document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () => {
+    try {
+      localStorage.removeItem(LS_USER_KEY);
+      localStorage.removeItem(LS_ORG_KEY);
+      localStorage.removeItem(LS_LANG_KEY);
+      localStorage.removeItem(LS_GMAIL_PROFILE);
     localStorage.removeItem(LS_SHOW_CODE_NAMES);
     localStorage.removeItem(LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE);
     // Reset selects visually
     const userSel = document.getElementById('currentUserSelect'); if (userSel) userSel.selectedIndex = 0;
     const orgSel = document.getElementById('currentOrganisationSelect'); if (orgSel) orgSel.selectedIndex = 0;
     const langSel = document.getElementById('preferredLanguageSelect'); if (langSel) langSel.value = 'en-NZ';
-    const gmailProfileInput = document.getElementById('gmailProfileInput'); if (gmailProfileInput) gmailProfileInput.value = '';
+    const gmailProfileSelect = document.getElementById('gmailProfileSelect');
+    if (gmailProfileSelect) gmailProfileSelect.value = '';
+    setStoredGmailProfile('');
+    if (typeof window.updateGmailProfileStatus === 'function') {
+      window.updateGmailProfileStatus();
+    }
     const showCodeToggle = document.getElementById('settingsShowCodeNamesToggle'); if (showCodeToggle) showCodeToggle.checked = true;
     setShowCodeNamesSetting(true);
     const nlFilterToggle = document.getElementById('settingsFilterNlNamesToPreferredLanguageToggle');
@@ -1204,6 +1353,18 @@ async function loadAndDisplaySettings() {
     const envVarInput = document.getElementById('openaiApiKeyEnvVar');
     if (envVarInput && settings.openai_api_key_env_var) {
       envVarInput.value = settings.openai_api_key_env_var;
+    }
+
+    // Populate Gmail profile selector
+    try {
+      const gmailProfiles = normaliseGmailProfileList(settings.gmail_profiles);
+      const defaultProfile = String(settings.gmail_default_profile || '').trim();
+      renderGmailProfileOptions(gmailProfiles, defaultProfile);
+      if (typeof window.updateGmailProfileStatus === 'function') {
+        window.updateGmailProfileStatus();
+      }
+    } catch (error) {
+      console.warn('Failed to render Gmail profiles', error);
     }
 
     // Populate fetch_counts_on_load toggle

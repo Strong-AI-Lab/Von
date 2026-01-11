@@ -396,6 +396,7 @@ def _split_history_into_segments_with_locations(
     *,
     session_id: str,
     include_debug: bool = True,
+    history_offset: int = 0,
 ) -> List[List[Dict[str, Any]]]:
     """Split history into segments, attaching stable location metadata.
 
@@ -419,6 +420,7 @@ def _split_history_into_segments_with_locations(
             current = []
             continue
 
+        absolute_index = idx + history_offset
         copied = {
             "role": entry.get("role"),
             "content": entry.get("content"),
@@ -431,6 +433,8 @@ def _split_history_into_segments_with_locations(
             existing_index = existing_location.get("history_index")
             existing_session = existing_location.get("session_id") or session_id
             if isinstance(existing_index, int) and existing_index >= 0:
+                if history_offset > 0 and existing_index < history_offset:
+                    existing_index = existing_index + history_offset
                 copied["history_location"] = {
                     "session_id": existing_session,
                     "history_index": existing_index,
@@ -438,12 +442,12 @@ def _split_history_into_segments_with_locations(
             else:
                 copied["history_location"] = {
                     "session_id": session_id,
-                    "history_index": idx,
+                    "history_index": absolute_index,
                 }
         else:
             copied["history_location"] = {
                 "session_id": session_id,
-                "history_index": idx,
+                "history_index": absolute_index,
             }
         current.append(copied)
 
@@ -537,25 +541,64 @@ def get_chat_history_segments(
             namespace=namespace,
             include_legacy=include_legacy,
         )
+        history_offset = 0
+        history_length = None
+        doc = None
         projection = None
         if isinstance(history_tail_limit, int) and history_tail_limit > 0:
-            projection = {"history": {"$slice": -history_tail_limit}}
-        doc = chat_history_coll.find_one(query, projection)
+            if hasattr(chat_history_coll, "aggregate") and callable(
+                getattr(chat_history_coll, "aggregate")
+            ):
+                pipeline = [
+                    {"$match": query},
+                    {
+                        "$project": {
+                            "history": {"$slice": ["$history", -history_tail_limit]},
+                            "history_length": {"$size": "$history"},
+                        }
+                    },
+                ]
+                try:
+                    doc = next(chat_history_coll.aggregate(pipeline), None)
+                except Exception:
+                    doc = None
+            if doc is None:
+                doc = chat_history_coll.find_one(query, projection)
+                if doc is not None:
+                    full_history = doc.get("history") or []
+                    if isinstance(full_history, list):
+                        history_length = len(full_history)
+                        doc = dict(doc)
+                        doc["history"] = full_history[-history_tail_limit:]
+        else:
+            doc = chat_history_coll.find_one(query, projection)
         if not doc:
             return ([], {"history_truncated": False}) if return_meta else []
 
         history = doc.get("history") or []
         if not isinstance(history, list) or not history:
             return ([], {"history_truncated": False}) if return_meta else []
-        history_truncated = bool(
-            isinstance(history_tail_limit, int)
-            and history_tail_limit > 0
-            and len(history) >= history_tail_limit
-        )
+        if history_length is None:
+            history_length_raw = doc.get("history_length")
+            if isinstance(history_length_raw, int):
+                history_length = history_length_raw
+
+        if isinstance(history_length, int) and history_length >= 0:
+            history_offset = max(0, history_length - len(history))
+            history_truncated = history_length > len(history)
+        else:
+            history_truncated = bool(
+                isinstance(history_tail_limit, int)
+                and history_tail_limit > 0
+                and len(history) >= history_tail_limit
+            )
 
         if include_locations:
             segments = _split_history_into_segments_with_locations(
-                history, session_id=session_id, include_debug=include_debug
+                history,
+                session_id=session_id,
+                include_debug=include_debug,
+                history_offset=history_offset,
             )
         else:
             segments = _split_history_into_segments(history)

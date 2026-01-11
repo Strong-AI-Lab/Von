@@ -20,6 +20,9 @@ Von now supports an explicit, UI-driven OAuth flow to authorise *agent* Gmail pr
 - `GMAIL_TOKEN_ENCRYPTION_KEY` (required for DB token storage; Fernet key)
 - `VON_AGENT_GMAIL_OAUTH_REDIRECT_URI` (e.g. `http://localhost:5000/von/api/agent/gmail/oauth/callback`)
 - `VON_AGENT_GMAIL_OAUTH_CLIENT_SECRET_PATH` (optional override; defaults to the profile's `credentials_path`)
+- OAuth 403 troubleshooting:
+  - If the consent screen is in **Testing**, add your account under **OAuth consent screen → Audience → Test users**.
+  - Ensure the OAuth client has an exact **Authorised redirect URI** matching the callback URL.
 
 ## Initial surface (MVP)
 - **Service helpers** (in code now): `list_messages`, `get_message`, `get_attachment`, per-profile.
@@ -44,7 +47,7 @@ Von now supports an explicit, UI-driven OAuth flow to authorise *agent* Gmail pr
   - `VON_GMAIL_TOKEN_PATH` (required)
   - `VON_GMAIL_CLIENT_SECRET_PATH` or `GOOGLE_CLIENT_SECRET_PATH` (optional, refresh only)
   - `VON_GMAIL_USER`, `VON_GMAIL_LABELS` (comma-separated), `VON_GMAIL_QUERY_PREFIX`, `VON_GMAIL_MUTATION` (boolean)
-- Optional default: `VON_GMAIL_DEFAULT_PROFILE` can be set to auto-fill Gmail tool calls when UI/local profile is not provided. The settings page now allows a "Gmail profile ID" text field stored in the browser (localStorage key `von_gmail_profile`).
+- Optional default: `VON_GMAIL_DEFAULT_PROFILE` can be set to auto-fill Gmail tool calls when UI/local profile is not provided. The settings page now exposes a Gmail profile selector (dropdown) populated from `VON_GMAIL_PROFILES`, stored in the browser (localStorage key `von_gmail_profile`).
 
 ## Phases
 1) **Service layer (done)**: Profile loader + Gmail helpers with tests.

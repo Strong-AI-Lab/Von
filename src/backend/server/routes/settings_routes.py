@@ -42,6 +42,7 @@ from ...services.feature_flags import (
     get_expert_footer_enabled,
     get_expert_tabs_enabled,
 )
+from ...integrations.google.gmail_service import list_profile_ids_from_env
 from ...services.concept_service import list_concepts, get_concept_by_id
 from ...languagemodels.llm_interface import OpenAIClient
 from ...db.repositories.concepts_repository import ConceptsRepository
@@ -540,6 +541,10 @@ def get_all_settings_data():
             "1",
             "true",
         }
+        gmail_profiles = list_profile_ids_from_env()
+        gmail_default_profile = os.getenv("VON_GMAIL_DEFAULT_PROFILE") or None
+        if gmail_default_profile and gmail_default_profile not in gmail_profiles:
+            gmail_default_profile = None
 
         return {
             "active_llm": get_active_llm_setting(),
@@ -556,6 +561,8 @@ def get_all_settings_data():
             "jira_project_allow_list_effective": jira_allow_list_effective,
             "internal_mcp_jira_execute_mode_raw": jira_execute_mode_raw,
             "internal_mcp_jira_execute_mode_enabled": jira_execute_mode_enabled,
+            "gmail_profiles": gmail_profiles,
+            "gmail_default_profile": gmail_default_profile,
         }
     except Exception as e:
         current_app.logger.error(f"Error retrieving settings data: {e}", exc_info=True)
