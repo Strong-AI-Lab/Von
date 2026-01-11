@@ -291,6 +291,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     print(f"[backup] Running mongodump into: {backup_root}")
+    print(
+        "[backup] Note: mongodump progress is coarse; counters may stay flat until a collection completes."
+    )
     _run_mongodump(mongo_uri=mongo_uri, db_name=db_name, out_path=backup_root)
 
     # Basic sanity check: ensure the expected database folder exists.

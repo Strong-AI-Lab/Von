@@ -249,6 +249,18 @@ def _pick_scopes(request_mutation: str) -> List[str]:
     return list(DEFAULT_SCOPES)
 
 
+def list_profile_ids_from_env() -> List[str]:
+    """Return configured Gmail profile IDs without exposing sensitive paths."""
+
+    try:
+        profiles = load_profiles_from_env()
+    except Exception as exc:
+        logger.warning("[gmail_service] Failed to load Gmail profiles: %s", exc)
+        return []
+
+    return sorted(profiles.keys())
+
+
 def get_profile(
     profile_id: str, profiles: Optional[Dict[str, GmailProfile]] = None
 ) -> GmailProfile:

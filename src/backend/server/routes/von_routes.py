@@ -1676,7 +1676,46 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     request_user_id = data.get("user_id")
     request_org_id = data.get("org_id")
     request_language = data.get("language", "en-NZ")
-    request_gmail_profile = data.get("gmail_profile")
+    request_gmail_profile_raw = data.get("gmail_profile")
+    request_gmail_profile = None
+    if isinstance(request_gmail_profile_raw, str):
+        request_gmail_profile = request_gmail_profile_raw.strip() or None
+    elif request_gmail_profile_raw is not None:
+        return (
+            jsonify(
+                {
+                    "error": "invalid_gmail_profile",
+                    "detail": "gmail_profile must be a string.",
+                }
+            ),
+            400,
+        )
+
+    if request_gmail_profile:
+        from ...integrations.google.gmail_service import list_profile_ids_from_env
+
+        available_profiles = list_profile_ids_from_env()
+        if not available_profiles:
+            return (
+                jsonify(
+                    {
+                        "error": "gmail_profiles_not_configured",
+                        "detail": "No Gmail profiles are configured on the server.",
+                    }
+                ),
+                400,
+            )
+        if request_gmail_profile not in available_profiles:
+            return (
+                jsonify(
+                    {
+                        "error": "unknown_gmail_profile",
+                        "detail": "gmail_profile is not configured on the server.",
+                        "available_profiles": available_profiles,
+                    }
+                ),
+                400,
+            )
 
     # Session management
     if "session_id" not in session:
