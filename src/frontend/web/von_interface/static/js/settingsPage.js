@@ -945,6 +945,26 @@ function setStoredJson(key, value) {
   try { if (value == null) localStorage.removeItem(key); else localStorage.setItem(key, JSON.stringify(value)); } catch { }
 }
 
+function normaliseOrgConceptId(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  return raw.startsWith('#V#') ? raw.slice(3) : raw;
+}
+
+function resolveOrgNameFromSelect(orgConceptId) {
+  const target = normaliseOrgConceptId(orgConceptId);
+  if (!target) return null;
+  const select = document.getElementById('currentOrganisationSelect');
+  if (!select) return null;
+  for (const opt of select.options) {
+    const optCid = normaliseOrgConceptId(opt.dataset?.conceptId);
+    if (optCid && optCid === target) {
+      return opt.textContent || null;
+    }
+  }
+  return null;
+}
+
 function applyStoredSelection(selectId, stored, fallbackSelected = true) {
   const sel = document.getElementById(selectId);
   if (!sel) return null;
@@ -1038,12 +1058,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('currentOrganisationSelect')?.addEventListener('change', () => {
     const sel = document.getElementById('currentOrganisationSelect');
     const opt = sel?.selectedOptions?.[0];
-    if (opt) {
+    if (opt && (opt.dataset?.id || opt.dataset?.conceptId)) {
       setStoredJson(LS_ORG_KEY, { id: opt.dataset.id || null, concept_id: opt.dataset.conceptId || null, name: opt.textContent || null });
       if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
       // Persist organisation preference (and language if set)
       persistCurrentUserPreferences();
-    } else { setStoredJson(LS_ORG_KEY, null); }
+    } else {
+      setStoredJson(LS_ORG_KEY, null);
+      if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
+      persistCurrentUserPreferences();
+    }
   });
   document.getElementById('preferredLanguageSelect')?.addEventListener('change', () => {
     const val = document.getElementById('preferredLanguageSelect')?.value;
@@ -1335,7 +1359,8 @@ async function loadAndDisplaySettings() {
         // Keep footer/user-visible org display in sync with Phase 2 org selection.
         try {
           if (orgId) {
-            setStoredJson(LS_ORG_KEY, { id: null, concept_id: orgId, name: null });
+            const resolvedName = resolveOrgNameFromSelect(orgId);
+            setStoredJson(LS_ORG_KEY, { id: null, concept_id: orgId, name: resolvedName });
           } else {
             setStoredJson(LS_ORG_KEY, null);
           }
@@ -1712,6 +1737,13 @@ async function loadUserConceptPreferences(userConceptId) {
           setStoredJson(LS_ORG_KEY, { id: selOpt.dataset.id || null, concept_id: selOpt.dataset.conceptId || null, name: selOpt.textContent || null });
         }
       }
+    } else {
+      const orgSel = document.getElementById('currentOrganisationSelect');
+      if (orgSel) {
+        orgSel.selectedIndex = 0;
+      }
+      setStoredJson(LS_ORG_KEY, null);
+      if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
     }
   } catch (e) {
     console.warn('Failed to load user concept preferences', e);
