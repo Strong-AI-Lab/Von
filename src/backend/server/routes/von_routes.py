@@ -3031,9 +3031,26 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         if presenter_channels is not None:
             # Screen channel becomes the stored/displayed response.
+            # Exception: tool-results fallback is debug-only; do not show it as the main chat bubble.
+            presenter_format = presenter_channels.get("format")
             screen_text_value = presenter_channels.get("screen")
-            if isinstance(screen_text_value, str) and screen_text_value.strip():
-                response_text = screen_text_value.strip()
+
+            if presenter_format == "tool_results_fallback_v1":
+                # Keep the model's user-facing response when available.
+                # Only strip <spoken> tags if present, or fall back to spoken when the
+                # response is empty.
+                extracted = _extract_spoken_only(response_text)
+                if extracted:
+                    response_text = extracted
+                elif isinstance(response_text, str) and response_text.strip():
+                    pass
+                else:
+                    spoken_value = presenter_channels.get("spoken")
+                    if isinstance(spoken_value, str) and spoken_value.strip():
+                        response_text = spoken_value.strip()
+            else:
+                if isinstance(screen_text_value, str) and screen_text_value.strip():
+                    response_text = screen_text_value.strip()
 
         if tool_invocations:
             current_app.logger.info(

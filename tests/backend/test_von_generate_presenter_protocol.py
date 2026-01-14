@@ -307,7 +307,7 @@ def test_presenter_mode_uses_tool_screen_when_screen_tag_missing(monkeypatch):
         "```"
     )
 
-    assert body["response"] == expected_screen
+    assert body["response"] == "Plain response without presenter tags."
     assert body["response_channels"] == {
         "screen": expected_screen,
         "spoken": "Short talk track.",
