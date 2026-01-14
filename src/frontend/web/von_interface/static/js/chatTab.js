@@ -13,7 +13,7 @@ import {
     startSpeechRecognition,
     stopSpeaking
 } from './speech.js';
-import { selectBestNameForContext } from './utils/nameSelection.js';
+import { getPreferredLanguage, selectBestNameForContext } from './utils/nameSelection.js';
 import { cartouchifyElementText, cartouchifyVontologyTokensInElement } from './utils/textDecorator.js';
 import { showToast } from './utils/toast.js';
 
@@ -33,6 +33,25 @@ const SESSION_TABS_REFRESH_COOLDOWN_MS = 15_000;
 let lastSessionTabsRefreshMs = 0;
 let pendingSessionTabsRefresh = null;
 let lastRenderedSessionCount = 0;
+
+// JVNAUTOSCI-982: Per-session metadata (programme/project/activity/modality links)
+const CHAT_SESSION_LINK_KEYS = [
+    { key: 'programmes', label: 'Programmes', placeholder: 'Add a programme…' },
+    { key: 'projects', label: 'Projects', placeholder: 'Add a project…' },
+    { key: 'activities', label: 'Activities', placeholder: 'Add an activity…' },
+    { key: 'modalities', label: 'Modalities', placeholder: 'Add a modality…' }
+];
+const chatSessionLinksCache = new Map();
+let activeChatSessionLinks = null;
+let chatSessionLinksLoadInFlight = null;
+let chatSessionLinksSaveInFlight = null;
+let chatSessionLinksSaveDebounceId = null;
+let chatSessionLinksDirtySessionId = null;
+let chatSessionLinksDirtyPayload = null;
+let chatSessionMetadataOpenKey = null;
+
+const chatSessionConceptMetaCache = new Map();
+const chatSessionConceptMetaInFlight = new Map();
 
 // Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
 // Stored locally only; intended to feed future introspection.
@@ -2851,6 +2870,670 @@ function setChatSessionCount(count) {
     }
 }
 
+function getChatSessionMetadataEl() {
+    return document.getElementById('chatSessionMetadata');
+}
+
+function _normaliseChatSessionLinks(links) {
+    const raw = (links && typeof links === 'object') ? links : {};
+    const out = {};
+    for (const { key } of CHAT_SESSION_LINK_KEYS) {
+        const values = raw[key];
+        const arr = Array.isArray(values) ? values : (typeof values === 'string' ? [values] : []);
+        const cleaned = [];
+        const seen = new Set();
+        for (const item of arr) {
+            if (typeof item !== 'string') continue;
+            const trimmed = item.trim();
+            if (!trimmed) continue;
+            if (!trimmed.startsWith('#V#')) continue;
+            if (seen.has(trimmed)) continue;
+            seen.add(trimmed);
+            cleaned.push(trimmed);
+        }
+        out[key] = cleaned;
+    }
+    return out;
+}
+
+function _normalisePotentialConceptId(text) {
+    const raw = String(text ?? '').trim();
+    if (!raw) return '';
+
+    let id = raw;
+    if (id.startsWith('#v#')) id = `#V#${id.slice(3)}`;
+    if (!id.startsWith('#V#')) return '';
+
+    // Strip common trailing punctuation.
+    const trailingJunk = new Set(['.', ',', ':', ';', '!', '?', ')', ']', '}', '…']);
+    while (id.length > 3 && trailingJunk.has(id[id.length - 1])) {
+        id = id.slice(0, -1);
+    }
+
+    return id.trim();
+}
+
+function _deriveNameFromConceptId(conceptId) {
+    const slug = String(conceptId || '').replace(/^#V#/, '');
+    if (!slug) return '';
+    return slug.replace(/_/g, ' ');
+}
+
+async function _getConceptMetaForChatSession(conceptId) {
+    const id = String(conceptId || '').trim();
+    if (!id || !id.startsWith('#V#')) return null;
+
+    if (chatSessionConceptMetaCache.has(id)) {
+        return chatSessionConceptMetaCache.get(id);
+    }
+
+    if (chatSessionConceptMetaInFlight.has(id)) {
+        return chatSessionConceptMetaInFlight.get(id);
+    }
+
+    const request = (async () => {
+        try {
+            const url = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(id)}&raw_only=1`;
+            const resp = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' } });
+            if (!resp.ok) {
+                return null;
+            }
+            const json = await resp.json();
+            const preferredLanguage = getPreferredLanguage();
+            const bestName = selectBestNameForContext(json?.raw_doc?.names, preferredLanguage);
+            const meta = {
+                displayName: bestName || json?.display_name || null,
+                kind: json?.kind || json?.computed_kind || null
+            };
+            chatSessionConceptMetaCache.set(id, meta);
+            return meta;
+        } catch (_) {
+            return null;
+        } finally {
+            chatSessionConceptMetaInFlight.delete(id);
+        }
+    })();
+
+    chatSessionConceptMetaInFlight.set(id, request);
+    return request;
+}
+
+function _clearChatSessionMetadata() {
+    const el = getChatSessionMetadataEl();
+    if (!el) return;
+    el.innerHTML = '';
+    el.classList.add('is-hidden');
+}
+
+function _renderChatSessionMetadataMessage(message) {
+    const el = getChatSessionMetadataEl();
+    if (!el) return;
+    el.classList.remove('is-hidden');
+    el.innerHTML = '';
+
+    const row = document.createElement('div');
+    row.className = 'chat-session-metadata-row';
+    const label = document.createElement('div');
+    label.className = 'chat-session-metadata-label';
+    label.textContent = 'Metadata';
+    const values = document.createElement('div');
+    values.className = 'chat-session-metadata-values';
+
+    const msg = document.createElement('span');
+    msg.style.fontSize = '13px';
+    msg.style.color = '#475569';
+    msg.textContent = String(message || '').trim() || '—';
+    values.appendChild(msg);
+    row.appendChild(label);
+    row.appendChild(values);
+    el.appendChild(row);
+}
+
+function _buildChatSessionMetadataSuggestions({ inputEl, suggestionsEl, onPick, includeIndividuals = true }) {
+    const state = { items: [], activeIndex: -1, abortController: null };
+    let pointerDown = false;
+
+    suggestionsEl.addEventListener('pointerdown', () => {
+        pointerDown = true;
+    });
+    suggestionsEl.addEventListener('pointerup', () => {
+        setTimeout(() => {
+            pointerDown = false;
+        }, 0);
+    });
+
+    const clearSuggestions = () => {
+        state.items = [];
+        state.activeIndex = -1;
+        suggestionsEl.classList.remove('open');
+        suggestionsEl.innerHTML = '';
+    };
+
+    const setActive = (idx) => {
+        state.activeIndex = idx;
+        suggestionsEl.querySelectorAll('.chat-session-metadata-suggestion').forEach((el, i) => {
+            if (i === idx) {
+                el.classList.add('active');
+            } else {
+                el.classList.remove('active');
+            }
+        });
+    };
+
+    const render = (items) => {
+        suggestionsEl.innerHTML = '';
+        if (!items.length) {
+            suggestionsEl.classList.remove('open');
+            return;
+        }
+
+        items.forEach((it, idx) => {
+            const row = document.createElement('div');
+            row.className = 'chat-session-metadata-suggestion';
+            row.setAttribute('role', 'option');
+
+            const name = document.createElement('span');
+            name.textContent = it.name || it.id;
+            name.title = `${it.name || it.id} — ${it.id}`;
+
+            const kind = document.createElement('span');
+            kind.className = 'chat-session-metadata-suggestion-kind';
+            kind.textContent = it.kind === 'predicate' ? 'Predicate' : (it.kind === 'individual' ? 'Individual' : 'Type');
+
+            row.appendChild(name);
+            row.appendChild(kind);
+
+            row.addEventListener('mouseenter', () => setActive(idx));
+            row.addEventListener('mouseleave', () => setActive(-1));
+            row.addEventListener('click', () => {
+                onPick(it);
+                clearSuggestions();
+            });
+
+            suggestionsEl.appendChild(row);
+        });
+
+        suggestionsEl.classList.add('open');
+    };
+
+    const performSearch = async (query) => {
+        const q = String(query || '').trim();
+        if (!q) {
+            clearSuggestions();
+            return;
+        }
+
+        try {
+            state.abortController?.abort?.();
+        } catch (_) { /* ignore */ }
+        const ac = new AbortController();
+        state.abortController = ac;
+
+        const url = `/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=12&fallback_substring=true${includeIndividuals ? '&include_individuals=true' : ''}`;
+        try {
+            const resp = await fetch(url, { signal: ac.signal });
+            if (!resp.ok) {
+                clearSuggestions();
+                return;
+            }
+            const data = await resp.json();
+            const items = Array.isArray(data?.results) ? data.results : [];
+            state.items = items;
+            state.activeIndex = -1;
+            render(items);
+        } catch (err) {
+            if (err?.name === 'AbortError') return;
+            clearSuggestions();
+        }
+    };
+
+    const debounce = (fn, wait) => {
+        let t;
+        return (...args) => {
+            clearTimeout(t);
+            t = setTimeout(() => fn(...args), wait);
+        };
+    };
+
+    const debouncedSearch = debounce(() => performSearch(inputEl.value), 200);
+
+    inputEl.addEventListener('input', () => debouncedSearch());
+    inputEl.addEventListener('focus', () => {
+        if (state.items.length) {
+            suggestionsEl.classList.add('open');
+        }
+    });
+
+    inputEl.addEventListener('blur', () => {
+        // Allow click selection to run first.
+        setTimeout(() => {
+            if (!pointerDown) {
+                clearSuggestions();
+            }
+        }, 0);
+    });
+
+    inputEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            clearSuggestions();
+            inputEl.blur();
+            return;
+        }
+
+        if (!state.items.length) {
+            if (e.key === 'Enter') {
+                const maybeId = _normalisePotentialConceptId(inputEl.value);
+                if (maybeId) {
+                    e.preventDefault();
+                    onPick({ id: maybeId, name: null, kind: 'individual' });
+                    inputEl.value = '';
+                    clearSuggestions();
+                }
+            }
+            return;
+        }
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            setActive(Math.min(state.activeIndex + 1, state.items.length - 1));
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            setActive(Math.max(state.activeIndex - 1, 0));
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            const idx = (state.activeIndex >= 0) ? state.activeIndex : 0;
+            const chosen = state.items[idx];
+            if (chosen) {
+                onPick(chosen);
+                inputEl.value = '';
+                clearSuggestions();
+            }
+        }
+    });
+
+    return { clearSuggestions };
+}
+
+function _escapeCssValue(value) {
+    const raw = String(value ?? '');
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+        return CSS.escape(raw);
+    }
+    return raw.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function _renderChatSessionMetadataPanel({ sessionId, links, statusText, statusTone, disabled }) {
+    const el = getChatSessionMetadataEl();
+    if (!el) return;
+
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        _clearChatSessionMetadata();
+        return;
+    }
+
+    el.classList.remove('is-hidden');
+    el.innerHTML = '';
+
+    if (statusText) {
+        const statusRow = document.createElement('div');
+        statusRow.className = 'chat-session-metadata-row';
+        const label = document.createElement('div');
+        label.className = 'chat-session-metadata-label';
+        label.textContent = 'Status';
+        const values = document.createElement('div');
+        values.className = 'chat-session-metadata-values';
+        const status = document.createElement('span');
+        status.style.fontSize = '12px';
+        status.style.color = statusTone === 'error' ? '#b91c1c' : '#64748b';
+        status.textContent = statusText;
+        values.appendChild(status);
+        statusRow.appendChild(label);
+        statusRow.appendChild(values);
+        el.appendChild(statusRow);
+    }
+
+    const safeLinks = _normaliseChatSessionLinks(links);
+
+    for (const group of CHAT_SESSION_LINK_KEYS) {
+        const row = document.createElement('div');
+        row.className = 'chat-session-metadata-row';
+
+        const label = document.createElement('div');
+        label.className = 'chat-session-metadata-label';
+        label.textContent = group.label;
+
+        const values = document.createElement('div');
+        values.className = 'chat-session-metadata-values';
+
+        const ids = Array.isArray(safeLinks[group.key]) ? safeLinks[group.key] : [];
+        ids.forEach((conceptId) => {
+            const chip = document.createElement('span');
+            chip.className = 'chat-session-metadata-chip';
+
+            const link = document.createElement('a');
+            link.href = '#';
+            const cached = chatSessionConceptMetaCache.get(conceptId);
+            link.textContent = cached?.displayName || _deriveNameFromConceptId(conceptId) || conceptId;
+            link.title = `${cached?.displayName || conceptId} — ${conceptId}`;
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                document.dispatchEvent(new CustomEvent('von:selectConceptById', {
+                    detail: { conceptId, createConceptTab: true }
+                }));
+            });
+            chip.appendChild(link);
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'chat-session-metadata-chip-remove';
+            removeBtn.textContent = '×';
+            removeBtn.title = `Remove ${conceptId}`;
+            removeBtn.disabled = !!disabled;
+            removeBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                removeChatSessionLink(group.key, conceptId);
+            });
+            chip.appendChild(removeBtn);
+
+            values.appendChild(chip);
+
+            if (!cached && !chatSessionConceptMetaInFlight.has(conceptId)) {
+                void _getConceptMetaForChatSession(conceptId).then(() => {
+                    if (activeChatSessionLinks?.sessionId === sid) {
+                        _renderChatSessionMetadataPanel({
+                            sessionId: sid,
+                            links: activeChatSessionLinks?.links,
+                            statusText: activeChatSessionLinks?.statusText,
+                            statusTone: activeChatSessionLinks?.statusTone,
+                            disabled: activeChatSessionLinks?.disabled
+                        });
+                    }
+                });
+            }
+        });
+
+        const actions = document.createElement('div');
+        actions.className = 'chat-session-metadata-actions';
+
+        const addBtn = document.createElement('button');
+        addBtn.type = 'button';
+        addBtn.className = 'chat-session-metadata-add';
+        addBtn.textContent = '+';
+        addBtn.title = `Add ${group.label}`;
+        addBtn.disabled = !!disabled;
+
+        const inputWrap = document.createElement('div');
+        inputWrap.className = 'chat-session-metadata-inputwrap';
+        inputWrap.dataset.linkKey = group.key;
+        inputWrap.style.display = (chatSessionMetadataOpenKey === group.key) ? 'block' : 'none';
+
+        const input = document.createElement('input');
+        input.className = 'chat-session-metadata-input';
+        input.type = 'text';
+        input.placeholder = group.placeholder;
+        input.disabled = !!disabled;
+
+        const suggestions = document.createElement('div');
+        suggestions.className = 'chat-session-metadata-suggestions';
+        suggestions.setAttribute('role', 'listbox');
+
+        inputWrap.appendChild(input);
+        inputWrap.appendChild(suggestions);
+
+        addBtn.addEventListener('click', () => {
+            if (chatSessionMetadataOpenKey === group.key) {
+                chatSessionMetadataOpenKey = null;
+                _renderChatSessionMetadataPanel({
+                    sessionId: sid,
+                    links: activeChatSessionLinks?.links,
+                    statusText: activeChatSessionLinks?.statusText,
+                    statusTone: activeChatSessionLinks?.statusTone,
+                    disabled: activeChatSessionLinks?.disabled
+                });
+                return;
+            }
+            chatSessionMetadataOpenKey = group.key;
+            _renderChatSessionMetadataPanel({
+                sessionId: sid,
+                links: activeChatSessionLinks?.links,
+                statusText: activeChatSessionLinks?.statusText,
+                statusTone: activeChatSessionLinks?.statusTone,
+                disabled: activeChatSessionLinks?.disabled
+            });
+
+            setTimeout(() => {
+                const container = getChatSessionMetadataEl();
+                if (!container) return;
+                const escapedKey = _escapeCssValue(group.key);
+                const target = container.querySelector(`.chat-session-metadata-inputwrap[data-link-key="${escapedKey}"] .chat-session-metadata-input`);
+                try { target?.focus?.(); } catch (_) { /* ignore */ }
+            }, 0);
+        });
+
+        actions.appendChild(addBtn);
+        actions.appendChild(inputWrap);
+        values.appendChild(actions);
+
+        row.appendChild(label);
+        row.appendChild(values);
+        el.appendChild(row);
+
+        if (chatSessionMetadataOpenKey === group.key && !disabled) {
+            // Wire autocomplete + focus.
+            _buildChatSessionMetadataSuggestions({
+                inputEl: input,
+                suggestionsEl: suggestions,
+                includeIndividuals: true,
+                onPick: (it) => {
+                    const picked = _normalisePotentialConceptId(it?.id) || (typeof it?.id === 'string' ? it.id.trim() : '');
+                    if (!picked) {
+                        showToast('Select a valid concept.', 'error');
+                        return;
+                    }
+                    addChatSessionLink(group.key, picked);
+                }
+            });
+            setTimeout(() => {
+                try { input.focus(); } catch (_) { /* ignore */ }
+            }, 0);
+        }
+    }
+}
+
+function _setActiveChatSessionLinksState(state) {
+    activeChatSessionLinks = state;
+    _renderChatSessionMetadataPanel({
+        sessionId: state?.sessionId,
+        links: state?.links,
+        statusText: state?.statusText,
+        statusTone: state?.statusTone,
+        disabled: state?.disabled
+    });
+}
+
+function _scheduleSaveChatSessionLinks(sessionId, links) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return;
+    chatSessionLinksDirtySessionId = sid;
+    chatSessionLinksDirtyPayload = links;
+
+    if (chatSessionLinksSaveDebounceId) {
+        clearTimeout(chatSessionLinksSaveDebounceId);
+        chatSessionLinksSaveDebounceId = null;
+    }
+
+    chatSessionLinksSaveDebounceId = setTimeout(() => {
+        chatSessionLinksSaveDebounceId = null;
+        void saveChatSessionLinks(sid, chatSessionLinksDirtyPayload);
+    }, 650);
+}
+
+async function _flushPendingChatSessionLinksSave(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return;
+    if (!chatSessionLinksDirtySessionId || chatSessionLinksDirtySessionId !== sid) return;
+    if (chatSessionLinksSaveDebounceId) {
+        clearTimeout(chatSessionLinksSaveDebounceId);
+        chatSessionLinksSaveDebounceId = null;
+    }
+    await saveChatSessionLinks(sid, chatSessionLinksDirtyPayload);
+}
+
+function addChatSessionLink(key, conceptId) {
+    const sid = activeChatSessionLinks?.sessionId;
+    if (!sid || sid !== activeChatSessionId) return;
+    const safeKey = String(key || '').trim();
+    const id = _normalisePotentialConceptId(conceptId);
+    if (!safeKey || !id) return;
+
+    const current = _normaliseChatSessionLinks(activeChatSessionLinks?.links);
+    const list = Array.isArray(current[safeKey]) ? current[safeKey].slice() : [];
+    if (list.includes(id)) {
+        showToast('Already added.', 'info');
+        return;
+    }
+    list.push(id);
+    current[safeKey] = list;
+
+    chatSessionLinksCache.set(sid, current);
+    _setActiveChatSessionLinksState({
+        sessionId: sid,
+        links: current,
+        statusText: 'Saving…',
+        statusTone: 'info',
+        disabled: false
+    });
+    _scheduleSaveChatSessionLinks(sid, current);
+}
+
+function removeChatSessionLink(key, conceptId) {
+    const sid = activeChatSessionLinks?.sessionId;
+    if (!sid || sid !== activeChatSessionId) return;
+    const safeKey = String(key || '').trim();
+    const id = String(conceptId || '').trim();
+    if (!safeKey || !id) return;
+
+    const current = _normaliseChatSessionLinks(activeChatSessionLinks?.links);
+    const list = Array.isArray(current[safeKey]) ? current[safeKey].slice() : [];
+    const next = list.filter(v => v !== id);
+    current[safeKey] = next;
+
+    chatSessionLinksCache.set(sid, current);
+    _setActiveChatSessionLinksState({
+        sessionId: sid,
+        links: current,
+        statusText: 'Saving…',
+        statusTone: 'info',
+        disabled: false
+    });
+    _scheduleSaveChatSessionLinks(sid, current);
+}
+
+async function loadChatSessionLinks(sessionId, options = {}) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) {
+        _clearChatSessionMetadata();
+        return;
+    }
+
+    const force = options.force === true;
+    const cached = chatSessionLinksCache.get(sid);
+    if (!force && cached) {
+        _setActiveChatSessionLinksState({ sessionId: sid, links: cached, statusText: '', statusTone: 'info', disabled: false });
+        return;
+    }
+
+    try {
+        chatSessionLinksLoadInFlight?.abortController?.abort?.();
+    } catch (_) { /* ignore */ }
+    const abortController = new AbortController();
+    chatSessionLinksLoadInFlight = { sessionId: sid, abortController };
+
+    _setActiveChatSessionLinksState({ sessionId: sid, links: cached || {}, statusText: 'Loading…', statusTone: 'info', disabled: true });
+
+    try {
+        const resp = await fetch(`/von/api/session/chat_session_links?session_id=${encodeURIComponent(sid)}`, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' },
+            cache: 'no-store',
+            signal: abortController.signal
+        });
+        const data = await resp.json().catch(() => ({}));
+
+        if (abortController.signal.aborted) return;
+        if (activeChatSessionId !== sid) return;
+
+        if (resp.status === 401 || data?.error === 'Not authenticated') {
+            chatSessionMetadataOpenKey = null;
+            _renderChatSessionMetadataMessage('Log in to view/edit conversation metadata.');
+            return;
+        }
+
+        if (!resp.ok) {
+            _setActiveChatSessionLinksState({ sessionId: sid, links: cached || {}, statusText: 'Unable to load metadata.', statusTone: 'error', disabled: false });
+            return;
+        }
+
+        const links = _normaliseChatSessionLinks(data?.session_links);
+        chatSessionLinksCache.set(sid, links);
+        _setActiveChatSessionLinksState({ sessionId: sid, links, statusText: '', statusTone: 'info', disabled: false });
+    } catch (err) {
+        if (err?.name === 'AbortError') return;
+        _setActiveChatSessionLinksState({ sessionId: sid, links: cached || {}, statusText: 'Unable to load metadata.', statusTone: 'error', disabled: false });
+    }
+}
+
+async function saveChatSessionLinks(sessionId, links) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return;
+    const payload = _normaliseChatSessionLinks(links);
+
+    // Avoid parallel saves; last write wins.
+    try {
+        chatSessionLinksSaveInFlight?.abortController?.abort?.();
+    } catch (_) { /* ignore */ }
+    const abortController = new AbortController();
+    chatSessionLinksSaveInFlight = { sessionId: sid, abortController };
+
+    try {
+        const resp = await fetch('/von/api/session/chat_session_links', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ session_id: sid, session_links: payload }),
+            signal: abortController.signal
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (abortController.signal.aborted) return;
+        if (activeChatSessionId !== sid) return;
+
+        if (resp.status === 401 || data?.error === 'Not authenticated') {
+            _renderChatSessionMetadataMessage('Log in to view/edit conversation metadata.');
+            return;
+        }
+
+        if (!resp.ok) {
+            _setActiveChatSessionLinksState({ sessionId: sid, links: payload, statusText: 'Save failed.', statusTone: 'error', disabled: false });
+            return;
+        }
+
+        const saved = _normaliseChatSessionLinks(data?.session_links || payload);
+        chatSessionLinksCache.set(sid, saved);
+        chatSessionLinksDirtySessionId = null;
+        chatSessionLinksDirtyPayload = null;
+        _setActiveChatSessionLinksState({ sessionId: sid, links: saved, statusText: 'Saved', statusTone: 'info', disabled: false });
+        setTimeout(() => {
+            if (activeChatSessionLinks?.sessionId === sid && activeChatSessionLinks?.statusText === 'Saved') {
+                _setActiveChatSessionLinksState({ sessionId: sid, links: saved, statusText: '', statusTone: 'info', disabled: false });
+            }
+        }, 1200);
+    } catch (err) {
+        if (err?.name === 'AbortError') return;
+        _setActiveChatSessionLinksState({ sessionId: sid, links: payload, statusText: 'Save failed.', statusTone: 'error', disabled: false });
+    }
+}
+
 function getChatTabButton() {
     return document.querySelector('.tab-button[data-tab="chatTab"]');
 }
@@ -3264,6 +3947,8 @@ async function refreshChatSessionTabs() {
             renderChatSessionTabsPlaceholder('unauthenticated');
             lastRenderedSessionCount = 0;
             sessionTabsCache = [];
+            chatSessionMetadataOpenKey = null;
+            _clearChatSessionMetadata();
             return;
         }
 
@@ -3333,6 +4018,11 @@ async function refreshChatSessionTabs() {
         }
 
         renderChatSessionTabs(sessions, activeChatSessionId || activeSessionId);
+
+        const sidForMeta = activeChatSessionId || activeSessionId;
+        if (sidForMeta) {
+            void loadChatSessionLinks(sidForMeta, { force: false });
+        }
     } catch (err) {
         console.error('Failed to load chat sessions:', err);
 
@@ -3362,6 +4052,8 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         lastRenderedSessionCount = 0;
         setChatSessionCount(0);
         sessionTabsCache = [];
+        chatSessionMetadataOpenKey = null;
+        _clearChatSessionMetadata();
         return;
     }
 
@@ -3659,6 +4351,12 @@ async function createChatSession(sessionName) {
         renderChatSessionTabs(sessionTabsCache, effectiveSessionId);
     }
 
+    // Metadata editor: start with a fresh load for the new session.
+    chatSessionMetadataOpenKey = null;
+    if (effectiveSessionId) {
+        void loadChatSessionLinks(effectiveSessionId, { force: true });
+    }
+
     const history = Array.isArray(data?.history) ? data.history : [];
     const scrollableField = document.getElementById('scrollableField');
     if (scrollableField) {
@@ -3742,6 +4440,11 @@ async function switchToChatSession(sessionId) {
 
     const previousSessionId = activeChatSessionId;
     const previousSessionName = activeChatSessionName;
+
+    // Best-effort: flush any pending metadata save before switching away.
+    if (previousSessionId) {
+        void _flushPendingChatSessionLinksSave(previousSessionId);
+    }
     const cachedSession = sessionTabsCache.find(
         session => String(session?.session_id || '') === sid
     );
@@ -3761,6 +4464,10 @@ async function switchToChatSession(sessionId) {
         renderChatSessionTabs(sessionTabsCache, sid);
     }
     setChatSessionTabLoading(sid, true);
+
+    // Render metadata panel immediately (cached if available).
+    chatSessionMetadataOpenKey = null;
+    void loadChatSessionLinks(sid, { force: false });
 
     abortActiveHistoryRequest();
     abortActiveChatRequest();
@@ -3798,6 +4505,14 @@ async function switchToChatSession(sessionId) {
             if (sessionTabsCache.length > 0) {
                 renderChatSessionTabs(sessionTabsCache, previousSessionId || sid);
             }
+
+            chatSessionMetadataOpenKey = null;
+            if (previousSessionId) {
+                void loadChatSessionLinks(previousSessionId, { force: false });
+            } else {
+                _clearChatSessionMetadata();
+            }
+
             setChatSessionTabLoading(sid, false);
             scrollableField.innerHTML = `<div class="chat-session-loading">${escapeHtml(msg)}</div>`;
             void loadChatHistory({
@@ -3810,6 +4525,13 @@ async function switchToChatSession(sessionId) {
         }
 
         setActiveChatSession(data?.session_id, data?.session_name);
+
+        // Refresh metadata (server-side session may have changed).
+        const effectiveMetaSessionId = (typeof data?.session_id === 'string' && data.session_id.trim())
+            ? data.session_id.trim()
+            : sid;
+        chatSessionMetadataOpenKey = null;
+        void loadChatSessionLinks(effectiveMetaSessionId, { force: true });
 
         if (shouldReuseCachedHistory) {
             const cached = getSessionHistoryCache(sid);
@@ -3882,6 +4604,14 @@ async function switchToChatSession(sessionId) {
         if (sessionTabsCache.length > 0) {
             renderChatSessionTabs(sessionTabsCache, previousSessionId || sid);
         }
+
+        chatSessionMetadataOpenKey = null;
+        if (previousSessionId) {
+            void loadChatSessionLinks(previousSessionId, { force: false });
+        } else {
+            _clearChatSessionMetadata();
+        }
+
         setChatSessionTabLoading(sid, false);
         scrollableField.innerHTML = '<div class="chat-session-loading">Unable to switch session.</div>';
         void loadChatHistory({
