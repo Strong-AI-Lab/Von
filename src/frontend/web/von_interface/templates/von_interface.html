@@ -13,7 +13,7 @@
   <script>
     window.__VON_FEATURE_FLAGS__ = {
       expertTabsEnabled: {{ 'true' if expert_tabs_enabled else 'false' }},
-      expertFooterEnabled: {{ 'true' if expert_footer_enabled else 'false' }}
+    expertFooterEnabled: { { 'true' if expert_footer_enabled else 'false' } }
     };
   </script>
 
@@ -132,7 +132,7 @@
   <!-- Footer for Model Info -->
   <div class="footer-container">
     <p id="modelInfoFooter" class="footer-info">
-      <span id="chat-history-length"></span>
+
     </p>
     <p id="languageIndicator" class="language-indicator">🌐 en-NZ</p>
     <p id="serverUptimeFooter" class="pid-indicator" title="Process uptime">
@@ -174,19 +174,6 @@
     </div>
   </div>
   {% endif %}
-
-  <!-- History Status Modal -->
-  <div id="historyStatusModal" class="modal" aria-hidden="true" role="dialog" aria-labelledby="historyStatusTitle">
-    <div class="modal-content">
-      <h2 id="historyStatusTitle">Conversation history</h2>
-      <div id="historyStatusBody">
-        <p>Loading…</p>
-      </div>
-      <div class="modal-actions">
-        <button id="historyStatusClose" type="button">Close</button>
-      </div>
-    </div>
-  </div>
 
   <!-- Link to external JavaScript (fixed endpoint spacing) -->
   <script type='module' src="{{ url_for('static', filename='js/main.js') }}"></script>

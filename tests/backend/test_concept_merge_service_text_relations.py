@@ -114,6 +114,10 @@ def test_merge_concepts_apply_updates_text_relations_and_deletes_source() -> Non
             side_effect=fake_get,
         ),
         patch(
+            "src.backend.services.concept_merge_service.delete_concept",
+            return_value=True,
+        ) as mock_delete_concept,
+        patch(
             "src.backend.services.concept_merge_service.ConceptsRepository"
         ) as mock_concepts_repo,
         patch(
@@ -139,4 +143,4 @@ def test_merge_concepts_apply_updates_text_relations_and_deletes_source() -> Non
 
     assert report["success"] is True
     mock_text_rel_repo.update_one.assert_called()
-    mock_concepts_repo.delete_one.assert_called_with({"concept_id": source_id})
+    mock_delete_concept.assert_called_with(source_id)
