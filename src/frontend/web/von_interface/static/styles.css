@@ -3451,6 +3451,10 @@ footer {
     background: #f8fafc;
 }
 
+.chat-session-metadata-suggestion.active {
+    background: #f8fafc;
+}
+
 .chat-session-metadata-suggestion:last-child {
     border-bottom: none;
 }
