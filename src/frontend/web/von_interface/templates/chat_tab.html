@@ -16,7 +16,13 @@
       </div>
     </div>
 
-    <div id="chatSessionTabs" class="chat-session-tabs" role="tablist" aria-label="Conversation sessions"></div>
+    <div class="chat-session-tabs-row" aria-label="Conversation sessions">
+      <div id="chatSessionTabs" class="chat-session-tabs" role="tablist" aria-label="Conversation sessions"></div>
+      <div id="chatSessionCount" class="chat-session-count" aria-label="Conversation count" title="Conversations">—
+      </div>
+    </div>
+
+    <div id="chatSessionMetadata" class="chat-session-metadata" aria-label="Conversation metadata"></div>
 
     <div id="historyBanner" class="history-banner hidden" role="status" aria-live="polite">
       <span id="historyBannerText" class="history-banner-text">Older conversation available</span>
@@ -53,7 +59,8 @@
         Dictate
       </button>
       <button id="resetButton" class="btn btn-secondary" type="button"
-        title="End this conversation (resets Von's context while keeping the conversation view)">End conversation</button>
+        title="End this conversation (resets Von's context while keeping the conversation view)">End
+        conversation</button>
 
       <button id="uploadFileButton" class="btn btn-secondary" type="button"
         title="Upload a file (or drag and drop onto the conversation)">Upload File</button>

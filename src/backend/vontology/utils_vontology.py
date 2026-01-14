@@ -193,6 +193,8 @@ from ..db.repositories.concepts_repository import (
     ConceptsRepository,
 )  # Added repository import
 
+from ..db.repositories.text_value_repository import TextRelationsRepository
+
 # --- Cached preferred language to avoid repeated DB calls ---
 _cached_preferred_language = None
 _cache_timestamp = 0
@@ -2407,6 +2409,16 @@ def delete_vontology_concept(concept_id: str) -> dict:
                 "message": f"Concept with id '{concept_id}' was not deleted.",
             }
 
+        # Remove associated text relations (names/descriptions/etc.) so deleted concepts
+        # cannot re-surface via stale text-value edges.
+        try:
+            rel_delete = TextRelationsRepository.delete_many(
+                {"subject_concept_id": concept_id}
+            )
+            text_relations_deleted = int(getattr(rel_delete, "deleted_count", 0) or 0)
+        except Exception:
+            text_relations_deleted = 0
+
         logger.info(
             f"Deleted concept '{concept_id}'. Reparented {children_reparented} children and re-typed {instances_retyped} instances."
         )
@@ -2432,6 +2444,7 @@ def delete_vontology_concept(concept_id: str) -> dict:
             "deleted_count": getattr(delete_result, "deleted_count", 0),
             "children_updated": children_reparented,
             "instances_updated": instances_retyped,
+            "text_relations_deleted": text_relations_deleted,
         }
 
     except PyMongoError as e:
@@ -2472,11 +2485,24 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
     try:
         concept_doc = ConceptsRepository.find_one({"concept_id": concept_id})
         if not concept_doc:
+            # Simulation must be read-only; only attempt cleanup when actually executing.
+            if execute:
+                try:
+                    rel_del = TextRelationsRepository.delete_many(
+                        {"subject_concept_id": concept_id}
+                    )
+                    cleaned = int(getattr(rel_del, "deleted_count", 0) or 0)
+                except Exception:
+                    cleaned = 0
+            else:
+                cleaned = 0
+
             # Return dict only (avoid tuple) to satisfy declared return type
             return {
                 "success": False,
                 "error": f"Concept '{concept_id}' not found",
                 "simulate": not execute,
+                "text_relations_deleted": cleaned,
             }
 
         warnings: list[str] = []
@@ -2635,6 +2661,16 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
             )
 
         del_result = ConceptsRepository.delete_one({"concept_id": concept_id})
+
+        # Remove associated text relations (names/descriptions/etc.) so deleted concepts
+        # cannot re-surface via stale text-value edges.
+        try:
+            rel_delete = TextRelationsRepository.delete_many(
+                {"subject_concept_id": concept_id}
+            )
+            text_relations_deleted = int(getattr(rel_delete, "deleted_count", 0) or 0)
+        except Exception:
+            text_relations_deleted = 0
         return {
             "success": getattr(del_result, "deleted_count", 0) == 1,
             "simulate": False,
@@ -2647,6 +2683,7 @@ def simulate_or_delete_concept(concept_id: str, execute: bool = False) -> dict:
             "instances": instances,
             "warnings": warnings,
             "transactional": False,
+            "text_relations_deleted": text_relations_deleted,
         }
     except Exception as e:  # pragma: no cover
         logger.error("simulate_or_delete_concept error: %s", e, exc_info=True)
@@ -3729,6 +3766,84 @@ def ensure_thing_exists_and_link_orphans() -> Dict[str, Any]:
         "orphans_linked": orphans_linked,
         "orphan_ids": orphan_ids,
     }
+
+
+def ensure_conversation_modality_concepts() -> Dict[str, Any]:
+    """Ensure core meeting/conversation modality concepts exist.
+
+    Creates (if missing):
+    - Type: Conversation Modality (#V#conversation_modality)
+    - Instances: Zoom, Microsoft Teams, Google Meet
+
+    Returns summary dict with created/exists counts.
+    """
+    from ..services.concept_service import create_concept
+    from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+
+    summary: Dict[str, Any] = {
+        "type_created": False,
+        "instances_created": [],
+        "instances_skipped": [],
+        "errors": [],
+    }
+
+    try:
+        if not ConceptsRepository.find_one({"concept_id": THING_PRIMARY_ID}):
+            ensure_thing_exists_and_link_orphans()
+    except Exception:
+        pass
+
+    modality_type_id = "#V#conversation_modality"
+    try:
+        if not ConceptsRepository.find_one({"concept_id": modality_type_id}):
+            created = create_vontology_concept(
+                parent_id=THING_PRIMARY_ID,
+                new_concept_name="Conversation Modality",
+                create_as_instance=False,
+                description=(
+                    "A conversation modality is the medium/platform through which a conversation or meeting occurs, "
+                    "such as Zoom, Microsoft Teams, or Google Meet."
+                ),
+                notes=(
+                    "Used to tag conversations/meetings with the platform they occurred on. "
+                    "This is a non-exclusive (many-to-many) categorisation; sessions may have multiple modalities."
+                ),
+            )
+            summary["type_created"] = bool(created.get("success"))
+    except Exception as exc:
+        summary["errors"].append(f"type_create_failed: {exc}")
+
+    instances = [
+        ("Zoom", "Video meeting platform."),
+        ("Microsoft Teams", "Video meeting and collaboration platform."),
+        ("Google Meet", "Video meeting platform (Google)."),
+    ]
+
+    for display_name, description in instances:
+        try:
+            concept_id = canonicalise_vontology_concept_id(display_name)
+            if not concept_id:
+                summary["errors"].append(f"invalid_name: {display_name}")
+                continue
+
+            if ConceptsRepository.find_one({"concept_id": concept_id}):
+                summary["instances_skipped"].append(concept_id)
+                continue
+
+            create_concept(
+                name=display_name,
+                concept_id=concept_id,
+                parent_concept_ids=[modality_type_id],
+                create_as_instance=True,
+                description=description,
+                notes="Created by Von to support conversation metadata.",
+                system_tags=["conversation", "modality", "meeting"],
+            )
+            summary["instances_created"].append(concept_id)
+        except Exception as exc:
+            summary["errors"].append(f"instance_create_failed:{display_name}:{exc}")
+
+    return summary
 
 
 # Note: add_upward_closure_nodes defined later (duplicate removed - keeping complete implementation at line 2949)

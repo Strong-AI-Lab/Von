@@ -380,22 +380,7 @@ export async function setModelInfoFooterText() {
   }
 
   // Build footer content: segments first (auth highlight depends on DOM order)
-  // Preserve chat history element if it exists (must remove before clearing innerHTML)
-  const historyElement = footer.querySelector('#chat-history-length');
-  if (historyElement) {
-    historyElement.remove(); // Remove from DOM before clearing
-  }
-
   footer.innerHTML = '';
-
-  // Re-append history element first (left-most position)
-  if (historyElement) {
-    footer.appendChild(historyElement);
-    const sep = document.createElement('span');
-    sep.className = 'footer-separator';
-    sep.textContent = ' | ';
-    footer.appendChild(sep);
-  }
 
   segments.forEach((seg, idx) => {
     if (typeof seg === 'string') {

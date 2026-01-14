@@ -950,55 +950,102 @@ def delete_concept(concept_id: str) -> bool:
     if concepts_coll is None:  # MODIFIED
         raise ConceptServiceError("Database collection 'concepts' not available.")
 
-    obj_id = None
-    try:
-        obj_id = ObjectId(concept_id)
-    except Exception:
-        logger.debug(
-            f"delete_concept: '{concept_id}' is not a valid ObjectId; will try string _id."
-        )
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        raise InvalidConceptDataError("concept_id must be a non-empty string")
 
+    # Resolve identifier to a concrete concept document and canonical concept_id.
+    # Callers may provide either:
+    # - a MongoDB _id (ObjectId hex string or string-stored _id)
+    # - an ontological concept_id (e.g. '#V#person')
     try:
-        delete_filter: Dict[str, Any]
-        if obj_id is not None:
-            delete_filter = {"$or": [{"_id": obj_id}, {"_id": concept_id}]}
+        doc = None
+
+        if concept_id.startswith("#V#"):
+            doc = ConceptsRepository.find_one(
+                {"concept_id": concept_id}, {"concept_id": 1, "_id": 1}
+            )
         else:
-            delete_filter = {"_id": concept_id}
-        # Fetch prior doc to obtain ontological concept_id variant for cascade purposes
-        prior_doc = concepts_coll.find_one(delete_filter, {"concept_id": 1, "_id": 1})
-        result: DeleteResult = concepts_coll.delete_one(delete_filter)
+            obj_id = None
+            try:
+                obj_id = ObjectId(concept_id)
+            except Exception:
+                obj_id = None
 
-        if result.deleted_count == 0:
+            if obj_id is not None:
+                doc = ConceptsRepository.find_one(
+                    {"_id": obj_id}, {"concept_id": 1, "_id": 1}
+                )
+            if doc is None:
+                doc = ConceptsRepository.find_one(
+                    {"_id": concept_id}, {"concept_id": 1, "_id": 1}
+                )
+            if doc is None:
+                # Fallback: treat as a concept_id-like identifier even if it doesn't start with '#V#'.
+                doc = ConceptsRepository.find_one(
+                    {"concept_id": concept_id}, {"concept_id": 1, "_id": 1}
+                )
+
+        if not doc:
             raise ConceptNotFoundError(
                 f"concept with ID '{concept_id}' not found for deletion."
             )
 
-        ok = result.acknowledged and result.deleted_count > 0
-        if ok:
+        canonical_concept_id = doc.get("concept_id")
+        if not isinstance(canonical_concept_id, str) or not canonical_concept_id:
+            # Extremely defensive: if the document lacks a concept_id, fall back to deleting by _id.
+            delete_filter: Dict[str, Any] = {"_id": doc.get("_id")}
+            result: DeleteResult = concepts_coll.delete_one(delete_filter)
+            if result.deleted_count == 0:
+                raise ConceptNotFoundError(
+                    f"concept with ID '{concept_id}' not found for deletion."
+                )
             try:
                 invalidate_phrase_cache()
             except Exception:
                 pass
-            cascade_ids = {concept_id}
-            if prior_doc:
-                doc_cid = prior_doc.get("concept_id")
-                if isinstance(doc_cid, str) and doc_cid:
-                    cascade_ids.add(doc_cid)
-            total_rel = 0
-            total_tv = 0
-            for sid in cascade_ids:
-                try:
-                    rel_removed, tv_removed = _cascade_delete_text_relations(sid)
-                    total_rel += rel_removed
-                    total_tv += tv_removed
-                except Exception as e:  # pragma: no cover - defensive
-                    logger.warning(
-                        f"[cascade_delete] Failed for subject variant {sid}: {e}"
-                    )
-            logger.info(
-                f"[cascade_delete] concept={concept_id} subject_variants={len(cascade_ids)} removed_relations={total_rel} gc_text_values={total_tv}"
+            return bool(result.acknowledged and result.deleted_count > 0)
+
+        # Best-effort: remove text relations (and GC orphaned text_values) before deleting.
+        # This keeps behaviour consistent even if the lower-level delete helper changes.
+        cascade_ids = {canonical_concept_id}
+        if concept_id != canonical_concept_id:
+            cascade_ids.add(concept_id)
+
+        total_rel = 0
+        total_tv = 0
+        for sid in cascade_ids:
+            try:
+                rel_removed, tv_removed = _cascade_delete_text_relations(sid)
+                total_rel += rel_removed
+                total_tv += tv_removed
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    f"[cascade_delete] Failed for subject variant {sid}: {e}"
+                )
+
+        # Canonical delete path: use vontology delete helper so rewiring/protection is consistent.
+        from ..vontology.utils_vontology import simulate_or_delete_concept
+
+        delete_report = simulate_or_delete_concept(canonical_concept_id, execute=True)
+
+        if not delete_report.get("success"):
+            if delete_report.get("protected"):
+                raise ConceptServiceError(
+                    f"Concept '{canonical_concept_id}' is protected and cannot be deleted."
+                )
+            raise ConceptServiceError(
+                f"Delete failed for concept '{canonical_concept_id}': {delete_report.get('error') or delete_report.get('message') or delete_report}"
             )
-        return ok
+
+        try:
+            invalidate_phrase_cache()
+        except Exception:
+            pass
+
+        logger.info(
+            f"[cascade_delete] concept={canonical_concept_id} subject_variants={len(cascade_ids)} removed_relations={total_rel} gc_text_values={total_tv}"
+        )
+        return True
     except ConceptNotFoundError:  # Re-raise specific error
         raise
     except Exception as e:

@@ -803,10 +803,14 @@ function createTabContent(tabId, conceptId, kind) {
 function insertTabButton(tabButton) {
     const tabContainer = document.getElementById('tabContainer');
     const importExportTab = document.querySelector('.tab-button[data-tab="importExportTab"]');
+    const settingsTab = document.querySelector('.tab-button[data-tab="settingsTab"]');
 
     if (tabContainer && importExportTab) {
         // Insert before import/export tab
         tabContainer.insertBefore(tabButton, importExportTab);
+    } else if (tabContainer && settingsTab) {
+        // Non-expert mode: keep dynamic concept tabs immediately after Conversations (before Settings).
+        tabContainer.insertBefore(tabButton, settingsTab);
     } else if (tabContainer) {
         // Fallback: append to end
         tabContainer.appendChild(tabButton);
@@ -821,9 +825,14 @@ function insertTabButton(tabButton) {
  */
 function insertTabContent(tabContent) {
     const tabContentArea = document.querySelector('.tab-content-area');
+    const settingsTabContent = document.getElementById('settingsTab');
 
     if (tabContentArea) {
-        tabContentArea.appendChild(tabContent);
+        if (settingsTabContent && settingsTabContent.parentNode === tabContentArea) {
+            tabContentArea.insertBefore(tabContent, settingsTabContent);
+        } else {
+            tabContentArea.appendChild(tabContent);
+        }
     } else {
         console.error('[dynamicTabs] Tab content area not found');
     }
