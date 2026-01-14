@@ -1408,6 +1408,166 @@ def rename_chat_session(
         raise ChatHistoryServiceError(f"Could not rename chat session: {e}") from e
 
 
+def _normalise_concept_id_list(values: Any) -> List[str]:
+    """Normalise a user-provided value into a de-duplicated list of concept IDs."""
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        return []
+
+    seen: set[str] = set()
+    result: List[str] = []
+    for raw in values:
+        if not isinstance(raw, str):
+            continue
+        item = raw.strip()
+        if not item:
+            continue
+        if not item.startswith("#V#"):
+            continue
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def get_chat_session_links(
+    *,
+    user_id: str,
+    session_id: str,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Dict[str, List[str]]:
+    """Fetch persisted concept links for a chat session.
+
+    Returns a dict of lists keyed by: programmes, projects, activities, modalities.
+    Missing/invalid stored values are normalised away.
+    """
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+
+    try:
+        doc = chat_history_coll.find_one(query, {"session_links": 1}) or {}
+    except PyMongoError as e:
+        logger.error(f"Error fetching chat session links: {e}", exc_info=True)
+        raise ChatHistoryServiceError(f"Could not fetch session links: {e}") from e
+
+    raw_links = doc.get("session_links")
+    links = raw_links if isinstance(raw_links, dict) else {}
+    return {
+        "programmes": _normalise_concept_id_list(
+            links.get("programmes")
+            or links.get("programme_ids")
+            or links.get("programme_concept_ids")
+        ),
+        "projects": _normalise_concept_id_list(
+            links.get("projects")
+            or links.get("project_ids")
+            or links.get("project_concept_ids")
+        ),
+        "activities": _normalise_concept_id_list(
+            links.get("activities")
+            or links.get("activity_ids")
+            or links.get("activity_concept_ids")
+        ),
+        "modalities": _normalise_concept_id_list(
+            links.get("modalities")
+            or links.get("modality_ids")
+            or links.get("modality_concept_ids")
+        ),
+    }
+
+
+def set_chat_session_links(
+    *,
+    user_id: str,
+    session_id: str,
+    session_links: Dict[str, Any],
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> Dict[str, Any]:
+    """Persist concept links for a chat session.
+
+    Important: does NOT update session `updated_at` so recency ordering is stable.
+    """
+    if not isinstance(user_id, str) or not user_id:
+        raise ChatHistoryServiceError("user_id is required.")
+    if not isinstance(session_id, str) or not session_id:
+        raise ChatHistoryServiceError("session_id is required.")
+
+    if not isinstance(session_links, dict):
+        session_links = {}
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+
+    normalised = {
+        "programmes": _normalise_concept_id_list(
+            session_links.get("programmes")
+            or session_links.get("programme_ids")
+            or session_links.get("programme_concept_ids")
+        ),
+        "projects": _normalise_concept_id_list(
+            session_links.get("projects")
+            or session_links.get("project_ids")
+            or session_links.get("project_concept_ids")
+        ),
+        "activities": _normalise_concept_id_list(
+            session_links.get("activities")
+            or session_links.get("activity_ids")
+            or session_links.get("activity_concept_ids")
+        ),
+        "modalities": _normalise_concept_id_list(
+            session_links.get("modalities")
+            or session_links.get("modality_ids")
+            or session_links.get("modality_concept_ids")
+        ),
+    }
+
+    try:
+        result = chat_history_coll.update_one(
+            query,
+            {
+                "$set": {
+                    "session_links": normalised,
+                    "session_links_updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+        return {
+            "updated": bool(getattr(result, "modified_count", 0) > 0),
+            "matched": bool(getattr(result, "matched_count", 0) > 0),
+            "session_links": normalised,
+        }
+    except PyMongoError as e:
+        logger.error(f"Error setting chat session links: {e}", exc_info=True)
+        raise ChatHistoryServiceError(f"Could not set session links: {e}") from e
+
+
 def backfill_chat_history_for_user(
     *,
     user_concept_id: str,
@@ -1885,7 +2045,9 @@ def reindex_chat_history_session_chunk(
     history_len = len(history)
     indexable_total, signature = _compute_rag_history_signature(history)
 
-    if safe_chunk_start == 0 and _should_skip_rag_reindex(doc, signature, indexable_total):
+    if safe_chunk_start == 0 and _should_skip_rag_reindex(
+        doc, signature, indexable_total
+    ):
         return {
             "status": "ok",
             "user_concept_id": user_concept_id,
@@ -2035,7 +2197,10 @@ def reindex_chat_history_session_chunk(
                 previous_failed = int(doc.get("rag_indexed_failed") or 0)
             except (TypeError, ValueError):
                 previous_failed = 0
-        if previous_failed == 0 and (previous_success + messages_indexed_success) >= indexable_total:
+        if (
+            previous_failed == 0
+            and (previous_success + messages_indexed_success) >= indexable_total
+        ):
             _update_rag_history_signature(
                 chat_history_coll,
                 doc.get("_id"),

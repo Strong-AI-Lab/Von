@@ -4395,6 +4395,147 @@ def rename_chat_session():
         return jsonify({"error": str(e)}), 500
 
 
+@von_bp.route("/api/session/chat_session_links", methods=["GET", "POST"])
+def chat_session_links():
+    """Get or set concept links for a chat session.
+
+    Stored on the chat_history session document as `session_links`.
+    Links are many-to-many lists of concept_ids:
+      - programmes
+      - projects
+      - activities
+      - modalities
+    """
+    try:
+        user_concept_id = session.get("user_concept_id")
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        requested_session_id = (
+            request.args.get("session_id")
+            if request.method == "GET"
+            else (request.get_json(silent=True) or {}).get("session_id")
+        )
+        session_id = None
+        if isinstance(requested_session_id, str) and requested_session_id.strip():
+            session_id = requested_session_id.strip()
+        else:
+            session_id = session.get("session_id")
+
+        if not isinstance(session_id, str) or not session_id.strip():
+            return jsonify({"error": "session_id required"}), 400
+        session_id = session_id.strip()
+
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+
+        # Best-effort: ensure modality concepts exist so the UI can attach them.
+        try:
+            from ...vontology.utils_vontology import (
+                ensure_conversation_modality_concepts,
+            )
+
+            ensure_conversation_modality_concepts()
+        except Exception:
+            pass
+
+        if request.method == "GET":
+            links = chat_history_service.get_chat_session_links(
+                user_id=user_concept_id,
+                session_id=session_id,
+                namespace=namespace,
+            )
+            return (
+                jsonify(
+                    {
+                        "status": "ok",
+                        "session_id": session_id,
+                        "session_links": links,
+                    }
+                ),
+                200,
+            )
+
+        data = request.get_json(silent=True) or {}
+        raw_links = data.get("session_links")
+        if not isinstance(raw_links, dict):
+            # Allow top-level key alternatives for callers.
+            raw_links = {
+                "programmes": data.get("programmes") or data.get("programme_ids"),
+                "projects": data.get("projects") or data.get("project_ids"),
+                "activities": data.get("activities") or data.get("activity_ids"),
+                "modalities": data.get("modalities") or data.get("modality_ids"),
+            }
+
+        # Filter out unknown concept IDs (best-effort) so we don't persist stale references.
+        try:
+            from ...db.repositories.concepts_repository import ConceptsRepository
+
+            def _flatten(values):
+                if values is None:
+                    return []
+                if isinstance(values, str):
+                    return [values]
+                if isinstance(values, list):
+                    return values
+                return []
+
+            all_ids = []
+            for key in ("programmes", "projects", "activities", "modalities"):
+                all_ids.extend(_flatten(raw_links.get(key)))
+
+            all_ids = [
+                v.strip()
+                for v in all_ids
+                if isinstance(v, str) and v.strip().startswith("#V#")
+            ]
+            if all_ids:
+                found = set(
+                    doc.get("concept_id")
+                    for doc in ConceptsRepository.find(
+                        {"concept_id": {"$in": list(set(all_ids))}},
+                        {"concept_id": 1},
+                    )
+                    if isinstance(doc, dict) and isinstance(doc.get("concept_id"), str)
+                )
+            else:
+                found = set()
+
+            missing = sorted({cid for cid in set(all_ids) if cid not in found})
+            if found:
+                for key in ("programmes", "projects", "activities", "modalities"):
+                    raw_links[key] = [
+                        v.strip()
+                        for v in _flatten(raw_links.get(key))
+                        if isinstance(v, str)
+                        and v.strip().startswith("#V#")
+                        and v.strip() in found
+                    ]
+        except Exception:
+            missing = []
+
+        result = chat_history_service.set_chat_session_links(
+            user_id=user_concept_id,
+            session_id=session_id,
+            session_links=raw_links,
+            namespace=namespace,
+        )
+
+        if not result.get("matched"):
+            return jsonify({"error": "Session not found"}), 404
+
+        body = {
+            "status": "updated" if result.get("updated") else "ok",
+            "session_id": session_id,
+            "session_links": result.get("session_links") or {},
+        }
+        if missing:
+            body["missing_concepts"] = missing
+        return jsonify(body), 200
+    except Exception as e:
+        print(f"Error updating chat session links: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/api/organisations/my_organisations", methods=["GET"])
 def get_my_organisations():
     """

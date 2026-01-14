@@ -6,7 +6,7 @@ from pymongo.errors import DuplicateKeyError
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import TextRelationsRepository
-from ..services.concept_service import get_concept_by_id
+from ..services.concept_service import get_concept_by_id, delete_concept
 
 logger = logging.getLogger(__name__)
 
@@ -441,8 +441,8 @@ def merge_concepts(
                 # If another process created the relation on target between fetch and update.
                 TextRelationsRepository.delete_one({"_id": rel_id})
 
-        # 5. Delete Source
-        ConceptsRepository.delete_one({"concept_id": source_id})
+        # 5. Delete Source (use canonical delete helper for consistent cleanup semantics)
+        delete_concept(source_id)
 
         report["success"] = True
         report["executed"] = True

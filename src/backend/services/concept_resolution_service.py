@@ -249,6 +249,41 @@ def resolve_concept_by_name(
             "audit": audit,
         }
 
+    # Filter out stale text relations pointing at non-existent concepts.
+    # This can happen if a concept is deleted but its text_relations (e.g. hasName) remain.
+    # Also keep virtual/code concepts, which intentionally have no DB row.
+    existing: set[str] = set()
+    try:
+        cursor = ConceptsRepository.find(
+            {"concept_id": {"$in": list(candidate_ids)}},
+            {"concept_id": 1},
+        )
+        for doc in cursor:
+            cid = doc.get("concept_id")
+            if isinstance(cid, str) and cid:
+                existing.add(cid)
+    except Exception as exc:  # pragma: no cover
+        audit.append(
+            {
+                "stage": "filter",
+                "method": "existing_concepts_error",
+                "error": str(exc),
+            }
+        )
+
+    existing.update({cid for cid in candidate_ids if is_code_concept_id(cid)})
+
+    if len(existing) != len(candidate_ids):
+        audit.append(
+            {
+                "stage": "filter",
+                "method": "existing_concepts",
+                "before": len(candidate_ids),
+                "after": len(existing),
+            }
+        )
+        candidate_ids = existing
+
     # Optional instance_of filter (recursive, includes descendants).
     if instance_of:
         try:

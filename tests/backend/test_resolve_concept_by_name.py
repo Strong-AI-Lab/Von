@@ -164,3 +164,36 @@ def test_resolve_concept_by_name_can_resolve_code_style_identifier():
     assert result["success"] is True
     assert result["status"] == "resolved"
     assert result["resolved_concept_id"] == concept_id
+
+
+def test_resolve_concept_by_name_does_not_resolve_deleted_concepts_from_stale_text_relations():
+    if TextValuesRepository.db() is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    concept_id = "#V#stale_deleted_concept"
+    concepts.insert_one({"concept_id": concept_id, "relationships": {}})
+
+    # Add a hasName relation that matches a code-style identifier exactly.
+    # This reproduces the historical failure mode where name resolution could
+    # return a deleted concept due to stale text_relations.
+    with bypass_access_control():
+        upsert_text_for_concept(
+            subject_concept_id=concept_id,
+            predicate="hasName",
+            text=concept_id,
+            lang="en-NZ",
+            context={"name_type": "CODE"},
+        )
+
+    # Simulate partial deletion: concept doc gone, text_relations remain.
+    ConceptsRepository.delete_one({"concept_id": concept_id})
+
+    result = resolve_concept_by_name(name=concept_id, match_code_strings=False)
+
+    assert result["success"] is True
+    assert result["status"] == "not_found"
+    assert result["resolved_concept_id"] is None

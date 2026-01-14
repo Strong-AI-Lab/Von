@@ -1,9 +1,9 @@
 // Chat Tab Module
 import { annotateTurn, getUserContext } from './apiService.js';
-import { isAnnotationEnabled } from './featureFlags.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { elements, renderSpanSuggestions } from './domUtils.js';
+import { isAnnotationEnabled } from './featureFlags.js';
 import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
 import {
     getSpeechSynthesisVoices,
@@ -2829,6 +2829,28 @@ function getChatSessionTabsContainer() {
     return document.getElementById('chatSessionTabs');
 }
 
+function getChatSessionCountEl() {
+    return document.getElementById('chatSessionCount');
+}
+
+function setChatSessionCount(count) {
+    const el = getChatSessionCountEl();
+    if (!el) {
+        return;
+    }
+
+    if (Number.isFinite(count)) {
+        const value = Math.max(0, Number(count));
+        el.textContent = String(value);
+        el.title = `Conversations (${value})`;
+        el.setAttribute('aria-label', `Conversation count: ${value}`);
+    } else {
+        el.textContent = '—';
+        el.title = 'Conversations';
+        el.setAttribute('aria-label', 'Conversation count');
+    }
+}
+
 function getChatTabButton() {
     return document.querySelector('.tab-button[data-tab="chatTab"]');
 }
@@ -3128,6 +3150,8 @@ function renderChatSessionTabsPlaceholder(mode = 'loading') {
     container.hidden = false;
     container.innerHTML = '';
 
+    setChatSessionCount(null);
+
     const fragment = document.createDocumentFragment();
 
     const allowNewChat = mode !== 'unauthenticated';
@@ -3336,6 +3360,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     if (!Array.isArray(sessions) || sessions.length === 0) {
         renderChatSessionTabsPlaceholder('empty');
         lastRenderedSessionCount = 0;
+        setChatSessionCount(0);
         sessionTabsCache = [];
         return;
     }
@@ -3343,6 +3368,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     container.hidden = false;
     container.innerHTML = '';
     lastRenderedSessionCount = sessions.length;
+    setChatSessionCount(sessions.length);
 
     const fragment = document.createDocumentFragment();
     const hasMultiple = sessions.length > 1;
@@ -3400,15 +3426,31 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             tab.title = `${displayName} • ${timestampLabel}`;
         }
 
+        const header = document.createElement('span');
+        header.className = 'chat-session-tab-header';
+
         const label = document.createElement('span');
         label.className = 'chat-session-tab-label';
         label.textContent = displayName;
+        header.appendChild(label);
+
+        const messageCount = Number.isFinite(session?.message_count) ? Number(session.message_count) : null;
+        const turnCount = messageCount === null ? null : Math.max(0, Math.ceil(messageCount / 2));
+        if (turnCount !== null && turnCount > 0) {
+            const suffix = turnCount === 1 ? 'turn' : 'turns';
+            tab.title = `${tab.title} • ${turnCount} ${suffix}`;
+
+            const count = document.createElement('span');
+            count.className = 'chat-session-tab-count';
+            count.textContent = String(turnCount);
+            header.appendChild(count);
+        }
 
         const meta = document.createElement('span');
         meta.className = 'chat-session-tab-meta';
         meta.textContent = timestampLabel;
 
-        tab.appendChild(label);
+        tab.appendChild(header);
         tab.appendChild(meta);
         tab.addEventListener('click', () => {
             if (sid === activeChatSessionId) {

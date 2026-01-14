@@ -495,7 +495,8 @@ def tree_build_progress(job_id: str):
     return jsonify(response), 200
 
 
-## Legacy route /delete_node removed (Phase 5 deprecation). Use unified DELETE /api/vontology/node instead.
+## Canonical ontology delete endpoint: use DELETE /api/vontology/node.
+## The legacy /api/vontology/delete_node route remains for backwards compatibility and is deprecated.
 @vontology_bp.route("/node", methods=["DELETE"])
 def unified_delete_node():
     """Unified ontology deletion endpoint.
@@ -1976,10 +1977,7 @@ def delete_node():
         )
 
     try:
-        repo = ConceptsRepository
-
-        # Check if node exists
-        existing_node = repo.find_one({"concept_id": concept_id})
+        existing_node = ConceptsRepository.find_one({"concept_id": concept_id})
         if not existing_node:
             return (
                 jsonify(
@@ -1991,32 +1989,38 @@ def delete_node():
                 404,
             )
 
-        # Delete the node
-        result = repo.delete_one({"concept_id": concept_id})
+        from ...vontology.utils_vontology import simulate_or_delete_concept
 
-        if result.deleted_count > 0:
+        report = simulate_or_delete_concept(concept_id, execute=True)
+        if report.get("success") is True:
             current_app.logger.info(f"Successfully deleted node: {concept_id}")
             return (
                 jsonify(
                     {
                         "success": True,
+                        "deprecated": True,
+                        "use_endpoint": "/api/vontology/node",
                         "message": f"Node '{existing_node.get('name', concept_id)}' deleted successfully.",
                         "deleted_concept_id": concept_id,
                         "deleted_name": existing_node.get("name"),
+                        "report": report,
                     }
                 ),
                 200,
             )
-        else:
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "message": f"Failed to delete node '{concept_id}'.",
-                    }
-                ),
-                500,
-            )
+
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "deprecated": True,
+                    "use_endpoint": "/api/vontology/node",
+                    "message": f"Failed to delete node '{concept_id}'.",
+                    "report": report,
+                }
+            ),
+            500,
+        )
 
     except Exception as e:
         current_app.logger.error(
