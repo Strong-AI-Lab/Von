@@ -1732,11 +1732,13 @@ def export_nodes_route():
 def search_concepts():
     """Lightweight search over Vontology concepts by names[].name (NL and ABBR types), legacy name, or concept_id.
 
-    Query params:
-      - q: search text (required)
-      - limit: max results (default 10)
-      - include_individuals: when true, include pure instances (default false, but frontend may set to true)
-      - fallback_substring: when true, if few prefix results then widen with substring (default true)
+        Query params:
+            - q: search text (required)
+            - limit: max results (default 10)
+            - include_individuals: when true, include pure instances (default false, but frontend may set to true)
+            - filter_kind: optional comma-separated kinds to include (type, predicate, individual)
+            - include_predicate_metadata: when true, include is_text_predicate for predicate results (default false)
+            - fallback_substring: when true, if few prefix results then widen with substring (default true)
 
     The search includes:
     - names[].name entries of type "NL" (natural language) and "ABBR" (abbreviations/acronyms)
@@ -1751,6 +1753,10 @@ def search_concepts():
         "yes",
         "y",
     )
+    include_predicate_metadata = (
+        request.args.get("include_predicate_metadata") or ""
+    ).lower() in ("1", "true", "yes", "y")
+    filter_kind_param = (request.args.get("filter_kind") or "").strip()
     # Allow disabling fallback via query param; default on
     fallback_substring = (request.args.get("fallback_substring") or "true").lower() in (
         "1",
@@ -1763,11 +1769,19 @@ def search_concepts():
         return jsonify({"results": []})
 
     try:
-        # Determine filter_kind based on include_individuals parameter
-        if include_individuals:
-            filter_kind = None  # Include all kinds
-        else:
-            filter_kind = ["type", "predicate"]  # Exclude pure individuals
+        # Determine filter_kind based on include_individuals parameter or explicit filter_kind.
+        filter_kind = None
+        if filter_kind_param:
+            raw_parts = [part.strip().lower() for part in filter_kind_param.split(",")]
+            allowed = {"type", "predicate", "individual"}
+            kinds = [part for part in raw_parts if part in allowed]
+            if kinds:
+                filter_kind = kinds
+        if filter_kind is None:
+            if include_individuals:
+                filter_kind = None  # Include all kinds
+            else:
+                filter_kind = ["type", "predicate"]  # Exclude pure individuals
 
         # Call the unified concept_search_service
         search_result = search_concepts_service(
@@ -1781,15 +1795,48 @@ def search_concepts():
         # Transform results to match expected frontend format
         # Frontend expects: [{"id": concept_id, "name": display_name, "kind": kind}, ...]
         # Service returns: [{"concept_id": ..., "name": ..., "kind": ..., "relevance_score": ...}, ...]
-        results = [
-            {
+        predicate_text_map = {}
+        if include_predicate_metadata:
+            try:
+                predicate_ids = [
+                    result["concept_id"]
+                    for result in search_result["results"]
+                    if result.get("kind") == "predicate"
+                ]
+                if predicate_ids:
+                    docs = ConceptsRepository.find(
+                        {"concept_id": {"$in": predicate_ids}},
+                        projection={
+                            "concept_id": 1,
+                            "relationships.is_an_instance_of": 1,
+                        },
+                    )
+                    for doc in docs:
+                        cid = doc.get("concept_id")
+                        if not isinstance(cid, str):
+                            continue
+                        instance_of = doc.get("relationships", {}).get(
+                            "is_an_instance_of", []
+                        )
+                        if isinstance(instance_of, str):
+                            instance_of = [instance_of]
+                        predicate_text_map[cid] = (
+                            "#V#binary_text_predicate" in instance_of
+                        )
+            except Exception:
+                predicate_text_map = {}
+
+        results = []
+        for result in search_result["results"]:
+            entry = {
                 "id": result["concept_id"],
                 "name": result["name"],
                 "kind": result["kind"],
                 "relevance_score": result.get("relevance_score"),
             }
-            for result in search_result["results"]
-        ]
+            if include_predicate_metadata and entry["kind"] == "predicate":
+                entry["is_text_predicate"] = predicate_text_map.get(entry["id"], False)
+            results.append(entry)
 
         return jsonify({"results": results})
     except Exception as e:

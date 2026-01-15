@@ -4474,6 +4474,7 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
             { val: 'related_to', label: 'related to' },
         ];
         const options = (kind === 'individual' || kind === 'unknown') ? kindsForIndividual : kindsForType;
+        const OTHER_PREDICATE_VALUE = '__other_predicate__';
         if (kindSelect) {
             if (!kindSelect.getAttribute('aria-label')) {
                 kindSelect.setAttribute('aria-label', 'Relationship kind');
@@ -4626,18 +4627,46 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                     }
                 }
             }
+
+            const otherSep = document.createElement('option');
+            otherSep.disabled = true; otherSep.textContent = '--- other predicates ---';
+            kindSelect.appendChild(otherSep);
+            const otherOpt = document.createElement('option');
+            otherOpt.value = OTHER_PREDICATE_VALUE;
+            otherOpt.textContent = 'Other… (search predicates)';
+            kindSelect.appendChild(otherOpt);
         }
 
         // Wire Add button
         const addBtn = document.getElementById(`relationshipAddButton_${suffix}`) || document.getElementById('relationshipAddButton');
         let targetInput = document.getElementById(`relationshipTargetInput_${suffix}`) || document.getElementById('relationshipTargetInput');
+        let predicateInput = document.getElementById(`relationshipPredicateInput_${suffix}`) || document.getElementById('relationshipPredicateInput');
         const statusEl = document.getElementById(`relationshipsStatus_${suffix}`) || document.getElementById('relationshipsStatus');
         if (addBtn && targetInput && kindSelect) {
+            if (!predicateInput) {
+                predicateInput = document.createElement('input');
+                predicateInput.id = `relationshipPredicateInput_${suffix}`;
+                predicateInput.type = 'text';
+                predicateInput.placeholder = '#V#predicate_id';
+                predicateInput.title = 'Enter or search for a predicate ID';
+                predicateInput.className = 'flex-1 minw-220 relationship-predicate-input';
+                predicateInput.style.display = 'none';
+                targetInput.parentNode.insertBefore(predicateInput, targetInput);
+            }
+
+            const predicateSelection = { id: null, is_text_predicate: false };
+            const isOtherPredicateSelected = () => kindSelect.value === OTHER_PREDICATE_VALUE;
 
             // Function to determine if current selection is a text predicate
             const isCurrentSelectionTextPredicate = () => {
                 const selectedOption = kindSelect.options[kindSelect.selectedIndex];
-                return selectedOption && selectedOption.dataset.isTextPredicate === 'true';
+                if (selectedOption && selectedOption.dataset.isTextPredicate === 'true') {
+                    return true;
+                }
+                if (isOtherPredicateSelected()) {
+                    return !!predicateSelection.is_text_predicate;
+                }
+                return false;
             };
 
             // Create inline editor for text predicates (similar to names editing)
@@ -4910,6 +4939,14 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 const inputContainer = targetInput.parentNode;
                 const isTextPredicate = isCurrentSelectionTextPredicate();
 
+                if (isOtherPredicateSelected()) {
+                    predicateInput.style.display = 'block';
+                    predicateInput.placeholder = '#V#predicate_id';
+                    predicateInput.title = 'Enter or search for a predicate ID';
+                } else {
+                    predicateInput.style.display = 'none';
+                }
+
                 if (isTextPredicate) {
                     // Replace simple input with inline text predicate controls
                     if (!inputContainer.querySelector('.text-predicate-form')) {
@@ -4938,10 +4975,15 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
             const newBtn = addBtn.cloneNode(true); addBtn.parentNode.replaceChild(newBtn, addBtn);
             newBtn.addEventListener('click', async () => {
                 const k = kindSelect.value;
+                const predicateValue = isOtherPredicateSelected() ? (predicateInput.value || '').trim() : k;
                 let tgt, lang, textType;
 
                 statusEl.textContent = '';
                 if (!k) { statusEl.textContent = 'Select a relationship kind'; return; }
+                if (isOtherPredicateSelected() && !predicateValue) {
+                    statusEl.textContent = 'Select or enter a predicate id';
+                    return;
+                }
 
                 if (isCurrentSelectionTextPredicate()) {
                     // Extract data from rich text form
@@ -4968,7 +5010,7 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                         const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts`, {
                             method: 'POST', headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                predicate: k,
+                                predicate: predicateValue,
                                 text: tgt,
                                 lang: lang,
                                 provenance: {
@@ -4992,13 +5034,18 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                         // Use traditional relationships API for concept predicates
                         const resp = await fetch('/vontology/api/vontology/relationships/add', {
                             method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ source_id: conceptId, kind: k, target_id: tgt })
+                            body: JSON.stringify({ source_id: conceptId, kind: predicateValue, target_id: tgt })
                         });
                         const data = await resp.json().catch(() => ({}));
                         if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
 
                         // Clear the simple input
                         targetInput.value = '';
+                        if (isOtherPredicateSelected()) {
+                            predicateInput.value = '';
+                            predicateSelection.id = null;
+                            predicateSelection.is_text_predicate = false;
+                        }
                     }
 
                     statusEl.textContent = 'Added';
@@ -5019,6 +5066,10 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
             if (targetInput.parentNode) targetInput.parentNode.replaceChild(clonedInput, targetInput);
             targetInput = clonedInput;
 
+            const clonedPredicateInput = predicateInput.cloneNode(true);
+            if (predicateInput.parentNode) predicateInput.parentNode.replaceChild(clonedPredicateInput, predicateInput);
+            predicateInput = clonedPredicateInput;
+
             // Create/ensure a results container next to the input
             const existingResults = document.getElementById(`relationshipSearchResults_${suffix}`) || document.getElementById('relationshipSearchResults');
             if (existingResults && existingResults.parentNode) existingResults.parentNode.removeChild(existingResults);
@@ -5034,8 +5085,23 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
             }
             targetInput.parentElement.appendChild(results);
 
+            const existingPredicateResults = document.getElementById(`relationshipPredicateSearchResults_${suffix}`);
+            if (existingPredicateResults && existingPredicateResults.parentNode) {
+                existingPredicateResults.parentNode.removeChild(existingPredicateResults);
+            }
+            const predicateResults = document.createElement('div');
+            predicateResults.id = `relationshipPredicateSearchResults_${suffix}`;
+            predicateResults.className = 'vontology-search-results';
+            predicateResults.style.position = 'absolute';
+            predicateResults.style.zIndex = '1000';
+            if (!predicateInput.parentElement.style.position) {
+                predicateInput.parentElement.style.position = 'relative';
+            }
+            predicateInput.parentElement.appendChild(predicateResults);
+
             // Local state
             const state = { items: [], activeIndex: -1, ac: null };
+            const predicateState = { items: [], activeIndex: -1, ac: null };
 
             const debounce = (fn, wait) => {
                 let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
@@ -5045,9 +5111,23 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 state.items = []; state.activeIndex = -1; results.classList.remove('open'); results.innerHTML = '';
             };
 
+            const clearPredicateResults = () => {
+                predicateState.items = [];
+                predicateState.activeIndex = -1;
+                predicateResults.classList.remove('open');
+                predicateResults.innerHTML = '';
+            };
+
             const setActive = (idx) => {
                 state.activeIndex = idx;
                 results.querySelectorAll('.vontology-search-item').forEach((el, i) => {
+                    if (i === idx) el.classList.add('active'); else el.classList.remove('active');
+                });
+            };
+
+            const setPredicateActive = (idx) => {
+                predicateState.activeIndex = idx;
+                predicateResults.querySelectorAll('.vontology-search-item').forEach((el, i) => {
                     if (i === idx) el.classList.add('active'); else el.classList.remove('active');
                 });
             };
@@ -5079,6 +5159,37 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 if (items.length) results.classList.add('open');
             };
 
+            const renderPredicate = (items) => {
+                predicateResults.innerHTML = '';
+                if (!items.length) { predicateResults.classList.remove('open'); return; }
+                const list = document.createElement('div');
+                list.setAttribute('role', 'listbox');
+                items.forEach((it, idx) => {
+                    const row = document.createElement('div');
+                    row.className = 'vontology-search-item';
+                    row.setAttribute('role', 'option');
+                    row.dataset.index = String(idx);
+                    const name = document.createElement('span');
+                    name.className = 'vontology-search-item-name';
+                    name.textContent = it.name || it.id;
+                    name.title = `${it.name || it.id} — ${it.id}`;
+                    row.appendChild(name);
+                    row.addEventListener('mouseenter', () => setPredicateActive(idx));
+                    row.addEventListener('mouseleave', () => setPredicateActive(-1));
+                    row.addEventListener('click', () => {
+                        predicateInput.value = it.id;
+                        predicateSelection.id = it.id;
+                        predicateSelection.is_text_predicate = !!it.is_text_predicate;
+                        clearPredicateResults();
+                        predicateInput.focus();
+                        updateInputForPredicateType();
+                    });
+                    list.appendChild(row);
+                });
+                predicateResults.appendChild(list);
+                if (items.length) predicateResults.classList.add('open');
+            };
+
             const performSearch = async (q) => {
                 try { state.ac?.abort?.(); } catch (_) { }
                 const ac = new AbortController(); state.ac = ac;
@@ -5089,6 +5200,7 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 // We also always allow individuals for 'related_to' and dynamic predicate kinds (#V#...).
                 const includeIndividuals = (() => {
                     if (k === 'related_to') return true; // symmetric free-form relation
+                    if (k === OTHER_PREDICATE_VALUE) return true; // other predicate selection
                     if (k.startsWith('#V#')) return true; // dynamic predicate (salient / elicitation)
                     if (kind === 'individual') {
                         // On an individual tab, allow individual targets for most predicates except those that must point to types.
@@ -5127,10 +5239,50 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 }
             };
 
+            const performPredicateSearch = async (q) => {
+                try { predicateState.ac?.abort?.(); } catch (_) { }
+                const ac = new AbortController(); predicateState.ac = ac;
+                const url = `/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=12&fallback_substring=true&filter_kind=predicate&include_predicate_metadata=true`;
+                try {
+                    const resp = await fetch(url, { signal: ac.signal });
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    const data = await resp.json();
+                    let items = Array.isArray(data?.results) ? data.results : [];
+                    items = items.filter((item) => item && item.kind === 'predicate');
+                    const qc = q ? q.toLowerCase() : '';
+                    if (qc && items.length) {
+                        items = items.slice();
+                        items.sort((a, b) => {
+                            const aName = (a.name || a.id || '').toLowerCase();
+                            const bName = (b.name || b.id || '').toLowerCase();
+                            const aExact = (aName === qc) ? 0 : 1;
+                            const bExact = (bName === qc) ? 0 : 1;
+                            if (aExact !== bExact) return aExact - bExact;
+                            if (aName.length !== bName.length) return aName.length - bName.length;
+                            const aPrefix = aName.startsWith(qc) ? 0 : 1;
+                            const bPrefix = bName.startsWith(qc) ? 0 : 1;
+                            if (aPrefix !== bPrefix) return aPrefix - bPrefix;
+                            return 0;
+                        });
+                    }
+                    predicateState.items = items;
+                    renderPredicate(predicateState.items);
+                } catch (e) {
+                    if (e?.name === 'AbortError') return; clearPredicateResults();
+                }
+            };
+
             const debounced = debounce(async () => {
                 // Only perform search if current selection is not a text predicate
                 if (isCurrentSelectionTextPredicate()) return;
                 const q = targetInput.value.trim(); if (!q) { clearResults(); return; } await performSearch(q);
+            }, 200);
+
+            const debouncedPredicate = debounce(async () => {
+                if (!isOtherPredicateSelected()) { clearPredicateResults(); return; }
+                const q = predicateInput.value.trim();
+                if (!q) { clearPredicateResults(); return; }
+                await performPredicateSearch(q);
             }, 200);
 
             targetInput.addEventListener('input', (e) => {
@@ -5141,10 +5293,20 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                     debounced(e);
                 }
             });
+            predicateInput.addEventListener('input', (e) => {
+                predicateSelection.id = null;
+                predicateSelection.is_text_predicate = false;
+                debouncedPredicate(e);
+            });
             targetInput.addEventListener('focus', () => {
                 // Only show results if not a text predicate and we have results
                 if (!isCurrentSelectionTextPredicate() && state.items.length) {
                     results.classList.add('open');
+                }
+            });
+            predicateInput.addEventListener('focus', () => {
+                if (isOtherPredicateSelected() && predicateState.items.length) {
+                    predicateResults.classList.add('open');
                 }
             });
             targetInput.addEventListener('keydown', (e) => {
@@ -5166,13 +5328,57 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 }
                 else if (e.key === 'Escape') { e.preventDefault(); clearResults(); targetInput.blur(); }
             });
+            predicateInput.addEventListener('keydown', (e) => {
+                if (!isOtherPredicateSelected() || !predicateState.items.length) return;
+                if (e.key === 'ArrowDown') { e.preventDefault(); setPredicateActive(Math.min(predicateState.activeIndex + 1, predicateState.items.length - 1)); }
+                else if (e.key === 'ArrowUp') { e.preventDefault(); setPredicateActive(Math.max(predicateState.activeIndex - 1, 0)); }
+                else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const q = (predicateInput.value || '').trim().toLowerCase();
+                    if (q && predicateState.items && predicateState.items.length) {
+                        const exact = predicateState.items.find(it => ((it.name || it.id || '').toLowerCase() === q));
+                        if (exact) {
+                            predicateInput.value = exact.id;
+                            predicateSelection.id = exact.id;
+                            predicateSelection.is_text_predicate = !!exact.is_text_predicate;
+                            clearPredicateResults();
+                            updateInputForPredicateType();
+                            return;
+                        }
+                    }
+                    if (predicateState.items && predicateState.items.length) {
+                        const top = predicateState.items[0];
+                        predicateInput.value = top.id;
+                        predicateSelection.id = top.id;
+                        predicateSelection.is_text_predicate = !!top.is_text_predicate;
+                        clearPredicateResults();
+                        updateInputForPredicateType();
+                        return;
+                    }
+                }
+                else if (e.key === 'Escape') { e.preventDefault(); clearPredicateResults(); predicateInput.blur(); }
+            });
 
             // Close on outside click
-            const onDocClick = (ev) => { if (!results.contains(ev.target) && ev.target !== targetInput) clearResults(); };
+            const onDocClick = (ev) => {
+                if (!results.contains(ev.target) && ev.target !== targetInput) clearResults();
+                if (!predicateResults.contains(ev.target) && ev.target !== predicateInput) clearPredicateResults();
+            };
             document.addEventListener('click', onDocClick);
 
             // Clear results when kind changes (filter set changes)
-            kindSelect.addEventListener('change', () => clearResults());
+            kindSelect.addEventListener('change', () => {
+                clearResults();
+                clearPredicateResults();
+                if (!isOtherPredicateSelected()) {
+                    predicateSelection.id = null;
+                    predicateSelection.is_text_predicate = false;
+                    if (predicateInput) {
+                        predicateInput.value = '';
+                    }
+                }
+                updateInputForPredicateType();
+            });
         }
 
         // Initial render
