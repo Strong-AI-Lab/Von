@@ -1143,10 +1143,8 @@ def _build_presenter_screen_summary_from_tool_messages(
             "#V#hasDescription",
         }:
             description_write_seen = True
-        if (
-            isinstance(payload_dict.get("description"), str)
-            and payload_dict.get("description").strip()
-        ):
+        description_value = payload_dict.get("description")
+        if isinstance(description_value, str) and description_value.strip():
             description_write_seen = True
 
         if tool_name_lower in {"add_relationship", "remove_relationship"}:
@@ -1257,10 +1255,8 @@ def _build_tool_messages_prompt_blob(
         }:
             description_write_seen = True
             return
-        if (
-            isinstance(payload.get("description"), str)
-            and payload.get("description").strip()
-        ):
+        description_value = payload.get("description")
+        if isinstance(description_value, str) and description_value.strip():
             description_write_seen = True
 
     def _summarise_relationship_write(tool_name: str, payload: dict) -> str | None:
@@ -3114,6 +3110,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 or _screen_too_similar_to_spoken(screen_text, spoken_text)
             )
 
+            def _strip_presenter_tags(text: str) -> str | None:
+                if not isinstance(text, str) or not text:
+                    return None
+                import re
+
+                cleaned = re.sub(r"</?spoken>", "", text, flags=re.IGNORECASE)
+                cleaned = re.sub(r"</?screen>", "", cleaned, flags=re.IGNORECASE)
+                cleaned = cleaned.strip()
+                return cleaned or None
+
             if needs_screen_backfill:
                 screen_backfill_second_pass_attempted = True
                 if not screen_tag_present or not screen_text:
@@ -3187,11 +3193,18 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
 
                 screen_candidate = None
+                screen_backfill_source = None
+                response_candidate = _strip_presenter_tags(response_text)
+                if response_candidate and not _screen_looks_like_tool_dump(
+                    response_candidate
+                ):
+                    screen_candidate = response_candidate
+                    screen_backfill_source = "response_text"
                 allow_llm_screen_synthesis = os.getenv(
                     "VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "1"
                 ).lower() in {"1", "true"}
 
-                if allow_llm_screen_synthesis:
+                if screen_candidate is None and allow_llm_screen_synthesis:
                     try:
                         synthesis_system = (
                             "You are Von. Create the on-screen response for the chat UI. "
@@ -3237,6 +3250,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             raw = str(synthesis_response).strip()
                             if raw:
                                 screen_candidate = raw
+                        if screen_candidate:
+                            screen_backfill_source = "llm_synthesis"
                     except Exception:
                         screen_candidate = None
 
@@ -3267,6 +3282,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             tool_messages
                         )
                     )
+                    if screen_candidate:
+                        screen_backfill_source = "tool_summary"
 
                 if screen_candidate:
                     base_channels = (
@@ -3275,8 +3292,21 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         else {}
                     )
                     base_channels["screen"] = str(screen_candidate).strip()
-                    base_channels["format"] = "screen_backfill_from_tools_v1"
+                    if screen_backfill_source == "response_text":
+                        base_channels["format"] = "screen_backfill_from_response_v1"
+                    else:
+                        base_channels["format"] = "screen_backfill_from_tools_v1"
                     presenter_channels = base_channels
+
+                    auxiliary_llm_calls.append(
+                        {
+                            "type": "workflow_stage",
+                            "stage": "screen_backfill",
+                            "source": screen_backfill_source,
+                            "reason": screen_backfill_second_pass_reason,
+                            "format": base_channels.get("format"),
+                        }
+                    )
 
         def _extract_spoken_only(text: str) -> str | None:
             if not isinstance(text, str) or not text:

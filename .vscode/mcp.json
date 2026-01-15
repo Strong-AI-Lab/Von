@@ -1,54 +1,55 @@
 {
-  "servers": {
-    "vontology": {
-      "type": "stdio",
-      "command": "C:\\Users\\witbr\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\pdm.exe",
-      "args": [
-        "run",
-        "python",
-        "src/backend/mcp_server/mcp_stdio_server.py"
-      ],
-      "cwd": "C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von"
-    },
-    "vonrag": {
-      "type": "stdio",
-      "command": "C:\\Users\\witbr\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\pdm.exe",
-      "args": [
-        "run",
-        "python",
-        "src/backend/mcp_server/rag_mcp_stdio_server.py"
-      ],
-      "cwd": "C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von"
-    },
-    "arxiv": {
-      "type": "stdio",
-      "command": "C:\\Users\\witbr\\.local\\bin\\uv.exe",
-      "args": [
-        "tool",
-        "run",
-        "arxiv-mcp-server",
-        "--storage-path",
-        "C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von\\data\\arxiv_papers"
-      ],
-      "cwd": "C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von"
-    },
-    "mongodb": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "mongodb-mcp-server"
-      ],
-      "type": "stdio"
-    },
-    "github": {
-      "url": "https://api.githubcopilot.com/mcp/",
-      "type": "http"
-    },
-    "atlassian/atlassian-mcp-server": {
-      "type": "http",
-      "url": "https://mcp.atlassian.com/v1/sse",
-      "gallery": "https://api.mcp.github.com",
-      "version": "1.0.0"
-    }
-  }
+	"servers": {
+		"vontology": {
+			"type": "stdio",
+			"command": "C:\\Users\\witbr\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\pdm.exe",
+			"args": [
+				"run",
+				"python",
+				"src/backend/mcp_server/mcp_stdio_server.py"
+			],
+			"cwd": "C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von"
+		},
+		"vonrag": {
+			"type": "stdio",
+			"command": "C:\\Users\\witbr\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\pdm.exe",
+			"args": [
+				"run",
+				"python",
+				"src/backend/mcp_server/rag_mcp_stdio_server.py"
+			],
+			"cwd": "C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von"
+		},
+		"arxiv": {
+			"type": "stdio",
+			"command": "C:\\Users\\witbr\\.local\\bin\\uv.exe",
+			"args": [
+				"tool",
+				"run",
+				"arxiv-mcp-server",
+				"--storage-path",
+				"C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von\\data\\arxiv_papers"
+			],
+			"cwd": "C:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von"
+		},
+		"mongodb": {
+			"command": "npx",
+			"args": [
+				"-y",
+				"mongodb-mcp-server"
+			],
+			"type": "stdio"
+		},
+		"github": {
+			"url": "https://api.githubcopilot.com/mcp/",
+			"type": "http"
+		},
+		"atlassian/atlassian-mcp-server": {
+			"type": "http",
+			"url": "https://mcp.atlassian.com/v1/sse",
+			"gallery": "https://api.mcp.github.com",
+			"version": "1.0.0"
+		}
+	},
+	"inputs": []
 }

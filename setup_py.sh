@@ -322,6 +322,18 @@ main() {
         echo -e "${YELLOW}Skipping MongoDB installation checks (-skip-mongodb flag set).${NC}"
     fi
 
+    echo -e "${CYAN}Checking for Tesseract OCR...${NC}"
+    if command_exists tesseract; then
+        TESS_VERSION=$(tesseract --version | head -n1)
+        echo -e "${GREEN}Tesseract OCR found: $TESS_VERSION${NC}"
+    else
+        echo -e "${YELLOW}Tesseract OCR not found. Please install manually:${NC}"
+        echo -e "  macOS: ${CYAN}brew install tesseract${NC}"
+        echo -e "  Ubuntu/Debian: ${CYAN}sudo apt install tesseract-ocr${NC}"
+        echo -e "  Or see: https://github.com/tesseract-ocr/tesseract"
+        echo -e "${YELLOW}Continuing with Python setup...${NC}"
+    fi
+
     # Ensure .env file exists
     ensure_env_file
 

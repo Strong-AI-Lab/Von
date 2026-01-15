@@ -578,6 +578,63 @@ function Ensure-MongoDB {
     throw "MongoDB installation failed. Run setup with -SkipMongoDB to bypass this check."
 }
 
+# Function to check and install Tesseract OCR (Windows)
+function Ensure-Tesseract {
+    Write-Host "Checking for Tesseract OCR installation..." -ForegroundColor Cyan
+
+    $tesseractCmd = Get-Command tesseract.exe -ErrorAction SilentlyContinue
+    if ($tesseractCmd) {
+        Write-Host "Tesseract OCR is already installed at $($tesseractCmd.Source)" -ForegroundColor Green
+        return
+    }
+
+    $defaultDirs = @(
+        "C:\Program Files\Tesseract-OCR",
+        "C:\Program Files (x86)\Tesseract-OCR"
+    )
+    foreach ($dir in $defaultDirs) {
+        $exe = Join-Path $dir "tesseract.exe"
+        if (Test-Path $exe) {
+            Write-Host "Tesseract OCR found at $exe (not in PATH). Adding to PATH for this session." -ForegroundColor Yellow
+            $env:Path = $env:Path + ";" + $dir
+            return
+        }
+    }
+
+    Write-Host "Tesseract OCR not found. Attempting to install via winget..." -ForegroundColor Yellow
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($winget) {
+        try {
+            & $winget.Source install --id UB-Mannheim.TesseractOCR -e --silent --accept-package-agreements --accept-source-agreements
+        }
+        catch {
+            Write-Host "Winget installation failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "winget not found. Skipping automatic installation." -ForegroundColor Yellow
+    }
+
+    $tesseractCmd = Get-Command tesseract.exe -ErrorAction SilentlyContinue
+    if ($tesseractCmd) {
+        Write-Host "Tesseract OCR installed at $($tesseractCmd.Source)" -ForegroundColor Green
+        return
+    }
+
+    foreach ($dir in $defaultDirs) {
+        $exe = Join-Path $dir "tesseract.exe"
+        if (Test-Path $exe) {
+            Write-Host "Tesseract OCR found at $exe after install. Adding to PATH for this session." -ForegroundColor Yellow
+            $env:Path = $env:Path + ";" + $dir
+            return
+        }
+    }
+
+    Write-Host "Tesseract OCR still not detected. Please install manually:" -ForegroundColor Yellow
+    Write-Host "- Windows installer: https://github.com/UB-Mannheim/tesseract/wiki" -ForegroundColor Cyan
+    Write-Host "- Ensure tesseract.exe is on PATH for OCR to work." -ForegroundColor Yellow
+}
+
 ## Validate parameters and provide an explanatory message
 if (-not $ConfigureVSCode -and -not $Reset -and -not $PythonVersion) {
     # Check if any action parameter is provided
@@ -622,6 +679,15 @@ if (-not $SkipMongoDB) {
 }
 else {
     Write-Host "Skipping MongoDB installation checks (-SkipMongoDB flag set)." -ForegroundColor Yellow
+}
+
+# Ensure Tesseract OCR is installed for PDF/image OCR support
+try {
+    Ensure-Tesseract
+}
+catch {
+    Write-Host "Tesseract setup encountered an error: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "Continuing with Python setup..." -ForegroundColor Yellow
 }
 
 # Ensure .env file exists (create from template if missing)

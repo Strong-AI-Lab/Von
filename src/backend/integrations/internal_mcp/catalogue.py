@@ -1682,6 +1682,7 @@ def _read_paper(**kwargs):
 
 # Blob/file-copy retrieval
 def _read_file_copy(**kwargs):
+    import os
     from ...security.access_control import (
         get_effective_user_concept_id,
         override_current_user,
@@ -1695,7 +1696,7 @@ def _read_file_copy(**kwargs):
 
     max_bytes = kwargs.get("max_bytes")
     if max_bytes is None:
-        max_bytes = 200_000
+        max_bytes = 5_000_000
     else:
         try:
             max_bytes = int(max_bytes)
@@ -1709,6 +1710,18 @@ def _read_file_copy(**kwargs):
         as_text = True
     encoding = kwargs.get("encoding") or "utf-8"
     allow_large = bool(kwargs.get("allow_large", False))
+
+    if allow_large:
+        try:
+            max_override = int(
+                os.environ.get("VON_READ_FILE_COPY_MAX_BYTES_OVERRIDE", "20000000")
+            )
+        except Exception:
+            max_override = 20_000_000
+        if max_override <= 0:
+            max_override = 20_000_000
+        if max_bytes is None or max_bytes > max_override:
+            max_bytes = max_override
 
     namespace = kwargs.get("namespace")
     user_part = None
@@ -1738,6 +1751,10 @@ def _read_file_copy(**kwargs):
             if error == "file_too_large":
                 payload["size_bytes"] = result.get("size_bytes")
                 payload["max_bytes"] = result.get("max_bytes")
+                payload["limit_override_env"] = "VON_READ_FILE_COPY_MAX_BYTES_OVERRIDE"
+                payload["limit_override_hint"] = (
+                    "Set VON_READ_FILE_COPY_MAX_BYTES_OVERRIDE to raise the maximum file size for read_file_copy."
+                )
             return payload
 
         info = result.get("info")
@@ -1758,12 +1775,102 @@ def _read_file_copy(**kwargs):
         }
 
         if as_text:
+            is_pdf = False
             try:
-                text = bytes(data_bytes).decode(str(encoding), errors="replace")
-            except LookupError:
-                return {"success": False, "error": "invalid_encoding"}
-            payload["text"] = text
-            payload["encoding"] = str(encoding)
+                content_type = getattr(info, "content_type", None)
+                original_name = getattr(info, "original_filename", None)
+                if isinstance(content_type, str) and content_type.lower().startswith(
+                    "application/pdf"
+                ):
+                    is_pdf = True
+                elif isinstance(original_name, str) and original_name.lower().endswith(
+                    ".pdf"
+                ):
+                    is_pdf = True
+            except Exception:
+                is_pdf = False
+
+            if is_pdf:
+                try:
+                    import fitz  # type: ignore[import-not-found] # PyMuPDF
+
+                    doc = fitz.open(stream=bytes(data_bytes), filetype="pdf")
+                    extracted_pages: list[str] = []
+                    for page in doc:
+                        extracted_pages.append(page.get_text("text"))
+                    text = "\n".join(extracted_pages).strip()
+                    payload["text"] = text
+                    payload["encoding"] = "utf-8"
+                    payload["text_extraction"] = "pymupdf"
+                    if not text:
+                        try:
+                            import pytesseract  # type: ignore[import-not-found]
+                            from PIL import Image  # type: ignore[import-not-found]
+
+                            ocr_pages: list[str] = []
+                            for page in doc:
+                                pix = page.get_pixmap(dpi=200)
+                                img = Image.frombytes(
+                                    "RGB",
+                                    (pix.width, pix.height),
+                                    pix.samples,
+                                )
+                                ocr_pages.append(pytesseract.image_to_string(img))
+                            ocr_text = "\n".join(ocr_pages).strip()
+                            if ocr_text:
+                                payload["text"] = ocr_text
+                                payload["text_extraction"] = "pymupdf_ocr"
+                        except Exception as exc:
+                            payload["text_extraction_error"] = str(exc)
+                except Exception as exc:
+                    payload["text_extraction"] = "pymupdf_failed"
+                    payload["text_extraction_error"] = str(exc)
+                    try:
+                        text = bytes(data_bytes).decode(str(encoding), errors="replace")
+                    except LookupError:
+                        return {"success": False, "error": "invalid_encoding"}
+                    payload["text"] = text
+                    payload["encoding"] = str(encoding)
+            else:
+                try:
+                    content_type = getattr(info, "content_type", None)
+                    original_name = getattr(info, "original_filename", None)
+                    is_image = False
+                    if isinstance(
+                        content_type, str
+                    ) and content_type.lower().startswith("image/"):
+                        is_image = True
+                    elif isinstance(
+                        original_name, str
+                    ) and original_name.lower().endswith(
+                        (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif")
+                    ):
+                        is_image = True
+
+                    if is_image:
+                        try:
+                            import pytesseract  # type: ignore[import-not-found]
+                            from PIL import Image  # type: ignore[import-not-found]
+                            import io
+
+                            image = Image.open(io.BytesIO(bytes(data_bytes)))
+                            ocr_text = pytesseract.image_to_string(image).strip()
+                            payload["text"] = ocr_text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = "image_ocr"
+                        except Exception as exc:
+                            payload["text_extraction_error"] = str(exc)
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+                    else:
+                        text = bytes(data_bytes).decode(str(encoding), errors="replace")
+                        payload["text"] = text
+                        payload["encoding"] = str(encoding)
+                except LookupError:
+                    return {"success": False, "error": "invalid_encoding"}
         else:
             import base64
 
@@ -2840,8 +2947,9 @@ def _read_file_copy_input_schema() -> Schema:
         allow_unknown=True,
         description=(
             "read_file_copy input: concept_id (str for a #V#computer_file_copy instance), "
-            "max_bytes (int, optional default 200000), encoding (str, default utf-8), "
-            "as_text (bool, default true; if false returns base64), allow_large (bool, default false), "
+            "max_bytes (int, optional default 5000000), encoding (str, default utf-8), "
+            "as_text (bool, default true; if false returns base64), allow_large (bool, default false; "
+            "when true, max_bytes may be raised up to VON_READ_FILE_COPY_MAX_BYTES_OVERRIDE, default 20000000), "
             "namespace (optional user@org override)."
         ),
     )
@@ -2864,13 +2972,16 @@ def _read_file_copy_output_schema() -> Schema:
             "bytes_base64": (str, type(None)),
             "bytes_base64_encoding": (str, type(None)),
             "max_bytes": (int, type(None)),
+            "text_extraction": (str, type(None)),
+            "text_extraction_error": (str, type(None)),
         },
         allow_unknown=True,
         description=(
             "read_file_copy output: success (bool), concept_id (str), original_filename (str), "
             "content_type (str), size_bytes (int), byte_length (int), blob (dict), "
             "text (str, when as_text=true) or bytes_base64 (str, when as_text=false), "
-            "encoding (str, when as_text=true), or error (str) if failed."
+            "encoding (str, when as_text=true), text_extraction (str, optional), "
+            "or error (str) if failed."
         ),
     )
 

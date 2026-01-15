@@ -63,6 +63,7 @@ Do not "hack around" MCP failures with ad-hoc scripts or direct REST calls. Fix 
 - Tasks can have Subtasks (use `issueTypeName="Subtask"` + `parent="JVNAUTOSCI-XXX"`).
 - Tasks can set an Epic as `parent` via edit tooling (`{"parent": {"key": "JVNAUTOSCI-123"}}`).
 - If an issue is created without an assignee, fix it via the Jira edit tool rather than duplicating.
+- Jira site URL: https://naoinstitute.atlassian.net/
 
 ## PowerShell-First Shell Rules
 - Avoid Bash-only syntax: heredocs, `export`, `$(cmd)`, `source venv/bin/activate`.

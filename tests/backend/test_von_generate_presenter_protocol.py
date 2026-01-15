@@ -267,12 +267,7 @@ def test_presenter_mode_uses_tool_screen_when_screen_tag_missing(monkeypatch):
 
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
-    llm = _StubLLMSequence(
-        [
-            "<screen>Concepts found:\n- #V#example</screen>",
-            "<spoken>Short talk track.</spoken>",
-        ]
-    )
+    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
     app = _make_app(monkeypatch, llm)
 
     tool_payload = {
@@ -299,13 +294,13 @@ def test_presenter_mode_uses_tool_screen_when_screen_tag_missing(monkeypatch):
     assert resp.status_code == 200
     body = resp.get_json()
 
-    expected_screen = "Concepts found:\n- #V#example"
+    expected_screen = "Plain response without presenter tags."
 
     assert body["response"] == expected_screen
     assert body["response_channels"] == {
         "screen": expected_screen,
         "spoken": "Short talk track.",
-        "format": "screen_backfill_from_tools_v1",
+        "format": "screen_backfill_from_response_v1",
     }
 
     llm_debug = body["llm_debug"]
@@ -314,9 +309,8 @@ def test_presenter_mode_uses_tool_screen_when_screen_tag_missing(monkeypatch):
     assert llm_debug.get("spoken_backfill_second_pass_attempted") is True
     assert llm_debug.get("spoken_backfill_second_pass_reason") == "missing_spoken"
 
-    assert len(llm.calls) == 2
-    assert llm.calls[0]["prompt"] == "Generate <screen> display content"
-    assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["prompt"] == "Generate <spoken> talk track"
 
 
 def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfill(
@@ -347,7 +341,9 @@ def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfil
     }
     tool_message = {"role": "tool", "content": json.dumps(tool_payload)}
     orchestrator_result = OrchestratorResult(
-        response_text="Plain response without presenter tags.",
+        response_text=(
+            "Tool results:\n\n" "```json\n" '{"tool": "add_relationship"}\n' "```"
+        ),
         extra_messages=[tool_message],
         tool_invocations=(),
         aux_llm_calls=(),
