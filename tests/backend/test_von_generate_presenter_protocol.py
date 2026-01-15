@@ -267,7 +267,12 @@ def test_presenter_mode_uses_tool_screen_when_screen_tag_missing(monkeypatch):
 
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
-    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    llm = _StubLLMSequence(
+        [
+            "<screen>Concepts found:\n- #V#example</screen>",
+            "<spoken>Short talk track.</spoken>",
+        ]
+    )
     app = _make_app(monkeypatch, llm)
 
     tool_payload = {
@@ -294,29 +299,78 @@ def test_presenter_mode_uses_tool_screen_when_screen_tag_missing(monkeypatch):
     assert resp.status_code == 200
     body = resp.get_json()
 
-    expected_screen = (
-        "Tool results:\n\n"
-        "1. fetch_concept\n"
-        "Status: ok\n"
-        "Duration: 12 ms\n"
-        "Payload:\n"
-        "```json\n"
-        "{\n"
-        "  \"concept_id\": \"#V#example\"\n"
-        "}\n"
-        "```"
-    )
+    expected_screen = "Concepts found:\n- #V#example"
 
-    assert body["response"] == "Plain response without presenter tags."
+    assert body["response"] == expected_screen
     assert body["response_channels"] == {
         "screen": expected_screen,
         "spoken": "Short talk track.",
-        "format": "tool_results_fallback_v1",
+        "format": "screen_backfill_from_tools_v1",
     }
 
     llm_debug = body["llm_debug"]
+    assert llm_debug.get("screen_backfill_second_pass_attempted") is True
+    assert llm_debug.get("screen_backfill_second_pass_reason") == "missing_screen"
     assert llm_debug.get("spoken_backfill_second_pass_attempted") is True
     assert llm_debug.get("spoken_backfill_second_pass_reason") == "missing_spoken"
 
-    assert len(llm.calls) == 1
-    assert llm.calls[0]["prompt"] == "Generate <spoken> talk track"
+    assert len(llm.calls) == 2
+    assert llm.calls[0]["prompt"] == "Generate <screen> display content"
+    assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
+
+
+def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfill(
+    monkeypatch,
+):
+    import json
+
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    llm = _StubLLMSequence(
+        [
+            "<screen>Description updated: YES</screen>",
+            "<spoken>Short talk track.</spoken>",
+        ]
+    )
+    app = _make_app(monkeypatch, llm)
+
+    tool_payload = {
+        "tool": "add_relationship",
+        "status": "ok",
+        "duration_ms": 12,
+        "payload": {
+            "source_id": "#V#example",
+            "predicate": "#V#is_a",
+            "target": "#V#concept",
+            "added": True,
+        },
+    }
+    tool_message = {"role": "tool", "content": json.dumps(tool_payload)}
+    orchestrator_result = OrchestratorResult(
+        response_text="Plain response without presenter tags.",
+        extra_messages=[tool_message],
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(orchestrator_result)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Hello", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    screen_text = body["response_channels"]["screen"]
+    assert "Writes ledger (authoritative):" in screen_text
+    assert "Description updated: NO" in screen_text
+
+    llm_debug = body["llm_debug"]
+    assert llm_debug.get("screen_backfill_second_pass_attempted") is True
+    assert llm_debug.get("screen_backfill_second_pass_reason") == "missing_screen"
+
+    assert len(llm.calls) == 2
+    assert llm.calls[0]["prompt"] == "Generate <screen> display content"
+    assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"

@@ -273,6 +273,108 @@ const descendantMemo = new Map();
 // Track in-flight relationship/name fetches to deduplicate concurrent requests
 const inFlightFetches = new Map();
 
+function dispatchConceptUpdated(conceptIds, { reason, source } = {}) {
+    try {
+        const ids = Array.isArray(conceptIds) ? conceptIds : [conceptIds];
+        ids
+            .map((id) => (id === null || id === undefined) ? null : String(id))
+            .filter((id) => id && id !== 'undefined')
+            .filter((id, idx, arr) => arr.indexOf(id) === idx)
+            .forEach((id) => {
+                try {
+                    document.dispatchEvent(new CustomEvent('concept-updated', {
+                        detail: { conceptId: id, reason: reason || 'updated', source: source || 'ui' }
+                    }));
+                } catch (_) { /* ignore */ }
+            });
+    } catch (_) {
+        /* ignore */
+    }
+}
+
+let __externalConceptRefreshTimer = null;
+let __externalConceptRefreshInFlight = false;
+const __externalConceptRefreshLastSeen = new Map(); // conceptId -> updated_at-ish string
+const __externalConceptRefreshNodeSnapshotLastSeen = new Map(); // conceptId -> snapshot string from node_content
+
+function extractUpdatedAt(concept) {
+    const candidates = [
+        concept?.updated_at,
+        concept?.concept_data?.updated_at,
+        concept?.concept_data?.preserved_fields?.updated_at,
+        concept?.raw_doc?.updated_at,
+        concept?.node_content?.updated_at
+    ];
+    for (const val of candidates) {
+        if (typeof val === 'string' && val.trim()) return val.trim();
+        if (typeof val === 'number' && Number.isFinite(val)) return String(val);
+    }
+    return null;
+}
+
+async function pollActiveConceptTabForExternalChanges() {
+    try {
+        if (typeof document === 'undefined') return;
+        if (document.visibilityState && document.visibilityState !== 'visible') return;
+        if (__externalConceptRefreshInFlight) return;
+        const activeBtn = document.querySelector('.tab-button.active[data-concept-id]');
+        const conceptId = activeBtn?.dataset?.conceptId ? String(activeBtn.dataset.conceptId) : null;
+        if (!conceptId) return;
+
+        __externalConceptRefreshInFlight = true;
+        let changed = false;
+
+        // 1) Concept document timestamp (covers description/notes/name updates)
+        try {
+            const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}`);
+            if (resp.ok) {
+                const concept = await resp.json().catch(() => null);
+                const updatedAt = concept ? extractUpdatedAt(concept) : null;
+                if (updatedAt) {
+                    const prev = __externalConceptRefreshLastSeen.get(conceptId);
+                    __externalConceptRefreshLastSeen.set(conceptId, updatedAt);
+                    if (prev && prev !== updatedAt) changed = true;
+                }
+            }
+        } catch (_) {
+            // ignore
+        }
+
+        // 2) Ontology node snapshot (covers relationship/typing changes which may not bump concept.updated_at)
+        try {
+            const resp2 = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(conceptId)}`);
+            if (resp2.ok) {
+                const node = await resp2.json().catch(() => null);
+                if (node) {
+                    const parents = Array.isArray(node.is_a_type_of) ? node.is_a_type_of.filter(x => typeof x === 'string').slice().sort() : [];
+                    const instOf = Array.isArray(node.is_an_instance_of) ? node.is_an_instance_of.filter(x => typeof x === 'string').slice().sort() : [];
+                    const snapshot = JSON.stringify({ parents, instOf });
+                    const prevSnap = __externalConceptRefreshNodeSnapshotLastSeen.get(conceptId);
+                    __externalConceptRefreshNodeSnapshotLastSeen.set(conceptId, snapshot);
+                    if (prevSnap && prevSnap !== snapshot) changed = true;
+
+                    // Keep caches in sync for tab label/type inference.
+                    parentTypesCache.set(conceptId, parents);
+                    instanceOfCache.set(conceptId, instOf);
+                    if (Array.isArray(node.names)) {
+                        namesCache.set(conceptId, node.names);
+                    }
+                }
+            }
+        } catch (_) {
+            // ignore
+        }
+
+        if (changed) {
+            dispatchConceptUpdated([conceptId], { reason: 'external_change_poll', source: 'poller' });
+        }
+    } catch (_) {
+        // ignore polling errors
+    } finally {
+        __externalConceptRefreshInFlight = false;
+    }
+}
+
 /** TESTING ONLY helper to inject ontology meta (avoids network in unit tests) */
 export function __setTabOntologyMeta(conceptId, { kind, parentTypes, instanceOf }) {
     const info = dynamicConceptTabs.get(conceptId);
@@ -1351,6 +1453,7 @@ async function reloadConceptTab(conceptId) {
     try {
         // Calculate the suffix used for this tab's DOM elements
         const suffix = makeUniqueDomSuffix(conceptId);
+        const kind = (dynamicConceptTabs.get(conceptId) || {}).kind;
 
         // Show loading state on both tab button and refresh icon
         const tabButton = document.querySelector(`[data-tab-id="${conceptId}"] .tab-name`);
@@ -1398,8 +1501,14 @@ async function reloadConceptTab(conceptId) {
         // Reload attributes explicitly
         await loadConceptAttributes(conceptId, suffix);
 
+        // Refresh relationships (including dynamic predicate groups)
+        try {
+            await renderRelationships(conceptId, suffix, kind);
+        } catch (relErr) {
+            console.warn('[dynamicTabs] Failed to refresh relationships during reload', relErr);
+        }
+
         // Refresh lists for Type tabs (Instances and Subtypes)
-        const kind = (dynamicConceptTabs.get(conceptId) || {}).kind;
         if (kind !== 'individual') {
             try {
                 await fetchConceptListWithSuffix(conceptId, suffix);
@@ -1799,6 +1908,33 @@ export function initializeDynamicTabs() {
             console.error('[dynamicTabs] Failed handling open-concept-tab event:', e);
         }
     });
+
+    // If any UI action mutates a concept, allow other open tabs to reload.
+    // detail: { conceptId: string, reason?: string, source?: string }
+    try {
+        const pending = new Map();
+        document.addEventListener('concept-updated', (evt) => {
+            const detail = evt?.detail || {};
+            const conceptId = detail.conceptId ? String(detail.conceptId) : null;
+            if (!conceptId) return;
+            if (!dynamicConceptTabs.has(conceptId)) return;
+            const existing = pending.get(conceptId);
+            if (existing) clearTimeout(existing);
+            pending.set(conceptId, setTimeout(() => {
+                pending.delete(conceptId);
+                try { reloadConceptTab(conceptId); } catch (_) { /* ignore */ }
+            }, 250));
+
+            // External changes auto-refresh: lightweight polling of the *active* concept tab.
+            // This is intentionally conservative to avoid hammering the server.
+            try {
+                if (__externalConceptRefreshTimer) clearInterval(__externalConceptRefreshTimer);
+                __externalConceptRefreshTimer = setInterval(() => {
+                    void pollActiveConceptTabForExternalChanges();
+                }, 8000);
+            } catch (_) { /* ignore */ }
+        });
+    } catch (_) { /* ignore */ }
 
     // Listen for requests to open annotation tabs for descriptions or notes
     document.addEventListener('open-annotation-tab', (evt) => {
@@ -4636,6 +4772,7 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
 
                         // Refresh the relationships display
                         await renderRelationships(conceptId, suffix);
+                        try { document.dispatchEvent(new CustomEvent('concept-updated', { detail: { conceptId, reason: 'text_relation_updated', source: 'inline_text_editor' } })); } catch (_) { }
                     } catch (e) {
                         alert(`Error saving changes: ${e.message}`);
                         // Restore original content on error
@@ -4866,6 +5003,11 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
 
                     statusEl.textContent = 'Added';
                     await renderRelationships(conceptId, suffix, kind);
+                    if (!isCurrentSelectionTextPredicate()) {
+                        dispatchConceptUpdated([conceptId, tgt], { reason: 'relationship_added', source: 'relationships_ui' });
+                    } else {
+                        dispatchConceptUpdated([conceptId], { reason: 'text_relation_added', source: 'relationships_ui' });
+                    }
                 } catch (e) {
                     statusEl.textContent = `Error: ${e.message}`;
                 }
@@ -5127,6 +5269,21 @@ async function renderRelationships(conceptId, suffix, kind) {
         const wrapper = document.createElement('div');
         wrapper.className = 'relationships-wrapper';
 
+        const normaliseConceptRelItem = (raw) => {
+            if (!raw) return { id: '', name: '', kind: null, raw };
+            if (typeof raw === 'string') {
+                return { id: raw, name: raw, kind: null, raw };
+            }
+            if (typeof raw === 'object') {
+                const id = raw.id || raw.concept_id || raw.identifier || raw.target_id || '';
+                const name = raw.name || raw.display_name || raw.label || id;
+                const kind = raw.kind || null;
+                return { id, name, kind, raw };
+            }
+            const s = String(raw);
+            return { id: s, name: s, kind: null, raw };
+        };
+
         for (const s of sections) {
             const arr = Array.isArray(rel[s.key]) ? rel[s.key] : [];
             if (!arr.length) continue;
@@ -5165,11 +5322,12 @@ async function renderRelationships(conceptId, suffix, kind) {
             // Backend now provides kind alongside name, eliminating N metadata fetches
             // Use backend-provided metadata with fallback to cache for backward compatibility
             for (let i = 0; i < arr.length; i++) {
-                const item = arr[i];
+                const norm = normaliseConceptRelItem(arr[i]);
+                if (!norm.id) continue;
                 // Prefer backend-provided kind, fall back to fetching if not present (backward compatibility)
-                const metadata = item.kind
-                    ? { kind: item.kind, name: item.name || item.id }
-                    : await getConceptMetadata(item.id);
+                const metadata = norm.kind
+                    ? { kind: norm.kind, name: norm.name || norm.id }
+                    : await getConceptMetadata(norm.id);
 
                 const chip = document.createElement('span');
                 chip.className = 'relationship-chip';
@@ -5180,17 +5338,17 @@ async function renderRelationships(conceptId, suffix, kind) {
                 chip.style.border = '1px solid #ddd';
                 chip.style.borderRadius = '12px';
                 chip.style.background = '#f9fafb';
-                chip.title = item.id;
+                chip.title = norm.id;
 
                 // Clickable name with cartouche styling based on kind
                 const name = document.createElement('span');
                 name.className = `concept-cartouche ${metadata.kind}`;
-                name.textContent = item.name || item.id;
+                name.textContent = norm.name || norm.id;
                 name.style.cursor = 'pointer';
-                name.title = `Open ${item.name || item.id}`;
+                name.title = `Open ${norm.name || norm.id}`;
 
                 // Bold the most salient type for "is a type of" relationships
-                if (s.key === 'is_a_type_of' && item.is_most_salient) {
+                if (s.key === 'is_a_type_of' && (norm.raw && norm.raw.is_most_salient)) {
                     name.style.fontWeight = 'bold';
                     name.style.color = '#059669'; // Slightly different green color for emphasis
                     name.title += ' (Most Salient Type)';
@@ -5201,7 +5359,7 @@ async function renderRelationships(conceptId, suffix, kind) {
                     try {
                         // Use backend's kind from metadata
                         const evt = new CustomEvent('open-concept-tab', {
-                            detail: { conceptId: item.id, conceptName: item.name || item.id, kind: metadata.kind, activate: true }
+                            detail: { conceptId: norm.id, conceptName: norm.name || norm.id, kind: metadata.kind, activate: true }
                         });
                         document.dispatchEvent(evt);
                     } catch (e) {
@@ -5212,7 +5370,7 @@ async function renderRelationships(conceptId, suffix, kind) {
                 remove.type = 'button';
                 remove.className = 'chip-remove';
                 remove.textContent = '×';
-                remove.title = `Remove ${s.title} → ${item.name || item.id}`;
+                remove.title = `Remove ${s.title} → ${norm.name || norm.id}`;
                 // Inline fallbacks to neutralize global button styles
                 remove.style.border = 'none';
                 remove.style.background = 'transparent';
@@ -5224,11 +5382,12 @@ async function renderRelationships(conceptId, suffix, kind) {
                     try {
                         const resp = await fetch('/vontology/api/vontology/relationships/remove', {
                             method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ source_id: conceptId, kind: s.key, target_id: item.id })
+                            body: JSON.stringify({ source_id: conceptId, kind: s.key, target_id: norm.id })
                         });
                         const d = await resp.json().catch(() => ({}));
                         if (!resp.ok || d.error) throw new Error(d.error || `HTTP ${resp.status}`);
                         await renderRelationships(conceptId, suffix, kind);
+                        dispatchConceptUpdated([conceptId, norm.id], { reason: 'relationship_removed', source: 'relationships_ui' });
                     } catch (e) {
                         console.warn('[dynamicTabs] remove relationship failed', e);
                         alert(`Failed to remove relationship: ${e.message}`);
@@ -5324,12 +5483,14 @@ async function renderRelationships(conceptId, suffix, kind) {
             // For text predicates, no metadata needed
             for (let itemIdx = 0; itemIdx < arr.length; itemIdx++) {
                 const item = arr[itemIdx];
+                const norm = (!isTextPredicate) ? normaliseConceptRelItem(item) : null;
+                if (!isTextPredicate && (!norm || !norm.id)) continue;
                 // For concept predicates: prefer backend-provided kind, fall back to fetching if not present
                 // For text predicates: metadata is null
                 const metadata = !isTextPredicate
-                    ? (item.kind
-                        ? { kind: item.kind, name: item.name || item.id }
-                        : await getConceptMetadata(item.id))
+                    ? (norm.kind
+                        ? { kind: norm.kind, name: norm.name || norm.id }
+                        : await getConceptMetadata(norm.id))
                     : null;
 
                 const chip = document.createElement('span');
@@ -5376,20 +5537,20 @@ async function renderRelationships(conceptId, suffix, kind) {
                     chip.appendChild(badge);
                 } else {
                     // Handle concept predicate: item has id and name properties
-                    chip.title = item.id;
+                    chip.title = norm.id;
                     name.className = `concept-cartouche ${metadata.kind}`;
-                    name.textContent = item.name || item.id;
+                    name.textContent = norm.name || norm.id;
                     name.style.cursor = 'pointer';
                     name.addEventListener('click', () => {
                         // Use backend's kind from metadata
-                        const evt = new CustomEvent('open-concept-tab', { detail: { conceptId: item.id, conceptName: item.name || item.id, kind: metadata.kind, activate: true } });
+                        const evt = new CustomEvent('open-concept-tab', { detail: { conceptId: norm.id, conceptName: norm.name || norm.id, kind: metadata.kind, activate: true } });
                         document.dispatchEvent(evt);
                     });
                 }
 
                 const remove = document.createElement('button');
                 remove.type = 'button'; remove.className = 'chip-remove'; remove.textContent = '×';
-                remove.title = `Remove ${titleText} → ${isTextPredicate ? (item.text || item) : (item.name || item.id)}`;
+                remove.title = `Remove ${titleText} → ${isTextPredicate ? (item.text || item) : (norm.name || norm.id)}`;
                 remove.style.border = 'none'; remove.style.background = 'transparent'; remove.style.cursor = 'pointer'; remove.style.color = '#b91c1c';
                 remove.addEventListener('click', async () => {
                     try {
@@ -5406,12 +5567,17 @@ async function renderRelationships(conceptId, suffix, kind) {
                             // Use relationships API for concept predicates
                             const resp = await fetch('/vontology/api/vontology/relationships/remove', {
                                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ source_id: conceptId, kind: dk, target_id: item.id })
+                                body: JSON.stringify({ source_id: conceptId, kind: dk, target_id: norm.id })
                             });
                             const d = await resp.json().catch(() => ({}));
                             if (!resp.ok || d.error) throw new Error(d.error || `HTTP ${resp.status}`);
                         }
                         await renderRelationships(conceptId, suffix, kind);
+                        if (isTextPredicate) {
+                            dispatchConceptUpdated([conceptId], { reason: 'text_relation_removed', source: 'relationships_ui' });
+                        } else {
+                            dispatchConceptUpdated([conceptId, norm.id], { reason: 'relationship_removed', source: 'relationships_ui' });
+                        }
                     } catch (e) {
                         console.warn('[dynamicTabs] remove dynamic relationship failed', e);
                         alert(`Failed to remove relationship: ${e.message}`);

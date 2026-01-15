@@ -1069,6 +1069,309 @@ def _build_presenter_screen_from_tool_messages(
     return "Tool results:\n\n" + "\n\n".join(entries)
 
 
+def _extract_screen_only(text: str) -> str | None:
+    if not isinstance(text, str) or not text:
+        return None
+    m = re.search(
+        r"<screen>\s*(.*?)\s*</screen>", text, flags=re.DOTALL | re.IGNORECASE
+    )
+    if not m:
+        return None
+    value = m.group(1)
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _build_presenter_screen_summary_from_tool_messages(
+    tool_messages: list[dict],
+) -> str | None:
+    """Deterministic, user-facing summary of tool activity.
+
+    This deliberately avoids embedding raw JSON payloads so it can safely appear
+    in the main chat transcript.
+    """
+
+    if not tool_messages:
+        return None
+
+    import json
+
+    lines: list[str] = []
+    lines.append("Tools ran to answer this request:")
+
+    description_write_seen = False
+    relationship_write_seen = False
+    names_write_seen = False
+    concept_create_seen = False
+
+    index = 0
+    for msg in tool_messages:
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or not content.strip():
+            continue
+
+        parsed = None
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            parsed = None
+
+        if not isinstance(parsed, dict):
+            index += 1
+            lines.append(f"{index}. Tool result (unstructured)")
+            continue
+
+        tool_name = parsed.get("tool") or parsed.get("method") or "tool"
+        status = parsed.get("status")
+        error = parsed.get("error")
+        payload = parsed.get("payload")
+
+        tool_name_text = tool_name.strip() if isinstance(tool_name, str) else ""
+        tool_name_lower = tool_name_text.lower()
+        payload_dict = payload if isinstance(payload, dict) else {}
+
+        if "description" in tool_name_lower:
+            description_write_seen = True
+        predicate = payload_dict.get("predicate")
+        if isinstance(predicate, str) and predicate.strip() in {
+            "hasDescription",
+            "has_description",
+            "#V#hasDescription",
+        }:
+            description_write_seen = True
+        if (
+            isinstance(payload_dict.get("description"), str)
+            and payload_dict.get("description").strip()
+        ):
+            description_write_seen = True
+
+        if tool_name_lower in {"add_relationship", "remove_relationship"}:
+            relationship_write_seen = True
+        if tool_name_lower in {"add_names", "add_name"}:
+            names_write_seen = True
+        if tool_name_lower in {"create_concepts", "create_concept"}:
+            concept_create_seen = True
+
+        index += 1
+        entry = f"{index}. {tool_name}"
+        if status:
+            entry += f" — {status}"
+        lines.append(entry)
+        if error:
+            lines.append(f"   Error: {error}")
+
+        # Pull out a few common, safe identifiers to help the user.
+        if isinstance(payload, dict):
+            for key in ("concept_id", "identifier", "id", "url", "arxiv_id"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    lines.append(f"   {key}: {value.strip()}")
+
+    if index == 0:
+        return None
+
+    # Always include an explicit writes ledger to make negative facts visible.
+    lines.append("")
+    lines.append("Writes ledger (authoritative):")
+    if description_write_seen:
+        lines.append("- Description updated: YES (evidence present in tool results)")
+    else:
+        lines.append("- Description updated: NO (no description write tool ran)")
+
+    did_not_lines: list[str] = []
+    if not relationship_write_seen:
+        did_not_lines.append("- No relationship writes detected")
+    if not names_write_seen:
+        did_not_lines.append("- No name writes detected")
+    if not concept_create_seen:
+        did_not_lines.append("- No concept creation detected")
+
+    if did_not_lines:
+        lines.append("")
+        lines.append("Writes not detected:")
+        lines.extend(did_not_lines)
+
+    return "\n".join(lines).strip() or None
+
+
+def _build_tool_messages_prompt_blob(
+    tool_messages: list[dict], *, max_chars: int = 12000
+) -> str:
+    """Build a compact plain-text representation of tool results for LLM backfill."""
+
+    if not tool_messages:
+        return "(no tool messages)"
+
+    import json
+
+    def _normalise_tool_name(parsed: dict) -> str:
+        tool_name = (
+            parsed.get("tool") or parsed.get("method") or parsed.get("name") or ""
+        )
+        return tool_name.strip() if isinstance(tool_name, str) else ""
+
+    def _iter_parsed_tool_results(messages: list[dict]) -> list[dict]:
+        parsed_results: list[dict] = []
+        for msg in messages:
+            if msg.get("role") != "tool":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                parsed_results.append(parsed)
+        return parsed_results
+
+    parsed_results = _iter_parsed_tool_results(tool_messages)
+
+    executed_lines: list[str] = []
+    writes_lines: list[str] = []
+
+    # Track a small set of write categories we care about for UI truthfulness.
+    description_write_seen = False
+    relationship_write_seen = False
+    names_write_seen = False
+    concept_create_seen = False
+
+    def _mark_description_write(tool_name: str, payload: dict) -> None:
+        nonlocal description_write_seen
+        if description_write_seen:
+            return
+        tool_name_lower = (tool_name or "").lower()
+        if "description" in tool_name_lower:
+            description_write_seen = True
+            return
+        predicate = payload.get("predicate")
+        if isinstance(predicate, str) and predicate.strip() in {
+            "hasDescription",
+            "has_description",
+            "#V#hasDescription",
+        }:
+            description_write_seen = True
+            return
+        if (
+            isinstance(payload.get("description"), str)
+            and payload.get("description").strip()
+        ):
+            description_write_seen = True
+
+    def _summarise_relationship_write(tool_name: str, payload: dict) -> str | None:
+        nonlocal relationship_write_seen
+        name_lower = (tool_name or "").lower()
+        if name_lower not in {"add_relationship", "remove_relationship"}:
+            return None
+
+        source_id = payload.get("source_id")
+        predicate = payload.get("predicate")
+        target = payload.get("target")
+        added = payload.get("added")
+        removed = payload.get("removed")
+
+        if not (
+            isinstance(source_id, str)
+            and isinstance(predicate, str)
+            and isinstance(target, str)
+        ):
+            relationship_write_seen = True
+            return f"- Relationship update via {tool_name} (details unavailable)"
+
+        relationship_write_seen = True
+
+        verb = "changed"
+        if name_lower == "add_relationship":
+            verb = "added" if added is not False else "attempted"
+        elif name_lower == "remove_relationship":
+            verb = "removed" if removed is not False else "attempted"
+
+        return f"- Relationship {verb}: `{source_id}` — `{predicate}` → `{target}`"
+
+    def _summarise_name_or_concept_write(tool_name: str, payload: dict) -> str | None:
+        nonlocal names_write_seen, concept_create_seen
+        name_lower = (tool_name or "").lower()
+        if name_lower in {"add_names", "add_name"}:
+            names_write_seen = True
+            concept_id = payload.get("concept_id")
+            if isinstance(concept_id, str) and concept_id.strip():
+                return f"- Names added for `{concept_id}`"
+            return "- Names added"
+
+        if name_lower in {"create_concepts", "create_concept"}:
+            concept_create_seen = True
+            total = payload.get("total")
+            if isinstance(total, int):
+                return f"- Concepts created: {total}"
+            return "- Concept creation attempted"
+
+        return None
+
+    for parsed in parsed_results:
+        tool_name = _normalise_tool_name(parsed) or "tool"
+        status = parsed.get("status")
+        status_text = (
+            status.strip() if isinstance(status, str) and status.strip() else None
+        )
+        executed_lines.append(
+            f"- {tool_name}" + (f" ({status_text})" if status_text else "")
+        )
+
+        payload = parsed.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+
+        # Categorise writes.
+        rel_summary = _summarise_relationship_write(tool_name, payload)
+        if rel_summary:
+            writes_lines.append(rel_summary)
+
+        name_or_concept_summary = _summarise_name_or_concept_write(tool_name, payload)
+        if name_or_concept_summary:
+            writes_lines.append(name_or_concept_summary)
+
+        _mark_description_write(tool_name, payload)
+
+    # Always include an explicit description verdict because it is a common source of confusion.
+    if description_write_seen:
+        writes_lines.append(
+            "- Description updated: YES (evidence present in tool results)"
+        )
+    else:
+        writes_lines.append("- Description updated: NO (no description write tool ran)")
+
+    # Provide a small "did not happen" block to make negative facts explicit.
+    did_not_lines: list[str] = []
+    if not relationship_write_seen:
+        did_not_lines.append("- No relationship writes detected")
+    if not names_write_seen:
+        did_not_lines.append("- No name writes detected")
+    if not concept_create_seen:
+        did_not_lines.append("- No concept creation detected")
+
+    blob_lines: list[str] = []
+    blob_lines.append("TOOL EXECUTION (authoritative):")
+    blob_lines.extend(executed_lines or ["- (no parsed tool results)"])
+    blob_lines.append("")
+    blob_lines.append("TOOL WRITES LEDGER (authoritative):")
+    blob_lines.extend(writes_lines or ["- No writes detected"])
+    if did_not_lines:
+        blob_lines.append("")
+        blob_lines.append("WRITES NOT DETECTED:")
+        blob_lines.extend(did_not_lines)
+
+    blob = "\n".join(blob_lines).strip() or "(tool results unavailable)"
+
+    blob = str(blob)
+    if len(blob) > max_chars:
+        blob = blob[:max_chars].rstrip() + "\n... [truncated]"
+    return blob
+
+
 def _is_prompt_introspection_question(text: str) -> bool:
     lowered = (text or "").strip().lower()
     if not lowered:
@@ -1810,6 +2113,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         auxiliary_system_prompt = None
         narration_prompt_text = None
         narration_prompt_fragments = []
+        screen_prompt_text = None
+        screen_prompt_fragments = []
         user_prompt_debug = {
             "effective_user_concept_id": user_concept_id,
             "loaded": False,
@@ -1817,6 +2122,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "prompt_concept_ids": [],
             "behaviour_prompt_concept_ids": [],
             "narration_prompt_concept_ids": [],
+            "screen_prompt_concept_ids": [],
         }
         if user_concept_id:
             try:
@@ -1836,6 +2142,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     user_concept_id,
                     prompt_types=("#V#von_chat_narration_prompt",),
                 )
+                screen_prompt_fragments = get_user_specific_prompt_fragments(
+                    user_concept_id,
+                    prompt_types=("#V#von_chat_screen_content_prompt",),
+                )
 
                 user_prompt_debug["behaviour_prompt_concept_ids"] = [
                     frag.get("concept_id")
@@ -1846,6 +2156,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 user_prompt_debug["narration_prompt_concept_ids"] = [
                     frag.get("concept_id")
                     for frag in narration_prompt_fragments
+                    if isinstance(frag, dict)
+                    and isinstance(frag.get("concept_id"), str)
+                ]
+                user_prompt_debug["screen_prompt_concept_ids"] = [
+                    frag.get("concept_id")
+                    for frag in screen_prompt_fragments
                     if isinstance(frag, dict)
                     and isinstance(frag.get("concept_id"), str)
                 ]
@@ -1886,6 +2202,23 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 narration_prompt_text = (
                     narration_prompt_text.strip() if narration_prompt_text else None
+                )
+
+                screen_texts = []
+                for frag in screen_prompt_fragments:
+                    if not isinstance(frag, dict):
+                        continue
+                    content = frag.get("content")
+                    if not isinstance(content, str):
+                        continue
+                    if not content.strip():
+                        continue
+                    screen_texts.append(content)
+                screen_prompt_text = "\n\n".join(
+                    text.strip() for text in screen_texts if text and text.strip()
+                )
+                screen_prompt_text = (
+                    screen_prompt_text.strip() if screen_prompt_text else None
                 )
 
                 if auxiliary_system_prompt:
@@ -2097,8 +2430,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     + ("\n\n" + timing_hint if timing_hint else "")
                     + (
                         "\n\nVON CHAT NARRATION PROMPT (from Vontology):\n"
+                        "(Applies ONLY to the <spoken> block; do not apply it to <screen>.)\n"
                         + narration_prompt_text
                         if narration_prompt_text
+                        else ""
+                    )
+                    + (
+                        "\n\nVON CHAT SCREEN CONTENT PROMPT (from Vontology):\n"
+                        "(Applies ONLY to the <screen> block; it must not override tool-grounded facts.)\n"
+                        + screen_prompt_text
+                        if screen_prompt_text
                         else ""
                     )
                 ),
@@ -2724,23 +3065,217 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
 
         presenter_channels = _extract_presenter_channels(response_text)
+
+        screen_backfill_second_pass_attempted = False
+        screen_backfill_second_pass_reason = None
+
         if presenter_mode_requested and tool_messages:
             screen_tag_present = _presenter_tag_present(response_text, "screen")
             screen_text = None
+            spoken_text = None
             if isinstance(presenter_channels, dict):
                 screen_value = presenter_channels.get("screen")
                 if isinstance(screen_value, str) and screen_value.strip():
                     screen_text = screen_value.strip()
-            if not screen_tag_present or not screen_text:
-                tool_screen = _build_presenter_screen_from_tool_messages(tool_messages)
-                if tool_screen:
+                spoken_value = presenter_channels.get("spoken")
+                if isinstance(spoken_value, str) and spoken_value.strip():
+                    spoken_text = spoken_value.strip()
+
+            def _screen_looks_like_tool_dump(value: str) -> bool:
+                lowered = (value or "").strip().lower()
+                if not lowered:
+                    return True
+                if lowered.startswith("tool results:"):
+                    return True
+                if "```json" in lowered or '"payload"' in lowered:
+                    return True
+                return False
+
+            def _screen_too_similar_to_spoken(
+                screen_value: str | None, spoken_value: str | None
+            ) -> bool:
+                if not screen_value or not spoken_value:
+                    return False
+                a = screen_value.strip()
+                b = spoken_value.strip()
+                if not a or not b:
+                    return False
+                # Heuristic: if the screen is exactly the talk track, it usually means the
+                # model emitted only <spoken> and we defaulted screen=spoken.
+                return a == b
+
+            needs_screen_backfill = (
+                (not screen_tag_present)
+                or (not isinstance(screen_text, str) or not screen_text.strip())
+                or (
+                    isinstance(screen_text, str)
+                    and _screen_looks_like_tool_dump(screen_text)
+                )
+                or _screen_too_similar_to_spoken(screen_text, spoken_text)
+            )
+
+            if needs_screen_backfill:
+                screen_backfill_second_pass_attempted = True
+                if not screen_tag_present or not screen_text:
+                    screen_backfill_second_pass_reason = "missing_screen"
+                elif _screen_looks_like_tool_dump(screen_text or ""):
+                    screen_backfill_second_pass_reason = "tool_payload_screen"
+                else:
+                    screen_backfill_second_pass_reason = "screen_matches_spoken"
+
+                tool_blob = _build_tool_messages_prompt_blob(tool_messages)
+
+                def _tool_messages_include_description_write(
+                    messages: list[dict],
+                ) -> bool:
+                    """Best-effort detection of a description write tool action.
+
+                    We keep this conservative: if we cannot identify a description
+                    write confidently, return False.
+                    """
+
+                    import json
+
+                    for message in messages:
+                        if message.get("role") != "tool":
+                            continue
+                        content = message.get("content")
+                        if not isinstance(content, str) or not content.strip():
+                            continue
+
+                        try:
+                            parsed = json.loads(content)
+                        except Exception:
+                            continue
+
+                        if not isinstance(parsed, dict):
+                            continue
+
+                        tool_name = (
+                            parsed.get("tool")
+                            or parsed.get("method")
+                            or parsed.get("name")
+                            or ""
+                        )
+                        tool_name = tool_name if isinstance(tool_name, str) else ""
+                        tool_name_lower = tool_name.lower()
+
+                        payload = parsed.get("payload")
+                        payload = payload if isinstance(payload, dict) else {}
+
+                        if "description" in tool_name_lower:
+                            return True
+
+                        predicate = payload.get("predicate")
+                        if isinstance(predicate, str) and predicate.strip() in {
+                            "hasDescription",
+                            "has_description",
+                            "#V#hasDescription",
+                        }:
+                            return True
+
+                        if (
+                            isinstance(payload.get("description"), str)
+                            and payload.get("description").strip()
+                        ):
+                            return True
+
+                    return False
+
+                description_write_seen = _tool_messages_include_description_write(
+                    tool_messages
+                )
+
+                screen_candidate = None
+                allow_llm_screen_synthesis = os.getenv(
+                    "VON_PRESENTER_SCREEN_BACKFILL_USE_LLM", "1"
+                ).lower() in {"1", "true"}
+
+                if allow_llm_screen_synthesis:
+                    try:
+                        synthesis_system = (
+                            "You are Von. Create the on-screen response for the chat UI. "
+                            "Return ONLY one block: <screen>...</screen>. "
+                            "Do not include <spoken>. Do not include JSON. "
+                            "Use New Zealand English spelling. "
+                            "CRITICAL: Only state facts that are explicitly present in the tool results summary. "
+                            "Do not infer, guess, or add any claims beyond tool outputs."
+                        )
+                        synthesis_user = (
+                            "User request:\n"
+                            f"{prompt_text}\n\n"
+                            "Model response (may be incomplete; NOT authoritative for tool-backed changes):\n"
+                            f"{response_text}\n\n"
+                            + (
+                                "VON CHAT SCREEN CONTENT PROMPT (from Vontology):\n"
+                                "(Applies ONLY to <screen> formatting; it must not override tool-grounded facts.)\n"
+                                + str(screen_prompt_text).strip()
+                                + "\n\n"
+                                if isinstance(screen_prompt_text, str)
+                                and screen_prompt_text.strip()
+                                else ""
+                            )
+                            + "Tool results summary (authoritative):\n"
+                            f"{tool_blob}\n"
+                            "\nNon-negotiable rule:\n"
+                            "- If the tool results summary does not explicitly show a description update, you MUST NOT claim the description was added/updated. "
+                            "  You may say it is still empty/vacuous or that no tool updated it.\n"
+                            "- You MUST include a short section titled 'Writes ledger (authoritative)' that reflects the tool writes ledger without contradiction.\n"
+                        )
+
+                        synthesis_response = llm_client.generate(
+                            prompt="Generate <screen> display content",
+                            context=[
+                                {"role": "system", "content": synthesis_system},
+                                {"role": "user", "content": synthesis_user},
+                            ],
+                            model=model_name,
+                        )
+
+                        screen_candidate = _extract_screen_only(str(synthesis_response))
+                        if not screen_candidate:
+                            raw = str(synthesis_response).strip()
+                            if raw:
+                                screen_candidate = raw
+                    except Exception:
+                        screen_candidate = None
+
+                # If the LLM tries to claim a description write without evidence,
+                # discard it and fall back to the deterministic tool summary.
+                if (
+                    screen_candidate
+                    and not description_write_seen
+                    and isinstance(screen_candidate, str)
+                ):
+                    import re
+
+                    lowered = screen_candidate.lower()
+                    description_claim_patterns = (
+                        r"\bdescription\s+(?:has\s+been\s+)?(?:added|updated|set|filled)\b",
+                        r"\badded\s+(?:a\s+)?description\b",
+                        r"\bupdated\s+(?:the\s+)?description\b",
+                    )
+                    if any(
+                        re.search(p, lowered, flags=re.IGNORECASE)
+                        for p in description_claim_patterns
+                    ):
+                        screen_candidate = None
+
+                if not screen_candidate:
+                    screen_candidate = (
+                        _build_presenter_screen_summary_from_tool_messages(
+                            tool_messages
+                        )
+                    )
+
+                if screen_candidate:
                     base_channels = (
                         dict(presenter_channels)
                         if isinstance(presenter_channels, dict)
                         else {}
                     )
-                    base_channels["screen"] = tool_screen
-                    base_channels["format"] = "tool_results_fallback_v1"
+                    base_channels["screen"] = str(screen_candidate).strip()
+                    base_channels["format"] = "screen_backfill_from_tools_v1"
                     presenter_channels = base_channels
 
         def _extract_spoken_only(text: str) -> str | None:
@@ -3019,11 +3554,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         base_channels["screen"] = screen_text
                         base_channels["spoken"] = spoken_fallback
                         existing_format = base_channels.get("format")
-                        base_channels["format"] = (
-                            existing_format
-                            if existing_format == "tool_results_fallback_v1"
-                            else "narration_fallback_v1"
-                        )
+                        # Preserve formats that describe *how the screen* was produced.
+                        # For normal tagged responses, surface that narration was added.
+                        if existing_format == "tool_results_fallback_v1":
+                            base_channels["format"] = existing_format
+                        elif isinstance(
+                            existing_format, str
+                        ) and existing_format.startswith("screen_backfill_"):
+                            base_channels["format"] = existing_format
+                        else:
+                            base_channels["format"] = "narration_fallback_v1"
                         presenter_channels = base_channels
             except Exception:
                 # Defensive: never fail the request just because narration generation failed.
@@ -3175,6 +3715,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "messages": current_turn_messages,
             "response": response_text,
             "presenter_channels": presenter_channels,
+            "screen_backfill_second_pass_attempted": screen_backfill_second_pass_attempted,
+            "screen_backfill_second_pass_reason": screen_backfill_second_pass_reason,
             "spoken_backfill_second_pass_attempted": spoken_backfill_second_pass_attempted,
             "spoken_backfill_second_pass_reason": spoken_backfill_second_pass_reason,
             "user_prompt": user_prompt_debug,

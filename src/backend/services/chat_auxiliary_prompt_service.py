@@ -27,6 +27,7 @@ _LEGACY_VON_LLM_PROMPT_TYPE = "#V#von_llm_prompt"
 _SPECIFIC_TO_USER_PREDICATE_CANDIDATES = (
     "#V#specific_to_von_user",
     "specific_to_von_user",
+    "#V#specific_to_user",
     "specific_to_user",
 )
 
