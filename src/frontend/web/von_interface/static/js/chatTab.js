@@ -36,10 +36,11 @@ let lastRenderedSessionCount = 0;
 
 // JVNAUTOSCI-982: Per-session metadata (programme/project/activity/modality links)
 const CHAT_SESSION_LINK_KEYS = [
-    { key: 'programmes', label: 'Programmes', placeholder: 'Add a programme…' },
-    { key: 'projects', label: 'Projects', placeholder: 'Add a project…' },
-    { key: 'activities', label: 'Activities', placeholder: 'Add an activity…' },
-    { key: 'modalities', label: 'Modalities', placeholder: 'Add a modality…' }
+    { key: 'programmes', label: 'Programmes', placeholder: 'Add a programme…', typeConceptId: '#V#programme' },
+    { key: 'projects', label: 'Projects', placeholder: 'Add a project…', typeConceptId: '#V#project' },
+    // Note: there is no canonical #V#activity type concept in the ontology.
+    { key: 'activities', label: 'Activities', placeholder: 'Add an activity…', typeConceptId: '#V#work_activity' },
+    { key: 'modalities', label: 'Modalities', placeholder: 'Add a modality…', typeConceptId: '#V#conversation_modality' }
 ];
 const chatSessionLinksCache = new Map();
 let activeChatSessionLinks = null;
@@ -3199,9 +3200,22 @@ function _renderChatSessionMetadataPanel({ sessionId, links, statusText, statusT
         const row = document.createElement('div');
         row.className = 'chat-session-metadata-row';
 
-        const label = document.createElement('div');
-        label.className = 'chat-session-metadata-label';
+        const label = document.createElement(group.typeConceptId ? 'button' : 'div');
+        label.className = group.typeConceptId
+            ? 'chat-session-metadata-label chat-session-metadata-label-link'
+            : 'chat-session-metadata-label';
         label.textContent = group.label;
+        if (group.typeConceptId) {
+            label.type = 'button';
+            label.title = `Open ${group.label} type concept`;
+            label.disabled = !!disabled;
+            label.addEventListener('click', (e) => {
+                e.preventDefault();
+                document.dispatchEvent(new CustomEvent('von:selectConceptById', {
+                    detail: { conceptId: group.typeConceptId, createConceptTab: true }
+                }));
+            });
+        }
 
         const values = document.createElement('div');
         values.className = 'chat-session-metadata-values';
@@ -6883,6 +6897,7 @@ export const setLlmDebugDataForTurn = (turnId, debugData) => {
 };
 // Export for testing
 export const __test_only__rehydrateHistory = rehydrateHistory;
+export const __test_only__renderChatSessionMetadataPanel = _renderChatSessionMetadataPanel;
 
 // Export for testing.
 export function __testOnly_resetChatTtsState() {

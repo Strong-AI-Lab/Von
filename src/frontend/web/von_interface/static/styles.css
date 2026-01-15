@@ -1386,6 +1386,24 @@ body {
     /* ADDED to help align tab buttons */
     align-items: center;
     /* ADDED to vertically center tab buttons */
+
+    /* Allow many dynamic tabs without pushing Settings off-screen */
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+}
+
+.tab-container::-webkit-scrollbar {
+    height: 8px;
+}
+
+.tab-container::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.6);
+    border-radius: 999px;
+}
+
+.tab-container::-webkit-scrollbar-track {
+    background: transparent;
 }
 
 /* Annotation tab label icon + letter alignment */
@@ -1416,9 +1434,27 @@ body {
     border-radius: 4px 4px 0 0;
     margin-right: 5px;
     display: inline-block !important;
+    flex: 0 0 auto;
     position: relative;
     visibility: visible !important;
     z-index: 1101;
+}
+
+/* Keep Settings reachable even when tabs overflow */
+.tab-button.settings-tab-button {
+    margin-left: auto;
+    position: sticky;
+    right: 0;
+    z-index: 3;
+    background-color: #f8f9fa;
+}
+
+/* Keep Conversations reachable even when tabs overflow */
+.tab-button[data-tab="chatTab"] {
+    position: sticky;
+    left: 0;
+    z-index: 4;
+    background-color: #f8f9fa;
 }
 
 .tab-button.settings-tab-button {
@@ -3332,6 +3368,37 @@ footer {
     color: #334155;
     font-size: 13px;
     padding-top: 3px;
+}
+
+.chat-session-metadata-label-link {
+    box-sizing: border-box;
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 2px 6px;
+    margin: 0;
+    text-align: left;
+    cursor: pointer;
+    line-height: normal;
+}
+
+.chat-session-metadata-label-link:hover:not(:disabled) {
+    background: #dbeafe;
+    border-color: #93c5fd;
+    text-decoration: none;
+}
+
+.chat-session-metadata-label-link:disabled {
+    cursor: default;
+    text-decoration: none;
+    opacity: 0.7;
+}
+
+.chat-session-metadata-label-link:focus-visible {
+    outline: none;
+    background: #dbeafe;
+    border-color: #93c5fd;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+    border-radius: 6px;
 }
 
 .chat-session-metadata-values {

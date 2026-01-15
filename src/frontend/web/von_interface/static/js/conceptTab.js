@@ -1844,6 +1844,7 @@ function initializeConceptTabDomElements() {
   // concept Tab Elements
   elements.conceptTypeDisplayNameElement = document.getElementById('conceptTypeDisplayName');
   elements.conceptTypeDisplayNamePluralElement = document.getElementById('conceptTypeDisplayNamePluralElement');
+  elements.refreshConceptButton = document.getElementById('refreshConceptButton');
   elements.conceptStep1Div = document.getElementById('conceptStep1');
   elements.startInteractionButton = document.getElementById('startInteractionButton');
   // Name input removed (managed via Names section now)
@@ -1878,6 +1879,45 @@ function initializeConceptTabDomElements() {
   elements.addNewConceptButton = document.getElementById('addNewConceptButton');
   elements.cancelInteractionButton = document.getElementById('cancelInteractionButton');
   elements.endInteractionButton = document.getElementById('endInteractionButton');
+}
+
+async function reloadSelectedConceptFromApi(suffix = '') {
+  const conceptId = getCurrentlySelectedConceptId();
+  const btn = suffix ? document.getElementById(`refreshConceptButton_${suffix}`) : document.getElementById('refreshConceptButton');
+  if (!conceptId) {
+    console.warn('[conceptTab] Refresh requested but no concept is selected');
+    return;
+  }
+
+  try {
+    if (btn) {
+      btn.classList.add('loading');
+      btn.disabled = true;
+    }
+
+    const encodedConceptId = encodeURIComponent(conceptId);
+    const response = await fetch(`/api/concepts/${encodedConceptId}`);
+    if (!response.ok) {
+      throw new Error(`Failed to reload concept: ${response.status} ${response.statusText}`);
+    }
+
+    const conceptData = await response.json();
+    selectConceptWithSuffix(conceptData, suffix);
+    await loadConceptNames(conceptId, suffix);
+    await loadConceptAttributes(conceptId, suffix);
+
+    try {
+      document.dispatchEvent(new CustomEvent('concept-updated', { detail: { conceptId, reason: 'manual_refresh', source: 'concept_tab' } }));
+    } catch (_) { /* ignore */ }
+  } catch (e) {
+    console.warn('[conceptTab] Failed to reload selected concept', e);
+    alert(`Failed to refresh concept: ${e.message}`);
+  } finally {
+    if (btn) {
+      btn.classList.remove('loading');
+      btn.disabled = false;
+    }
+  }
 }
 
 // Keep track of whether listeners have been added to prevent duplicates
@@ -1940,6 +1980,14 @@ export function setupConceptTabEventListeners() {
   // Refresh list button
   if (elements.refreshConceptListButton) {
     elements.refreshConceptListButton.addEventListener('click', () => fetchConceptList());
+  }
+
+  // Refresh selected concept data (header icon)
+  if (elements.refreshConceptButton) {
+    elements.refreshConceptButton.addEventListener('click', (e) => {
+      try { e.stopPropagation(); } catch (_) { }
+      reloadSelectedConceptFromApi();
+    });
   }
   if (elements.conceptAnswerInput) {
     elements.conceptAnswerInput.addEventListener('keydown', (event) => {
@@ -2047,6 +2095,7 @@ export function initializeConceptTabDomElementsWithSuffix(suffix) {
   // concept Tab Elements with suffix
   elements.conceptTypeDisplayNameElement = document.getElementById(`conceptTypeDisplayName_${suffix}`);
   elements.conceptTypeDisplayNamePluralElement = document.getElementById(`conceptTypeDisplayNamePluralElement_${suffix}`);
+  elements.refreshConceptButton = document.getElementById(`refreshConceptButton_${suffix}`);
   elements.conceptStep1Div = document.getElementById(`conceptStep1_${suffix}`);
   elements.startInteractionButton = document.getElementById(`startInteractionButton_${suffix}`);
   // Name field removed for suffixed tabs
