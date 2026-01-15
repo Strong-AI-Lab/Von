@@ -3641,6 +3641,28 @@ footer {
     margin-bottom: 12px;
 }
 
+.upload-file-status {
+    margin-left: 10px;
+    font-size: 0.85rem;
+    color: #475569;
+    min-height: 1.1em;
+}
+
+.upload-file-status.is-uploading {
+    color: #0b5394;
+    font-weight: 600;
+}
+
+.upload-file-status.is-success {
+    color: #2e7d32;
+    font-weight: 600;
+}
+
+.upload-file-status.is-error {
+    color: #b91c1c;
+    font-weight: 600;
+}
+
 .loading-indicator-sep {
     width: 1px;
     height: 14px;
@@ -3764,6 +3786,12 @@ footer {
     outline: 2px dashed #2b7fff;
     outline-offset: -6px;
     background-color: rgba(43, 127, 255, 0.06);
+}
+
+.prompt-input.drag-over {
+    border-color: #2b7fff;
+    box-shadow: 0 0 0 2px rgba(43, 127, 255, 0.35);
+    background-color: rgba(43, 127, 255, 0.04);
 }
 
 /* Chat variant (legacy class) updated for parity */

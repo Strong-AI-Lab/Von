@@ -792,6 +792,62 @@ function formatBytesForUi(sizeBytes) {
     return `${gb.toFixed(2)} GB`;
 }
 
+let uploadUiState = {
+    button: null,
+    statusEl: null,
+    inFlight: 0,
+    lastStatusTimeoutId: null,
+    defaultButtonLabel: null
+};
+
+function setUploadStatus(message, type = 'info') {
+    const el = uploadUiState.statusEl;
+    if (!el) return;
+
+    if (uploadUiState.lastStatusTimeoutId) {
+        clearTimeout(uploadUiState.lastStatusTimeoutId);
+        uploadUiState.lastStatusTimeoutId = null;
+    }
+
+    el.textContent = message || '';
+    el.classList.remove('is-uploading', 'is-success', 'is-error');
+    if (type === 'uploading') {
+        el.classList.add('is-uploading');
+    } else if (type === 'success') {
+        el.classList.add('is-success');
+    } else if (type === 'error') {
+        el.classList.add('is-error');
+    }
+}
+
+function clearUploadStatusAfterDelay(delayMs = 5000) {
+    if (!uploadUiState.statusEl) return;
+    if (uploadUiState.lastStatusTimeoutId) {
+        clearTimeout(uploadUiState.lastStatusTimeoutId);
+    }
+    uploadUiState.lastStatusTimeoutId = window.setTimeout(() => {
+        setUploadStatus('');
+        uploadUiState.lastStatusTimeoutId = null;
+    }, delayMs);
+}
+
+function setUploadButtonBusy(isBusy) {
+    const btn = uploadUiState.button;
+    if (!btn) return;
+
+    if (!uploadUiState.defaultButtonLabel) {
+        uploadUiState.defaultButtonLabel = btn.textContent || 'Upload File';
+    }
+
+    if (isBusy) {
+        btn.disabled = true;
+        btn.textContent = 'Uploading…';
+    } else {
+        btn.disabled = false;
+        btn.textContent = uploadUiState.defaultButtonLabel;
+    }
+}
+
 function isFileDragEvent(event) {
     const dt = event?.dataTransfer;
     if (!dt) return false;
@@ -835,9 +891,22 @@ async function uploadFilesToVon(files) {
     const list = Array.from(files || []).filter(Boolean);
     if (!list.length) return;
 
+    uploadUiState.inFlight += 1;
+    if (uploadUiState.inFlight === 1) {
+        setUploadButtonBusy(true);
+    }
+
+    const total = list.length;
+    let successCount = 0;
+    let failureCount = 0;
+    let index = 0;
+
     for (const file of list) {
+        index += 1;
         const sizeLabel = formatBytesForUi(file.size);
         appendMessage('User', `Uploading file: ${file.name}${sizeLabel ? ` (${sizeLabel})` : ''}`);
+
+        setUploadStatus(`Uploading ${index}/${total}: ${file.name}`, 'uploading');
 
         try {
             const result = await uploadSingleFileToVon(file);
@@ -862,13 +931,26 @@ async function uploadFilesToVon(files) {
                 `File uploaded and registered as ${conceptId || '(unknown)'}${details.length ? `\n${details.join('\n')}` : ''}`
             );
 
+            successCount += 1;
+
             if (conceptId) {
                 insertTextIntoChatPrompt(`Attached file concept: ${conceptId}`);
             }
         } catch (error) {
             console.error('[chatTab] file upload error', error);
             appendMessage('Error', `File upload failed: ${String(error?.message || error)}`);
+            failureCount += 1;
+            setUploadStatus(`Upload failed: ${file.name}`, 'error');
         }
+    }
+
+    const summary = `Upload complete: ${successCount} succeeded${failureCount ? `, ${failureCount} failed` : ''}.`;
+    setUploadStatus(summary, failureCount ? 'error' : 'success');
+    clearUploadStatusAfterDelay();
+
+    uploadUiState.inFlight = Math.max(0, uploadUiState.inFlight - 1);
+    if (uploadUiState.inFlight === 0) {
+        setUploadButtonBusy(false);
     }
 }
 
@@ -5252,6 +5334,7 @@ export function initializeChatTab() {
     const exportConversationMarkdownBtn = document.getElementById('exportConversationMarkdownBtn');
     const uploadFileButton = document.getElementById('uploadFileButton');
     const uploadFileInput = document.getElementById('uploadFileInput');
+    const uploadFileStatus = document.getElementById('uploadFileStatus');
     const chatTab = document.getElementById('chatTab');
 
     if (!sendButton || !resetButton || !promptInput) {
@@ -5267,6 +5350,9 @@ export function initializeChatTab() {
             annotationToggle.remove();
         }
     }
+
+    uploadUiState.button = uploadFileButton || null;
+    uploadUiState.statusEl = uploadFileStatus || null;
 
     if (uploadFileButton && uploadFileInput) {
         uploadFileButton.addEventListener('click', () => {
@@ -5298,26 +5384,63 @@ export function initializeChatTab() {
         document.addEventListener('drop', preventIfFiles);
 
         // Local UI + drop handling
+        const applyDragOverState = () => {
+            scrollableField.classList.add('drag-over');
+            if (promptInput) {
+                promptInput.classList.add('drag-over');
+            }
+        };
+
+        const clearDragOverState = () => {
+            scrollableField.classList.remove('drag-over');
+            if (promptInput) {
+                promptInput.classList.remove('drag-over');
+            }
+        };
+
         chatTab.addEventListener('dragover', (event) => {
             if (!isFileDragEvent(event)) return;
             preventIfFiles(event);
-            scrollableField.classList.add('drag-over');
+            applyDragOverState();
         });
 
         chatTab.addEventListener('dragleave', (event) => {
             if (!isFileDragEvent(event)) return;
-            scrollableField.classList.remove('drag-over');
+            clearDragOverState();
         });
 
         chatTab.addEventListener('drop', async (event) => {
             if (!isFileDragEvent(event)) return;
             preventIfFiles(event);
-            scrollableField.classList.remove('drag-over');
+            clearDragOverState();
 
             const dt = event.dataTransfer;
             const files = dt ? dt.files : null;
             await uploadFilesToVon(files);
         });
+
+        if (promptInput) {
+            promptInput.addEventListener('dragover', (event) => {
+                if (!isFileDragEvent(event)) return;
+                preventIfFiles(event);
+                applyDragOverState();
+            });
+
+            promptInput.addEventListener('dragleave', (event) => {
+                if (!isFileDragEvent(event)) return;
+                clearDragOverState();
+            });
+
+            promptInput.addEventListener('drop', async (event) => {
+                if (!isFileDragEvent(event)) return;
+                preventIfFiles(event);
+                clearDragOverState();
+
+                const dt = event.dataTransfer;
+                const files = dt ? dt.files : null;
+                await uploadFilesToVon(files);
+            });
+        }
     }
 
     // Initialize LLM debug popup handlers
@@ -6632,6 +6755,7 @@ async function showLlmDebugPopup(turnId, options = {}) {
     const hasError = debugData.error !== undefined;
 
     let workflowExecutionTrace = null;
+    let workflowStages = [];
     if (Array.isArray(debugData.aux_llm_calls)) {
         workflowExecutionTrace = debugData.aux_llm_calls.find((entry) => {
             if (!entry || typeof entry !== 'object') {
@@ -6642,6 +6766,13 @@ async function showLlmDebugPopup(turnId, options = {}) {
             }
             return typeof entry.execution_id === 'string' && entry.execution_id.trim().length > 0;
         }) || null;
+
+        workflowStages = debugData.aux_llm_calls.filter((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return false;
+            }
+            return entry.type === 'workflow_stage';
+        });
     }
 
     // Build metadata HTML display
@@ -6663,6 +6794,22 @@ async function showLlmDebugPopup(turnId, options = {}) {
         metadataHtml += '</div>';
         metadataHtml += '<pre>';
         metadataHtml += escapeHtml(JSON.stringify(workflowSummary, null, 2));
+        metadataHtml += '</pre>';
+        metadataHtml += '</div>';
+    }
+
+    if (workflowStages.length > 0) {
+        const stageSummary = workflowStages.map((entry) => ({
+            stage: entry.stage ?? null,
+            source: entry.source ?? null,
+            reason: entry.reason ?? null,
+            format: entry.format ?? null
+        }));
+
+        metadataHtml += '<div class="llm-debug-metadata-section">';
+        metadataHtml += '<strong>Workflow stages</strong>';
+        metadataHtml += '<pre>';
+        metadataHtml += escapeHtml(JSON.stringify(stageSummary, null, 2));
         metadataHtml += '</pre>';
         metadataHtml += '</div>';
     }

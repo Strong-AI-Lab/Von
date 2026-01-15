@@ -142,6 +142,8 @@ dependencies = [
     "openstacksdk>=4.0.0",
     "google-genai>=1.55.0",
     "bleach>=6.3.0",
+    "pymupdf>=1.24.10",
+    "pytesseract>=0.3.13",
 ]
 
 [build-system]

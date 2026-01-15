@@ -141,6 +141,103 @@ def _build_name_query(
     return {"$or": base_or}
 
 
+def _normalize_text_for_match(text: str) -> str:
+    """Normalise text for case/whitespace-insensitive matching.
+
+    Mirrors text_value_service._normalize_text behaviour so fingerprint
+    matching and manual scan use consistent normalisation rules.
+    """
+    cleaned = text.strip()
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"[\t\f\v ]+", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    return cleaned.casefold()
+
+
+def _find_text_values_by_fingerprint(
+    normalized_query: str, limit: int = 500
+) -> list[dict]:
+    coll = TextValuesRepository.collection()
+    if coll is None:
+        return []
+    try:
+        langs = [
+            lang
+            for lang in coll.distinct("lang")
+            if isinstance(lang, str) and lang.strip()
+        ]
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("Failed to fetch distinct text_value langs: %s", exc)
+        langs = []
+
+    if not langs:
+        langs = ["en"]
+
+    fingerprints = [f"{normalized_query}||{lang.lower()}" for lang in langs]
+    if not fingerprints:
+        return []
+
+    return list(
+        TextValuesRepository.find({"fingerprint": {"$in": fingerprints}}, limit=limit)
+    )
+
+
+def _scan_text_values_for_match(
+    normalized_query: str,
+    predicates: list[str],
+    *,
+    exact: bool,
+    prefix: bool,
+    limit: int = 5000,
+) -> list[dict]:
+    if not normalized_query:
+        return []
+
+    relations = list(
+        TextRelationsRepository.find(
+            {"predicate": {"$in": predicates}},
+            projection={"object_text_id": 1},
+            limit=limit,
+        )
+    )
+
+    if not relations:
+        return []
+
+    candidate_ids: list[object] = []
+    for rel in relations:
+        obj_id = rel.get("object_text_id")
+        if not obj_id:
+            continue
+        candidate_ids.append(obj_id)
+        if isinstance(obj_id, str) and ObjectId.is_valid(obj_id):
+            candidate_ids.append(ObjectId(obj_id))
+
+    if not candidate_ids:
+        return []
+
+    text_values = list(
+        TextValuesRepository.find({"_id": {"$in": candidate_ids}}, limit=limit)
+    )
+
+    matches: list[dict] = []
+    for tv in text_values:
+        raw_text = tv.get("text")
+        if not isinstance(raw_text, str):
+            continue
+        normalized_text = _normalize_text_for_match(raw_text)
+        if exact:
+            is_match = normalized_text == normalized_query
+        elif prefix:
+            is_match = normalized_text.startswith(normalized_query)
+        else:
+            is_match = normalized_query in normalized_text
+        if is_match:
+            matches.append(tv)
+
+    return matches
+
+
 def _search_text_relations(
     query: str,
     exact: bool = False,
@@ -167,109 +264,69 @@ def _search_text_relations(
         {'#V#university', '#V#university_of_melbourne', ...}
     """
     # Normalize whitespace in query (collapse multiple spaces to single space)
-    normalized_query = re.sub(r"\s+", " ", query.strip())
+    collapsed_query = re.sub(r"\s+", " ", query.strip())
+    normalized_query = _normalize_text_for_match(query)
 
     # Build predicates list FIRST - only search text_values linked via these predicates
     predicates = ["hasName"]
     if include_description:
         predicates.append("hasDescription")
 
-    # Strategy: Find text_relations by predicate FIRST, get their text_value_ids,
-    # THEN search only within those specific text_values
-    # This prevents finding "New Zealand" in descriptions/notes when we only want names
-
-    # Step 1: Get ALL text_relations for the specified predicates (hasName by default)
-    all_relations = list(
-        TextRelationsRepository.find({"predicate": {"$in": predicates}}, limit=10000)
-    )
-
-    if not all_relations:
-        logger.debug(f"No text_relations found for predicates {predicates}")
-        return set()
-
-    # Step 2: Extract the text_value_ids that are actually used as names (or descriptions if enabled)
-    valid_text_value_ids = {
-        rel["object_text_id"] for rel in all_relations if rel.get("object_text_id")
-    }
-
-    if not valid_text_value_ids:
-        logger.debug(
-            f"No text_value_ids found in relations for predicates {predicates}"
-        )
-        return set()
-
-    # Step 3: Build text search query, but restrict to valid_text_value_ids
-    if exact:
-        text_query = {
-            "_id": {
-                "$in": [
-                    ObjectId(tv_id)
-                    for tv_id in valid_text_value_ids
-                    if ObjectId.is_valid(tv_id)
-                ]
-            },
-            "text": normalized_query,
-        }
-    elif prefix:
-        text_query = {
-            "_id": {
-                "$in": [
-                    ObjectId(tv_id)
-                    for tv_id in valid_text_value_ids
-                    if ObjectId.is_valid(tv_id)
-                ]
-            },
-            "text": {"$regex": f"^{re.escape(normalized_query)}", "$options": "i"},
-        }
+    # Strategy: search text_values directly, then join to text_relations by predicate.
+    matching_texts: list[dict] = []
+    if exact or prefix:
+        flexible_pattern = re.escape(collapsed_query).replace(" ", r"\s+")
+        if exact:
+            text_query = {"text": {"$regex": f"^{flexible_pattern}$", "$options": "i"}}
+        else:
+            text_query = {"text": {"$regex": f"^{flexible_pattern}", "$options": "i"}}
+        matching_texts = list(TextValuesRepository.find(text_query, limit=500))
     else:
-        # For substring search, try exact match first, then broader text search
-        # All searches restricted to valid_text_value_ids
-        object_ids = [
-            ObjectId(tv_id)
-            for tv_id in valid_text_value_ids
-            if ObjectId.is_valid(tv_id)
-        ]
-
-        # Try exact match with flexible whitespace
-        flexible_exact_pattern = re.escape(normalized_query).replace(" ", r"\s+")
+        flexible_exact_pattern = re.escape(collapsed_query).replace(" ", r"\s+")
         exact_query = {
-            "_id": {"$in": object_ids},
-            "text": {"$regex": f"^{flexible_exact_pattern}$", "$options": "i"},
+            "text": {"$regex": f"^{flexible_exact_pattern}$", "$options": "i"}
         }
         matching_texts = list(TextValuesRepository.find(exact_query, limit=500))
 
-        # Fallback to text search within valid IDs only
         if not matching_texts:
             try:
-                text_search_query = {
-                    "_id": {"$in": object_ids},
-                    "$text": {"$search": normalized_query},
-                }
+                text_search_query = {"$text": {"$search": collapsed_query}}
                 matching_texts = list(
                     TextValuesRepository.find(text_search_query, limit=500)
                 )
             except Exception as e:
                 logger.debug(f"Text search failed: {e}")
-                # Final fallback: substring anywhere in text
                 substring_query = {
-                    "_id": {"$in": object_ids},
-                    "text": {"$regex": re.escape(normalized_query), "$options": "i"},
+                    "text": {"$regex": re.escape(collapsed_query), "$options": "i"}
                 }
                 matching_texts = list(
                     TextValuesRepository.find(substring_query, limit=500)
                 )
 
-    # Step 4: Execute query for exact/prefix
-    if exact or prefix:
-        matching_texts = list(TextValuesRepository.find(text_query, limit=500))
+    if not matching_texts:
+        if exact:
+            matching_texts = _find_text_values_by_fingerprint(normalized_query)
+        if not matching_texts:
+            matching_texts = _scan_text_values_for_match(
+                normalized_query,
+                predicates,
+                exact=exact,
+                prefix=prefix,
+            )
 
     if not matching_texts:
         return set()
 
-    # Step 5: Extract text_value IDs from matching texts
-    text_value_ids = [str(tv["_id"]) for tv in matching_texts]
+    # Step 1: Extract text_value IDs from matching texts
+    text_value_ids = []
+    for tv in matching_texts:
+        raw_id = tv.get("_id")
+        if raw_id is None:
+            continue
+        text_value_ids.append(raw_id)
+        text_value_ids.append(str(raw_id))
 
-    # Step 6: Find text_relations linking these text_values to concepts
+    # Step 2: Find text_relations linking these text_values to concepts
     relations = list(
         TextRelationsRepository.find(
             {
