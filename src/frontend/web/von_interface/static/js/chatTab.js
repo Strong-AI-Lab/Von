@@ -85,6 +85,10 @@ function getLoadingIndicatorEl() {
     return document.getElementById('loadingIndicator');
 }
 
+function getLoadingIndicatorDetailEl() {
+    return document.getElementById('loadingIndicatorDetail');
+}
+
 function setLoadingIndicatorText(text) {
     const el = getLoadingIndicatorTextEl();
     if (!el) {
@@ -94,6 +98,11 @@ function setLoadingIndicatorText(text) {
 }
 
 function setLoadingIndicatorTooltip(text) {
+    const detailEl = getLoadingIndicatorDetailEl();
+    if (detailEl) {
+        return;
+    }
+
     const value = String(text ?? '').trim();
     const wrapper = getLoadingIndicatorEl();
     if (wrapper) {
@@ -112,6 +121,16 @@ function setLoadingIndicatorTooltip(text) {
         textEl.setAttribute('aria-label', value);
         textEl.setAttribute('data-original-title', value);
     }
+}
+
+function setLoadingIndicatorDetailText(text) {
+    const detailEl = getLoadingIndicatorDetailEl();
+    if (!detailEl) {
+        return;
+    }
+    const value = String(text ?? '').trim();
+    detailEl.textContent = value;
+    detailEl.setAttribute('aria-hidden', value ? 'false' : 'true');
 }
 
 function createClientRequestId() {
@@ -403,14 +422,14 @@ function startThinkingTooltipTicker(request) {
 
     stopThinkingTooltipTicker(request);
 
-    // Update once per second so the elapsed time in the tooltip stays current,
+    // Update once per second so the elapsed time stays current,
     // even if tool-progress polling backs off (e.g., repeated 404s).
     request.thinkingTooltipIntervalId = setInterval(() => {
         if (request.aborted || activeChatRequest !== request) {
             stopThinkingTooltipTicker(request);
             return;
         }
-        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+        setLoadingIndicatorDetailText(formatToolUseHistoryTooltip(request));
     }, 1000);
 }
 
@@ -453,8 +472,8 @@ function startToolUseProgressPolling(request) {
             return;
         }
 
-        // Keep tooltip "alive" even before the server has any tool-progress state.
-        setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+        // Keep detail text "alive" even before the server has any tool-progress state.
+        setLoadingIndicatorDetailText(formatToolUseHistoryTooltip(request));
 
         try {
             const resp = await fetch(`/von/progress/${encodeURIComponent(requestId)}`,
@@ -467,7 +486,14 @@ function startToolUseProgressPolling(request) {
 
             if (resp.status === 404) {
                 poll.consecutiveNotFound += 1;
-                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
+                poll.nextDelayMs = Math.min(10_000, poll.nextDelayMs * 1.7);
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+
+            if (resp.status === 202) {
+                poll.consecutiveNotFound = 0;
+                poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.4);
                 scheduleNextPoll(poll.nextDelayMs);
                 return;
             }
@@ -483,9 +509,15 @@ function startToolUseProgressPolling(request) {
             poll.nextDelayMs = 350;
             setLoadingIndicatorText(formatToolUseProgressText(progress));
             recordToolUseHistory(request, progress);
-            setLoadingIndicatorTooltip(formatToolUseHistoryTooltip(request));
+            setLoadingIndicatorDetailText(formatToolUseHistoryTooltip(request));
 
             const status = typeof progress?.status === 'string' ? progress.status : null;
+            if (status === 'disabled') {
+                poll.nextDelayMs = 10_000;
+                scheduleNextPoll(poll.nextDelayMs);
+                return;
+            }
+
             if (status === 'completed' || status === 'error') {
                 stopToolUseProgressPolling(request);
                 return;
@@ -643,6 +675,66 @@ function escapeHtml(value) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+function extractPromptConceptGroups(debugData) {
+    const userPrompt = debugData && typeof debugData === 'object' ? debugData.user_prompt : null;
+    const loaded = !!userPrompt?.loaded;
+    const chars = Number.isFinite(userPrompt?.chars) ? Number(userPrompt?.chars) : null;
+    if (!loaded || (chars !== null && chars <= 0)) {
+        return [];
+    }
+    const seen = new Set();
+    const groups = [];
+
+    const addGroup = (label, ids) => {
+        if (!Array.isArray(ids)) {
+            return;
+        }
+        const cleaned = [];
+        for (const raw of ids) {
+            if (typeof raw !== 'string') {
+                continue;
+            }
+            const trimmed = raw.trim();
+            if (!trimmed || seen.has(trimmed)) {
+                continue;
+            }
+            seen.add(trimmed);
+            cleaned.push(trimmed);
+        }
+        if (cleaned.length > 0) {
+            groups.push({ label, ids: cleaned });
+        }
+    };
+
+    addGroup('Behaviour prompts', userPrompt?.behaviour_prompt_concept_ids);
+    addGroup('Narration prompts', userPrompt?.narration_prompt_concept_ids);
+    addGroup('Screen prompts', userPrompt?.screen_prompt_concept_ids);
+    addGroup('Other prompts', userPrompt?.prompt_concept_ids);
+
+    return groups;
+}
+
+function buildPromptConceptLinksHtml(groups) {
+    if (!Array.isArray(groups) || groups.length === 0) {
+        return '';
+    }
+
+    let html = '<div class="llm-debug-metadata-section">';
+    html += '<strong>Prompt concepts</strong>';
+    html += '<div class="llm-debug-prompt-groups">';
+    for (const group of groups) {
+        const label = escapeHtml(group.label);
+        const links = (group.ids || []).map((id) => {
+            const safeId = escapeHtml(id);
+            return `<button type="button" class="llm-debug-prompt-link" data-concept-id="${safeId}">${safeId}</button>`;
+        }).join(' ');
+        html += `<div class="llm-debug-prompt-group"><span class="llm-debug-prompt-label">${label}:</span>${links ? ` ${links}` : ''}</div>`;
+    }
+    html += '</div>';
+    html += '</div>';
+    return html;
 }
 
 function extractBoldQuotedInstruction(text) {
@@ -5602,6 +5694,7 @@ export function initializeChatTab() {
 
 function setThinkingState(isThinking) {
     const loadingIndicator = document.getElementById('loadingIndicator');
+    const loadingDetail = document.getElementById('loadingIndicatorDetail');
     const abortButton = document.getElementById('abortButton');
     const sendButton = document.getElementById('sendButton');
 
@@ -5614,6 +5707,13 @@ function setThinkingState(isThinking) {
         } else {
             setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
             setLoadingIndicatorTooltip('');
+        }
+    }
+
+    if (loadingDetail) {
+        loadingDetail.style.display = isThinking ? 'block' : 'none';
+        if (!isThinking) {
+            setLoadingIndicatorDetailText('');
         }
     }
 
@@ -5841,6 +5941,12 @@ async function handleSendPrompt() {
             const responseChannels = normalisePresenterChannels(presenterChannelsRaw);
             const screenText = responseChannels?.screen ? responseChannels.screen : String(data.response ?? '');
             const spokenText = responseChannels?.spoken ? responseChannels.spoken : null;
+
+            const toolProgressEnabled = data?.llm_debug?.internal_mcp?.tool_use_progress?.enabled;
+            if (toolProgressEnabled === false) {
+                stopToolUseProgressPolling(request);
+                setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
+            }
 
             // Append assistant message with turnId and llm_debug flag
             appendMessage('Von', screenText, assistantTurnId, !!data.llm_debug, false, null, fastpathMeta, spokenText);
@@ -6777,6 +6883,8 @@ async function showLlmDebugPopup(turnId, options = {}) {
 
     // Build metadata HTML display
     let metadataHtml = '';
+    const promptGroups = extractPromptConceptGroups(debugData);
+    metadataHtml += buildPromptConceptLinksHtml(promptGroups);
     if (workflowExecutionTrace) {
         const executionId = String(workflowExecutionTrace.execution_id).trim();
         const href = `/api/workflows/executions/${encodeURIComponent(executionId)}`;
@@ -6830,6 +6938,34 @@ async function showLlmDebugPopup(turnId, options = {}) {
     }
 
     metaDiv.innerHTML = metadataHtml;
+
+    if (!metaDiv.dataset.promptLinkBound) {
+        metaDiv.addEventListener('click', (event) => {
+            const target = event.target;
+            if (!target || !(target instanceof HTMLElement)) {
+                return;
+            }
+            const button = target.closest('.llm-debug-prompt-link');
+            if (!button) {
+                return;
+            }
+            event.preventDefault();
+            const conceptId = button.dataset.conceptId;
+            if (!conceptId) {
+                return;
+            }
+            document.dispatchEvent(new CustomEvent('von:selectConceptById', {
+                detail: {
+                    conceptId,
+                    createConceptTab: true,
+                    modifierKeys: {
+                        shiftKey: event.shiftKey
+                    }
+                }
+            }));
+        });
+        metaDiv.dataset.promptLinkBound = 'true';
+    }
 
     // Display messages
     try {

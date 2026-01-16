@@ -1198,11 +1198,11 @@ def get_chat_history_session_summaries(
                         "created_at": 1,
                         "updated_at": 1,
                         "namespace": 1,
-                        "history_tail": {"$slice": ["$history", -1]},
+                        "history_tail": {"$slice": [{"$ifNull": ["$history", []]}, -1]},
                         "message_count": {
                             "$size": {
                                 "$filter": {
-                                    "input": "$history",
+                                    "input": {"$ifNull": ["$history", []]},
                                     "as": "msg",
                                     "cond": {
                                         "$not": {

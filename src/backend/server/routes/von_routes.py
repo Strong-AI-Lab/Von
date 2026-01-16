@@ -612,7 +612,15 @@ def get_generation_progress(request_id: str):
     scope_key = _get_tool_progress_scope_key()
     state = _get_tool_progress(scope_key, request_id.strip())
     if not state:
-        return jsonify({"status": "not_found"}), 404
+        try:
+            show_tool_use_progress = bool(get_show_tool_use_during_thinking())
+        except Exception:
+            show_tool_use_progress = False
+
+        if not show_tool_use_progress:
+            return jsonify({"status": "disabled"}), 200
+
+        return jsonify({"status": "pending"}), 202
 
     # Do not leak internal epoch detail to the UI.
     state.pop("updated_at_epoch", None)
