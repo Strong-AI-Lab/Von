@@ -2973,6 +2973,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         user_namespace=user_namespace,
                         gmail_profile=request_gmail_profile,
                         auxiliary_system_prompt=auxiliary_system_prompt,
+                        preferred_language=request_language,
                     )
                 finally:
                     if show_tool_use_progress:
