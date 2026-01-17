@@ -31,6 +31,15 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - Strong rule: treat canonical predicate concepts (e.g. #V#is_a_type_of) as the authoritative ontology relations. Do not introduce or rely on structural relationship fields when predicate concepts exist; kind/classification should be derived from canonical predicate usage.
 - Do a quick factoring review whenever you touch write paths: search for existing canonical helpers/endpoints (especially for deletes/merges) and route through them rather than adding parallel pathways.
 - Treat ontology/predicate investigation as a normal first step for Vontology work: resolve candidate concepts by name (including spelling variants like programme/program), search for existing predicates/types before inventing new ones, and record the findings (and chosen canonical IDs) in the related Jira issue.
+- **Vontology-first checklist (mandatory for ontology-related work):**
+	1. Resolve candidate concepts by name (MCP search/resolve).
+	2. Check for existing predicate/type concepts before inventing anything.
+	3. If a list of concepts is needed, prefer a Vontology type and query its instances.
+	4. Record the chosen canonical IDs in the Jira issue.
+- **No hard-coded ontology lists**: do not add fixed lists of predicate/type IDs or names in code. If you believe a hard-coded list is unavoidable, you must:
+	- explain why Vontology lookup is not viable,
+	- add a Jira note documenting the exception, and
+	- include a removal/cleanup plan.
 - When uncertain, ask succinctly; do not guess or fabricate behaviour.
 - When working on a task that may involve changes, you may open a branch based on the Jira task name (e.g. `JVNAUTOSCI-956-short-title`).
 - When you start work on a task (including restarting from Done or other closed states), transition it to In Progress.

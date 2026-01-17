@@ -127,6 +127,12 @@ class _MissingToolCallDetectorSpec:
     model: Optional[str]
 
 
+@dataclass(frozen=True)
+class _OntologyPreflightResult:
+    message: str | None
+    telemetry: Mapping[str, Any] | None
+
+
 class ToolCallParsingError(Exception):
     """Raised when a model returns an invalid tool call payload."""
 
@@ -143,6 +149,8 @@ class InternalMCPChatOrchestrator:
     _TOOL_FIELD = "tool"
     _PAYLOAD_FIELD = "payload"
     _MISSING_TOOL_CALL_ACTION_ID = "#V#detect_missing_tool_call_action"
+    _PREFLIGHT_PREDICATE_TYPE_ID = "#V#conversation_preflight_predicate"
+    _PREFLIGHT_CACHE_TTL_SECONDS = 120
     _FALLBACK_MISSING_TOOL_CALL_PROMPT = (
         "You are a strict classifier for an agent system that can call tools via JSON.\n"
         "Your job: decide whether the assistant response *promises* to call tools (or says it is about to do so) "
@@ -184,6 +192,9 @@ class InternalMCPChatOrchestrator:
         # Vontology-backed missing-tool-call detector (lazy loaded)
         self._missing_tool_call_detector: Optional[_MissingToolCallDetectorSpec] = None
         self._missing_tool_call_detector_loaded: bool = False
+
+        # Deterministic ontology preflight cache (per language).
+        self._preflight_cache: dict[str, dict[str, Any]] = {}
 
         # Guardrails against context/tool-result bloat.
         # These are expressed in characters (not tokens) to avoid model-specific tokenisers.
@@ -2129,11 +2140,217 @@ class InternalMCPChatOrchestrator:
                 result["payload"] = str(safe_payload)
             return json.dumps(result, default=str)
 
+    @staticmethod
+    def _normalise_language(language: str | None) -> str | None:
+        if not isinstance(language, str):
+            return None
+        cleaned = language.strip()
+        return cleaned if cleaned else None
+
+    @staticmethod
+    def _language_variants(language: str | None) -> list[str]:
+        if not isinstance(language, str) or not language.strip():
+            return []
+        cleaned = language.strip()
+        base = cleaned.split("-")[0] if "-" in cleaned else cleaned
+        if base and base != cleaned:
+            return [cleaned, base]
+        return [cleaned]
+
+    @staticmethod
+    def _select_preferred_name(
+        name_texts: list[dict[str, Any]], preferred_language: str | None
+    ) -> tuple[str | None, str | None]:
+        if not name_texts:
+            return None, None
+
+        variants = InternalMCPChatOrchestrator._language_variants(preferred_language)
+
+        def _type_rank(name_type: str | None) -> int:
+            if name_type == "NL":
+                return 0
+            if name_type == "ABBR":
+                return 1
+            if name_type == "CODE":
+                return 2
+            return 3
+
+        candidates: list[tuple[int, int, str, str | None]] = []
+        for entry in name_texts:
+            text = entry.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            lang = entry.get("lang")
+            context = entry.get("context")
+            name_type = None
+            if isinstance(context, dict):
+                name_type = context.get("name_type")
+            if not isinstance(name_type, str):
+                name_type = None
+
+            lang_rank = 2
+            if variants and isinstance(lang, str):
+                if lang == variants[0]:
+                    lang_rank = 0
+                elif len(variants) > 1 and lang == variants[1]:
+                    lang_rank = 1
+
+            candidates.append(
+                (
+                    lang_rank,
+                    _type_rank(name_type),
+                    text.strip(),
+                    lang if isinstance(lang, str) else None,
+                )
+            )
+
+        if not candidates:
+            return None, None
+
+        candidates.sort(key=lambda item: (item[0], item[1], len(item[2]), item[2]))
+        best = candidates[0]
+        return best[2], best[3]
+
+    def _get_preflight_cache_key(self, preferred_language: str | None) -> str:
+        return (preferred_language or "").strip() or "__default__"
+
+    def _load_preflight_predicates(
+        self, preferred_language: str | None
+    ) -> list[dict[str, Any]]:
+        try:
+            from src.backend.services.concept_search_service import search_concepts
+        except Exception:
+            return []
+
+        try:
+            from src.backend.services.text_value_service import get_texts_for_concept
+        except Exception:
+            return []
+
+        try:
+            result = search_concepts(
+                query="",
+                instance_of=self._PREFLIGHT_PREDICATE_TYPE_ID,
+                filter_kind=["predicate"],
+                limit=80,
+                match_type="substring",
+            )
+        except Exception:
+            return []
+
+        results = result.get("results") if isinstance(result, dict) else None
+        if not isinstance(results, list):
+            return []
+
+        predicates: list[dict[str, Any]] = []
+        for entry in results:
+            if not isinstance(entry, dict):
+                continue
+            concept_id = entry.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            name_texts = get_texts_for_concept(
+                concept_id, predicate="hasName", limit=80
+            )
+            display_name, name_lang = self._select_preferred_name(
+                name_texts, preferred_language
+            )
+            predicates.append(
+                {
+                    "concept_id": concept_id,
+                    "display_name": display_name,
+                    "name_lang": name_lang,
+                }
+            )
+
+        return predicates
+
+    def _build_ontology_preflight(
+        self, prompt: str, preferred_language: str | None
+    ) -> _OntologyPreflightResult:
+        """Deterministically surface preflight predicates from the Vontology.
+
+        Stage 1 (JVNAUTOSCI-988): read-only, cheap, and scoped to the current turn.
+        """
+
+        if not isinstance(prompt, str):
+            return _OntologyPreflightResult(message=None, telemetry=None)
+
+        raw = prompt.strip()
+        if not raw:
+            return _OntologyPreflightResult(message=None, telemetry=None)
+
+        explicit_ids = sorted(set(re.findall(r"#V#[A-Za-z0-9][A-Za-z0-9._-]*", raw)))
+
+        preferred_language = self._normalise_language(preferred_language)
+        if preferred_language is None:
+            try:
+                from src.backend.services.settings_service import get_preferred_language
+
+                preferred_language = self._normalise_language(get_preferred_language())
+            except Exception:
+                preferred_language = None
+
+        cache_key = self._get_preflight_cache_key(preferred_language)
+        cached = self._preflight_cache.get(cache_key)
+        now = time.time()
+        if (
+            cached
+            and (now - cached.get("timestamp", 0)) < self._PREFLIGHT_CACHE_TTL_SECONDS
+        ):
+            predicates = cached.get("predicates", [])
+        else:
+            predicates = self._load_preflight_predicates(preferred_language)
+            self._preflight_cache[cache_key] = {
+                "timestamp": now,
+                "predicates": predicates,
+            }
+
+        if not predicates and not explicit_ids:
+            return _OntologyPreflightResult(message=None, telemetry=None)
+
+        lines: list[str] = [
+            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1):",
+            "Source: instances of #V#conversation_preflight_predicate.",
+            "Use these existing predicate concept IDs for tool planning. Do not invent new predicates here.",
+        ]
+
+        if explicit_ids:
+            lines.append("Explicit IDs in prompt:")
+            for concept_id in explicit_ids[:6]:
+                lines.append(f"- {concept_id}")
+
+        if predicates:
+            lines.append("Preflight predicate candidates:")
+            for item in predicates[:30]:
+                concept_id = item.get("concept_id")
+                display_name = item.get("display_name")
+                name_lang = item.get("name_lang")
+                if not concept_id:
+                    continue
+                if display_name:
+                    lang_suffix = f" [{name_lang}]" if name_lang else ""
+                    lines.append(f'- {concept_id} (name="{display_name}"{lang_suffix})')
+                else:
+                    lines.append(f"- {concept_id}")
+
+        telemetry: dict[str, Any] = {
+            "type": "ontology_preflight",
+            "stage": "deterministic_preflight",
+            "preferred_language": preferred_language,
+            "predicate_type": self._PREFLIGHT_PREDICATE_TYPE_ID,
+            "preflight_predicates": predicates,
+            "explicit_ids": explicit_ids,
+        }
+
+        return _OntologyPreflightResult(message="\n".join(lines), telemetry=telemetry)
+
     def _build_augmented_context(
         self,
         context: Optional[Sequence[Mapping[str, Any]]],
         user_namespace: str | None = None,
         auxiliary_system_prompt: str | None = None,
+        preflight_message: str | None = None,
     ) -> List[Mapping[str, Any]]:
         base: List[Mapping[str, Any]] = []
         if context:
@@ -2177,6 +2394,8 @@ class InternalMCPChatOrchestrator:
             )
 
         base.insert(0, {"role": "system", "content": instruction_msg})
+        if isinstance(preflight_message, str) and preflight_message.strip():
+            base.insert(1, {"role": "system", "content": preflight_message.strip()})
         return self._limit_context_for_llm(base)
 
     @staticmethod
@@ -2696,6 +2915,7 @@ class InternalMCPChatOrchestrator:
         user_namespace: Optional[str] = None,
         gmail_profile: Optional[str] = None,
         auxiliary_system_prompt: str | None = None,
+        preferred_language: str | None = None,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
@@ -2877,10 +3097,17 @@ class InternalMCPChatOrchestrator:
             _persist_trace(status="completed")
             return result
 
+        preflight = self._build_ontology_preflight(prompt, preferred_language)
+        if preflight.telemetry:
+            aux_llm_calls.append(preflight.telemetry)
+            if trace_enabled and trace is not None:
+                trace.metadata["ontology_preflight"] = dict(preflight.telemetry)
+
         augmented_context = self._build_augmented_context(
             context,
             user_namespace=user_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
+            preflight_message=preflight.message,
         )
 
         # If the user asks which TTS voice is being used, attach a small session

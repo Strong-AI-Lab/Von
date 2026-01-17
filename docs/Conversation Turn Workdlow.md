@@ -1,4 +1,4 @@
-# Conversation Turn Workdlow
+# Conversation Turn Workflow
 
 ## Purpose
 Provide a clear, end-to-end model of what happens from a user submitting a prompt to Von returning a response. This document describes the current behaviour and sequencing, with explicit decision points and outputs so it can serve as a baseline for future workflow design.
@@ -35,6 +35,14 @@ Provide a clear, end-to-end model of what happens from a user submitting a promp
 1. If the internal MCP orchestrator is available, it is invoked with prompt, context, model, namespace, and auxiliary system prompt. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L2910-L3050).
 2. The orchestrator may call a workflow selector for authenticated presenter turns, used mainly to decide narration routing. See [src/backend/integrations/internal_mcp/orchestrator.py](src/backend/integrations/internal_mcp/orchestrator.py#L2905-L2965).
 3. The orchestrator executes the tool loop: LLM response → strict tool-call JSON parsing → tool invocation → tool result message → repeat until no further tool calls or caps reached. See [src/backend/integrations/internal_mcp/orchestrator.py](src/backend/integrations/internal_mcp/orchestrator.py#L2774-L2925).
+
+### Stage 3a: Ontology discovery context (current reality)
+There is **no dedicated ontology discovery pre-flight** today. The orchestrator does not inject a curated list of existing predicate/type concepts before tool planning. This means the LLM must already “know” or guess correct `#V#...` predicate IDs, which increases invalid predicate attempts.
+
+Existing building blocks that are **not yet wired into tool planning**:
+- **Annotations pipeline** (span extraction + candidate concept lookup). The backend can extract spans and candidate concepts via `extract_annotations` + `concept_search_service`, but chat only triggers this when the UI toggle is enabled, and results are not fed into tool selection. See [src/backend/services/annotation_extraction_service.py](src/backend/services/annotation_extraction_service.py) and [src/backend/server/routes/annotations_routes.py](src/backend/server/routes/annotations_routes.py).
+- **Salient predicates** (per-instance/type). A cached endpoint exists for `#V#salient_binary_predicate_for_type`, but it is currently used for UI tooling, not tool planning. See [src/backend/server/routes/vontology_routes.py](src/backend/server/routes/vontology_routes.py#L3233-L3760).
+- **RAG concept description search**. `search_concept_descriptions` is available via internal MCP, but the default chat flow does not invoke it (except the RAG counts fastpath). See [src/backend/integrations/internal_mcp/catalogue.py](src/backend/integrations/internal_mcp/catalogue.py#L3317-L3580).
 
 ### Stage 4: Presenter protocol handling
 1. The model response is parsed for `<screen>` and `<spoken>` tags. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3035-L3120).
@@ -90,11 +98,17 @@ When markdown rendering is active, the UI transforms certain patterns into promp
    - Detection artefacts are logged but do not drive a repair loop in the same turn.
 4. **Workflow selector verdicts are non-binding**
    - Selector metadata does not enforce subsequent stage execution.
+5. **Predicate discovery gap**
+   - The model may emit invalid predicates (e.g., `has_author`) when no existing predicate ID is surfaced in context.
+6. **Annotation results are not used for tool planning**
+   - Annotation suggestions exist but are not part of the orchestrator’s decision context.
 
 ## Known Gaps (Foundations for a Formal Workflow)
 - **Screen grounding check**: validate screen claims against tool outputs before final response emission.
 - **Complexity analysis**: explicit pre-tool assessment with a stored rationale.
 - **Tool policy selection**: explicit budget and policy step that gates tool execution.
+- **Ontology discovery pre-flight**: deterministic, read-only candidate discovery for types/predicates before tool selection.
+- **Multi-turn context persistence**: short-lived cache of discovered concept IDs across follow-up turns.
 
 ## Glossary
 - **Presenter mode**: protocol that outputs `screen` and `spoken` channels for display and TTS.

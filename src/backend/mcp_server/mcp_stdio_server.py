@@ -1564,6 +1564,7 @@ async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
                 user_namespace=user_namespace,
                 gmail_profile=gmail_profile,
                 auxiliary_system_prompt=auxiliary_system_prompt,
+                preferred_language=get_preferred_language(),
             )
 
         orchestrator_result = await _run_blocking_with_timeout(
