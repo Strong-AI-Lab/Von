@@ -28,6 +28,7 @@
     ./setup_py.ps1 -Reset -ConfigureVSCode -PythonVersion 3.11
     ./setup_py.ps1 -SkipMongoDB -ConfigureVSCode
 #>
+# PSScriptAnalyzer -DisableRule PSUseApprovedVerbs
 param (
     [Parameter(Mandatory = $false)]
     [switch]$ConfigureVSCode, # Renamed from VSCODE_FLAG
@@ -368,8 +369,8 @@ except ImportError as e:
     }
 }
 
-# Function to ensure uv and arxiv-mcp-server are installed
-function Ensure-UvAndArxiv {
+# Function to install uv and arxiv-mcp-server
+function Install-UvAndArxiv {
     Write-Host "Checking for uv installation..." -ForegroundColor Cyan
 
     # Check if uv is installed
@@ -417,8 +418,8 @@ function Ensure-UvAndArxiv {
     }
 }
 
-# Function to check and create .env file from template
-function Ensure-EnvFile {
+# Function to create .env file from template when missing
+function New-EnvFile {
     Write-Host ""
     Write-Host "=== Database Configuration ===" -ForegroundColor Cyan
 
@@ -454,8 +455,8 @@ OLLAMA_HOSTS_LIST=127.0.0.1
 
 }
 
-# Function to check and install MongoDB (Windows)
-function Ensure-MongoDB {
+# Function to install MongoDB (Windows)
+function Install-MongoDB {
     Write-Host "Checking for MongoDB installation..." -ForegroundColor Cyan
 
     # Try to find mongod.exe in PATH
@@ -578,8 +579,8 @@ function Ensure-MongoDB {
     throw "MongoDB installation failed. Run setup with -SkipMongoDB to bypass this check."
 }
 
-# Function to check and install Tesseract OCR (Windows)
-function Ensure-Tesseract {
+# Function to install Tesseract OCR (Windows)
+function Install-Tesseract {
     Write-Host "Checking for Tesseract OCR installation..." -ForegroundColor Cyan
 
     $tesseractCmd = Get-Command tesseract.exe -ErrorAction SilentlyContinue
@@ -670,7 +671,7 @@ if ($Reset) {
 # Ensure MongoDB is installed before proceeding (unless skipped)
 if (-not $SkipMongoDB) {
     try {
-        Ensure-MongoDB
+        Install-MongoDB
     }
     catch {
         Write-Host "MongoDB setup failed, but continuing with Python setup..." -ForegroundColor Yellow
@@ -683,7 +684,7 @@ else {
 
 # Ensure Tesseract OCR is installed for PDF/image OCR support
 try {
-    Ensure-Tesseract
+    Install-Tesseract
 }
 catch {
     Write-Host "Tesseract setup encountered an error: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -691,10 +692,10 @@ catch {
 }
 
 # Ensure .env file exists (create from template if missing)
-Ensure-EnvFile
+New-EnvFile
 
 # Ensure uv and arxiv-mcp-server are installed for MCP integrations
-Ensure-UvAndArxiv
+Install-UvAndArxiv
 
 Initialize-Windows -RequestedPythonVersion $PythonVersion
 

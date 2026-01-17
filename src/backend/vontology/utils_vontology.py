@@ -82,8 +82,9 @@ def validate_concept_name_for_id(name: str) -> Tuple[bool, Optional[str]]:
     Validate that a concept name can be safely converted to a concept ID.
 
     Constraints:
-    - No quotes (\" or ') — reserved for text boundaries in linkification
-    - Spaces are allowed and will be normalized to underscores in the ID
+    - Name must be a non-empty string
+    - Spaces and punctuation are permitted; they will be normalised away when
+      generating the concept_id
 
     Args:
         name: Raw concept name from user
@@ -95,12 +96,6 @@ def validate_concept_name_for_id(name: str) -> Tuple[bool, Optional[str]]:
     """
     if not name or not isinstance(name, str):
         return False, "Concept name must be a non-empty string"
-
-    if '"' in name or "'" in name:
-        return (
-            False,
-            "Concept names cannot contain quotes (\" or '). These are reserved for text boundaries.",
-        )
 
     return True, None
 
@@ -571,6 +566,9 @@ def is_type(node: dict) -> bool:
         return False
     rel = node.get("relationships", {}) or {}
     if is_nonempty_relationship(rel.get("is_a_type_of")):
+        return True
+    # Compatibility: treat predicate concept aliases as structural edges.
+    if is_nonempty_relationship(rel.get("#V#is_a_type_of")):
         return True
     return is_thing_concept(node)
 
