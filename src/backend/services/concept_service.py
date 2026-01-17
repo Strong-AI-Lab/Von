@@ -219,6 +219,19 @@ def create_concept(
             "Either 'concept_id' or 'vontology_path' must be provided."
         )
 
+    if concept_id:
+        try:
+            from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+
+            canonical_id = canonicalise_vontology_concept_id(concept_id)
+        except Exception:
+            canonical_id = None
+
+        if canonical_id:
+            concept_id = canonical_id
+        else:
+            raise InvalidConceptDataError("Concept ID is empty after normalisation.")
+
     now = datetime.now(timezone.utc)
 
     # Persist display name using text_relations (modern approach) instead of legacy names[] field

@@ -50,6 +50,8 @@ let chatSessionLinksSaveDebounceId = null;
 let chatSessionLinksDirtySessionId = null;
 let chatSessionLinksDirtyPayload = null;
 let chatSessionMetadataOpenKey = null;
+const LS_CHAT_SESSION_METADATA_COLLAPSED = 'von:chatSessionMetadataCollapsed';
+let chatSessionMetadataCollapsed = null;
 
 const chatSessionConceptMetaCache = new Map();
 const chatSessionConceptMetaInFlight = new Map();
@@ -3146,6 +3148,41 @@ function _renderChatSessionMetadataMessage(message) {
     el.classList.remove('is-hidden');
     el.innerHTML = '';
 
+    const isCollapsed = _isChatSessionMetadataCollapsed();
+
+    const header = document.createElement('div');
+    header.className = 'chat-session-metadata-header';
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'chat-session-metadata-toggle';
+    toggle.setAttribute('aria-expanded', String(!isCollapsed));
+    toggle.title = isCollapsed ? 'Show conversation context' : 'Hide conversation context';
+
+    const toggleText = document.createElement('span');
+    toggleText.className = 'chat-session-metadata-toggle-text';
+    toggleText.textContent = 'Conversation context';
+
+    const toggleIcon = document.createElement('span');
+    toggleIcon.className = 'chat-session-metadata-toggle-icon';
+    toggleIcon.textContent = '▾';
+
+    toggle.appendChild(toggleText);
+    toggle.appendChild(toggleIcon);
+    toggle.addEventListener('click', () => {
+        _setChatSessionMetadataCollapsed(!isCollapsed);
+        _renderChatSessionMetadataMessage(message);
+    });
+
+    header.appendChild(toggle);
+    el.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'chat-session-metadata-body';
+    if (isCollapsed) {
+        body.classList.add('is-collapsed');
+    }
+
     const row = document.createElement('div');
     row.className = 'chat-session-metadata-row';
     const label = document.createElement('div');
@@ -3161,7 +3198,8 @@ function _renderChatSessionMetadataMessage(message) {
     values.appendChild(msg);
     row.appendChild(label);
     row.appendChild(values);
-    el.appendChild(row);
+    body.appendChild(row);
+    el.appendChild(body);
 }
 
 function _buildChatSessionMetadataSuggestions({ inputEl, suggestionsEl, onPick, includeIndividuals = true }) {
@@ -3337,6 +3375,27 @@ function _escapeCssValue(value) {
     return raw.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
+function _isChatSessionMetadataCollapsed() {
+    if (typeof chatSessionMetadataCollapsed === 'boolean') {
+        return chatSessionMetadataCollapsed;
+    }
+    try {
+        chatSessionMetadataCollapsed = window.localStorage.getItem(LS_CHAT_SESSION_METADATA_COLLAPSED) === 'true';
+    } catch (_) {
+        chatSessionMetadataCollapsed = false;
+    }
+    return chatSessionMetadataCollapsed;
+}
+
+function _setChatSessionMetadataCollapsed(value) {
+    chatSessionMetadataCollapsed = !!value;
+    try {
+        window.localStorage.setItem(LS_CHAT_SESSION_METADATA_COLLAPSED, chatSessionMetadataCollapsed ? 'true' : 'false');
+    } catch (_) {
+        // ignore
+    }
+}
+
 function _renderChatSessionMetadataPanel({ sessionId, links, statusText, statusTone, disabled }) {
     const el = getChatSessionMetadataEl();
     if (!el) return;
@@ -3349,6 +3408,45 @@ function _renderChatSessionMetadataPanel({ sessionId, links, statusText, statusT
 
     el.classList.remove('is-hidden');
     el.innerHTML = '';
+
+    const isCollapsed = _isChatSessionMetadataCollapsed();
+    if (isCollapsed && chatSessionMetadataOpenKey) {
+        chatSessionMetadataOpenKey = null;
+    }
+
+    const header = document.createElement('div');
+    header.className = 'chat-session-metadata-header';
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'chat-session-metadata-toggle';
+    toggle.setAttribute('aria-expanded', String(!isCollapsed));
+    toggle.title = isCollapsed ? 'Show conversation context' : 'Hide conversation context';
+    toggle.disabled = false;
+
+    const toggleText = document.createElement('span');
+    toggleText.className = 'chat-session-metadata-toggle-text';
+    toggleText.textContent = 'Conversation context';
+
+    const toggleIcon = document.createElement('span');
+    toggleIcon.className = 'chat-session-metadata-toggle-icon';
+    toggleIcon.textContent = '▾';
+
+    toggle.appendChild(toggleText);
+    toggle.appendChild(toggleIcon);
+    toggle.addEventListener('click', () => {
+        _setChatSessionMetadataCollapsed(!isCollapsed);
+        _renderChatSessionMetadataPanel({
+            sessionId: sid,
+            links: activeChatSessionLinks?.links,
+            statusText: activeChatSessionLinks?.statusText,
+            statusTone: activeChatSessionLinks?.statusTone,
+            disabled: activeChatSessionLinks?.disabled
+        });
+    });
+
+    header.appendChild(toggle);
+    el.appendChild(header);
 
     if (statusText) {
         const statusRow = document.createElement('div');
@@ -3366,6 +3464,12 @@ function _renderChatSessionMetadataPanel({ sessionId, links, statusText, statusT
         statusRow.appendChild(label);
         statusRow.appendChild(values);
         el.appendChild(statusRow);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'chat-session-metadata-body';
+    if (isCollapsed) {
+        body.classList.add('is-collapsed');
     }
 
     const safeLinks = _normaliseChatSessionLinks(links);
@@ -3506,9 +3610,9 @@ function _renderChatSessionMetadataPanel({ sessionId, links, statusText, statusT
 
         row.appendChild(label);
         row.appendChild(values);
-        el.appendChild(row);
+        body.appendChild(row);
 
-        if (chatSessionMetadataOpenKey === group.key && !disabled) {
+        if (chatSessionMetadataOpenKey === group.key && !disabled && !isCollapsed) {
             // Wire autocomplete + focus.
             _buildChatSessionMetadataSuggestions({
                 inputEl: input,
@@ -3528,6 +3632,8 @@ function _renderChatSessionMetadataPanel({ sessionId, links, statusText, statusT
             }, 0);
         }
     }
+
+    el.appendChild(body);
 }
 
 function _setActiveChatSessionLinksState(state) {

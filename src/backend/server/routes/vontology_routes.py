@@ -2983,6 +2983,26 @@ def add_relationship_route():
             400,
         )
 
+    structural_aliases = {
+        "#V#is_a_type_of": "is_a_type_of",
+        "#V#has_subtype": "has_subtype",
+        "#V#is_an_instance_of": "is_an_instance_of",
+        "#V#has_instance": "has_instance",
+        "#V#related_to": "related_to",
+    }
+    if isinstance(kind, str) and kind in structural_aliases:
+        kind = structural_aliases[kind]
+
+    structural_aliases = {
+        "#V#is_a_type_of": "is_a_type_of",
+        "#V#has_subtype": "has_subtype",
+        "#V#is_an_instance_of": "is_an_instance_of",
+        "#V#has_instance": "has_instance",
+        "#V#related_to": "related_to",
+    }
+    if isinstance(kind, str) and kind in structural_aliases:
+        kind = structural_aliases[kind]
+
     if source_id == target_id:
         return (
             jsonify(

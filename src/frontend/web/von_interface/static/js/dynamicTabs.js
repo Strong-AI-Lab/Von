@@ -4480,6 +4480,15 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 kindSelect.setAttribute('aria-label', 'Relationship kind');
             }
             kindSelect.innerHTML = '';
+            const ensurePredicateOption = (predicateId, label) => {
+                if (!predicateId) return;
+                const exists = Array.from(kindSelect.options).some((opt) => opt?.value === predicateId);
+                if (exists) return;
+                const option = document.createElement('option');
+                option.value = predicateId;
+                option.textContent = label || predicateId;
+                kindSelect.appendChild(option);
+            };
             for (const opt of options) {
                 const o = document.createElement('option');
                 o.value = opt.val; o.textContent = opt.label; kindSelect.appendChild(o);
@@ -4585,6 +4594,10 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                         kindSelect.appendChild(po);
                     }
                 }
+                ensurePredicateOption(
+                    '#V#salient_binary_predicate_for_type',
+                    'salient binary predicate for type'
+                );
             } else {
                 // Individual tab: append salient predicates aggregated from all its types with caching
                 const cached = caches.salientPredicates.get(conceptId);

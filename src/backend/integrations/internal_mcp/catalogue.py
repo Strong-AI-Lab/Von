@@ -674,6 +674,24 @@ def _add_relationship(**kwargs):
         predicate_str = (
             predicate.strip() if isinstance(predicate, str) else str(predicate)
         )
+        structural_aliases = {
+            "#V#is_a_type_of": "is_a_type_of",
+            "#V#has_subtype": "has_subtype",
+            "#V#is_an_instance_of": "is_an_instance_of",
+            "#V#has_instance": "has_instance",
+            "#V#related_to": "related_to",
+        }
+        if predicate_str in structural_aliases:
+            predicate_str = structural_aliases[predicate_str]
+        structural_aliases = {
+            "#V#is_a_type_of": "is_a_type_of",
+            "#V#has_subtype": "has_subtype",
+            "#V#is_an_instance_of": "is_an_instance_of",
+            "#V#has_instance": "has_instance",
+            "#V#related_to": "related_to",
+        }
+        if predicate_str in structural_aliases:
+            predicate_str = structural_aliases[predicate_str]
         predicate_normalised = (
             predicate_str[3:] if predicate_str.startswith("#V#") else predicate_str
         )

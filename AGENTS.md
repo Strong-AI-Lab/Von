@@ -28,6 +28,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - Add a regression test for every state/format-loss bug (load -> edit -> save -> re-edit).
 - Prefer lightweight telemetry where practical (timings, counters, and error summaries) to support UX and future introspection.
 - For high-risk state changes (auth/org handling, DB writes, Vontology mutations), use a single authoritative pathway and reuse it consistently.
+- Strong rule: treat canonical predicate concepts (e.g. #V#is_a_type_of) as the authoritative ontology relations. Do not introduce or rely on structural relationship fields when predicate concepts exist; kind/classification should be derived from canonical predicate usage.
 - Do a quick factoring review whenever you touch write paths: search for existing canonical helpers/endpoints (especially for deletes/merges) and route through them rather than adding parallel pathways.
 - Treat ontology/predicate investigation as a normal first step for Vontology work: resolve candidate concepts by name (including spelling variants like programme/program), search for existing predicates/types before inventing new ones, and record the findings (and chosen canonical IDs) in the related Jira issue.
 - When uncertain, ask succinctly; do not guess or fabricate behaviour.

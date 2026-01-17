@@ -376,5 +376,6 @@
     "**/coverage": true,
     "**/dist": true
   },
-  "typescript.enablePromptUseWorkspaceTsdk": true
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "chatgpt.openOnStartup": false
 }
