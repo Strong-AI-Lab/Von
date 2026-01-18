@@ -2915,6 +2915,27 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "usage": None,
             "calls": [],
         }
+
+        def _record_stage_llm_call(
+            *,
+            call_type: str,
+            model_name: str | None,
+            duration_ms: float | None,
+            usage: dict | None = None,
+            note: str | None = None,
+            stage: str | None = None,
+        ) -> None:
+            payload = {
+                "type": call_type,
+                "model": model_name,
+                "duration_ms": duration_ms,
+                "usage": usage,
+            }
+            if stage:
+                payload["stage"] = stage
+            if note:
+                payload["note"] = note
+            llm_interaction["calls"].append(payload)
         if orchestrator is None:
             llm_start_perf = time.perf_counter()
             response_text = llm_client.generate(
@@ -3245,14 +3266,56 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             "- You MUST include a short section titled 'Writes ledger (authoritative)' that reflects the tool writes ledger without contradiction.\n"
                         )
 
-                        synthesis_response = llm_client.generate(
-                            prompt="Generate <screen> display content",
-                            context=[
-                                {"role": "system", "content": synthesis_system},
-                                {"role": "user", "content": synthesis_user},
-                            ],
-                            model=model_name,
-                        )
+                        synthesis_response = None
+                        if orchestrator is not None and hasattr(
+                            orchestrator, "_run_llm_with_fallbacks"
+                        ):
+                            try:
+                                policy_state, _ = orchestrator._load_workflow_model_policy(
+                                    request_language
+                                )
+                                synthesis_response, screen_model_used, _ = (
+                                    orchestrator._run_llm_with_fallbacks(
+                                        stage="screen_backfill",
+                                        prompt="Generate <screen> display content",
+                                        context=[
+                                            {
+                                                "role": "system",
+                                                "content": synthesis_system,
+                                            },
+                                            {"role": "user", "content": synthesis_user},
+                                        ],
+                                        default_client=llm_client,
+                                        default_model=model_name,
+                                        policy_state=policy_state,
+                                        user_concept_id=user_concept_id,
+                                        org_concept_id=org_concept_id,
+                                        llm_calls_log=llm_interaction["calls"],
+                                        aux_log=auxiliary_llm_calls,
+                                        record_llm_call=_record_stage_llm_call,
+                                    )
+                                )
+                            except Exception:
+                                synthesis_response = None
+                        if synthesis_response is None:
+                            llm_start = time.perf_counter()
+                            screen_model_used = model_name
+                            synthesis_response = llm_client.generate(
+                                prompt="Generate <screen> display content",
+                                context=[
+                                    {"role": "system", "content": synthesis_system},
+                                    {"role": "user", "content": synthesis_user},
+                                ],
+                                model=screen_model_used,
+                            )
+                            _record_stage_llm_call(
+                                call_type="llm.generate",
+                                model_name=screen_model_used,
+                                duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                                usage=None,
+                                note="Screen backfill synthesis (legacy).",
+                                stage="screen_backfill",
+                            )
 
                         screen_candidate = _extract_screen_only(str(synthesis_response))
                         if not screen_candidate:
@@ -3674,6 +3737,95 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             if normalised_messages:
                 sent_context_stats_messages = normalised_messages
 
+        buttonify_options: list[str] = []
+        buttonify_meta: dict[str, Any] | None = None
+        buttonify_enabled = os.getenv("VON_BUTTONIFY_MODEL_ENABLE", "0").lower() in {
+            "1",
+            "true",
+        }
+        if buttonify_enabled and isinstance(response_text, str) and response_text:
+            buttonify_prompt = (
+                "Extract up to 4 short quick-reply options for the user. "
+                "Each option must be 1-4 words, imperative or yes/no style, and safe to send verbatim. "
+                "Return ONLY a JSON array of strings (no prose, no Markdown). "
+                "If there are no clear options, return []."
+            )
+            buttonify_context = [
+                {
+                    "role": "system",
+                    "content": "You generate quick-reply options for a chat UI.",
+                },
+                {
+                    "role": "user",
+                    "content": f"User message:\n{prompt_text}\n\nAssistant response:\n{response_text}",
+                },
+            ]
+            buttonify_response = None
+            buttonify_model_used = model_name
+            if orchestrator is not None and hasattr(
+                orchestrator, "_run_llm_with_fallbacks"
+            ):
+                try:
+                    policy_state, _ = orchestrator._load_workflow_model_policy(
+                        request_language
+                    )
+                    buttonify_response, buttonify_model_used, _ = (
+                        orchestrator._run_llm_with_fallbacks(
+                            stage="buttonify",
+                            prompt=buttonify_prompt,
+                            context=buttonify_context,
+                            default_client=llm_client,
+                            default_model=model_name,
+                            policy_state=policy_state,
+                            user_concept_id=user_concept_id,
+                            org_concept_id=org_concept_id,
+                            llm_calls_log=llm_interaction["calls"],
+                            aux_log=auxiliary_llm_calls,
+                            record_llm_call=_record_stage_llm_call,
+                        )
+                    )
+                except Exception:
+                    buttonify_response = None
+            if buttonify_response is None:
+                llm_start = time.perf_counter()
+                buttonify_response = llm_client.generate(
+                    prompt=buttonify_prompt,
+                    context=buttonify_context,
+                    model=buttonify_model_used,
+                )
+                _record_stage_llm_call(
+                    call_type="llm.generate",
+                    model_name=buttonify_model_used,
+                    duration_ms=(time.perf_counter() - llm_start) * 1000.0,
+                    usage=None,
+                    note="Buttonify quick-reply extraction (legacy).",
+                    stage="buttonify",
+                )
+            try:
+                import json as _json
+
+                parsed = _json.loads(str(buttonify_response))
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if not isinstance(item, str):
+                            continue
+                        cleaned = item.strip()
+                        if not cleaned:
+                            continue
+                        if len(cleaned.split()) > 4:
+                            continue
+                        if len(cleaned) > 60:
+                            continue
+                        buttonify_options.append(cleaned)
+            except Exception:
+                buttonify_options = []
+
+            buttonify_meta = {
+                "enabled": True,
+                "model": buttonify_model_used,
+                "options": buttonify_options,
+            }
+
         context_stats = _calculate_context_stats(sent_context_stats_messages)
 
         # stored_context should reflect the persisted user/session history when authenticated,
@@ -3796,6 +3948,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 else []
             ),
             "aux_llm_calls": auxiliary_llm_calls,
+            "buttonify": buttonify_meta,
         }
 
         # Derive warnings from debug info and add to structure

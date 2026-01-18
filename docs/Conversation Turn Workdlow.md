@@ -84,10 +84,14 @@ When markdown rendering is active, the UI transforms certain patterns into promp
 - Shift-click inserts without auto-send.
 - Auto-send uses `submitChatPromptImmediately()`. See [src/frontend/web/von_interface/static/js/chatTab.js](src/frontend/web/von_interface/static/js/chatTab.js#L740-L820).
 
+### Optional model-driven buttonify
+When `VON_BUTTONIFY_MODEL_ENABLE=1`, the backend runs a lightweight model pass (stage `buttonify`) to emit structured quick replies in `llm_debug.buttonify.options`. The UI renders these buttons if present, otherwise it falls back to the heuristic transforms above.
+
 ## Observability and Trace Artefacts
 - **LLM debug payload**: response, tool invocations, tool stats, context stats, presenter metadata. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3615-L3845).
 - **Workflow traces**: stored as execution traces and surfaced via `aux_llm_calls` when enabled. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3400-L3465).
 - **Tool-use progress**: emits progress updates for the UI “Thinking…” indicator. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L603-L705).
+- **Model registry snapshot**: summary metadata (source + sample models) attached to `aux_llm_calls` and workflow traces. See [src/backend/integrations/internal_mcp/orchestrator.py](src/backend/integrations/internal_mcp/orchestrator.py#L3668-L3730).
 
 ## Observed Failure Modes (from recent traces)
 1. **Screen backfill over-asserts tool outcomes**

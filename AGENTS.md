@@ -15,6 +15,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 9. Prefer small, composable functions; avoid monolithic helpers.
 10. Always check VS Code Problems panel (or run `get_errors`) after edits and when errors are reported. If the Problems panel is not available, run `pyright` as a proxy.
 11. Enable pre-commit guardrails: `git config core.hooksPath .githooks`.
+12. **STOP**: Never run backend tests against `VON_DB_NAME=von_db`. Always use the test DB (`VON_DB_NAME=test_von_db`) or the `pytest:backend (test db)` task.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.

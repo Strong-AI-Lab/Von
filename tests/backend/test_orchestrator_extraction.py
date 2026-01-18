@@ -150,6 +150,7 @@ def test_assess_missing_tool_call_prefers_parse_error_over_fence_and_classifier(
         interpretation=None,
         llm_client=llm,
         model="primary-model",
+        classifier_model="classifier-model",
         aux_log=aux_log,
         tool_call_parse_error=ToolCallParsingError("bad", raw_response="{bad json"),
     )
@@ -172,6 +173,7 @@ def test_assess_missing_tool_call_uses_fenced_json_reason_without_classifier_cal
         interpretation=interpretation,
         llm_client=llm,
         model="primary-model",
+        classifier_model="classifier-model",
         aux_log=aux_log,
         tool_call_parse_error=None,
     )
@@ -196,6 +198,7 @@ def test_assess_missing_tool_call_retries_on_json_action_without_classifier_call
         interpretation=interpretation,
         llm_client=llm,
         model="primary-model",
+        classifier_model="classifier-model",
         aux_log=aux_log,
         tool_call_parse_error=None,
     )
@@ -227,6 +230,7 @@ def test_assess_missing_tool_call_backstops_classifier_no_with_heuristic_yes():
         interpretation=interpretation,
         llm_client=llm,
         model="primary-model",
+        classifier_model="classifier-model",
         aux_log=aux_log,
         tool_call_parse_error=None,
     )

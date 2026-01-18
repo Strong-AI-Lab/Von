@@ -860,6 +860,56 @@ function insertTextIntoChatPrompt(text) {
     }
 }
 
+function appendQuickReplyButtons(container, options) {
+    if (!container || !Array.isArray(options) || options.length === 0) {
+        return;
+    }
+
+    const cleaned = options
+        .map((opt) => String(opt ?? '').trim())
+        .filter((opt) => opt && opt.length <= 60);
+
+    if (!cleaned.length) {
+        return;
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'chat-quick-replies';
+    wrapper.style.cssText = 'margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;';
+
+    const label = document.createElement('span');
+    label.textContent = 'Quick replies:';
+    label.style.cssText = 'font-size: 0.85em; color: #6c757d; margin-right: 4px;';
+    wrapper.appendChild(label);
+
+    for (const optionText of cleaned) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'chat-insert-prompt-button';
+        btn.textContent = optionText;
+        btn.title = 'Insert into chat prompt and send (Shift inserts without sending)';
+        btn.setAttribute('aria-label', `Insert into chat prompt: ${optionText}`);
+        btn.addEventListener('click', (e) => {
+            try {
+                e.preventDefault();
+                e.stopPropagation();
+            } catch (_) {
+                // Ignore.
+            }
+
+            insertTextIntoChatPrompt(optionText);
+
+            const shiftHeld = !!(e && e.shiftKey);
+            if (!shiftHeld) {
+                submitChatPromptImmediately();
+            }
+        });
+        wrapper.appendChild(btn);
+    }
+
+    container.appendChild(wrapper);
+}
+
 function submitChatPromptImmediately() {
     const sendButton = document.getElementById('sendButton');
     if (sendButton && typeof sendButton.click === 'function') {
@@ -6575,6 +6625,12 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
             messageContent.appendChild(messageHeader);
             messageContent.appendChild(messageText);
+            try {
+                const debugData = turnId ? llmDebugData.get(turnId) : null;
+                appendQuickReplyButtons(messageContent, debugData?.buttonify?.options);
+            } catch (_) {
+                // Ignore quick-reply rendering failures.
+            }
             messageContainer.appendChild(vonImage);
             messageContainer.appendChild(messageContent);
 
