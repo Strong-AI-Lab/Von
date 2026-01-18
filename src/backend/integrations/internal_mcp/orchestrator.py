@@ -142,6 +142,15 @@ class _WorkflowModelPolicyState:
     errors: Sequence[str]
 
 
+@dataclass(frozen=True)
+class _ModelCandidate:
+    provider: str | None
+    model: str | None
+    raw: str
+    source: str
+    host: str | None = None
+
+
 class ToolCallParsingError(Exception):
     """Raised when a model returns an invalid tool call payload."""
 
@@ -416,6 +425,7 @@ class InternalMCPChatOrchestrator:
                 interpretation=data.get("interpretation"),
                 llm_client=request.environment.llm_client,
                 model=request.environment.model,
+                classifier_model=data.get("classifier_model"),
                 aux_log=aux_log,
                 tool_call_parse_error=data.get("tool_call_parse_error"),
             ),
@@ -593,20 +603,60 @@ class InternalMCPChatOrchestrator:
         except Exception:
             pass
 
-        llm_start = time.perf_counter()
-        retry_response = request.environment.llm_client.generate(
-            prompt_text, context=augmented_context, model=request.environment.model
-        )
-        duration_ms = (time.perf_counter() - llm_start) * 1000.0
+        policy_state = data.get("policy_state")
+        default_model = data.get("default_model")
+        user_concept_id = data.get("user_concept_id")
+        org_concept_id = data.get("org_concept_id")
+        registry_snapshot = data.get("registry_snapshot")
 
-        if callable(record_llm_call):
-            record_llm_call(
-                call_type="llm.generate",
-                model_name=request.environment.model,
-                duration_ms=duration_ms,
-                usage=None,
-                note="Missing tool call retry prompt (workflow).",
+        retry_response = None
+        duration_ms = 0.0
+
+        if isinstance(policy_state, _WorkflowModelPolicyState) and callable(
+            record_llm_call
+        ):
+            llm_start = time.perf_counter()
+            retry_response, _, _ = self._run_llm_with_fallbacks(
+                stage="tool_recovery",
+                prompt=prompt_text,
+                context=augmented_context,
+                default_client=request.environment.llm_client,
+                default_model=default_model or request.environment.model,
+                policy_state=policy_state,
+                registry_snapshot=(
+                    registry_snapshot
+                    if isinstance(registry_snapshot, Mapping)
+                    else None
+                ),
+                user_concept_id=(
+                    user_concept_id
+                    if isinstance(user_concept_id, str)
+                    else request.environment.user_namespace
+                ),
+                org_concept_id=(
+                    org_concept_id if isinstance(org_concept_id, str) else None
+                ),
+                llm_calls_log=data.get("llm_calls_log") or [],
+                aux_log=aux_log,
+                record_llm_call=record_llm_call,
             )
+            duration_ms = (time.perf_counter() - llm_start) * 1000.0
+        else:
+            llm_start = time.perf_counter()
+            retry_response = request.environment.llm_client.generate(
+                prompt_text, context=augmented_context, model=request.environment.model
+            )
+            duration_ms = (time.perf_counter() - llm_start) * 1000.0
+
+            if callable(record_llm_call):
+                record_llm_call(
+                    call_type="llm.generate",
+                    model_name=request.environment.model,
+                    duration_ms=duration_ms,
+                    usage=None,
+                    note="Missing tool call retry prompt (workflow).",
+                    stage="tool_recovery",
+                )
 
         try:
             aux_log.append(
@@ -751,14 +801,55 @@ class InternalMCPChatOrchestrator:
             f"{screen_text}\n"
         )
 
-        narration_response = request.environment.llm_client.generate(
-            prompt="Generate <spoken> talk track",
-            context=[
-                {"role": "system", "content": narration_system},
-                {"role": "user", "content": narration_user},
-            ],
-            model=request.environment.model,
-        )
+        policy_state = request.data.get("policy_state")
+        default_model = request.data.get("default_model")
+        record_llm_call = request.data.get("record_llm_call")
+        aux_llm_calls = request.data.get("aux_llm_calls")
+        user_concept_id = request.data.get("user_concept_id")
+        org_concept_id = request.data.get("org_concept_id")
+        registry_snapshot = request.data.get("registry_snapshot")
+
+        if (
+            isinstance(policy_state, _WorkflowModelPolicyState)
+            and callable(record_llm_call)
+            and isinstance(aux_llm_calls, list)
+        ):
+            narration_response, _, _ = self._run_llm_with_fallbacks(
+                stage="narration",
+                prompt="Generate <spoken> talk track",
+                context=[
+                    {"role": "system", "content": narration_system},
+                    {"role": "user", "content": narration_user},
+                ],
+                default_client=request.environment.llm_client,
+                default_model=default_model or request.environment.model,
+                policy_state=policy_state,
+                registry_snapshot=(
+                    registry_snapshot
+                    if isinstance(registry_snapshot, Mapping)
+                    else None
+                ),
+                user_concept_id=(
+                    user_concept_id
+                    if isinstance(user_concept_id, str)
+                    else request.environment.user_namespace
+                ),
+                org_concept_id=(
+                    org_concept_id if isinstance(org_concept_id, str) else None
+                ),
+                llm_calls_log=request.data.get("llm_calls_log") or [],
+                aux_log=aux_llm_calls,
+                record_llm_call=record_llm_call,
+            )
+        else:
+            narration_response = request.environment.llm_client.generate(
+                prompt="Generate <spoken> talk track",
+                context=[
+                    {"role": "system", "content": narration_system},
+                    {"role": "user", "content": narration_user},
+                ],
+                model=request.environment.model,
+            )
 
         spoken = self._coerce_spoken_text(narration_response)
         if not spoken:
@@ -1342,6 +1433,181 @@ class InternalMCPChatOrchestrator:
         return candidate or None
 
     @staticmethod
+    def _parse_policy_model_candidate(value: Any) -> _ModelCandidate | None:
+        if not isinstance(value, str):
+            return None
+
+        raw = value.strip()
+        if not raw:
+            return None
+
+        if raw == "active_llm":
+            return _ModelCandidate(
+                provider=None,
+                model=None,
+                raw=raw,
+                source="active_llm",
+                host=None,
+            )
+
+        candidate = raw
+        if candidate.startswith("#V#"):
+            candidate = candidate[3:]
+
+        provider = None
+        model = candidate
+        host = None
+
+        if "://" in candidate:
+            provider = "ollama"
+            host, _, model = candidate.partition("://")
+            model = model.strip()
+            host = host.strip()
+        elif ":" in candidate:
+            provider, _, model = candidate.partition(":")
+            provider = provider.strip().lower() or None
+            model = model.strip()
+
+        if not model:
+            return None
+
+        return _ModelCandidate(
+            provider=provider,
+            model=model,
+            raw=raw,
+            source="policy",
+            host=host,
+        )
+
+    @staticmethod
+    def _resolve_registry_model_candidate(
+        value: Any,
+        registry_snapshot: Mapping[str, Any] | None,
+    ) -> Any:
+        if not isinstance(value, str):
+            return value
+
+        if not registry_snapshot:
+            return value
+
+        models = registry_snapshot.get("models")
+        if not isinstance(models, list):
+            return value
+
+        raw = value.strip()
+        if not raw:
+            return value
+
+        for entry in models:
+            if not isinstance(entry, Mapping):
+                continue
+            if raw in {
+                entry.get("concept_id"),
+                entry.get("registry_entry_id"),
+            }:
+                model_id = entry.get("model_id")
+                if isinstance(model_id, str):
+                    model_id = model_id.strip()
+                else:
+                    model_id = ""
+                provider = entry.get("provider")
+                if (
+                    model_id
+                    and isinstance(provider, str)
+                    and provider.strip()
+                    and ":" not in model_id
+                ):
+                    model_id = f"{provider.strip().lower()}:{model_id}"
+                return model_id or value
+
+        return value
+
+    def _stage_model_candidates(
+        self,
+        *,
+        stage: str,
+        default_model: Optional[str],
+        policy_state: _WorkflowModelPolicyState,
+        registry_snapshot: Mapping[str, Any] | None = None,
+    ) -> list[_ModelCandidate]:
+        candidates: list[_ModelCandidate] = []
+
+        if not policy_state.enabled or not policy_state.policy:
+            return [
+                _ModelCandidate(
+                    provider=None,
+                    model=default_model,
+                    raw="active_llm",
+                    source="active_llm",
+                    host=None,
+                )
+            ]
+
+        stages = None
+        if policy_state.policy and isinstance(
+            policy_state.policy.get("stages"), Mapping
+        ):
+            stages = policy_state.policy.get("stages")
+
+        stage_config = None
+        if isinstance(stages, Mapping):
+            stage_config = stages.get(stage)
+
+        primary = None
+        fallback = None
+        if isinstance(stage_config, Mapping):
+            primary = stage_config.get("primary")
+            fallback = stage_config.get("fallback")
+
+        primary = self._resolve_registry_model_candidate(primary, registry_snapshot)
+        fallback = (
+            [
+                self._resolve_registry_model_candidate(item, registry_snapshot)
+                for item in fallback
+            ]
+            if isinstance(fallback, list)
+            else fallback
+        )
+
+        primary_candidate = self._parse_policy_model_candidate(primary)
+        if primary_candidate:
+            candidates.append(primary_candidate)
+
+        if isinstance(fallback, list):
+            for item in fallback:
+                fallback_candidate = self._parse_policy_model_candidate(item)
+                if fallback_candidate:
+                    candidates.append(fallback_candidate)
+
+        # Always include active LLM as last resort.
+        candidates.append(
+            _ModelCandidate(
+                provider=None,
+                model=default_model,
+                raw="active_llm",
+                source="active_llm",
+                host=None,
+            )
+        )
+
+        # De-duplicate by provider+model+host+source
+        seen: set[tuple[str | None, str | None, str | None, str]] = set()
+        unique: list[_ModelCandidate] = []
+        for candidate in candidates:
+            key = (
+                candidate.provider,
+                candidate.model,
+                candidate.host,
+                candidate.source,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+
+        return unique
+
+    @staticmethod
     def _is_workflow_model_policy_enabled() -> bool:
         return os.getenv("VON_WORKFLOW_MODEL_POLICY_ENABLE", "0").lower() in {
             "1",
@@ -1487,27 +1753,291 @@ class InternalMCPChatOrchestrator:
         stage: str,
         default_model: Optional[str],
         policy_state: _WorkflowModelPolicyState,
+        registry_snapshot: Mapping[str, Any] | None = None,
     ) -> Optional[str]:
-        if not policy_state.enabled or not policy_state.policy:
+        if not policy_state.enabled:
             return default_model
 
-        stages = policy_state.policy.get("stages")
-        if not isinstance(stages, Mapping):
-            return default_model
+        candidates = self._stage_model_candidates(
+            stage=stage,
+            default_model=default_model,
+            policy_state=policy_state,
+            registry_snapshot=registry_snapshot,
+        )
 
-        stage_config = stages.get(stage)
-        if not isinstance(stage_config, Mapping):
-            return default_model
+        for candidate in candidates:
+            if candidate.source == "active_llm":
+                return default_model
+            return self._normalise_llm_model_name(candidate.model) or default_model
 
-        primary = stage_config.get("primary")
-        if not isinstance(primary, str) or not primary.strip():
-            return default_model
+        return default_model
 
-        primary = primary.strip()
-        if primary == "active_llm":
-            return default_model
+    def _create_client_for_candidate(
+        self,
+        candidate: _ModelCandidate,
+        *,
+        default_client: Any,
+        default_model: Optional[str],
+        user_concept_id: Optional[str],
+        org_concept_id: Optional[str],
+    ) -> tuple[Any, Optional[str], Mapping[str, Any]]:
+        telemetry: dict[str, Any] = {
+            "raw": candidate.raw,
+            "provider": candidate.provider,
+            "model": candidate.model,
+            "host": candidate.host,
+            "source": candidate.source,
+        }
 
-        return self._normalise_llm_model_name(primary) or default_model
+        if candidate.source == "active_llm":
+            return default_client, default_model, telemetry
+
+        provider = candidate.provider
+        model = self._normalise_llm_model_name(candidate.model)
+
+        if provider in {None, "", "openai", "ollama", "gemini"}:
+            pass
+        else:
+            telemetry["error"] = "unsupported_provider"
+            return default_client, default_model, telemetry
+
+        try:
+            from src.backend.languagemodels.llm_interface import get_llm_client
+
+            if provider:
+                client = get_llm_client(
+                    client_type=provider,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                )
+            else:
+                client = default_client
+            return client, model or default_model, telemetry
+        except Exception as exc:
+            telemetry["error"] = str(exc)
+            return default_client, default_model, telemetry
+
+    def _run_llm_with_fallbacks(
+        self,
+        *,
+        stage: str,
+        prompt: str,
+        context: Optional[Sequence[Mapping[str, Any]]],
+        default_client: Any,
+        default_model: Optional[str],
+        policy_state: _WorkflowModelPolicyState,
+        registry_snapshot: Mapping[str, Any] | None,
+        user_concept_id: Optional[str],
+        org_concept_id: Optional[str],
+        llm_calls_log: list[dict[str, Any]],
+        aux_log: list[Mapping[str, Any]],
+        record_llm_call: Callable[..., Any],
+    ) -> tuple[str, Optional[str], Mapping[str, Any]]:
+        candidates = self._stage_model_candidates(
+            stage=stage,
+            default_model=default_model,
+            policy_state=policy_state,
+            registry_snapshot=registry_snapshot,
+        )
+
+        errors: list[Mapping[str, Any]] = []
+        last_exception: Exception | None = None
+
+        for candidate in candidates:
+            client, model_name, telemetry = self._create_client_for_candidate(
+                candidate,
+                default_client=default_client,
+                default_model=default_model,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
+
+            llm_start = time.perf_counter()
+            try:
+                response = client.generate(
+                    prompt,
+                    context=cast(Optional[List[Dict[str, Any]]], context),
+                    model=model_name,
+                )
+                duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                record_llm_call(
+                    call_type="llm.generate",
+                    model_name=model_name,
+                    duration_ms=duration_ms,
+                    usage=None,
+                    note=("Fallback chain generate()" if errors else "llm.generate"),
+                    stage=stage,
+                )
+                aux_log.append(
+                    {
+                        "type": "workflow_model_policy_stage",
+                        "stage": stage,
+                        "selected": {
+                            **telemetry,
+                            "model_resolved": model_name,
+                        },
+                        "fallback_used": bool(errors),
+                        "errors": list(errors),
+                    }
+                )
+                return response, model_name, telemetry
+            except Exception as exc:
+                duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                record_llm_call(
+                    call_type="llm.generate",
+                    model_name=model_name,
+                    duration_ms=duration_ms,
+                    usage=None,
+                    note="llm.generate failed; trying fallback",
+                    stage=stage,
+                )
+                error_entry = {
+                    "candidate": telemetry,
+                    "model_resolved": model_name,
+                    "error": str(exc),
+                }
+                errors.append(error_entry)
+                last_exception = exc
+                continue
+
+        if errors:
+            aux_log.append(
+                {
+                    "type": "workflow_model_policy_stage",
+                    "stage": stage,
+                    "selected": None,
+                    "fallback_used": True,
+                    "errors": list(errors),
+                }
+            )
+
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("No model candidates available for stage")
+
+    def _run_llm_with_tools_fallbacks(
+        self,
+        *,
+        stage: str,
+        prompt: str,
+        context: Optional[Sequence[Mapping[str, Any]]],
+        tool_definitions: Sequence[ToolDefinition],
+        default_client: Any,
+        default_model: Optional[str],
+        policy_state: _WorkflowModelPolicyState,
+        registry_snapshot: Mapping[str, Any] | None,
+        user_concept_id: Optional[str],
+        org_concept_id: Optional[str],
+        llm_calls_log: list[dict[str, Any]],
+        aux_log: list[Mapping[str, Any]],
+        record_llm_call: Callable[..., Any],
+    ) -> tuple[LLMResponse, Optional[str], Mapping[str, Any]]:
+        candidates = self._stage_model_candidates(
+            stage=stage,
+            default_model=default_model,
+            policy_state=policy_state,
+            registry_snapshot=registry_snapshot,
+        )
+
+        errors: list[Mapping[str, Any]] = []
+        last_exception: Exception | None = None
+
+        for candidate in candidates:
+            client, model_name, telemetry = self._create_client_for_candidate(
+                candidate,
+                default_client=default_client,
+                default_model=default_model,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+            )
+
+            supports_structured = (
+                hasattr(client, "generate_with_tools")
+                and hasattr(client, "_should_use_structured_calling")
+                and client._should_use_structured_calling()
+            )
+            if not supports_structured:
+                errors.append(
+                    {
+                        "candidate": telemetry,
+                        "model_resolved": model_name,
+                        "error": "structured_tool_calling_disabled",
+                    }
+                )
+                continue
+
+            llm_start = time.perf_counter()
+            try:
+                llm_response = client.generate_with_tools(
+                    prompt=prompt,
+                    available_tools=list(tool_definitions),
+                    context=cast(Optional[List[Dict[str, Any]]], context),
+                    model=model_name,
+                    system_message=None,
+                )
+                duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                record_llm_call(
+                    call_type="llm.generate_with_tools",
+                    model_name=(
+                        llm_response.model
+                        if isinstance(getattr(llm_response, "model", None), str)
+                        else model_name
+                    ),
+                    duration_ms=duration_ms,
+                    usage=(
+                        llm_response.usage
+                        if isinstance(getattr(llm_response, "usage", None), Mapping)
+                        else None
+                    ),
+                    stage=stage,
+                )
+                aux_log.append(
+                    {
+                        "type": "workflow_model_policy_stage",
+                        "stage": stage,
+                        "selected": {
+                            **telemetry,
+                            "model_resolved": model_name,
+                        },
+                        "fallback_used": bool(errors),
+                        "errors": list(errors),
+                    }
+                )
+                return llm_response, model_name, telemetry
+            except Exception as exc:
+                duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                record_llm_call(
+                    call_type="llm.generate_with_tools",
+                    model_name=model_name,
+                    duration_ms=duration_ms,
+                    usage=None,
+                    note="llm.generate_with_tools failed; trying fallback",
+                    stage=stage,
+                )
+                errors.append(
+                    {
+                        "candidate": telemetry,
+                        "model_resolved": model_name,
+                        "error": str(exc),
+                    }
+                )
+                last_exception = exc
+                continue
+
+        if errors:
+            aux_log.append(
+                {
+                    "type": "workflow_model_policy_stage",
+                    "stage": stage,
+                    "selected": None,
+                    "fallback_used": True,
+                    "errors": list(errors),
+                }
+            )
+
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("No structured model candidates available for stage")
 
     def _inject_prompt_variable(self, prompt_text: str, *, key: str, value: str) -> str:
         """Ensure a prompt receives a variable payload.
@@ -2793,6 +3323,7 @@ class InternalMCPChatOrchestrator:
         interpretation: _ModelTurnInterpretation | None,
         llm_client: Any,
         model: str | None,
+        classifier_model: str | None,
         aux_log: list[Mapping[str, Any]],
         tool_call_parse_error: ToolCallParsingError | None,
     ) -> _MissingToolCallAssessment:
@@ -2879,7 +3410,7 @@ class InternalMCPChatOrchestrator:
                 classifier_invoked, llm_flag = self._llm_detects_missing_tool_call(
                     response_text,
                     llm_client,
-                    fallback_model=model,
+                    fallback_model=classifier_model or model,
                     aux_log=aux_log,
                     path=path,
                 )
@@ -3116,6 +3647,7 @@ class InternalMCPChatOrchestrator:
             duration_ms: float | None,
             usage: Mapping[str, Any] | None = None,
             note: str | None = None,
+            stage: str | None = None,
         ) -> None:
             payload: dict[str, Any] = {
                 "type": call_type,
@@ -3123,6 +3655,8 @@ class InternalMCPChatOrchestrator:
                 "duration_ms": duration_ms,
                 "usage": dict(usage) if isinstance(usage, Mapping) else None,
             }
+            if isinstance(stage, str) and stage.strip():
+                payload["stage"] = stage.strip()
             if isinstance(note, str) and note.strip():
                 payload["note"] = note.strip()
             llm_calls.append(payload)
@@ -3201,6 +3735,10 @@ class InternalMCPChatOrchestrator:
             if not trace_enabled or trace is None or trace_store_fn is None:
                 return
             try:
+                trace.metadata["llm_calls"] = list(llm_calls)
+                usage_totals = _aggregate_usage_total()
+                if usage_totals is not None:
+                    trace.metadata["llm_usage"] = dict(usage_totals)
                 if status == "failed" and error:
                     trace.finish_failed(error)
                 else:
@@ -3227,12 +3765,162 @@ class InternalMCPChatOrchestrator:
             if trace_enabled and trace is not None:
                 trace.metadata["workflow_model_policy"] = dict(policy_telemetry)
 
+        registry_snapshot: Mapping[str, Any] | None = None
+        try:
+            from ...services.model_registry_service import get_model_registry_snapshot
+
+            registry_snapshot = get_model_registry_snapshot(
+                preferred_language=preferred_language
+            )
+        except Exception:
+            registry_snapshot = None
+
+        if isinstance(registry_snapshot, Mapping):
+            models_value = registry_snapshot.get("models")
+            model_count = len(models_value) if isinstance(models_value, list) else None
+            model_sample = models_value[:5] if isinstance(models_value, list) else None
+            registry_summary = {
+                "type": "model_registry",
+                "source": registry_snapshot.get("source"),
+                "model_count": model_count,
+                "models": model_sample,
+            }
+            aux_llm_calls.append(registry_summary)
+            if trace_enabled and trace is not None:
+                trace.metadata["model_registry"] = dict(registry_summary)
+
+        user_concept_id = user_namespace
+        org_concept_id = None
+
         def _model_for_stage(stage: str) -> Optional[str]:
             return self._select_model_for_stage(
                 stage=stage,
                 default_model=model,
                 policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
             )
+
+        def _summarise_tool_messages_for_critic(
+            messages: Sequence[Mapping[str, Any]],
+        ) -> str:
+            if not messages:
+                return "(no tool calls)"
+
+            lines: list[str] = []
+            for msg in messages[:20]:
+                content = msg.get("content") if isinstance(msg, Mapping) else None
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                snippet = content.strip().replace("\r\n", "\n")
+                if len(snippet) > 800:
+                    snippet = snippet[:800] + "\n... [truncated]"
+                lines.append(snippet)
+            return "\n\n".join(lines) if lines else "(no tool calls)"
+
+        def _maybe_apply_critic(
+            response_text: str,
+            *,
+            tool_messages_for_critic: Sequence[Mapping[str, Any]] = (),
+        ) -> str:
+            critic_enabled = os.getenv("VON_CRITIC_ENABLE", "0").lower() in {
+                "1",
+                "true",
+            }
+            if not critic_enabled:
+                return response_text
+
+            if "<screen>" in response_text or "<spoken>" in response_text:
+                return response_text
+
+            tool_summary = _summarise_tool_messages_for_critic(tool_messages_for_critic)
+            critic_prompt = (
+                "Review the assistant response for factual consistency and policy compliance. "
+                'If it is acceptable, return JSON: {"approve": true}. '
+                'If it needs correction, return JSON: {"approve": false, "revised_response": "...", "notes": "..."}. '
+                "Return ONLY JSON."
+            )
+            critic_context = [
+                {
+                    "role": "system",
+                    "content": "You are a strict reviewer. Use New Zealand English spelling.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "User prompt:\n"
+                        f"{prompt}\n\n"
+                        "Assistant response:\n"
+                        f"{response_text}\n\n"
+                        "Tool outputs (authoritative):\n"
+                        f"{tool_summary}\n"
+                    ),
+                },
+            ]
+
+            critic_response = None
+            critic_model_used = _model_for_stage("critic")
+            try:
+                critic_response, critic_model_used, _ = self._run_llm_with_fallbacks(
+                    stage="critic",
+                    prompt=critic_prompt,
+                    context=critic_context,
+                    default_client=llm_client,
+                    default_model=critic_model_used,
+                    policy_state=policy_state,
+                    registry_snapshot=registry_snapshot,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                    llm_calls_log=llm_calls,
+                    aux_log=aux_llm_calls,
+                    record_llm_call=_record_llm_call,
+                )
+            except Exception as exc:
+                aux_llm_calls.append(
+                    {
+                        "type": "critic",
+                        "stage": "critic",
+                        "error": str(exc),
+                        "model": critic_model_used,
+                    }
+                )
+                return response_text
+
+            try:
+                parsed = json.loads(str(critic_response))
+            except Exception:
+                aux_llm_calls.append(
+                    {
+                        "type": "critic",
+                        "stage": "critic",
+                        "error": "critic_json_parse_failed",
+                        "model": critic_model_used,
+                    }
+                )
+                return response_text
+
+            if isinstance(parsed, dict) and parsed.get("approve") is False:
+                revised = parsed.get("revised_response")
+                if isinstance(revised, str) and revised.strip():
+                    aux_llm_calls.append(
+                        {
+                            "type": "critic",
+                            "stage": "critic",
+                            "model": critic_model_used,
+                            "approved": False,
+                            "notes": parsed.get("notes") if parsed else None,
+                        }
+                    )
+                    return revised.strip()
+
+            aux_llm_calls.append(
+                {
+                    "type": "critic",
+                    "stage": "critic",
+                    "model": critic_model_used,
+                    "approved": True,
+                }
+            )
+            return response_text
 
         if not self._gateway.enabled or self._max_tool_invocations <= 0:
             planner_model = _model_for_stage("planner")
@@ -3246,14 +3934,19 @@ class InternalMCPChatOrchestrator:
                         "max_tool_invocations": int(self._max_tool_invocations),
                     },
                 )
-            llm_start = time.perf_counter()
-            response = llm_client.generate(prompt, context=context, model=planner_model)
-            _record_llm_call(
-                call_type="llm.generate",
-                model_name=planner_model,
-                duration_ms=(time.perf_counter() - llm_start) * 1000.0,
-                usage=None,
-                note="Token usage unavailable via legacy generate().",
+            response, planner_model, _ = self._run_llm_with_fallbacks(
+                stage="planner",
+                prompt=prompt,
+                context=context,
+                default_client=llm_client,
+                default_model=planner_model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                llm_calls_log=llm_calls,
+                aux_log=aux_llm_calls,
+                record_llm_call=_record_llm_call,
             )
             if trace_enabled and trace is not None:
                 llm_step.finish_success(
@@ -3288,8 +3981,10 @@ class InternalMCPChatOrchestrator:
                     )
                     _persist_trace(status="completed")
                     return result
+            response_text = response if isinstance(response, str) else str(response)
+            response_text = _maybe_apply_critic(response_text)
             result = OrchestratorResult(
-                response_text=response,
+                response_text=response_text,
                 extra_messages=(),
                 tool_invocations=(),
                 aux_llm_calls=tuple(aux_llm_calls),
@@ -3388,6 +4083,13 @@ class InternalMCPChatOrchestrator:
                     "screen_text": screen_value,
                     "user_prompt": prompt,
                     "presenter_channels": {},
+                    "policy_state": policy_state,
+                    "default_model": _model_for_stage("narration"),
+                    "registry_snapshot": registry_snapshot,
+                    "user_concept_id": user_concept_id,
+                    "org_concept_id": org_concept_id,
+                    "aux_llm_calls": aux_llm_calls,
+                    "record_llm_call": _record_llm_call,
                 }
 
                 narration_result = self.execute_workflow(
@@ -3440,6 +4142,10 @@ class InternalMCPChatOrchestrator:
             and hasattr(llm_client, "_should_use_structured_calling")
             and llm_client._should_use_structured_calling()
         )
+        if policy_state.enabled and policy_state.policy:
+            use_structured = True
+
+        response = ""
 
         if use_structured:
             self._logger.debug("[mcp_orchestrator] Using structured tool calling path")
@@ -3455,27 +4161,20 @@ class InternalMCPChatOrchestrator:
                         },
                     )
                 tool_definitions = self._convert_mcp_tools_to_structured_definitions()
-                llm_start = time.perf_counter()
-                llm_response = llm_client.generate_with_tools(
+                llm_response, tool_call_model, _ = self._run_llm_with_tools_fallbacks(
+                    stage="tool_call",
                     prompt=prompt,
-                    available_tools=tool_definitions,
                     context=augmented_context,
-                    model=tool_call_model,
-                    system_message=None,  # Already in augmented_context
-                )
-                _record_llm_call(
-                    call_type="llm.generate_with_tools",
-                    model_name=(
-                        llm_response.model
-                        if isinstance(getattr(llm_response, "model", None), str)
-                        else tool_call_model
-                    ),
-                    duration_ms=(time.perf_counter() - llm_start) * 1000.0,
-                    usage=(
-                        llm_response.usage
-                        if isinstance(getattr(llm_response, "usage", None), Mapping)
-                        else None
-                    ),
+                    tool_definitions=tool_definitions,
+                    default_client=llm_client,
+                    default_model=tool_call_model,
+                    policy_state=policy_state,
+                    registry_snapshot=registry_snapshot,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                    llm_calls_log=llm_calls,
+                    aux_log=aux_llm_calls,
+                    record_llm_call=_record_llm_call,
                 )
 
                 # Convert to legacy format for compatibility
@@ -3510,6 +4209,7 @@ class InternalMCPChatOrchestrator:
                                 else str(response)[:800]
                             ),
                             "tool_call_count": len(tool_calls or []),
+                            "model": tool_call_model or "default",
                         }
                     )
             except Exception as exc:
@@ -3536,16 +4236,19 @@ class InternalMCPChatOrchestrator:
                         "context_messages": len(augmented_context),
                     },
                 )
-            llm_start = time.perf_counter()
-            response = llm_client.generate(
-                prompt, context=augmented_context, model=tool_call_model
-            )
-            _record_llm_call(
-                call_type="llm.generate",
-                model_name=tool_call_model,
-                duration_ms=(time.perf_counter() - llm_start) * 1000.0,
-                usage=None,
-                note="Token usage unavailable via legacy generate().",
+            response, tool_call_model, _ = self._run_llm_with_fallbacks(
+                stage="tool_call",
+                prompt=prompt,
+                context=augmented_context,
+                default_client=llm_client,
+                default_model=tool_call_model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                llm_calls_log=llm_calls,
+                aux_log=aux_llm_calls,
+                record_llm_call=_record_llm_call,
             )
             tool_calls = None  # Will be extracted below
             has_valid_tool_call = False  # Will be set below
@@ -3556,7 +4259,8 @@ class InternalMCPChatOrchestrator:
                             response[:800]
                             if isinstance(response, str)
                             else str(response)[:800]
-                        )
+                        ),
+                        "model": tool_call_model or "default",
                     }
                 )
 
@@ -3595,6 +4299,12 @@ class InternalMCPChatOrchestrator:
                 "missing_tool_assessor": self._assess_missing_tool_call,
                 "extract_tool_calls_fn": self._extract_tool_calls,
                 "record_llm_call": _record_llm_call,
+                "classifier_model": _model_for_stage("classifier"),
+                "policy_state": policy_state,
+                "default_model": tool_call_model,
+                "registry_snapshot": registry_snapshot,
+                "user_concept_id": user_concept_id,
+                "org_concept_id": org_concept_id,
             }
             if workflow_def is not None:
                 recovery_model = _model_for_stage("tool_recovery")
@@ -3705,6 +4415,11 @@ class InternalMCPChatOrchestrator:
                         "missing_tool_assessor": self._assess_missing_tool_call,
                         "extract_tool_calls_fn": self._extract_tool_calls,
                         "record_llm_call": _record_llm_call,
+                        "classifier_model": _model_for_stage("classifier"),
+                        "policy_state": policy_state,
+                        "default_model": tool_call_model,
+                        "user_concept_id": user_concept_id,
+                        "org_concept_id": org_concept_id,
                     }
                     if workflow_def is not None:
                         recovery_model = _model_for_stage("tool_recovery")
@@ -4027,16 +4742,19 @@ class InternalMCPChatOrchestrator:
                 "If you need to call another tool, you may do so."
             )
             summariser_model = _model_for_stage("summariser")
-            llm_start = time.perf_counter()
-            current_response = llm_client.generate(
-                follow_up_prompt, context=augmented_context, model=summariser_model
-            )
-            _record_llm_call(
-                call_type="llm.generate",
-                model_name=summariser_model,
-                duration_ms=(time.perf_counter() - llm_start) * 1000.0,
-                usage=None,
-                note="Follow-up after tool execution; token usage unavailable via legacy generate().",
+            current_response, summariser_model, _ = self._run_llm_with_fallbacks(
+                stage="summariser",
+                prompt=follow_up_prompt,
+                context=augmented_context,
+                default_client=llm_client,
+                default_model=summariser_model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                llm_calls_log=llm_calls,
+                aux_log=aux_llm_calls,
+                record_llm_call=_record_llm_call,
             )
 
         # Log if we hit the iteration limit
@@ -4051,6 +4769,9 @@ class InternalMCPChatOrchestrator:
             )
 
         final_response_text = _maybe_apply_narration_routing(current_response)
+        final_response_text = _maybe_apply_critic(
+            final_response_text, tool_messages_for_critic=tool_messages
+        )
 
         result = OrchestratorResult(
             response_text=final_response_text,
