@@ -110,6 +110,48 @@ When markdown rendering is active, the UI transforms certain patterns into promp
 - **Ontology discovery pre-flight**: deterministic, read-only candidate discovery for types/predicates before tool selection.
 - **Multi-turn context persistence**: short-lived cache of discovered concept IDs across follow-up turns.
 
+## Stage-to-Model Policy Mapping (Proposed)
+This mapping introduces **per-stage model policies** without changing current behaviour. It documents *where* a workflow model policy should be queried once implemented. For now, the default policy remains **single-model** (the active LLM) for all stages.
+
+### Stage: `planner`
+- **When**: Before the tool loop begins, as the assistant plans the action/tool sequence.
+- **Where**: `InternalMCPChatOrchestrator.run()` before the first LLM call.
+
+### Stage: `tool_call`
+- **When**: Each LLM call that is expected to emit tool calls.
+- **Where**: `InternalMCPChatOrchestrator.run()` inside the tool loop.
+
+### Stage: `tool_recovery`
+- **When**: Missing-tool-call detection and JSON repair.
+- **Where**: `_missing_tool_call_retry_prompt()` / `_infer_missing_tool_call_retry_tool_calls()` in `orchestrator.py`.
+
+### Stage: `classifier`
+- **When**: Lightweight classification (missing tool call, screen-vs-spoken quality checks, buttonify candidate extraction).
+- **Where**: `orchestrator.py` classifier paths and presenter backfill checks.
+
+### Stage: `critic`
+- **When**: Actor–critic checks over tool plans or final summaries (policy compliance, provenance).
+- **Where**: Future workflow state after the actor output but before execution/response emission.
+
+### Stage: `screen_backfill`
+- **When**: Presenter screen channel is missing, tool-dump-like, or too similar to spoken.
+- **Where**: `_screen_looks_like_tool_dump()` / backfill block in `von_routes.py`.
+
+### Stage: `narration`
+- **When**: Spoken channel generation (narration workflow).
+- **Where**: `CHAT_NARRATION_WORKFLOW_ID` execution in `von_routes.py`.
+
+### Stage: `summariser`
+- **When**: Tool-result summarisation and compact response synthesis.
+- **Where**: Tool-summary synthesis paths in `von_routes.py`.
+
+### Stage: `buttonify`
+- **When**: Structured quick-reply extraction for UI buttonification.
+- **Where**: Before frontend transforms in `chatTab.js` (server-side candidate generation).
+
+## Compatibility Note
+The initial workflow model policy should preserve **current single-model behaviour** (active LLM for all stages), with optional local-only fallback for low-risk classifier stages. No runtime behaviour changes are required until policy resolution is implemented.
+
 ## Glossary
 - **Presenter mode**: protocol that outputs `screen` and `spoken` channels for display and TTS.
 - **Screen backfill**: second-pass screen synthesis when the model does not provide a valid screen.
