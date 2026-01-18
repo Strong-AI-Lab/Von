@@ -133,6 +133,15 @@ class _OntologyPreflightResult:
     telemetry: Mapping[str, Any] | None
 
 
+@dataclass(frozen=True)
+class _WorkflowModelPolicyState:
+    enabled: bool
+    policy: Mapping[str, Any] | None
+    policy_id: str | None
+    predicate_id: str | None
+    errors: Sequence[str]
+
+
 class ToolCallParsingError(Exception):
     """Raised when a model returns an invalid tool call payload."""
 
@@ -195,6 +204,16 @@ class InternalMCPChatOrchestrator:
 
         # Deterministic ontology preflight cache (per language).
         self._preflight_cache: dict[str, dict[str, Any]] = {}
+
+        # Workflow model policy cache (single policy instance).
+        self._workflow_model_policy_cache: dict[str, Any] = {}
+        self._workflow_model_policy_cache_ttl_seconds = self._coerce_int(
+            None,
+            env_var="VON_WORKFLOW_MODEL_POLICY_CACHE_SECONDS",
+            default=120,
+            min_value=10,
+            max_value=3600,
+        )
 
         # Guardrails against context/tool-result bloat.
         # These are expressed in characters (not tokens) to avoid model-specific tokenisers.
@@ -1321,6 +1340,174 @@ class InternalMCPChatOrchestrator:
             candidate = candidate[3:]
 
         return candidate or None
+
+    @staticmethod
+    def _is_workflow_model_policy_enabled() -> bool:
+        return os.getenv("VON_WORKFLOW_MODEL_POLICY_ENABLE", "0").lower() in {
+            "1",
+            "true",
+        }
+
+    def _resolve_concept_id_by_name(
+        self,
+        name: str,
+        *,
+        preferred_language: str | None = None,
+    ) -> Optional[str]:
+        if not isinstance(name, str) or not name.strip():
+            return None
+        try:
+            from src.backend.services.concept_resolution_service import (
+                resolve_concept_by_name,
+            )
+        except Exception:
+            return None
+
+        try:
+            resolution = resolve_concept_by_name(
+                name=name.strip(),
+                preferred_languages=(
+                    [preferred_language] if preferred_language else None
+                ),
+                match_code_strings=True,
+            )
+        except Exception:
+            return None
+
+        if not isinstance(resolution, Mapping):
+            return None
+
+        if resolution.get("status") != "resolved":
+            return None
+
+        resolved = resolution.get("resolved_concept_id")
+        return resolved if isinstance(resolved, str) else None
+
+    def _load_workflow_model_policy(
+        self, preferred_language: str | None
+    ) -> tuple[_WorkflowModelPolicyState, Mapping[str, Any] | None]:
+        now = time.time()
+        cached = self._workflow_model_policy_cache
+        if cached:
+            expires_at = cached.get("expires_at")
+            state = cached.get("state")
+            telemetry_value = cached.get("telemetry")
+            if (
+                isinstance(expires_at, (int, float))
+                and expires_at > now
+                and isinstance(state, _WorkflowModelPolicyState)
+            ):
+                cached_telemetry = (
+                    telemetry_value if isinstance(telemetry_value, Mapping) else None
+                )
+                return state, cached_telemetry
+
+        enabled = self._is_workflow_model_policy_enabled()
+        policy_name = os.getenv(
+            "VON_WORKFLOW_MODEL_POLICY_NAME", "default_workflow_model_policy"
+        )
+        predicate_name = os.getenv(
+            "VON_WORKFLOW_MODEL_POLICY_PREDICATE", "has_model_policy_json"
+        )
+        errors: list[str] = []
+
+        policy_id = self._resolve_concept_id_by_name(
+            policy_name, preferred_language=preferred_language
+        )
+        if not policy_id:
+            errors.append("policy_not_resolved")
+
+        predicate_id = self._resolve_concept_id_by_name(
+            predicate_name, preferred_language=preferred_language
+        )
+        if not predicate_id:
+            errors.append("predicate_not_resolved")
+
+        policy_payload: Mapping[str, Any] | None = None
+        if policy_id and predicate_id:
+            try:
+                from src.backend.services.text_value_service import (
+                    get_texts_for_concept,
+                )
+
+                rows = get_texts_for_concept(policy_id, predicate=predicate_id, limit=5)
+            except Exception:
+                rows = []
+                errors.append("policy_text_fetch_failed")
+
+            policy_text = None
+            if isinstance(rows, list):
+                for row in rows:
+                    if isinstance(row, Mapping):
+                        candidate = row.get("text")
+                        if isinstance(candidate, str) and candidate.strip():
+                            policy_text = candidate
+                            break
+
+            if policy_text:
+                try:
+                    parsed = json.loads(policy_text)
+                    if isinstance(parsed, Mapping):
+                        policy_payload = parsed
+                    else:
+                        errors.append("policy_json_not_object")
+                except Exception:
+                    errors.append("policy_json_parse_failed")
+            else:
+                errors.append("policy_text_missing")
+
+        state = _WorkflowModelPolicyState(
+            enabled=enabled,
+            policy=policy_payload,
+            policy_id=policy_id,
+            predicate_id=predicate_id,
+            errors=tuple(errors),
+        )
+
+        telemetry: dict[str, Any] = {
+            "type": "workflow_model_policy",
+            "enabled": enabled,
+            "policy_id": policy_id or "",
+            "predicate_id": predicate_id or "",
+            "loaded": bool(policy_payload),
+            "errors": list(errors),
+        }
+
+        self._workflow_model_policy_cache = {
+            "expires_at": now + float(self._workflow_model_policy_cache_ttl_seconds),
+            "state": state,
+            "telemetry": telemetry,
+        }
+
+        return state, telemetry
+
+    def _select_model_for_stage(
+        self,
+        *,
+        stage: str,
+        default_model: Optional[str],
+        policy_state: _WorkflowModelPolicyState,
+    ) -> Optional[str]:
+        if not policy_state.enabled or not policy_state.policy:
+            return default_model
+
+        stages = policy_state.policy.get("stages")
+        if not isinstance(stages, Mapping):
+            return default_model
+
+        stage_config = stages.get(stage)
+        if not isinstance(stage_config, Mapping):
+            return default_model
+
+        primary = stage_config.get("primary")
+        if not isinstance(primary, str) or not primary.strip():
+            return default_model
+
+        primary = primary.strip()
+        if primary == "active_llm":
+            return default_model
+
+        return self._normalise_llm_model_name(primary) or default_model
 
     def _inject_prompt_variable(self, prompt_text: str, *, key: str, value: str) -> str:
         """Ensure a prompt receives a variable payload.
@@ -3032,22 +3219,38 @@ class InternalMCPChatOrchestrator:
             except Exception:
                 pass
 
+        policy_state, policy_telemetry = self._load_workflow_model_policy(
+            preferred_language
+        )
+        if policy_telemetry:
+            aux_llm_calls.append(policy_telemetry)
+            if trace_enabled and trace is not None:
+                trace.metadata["workflow_model_policy"] = dict(policy_telemetry)
+
+        def _model_for_stage(stage: str) -> Optional[str]:
+            return self._select_model_for_stage(
+                stage=stage,
+                default_model=model,
+                policy_state=policy_state,
+            )
+
         if not self._gateway.enabled or self._max_tool_invocations <= 0:
+            planner_model = _model_for_stage("planner")
             if trace_enabled and trace is not None:
                 llm_step = trace.start_step(
                     "llm.generate",
                     inputs={
                         "prompt": prompt,
-                        "model": model or "default",
+                        "model": planner_model or "default",
                         "gateway_enabled": bool(self._gateway.enabled),
                         "max_tool_invocations": int(self._max_tool_invocations),
                     },
                 )
             llm_start = time.perf_counter()
-            response = llm_client.generate(prompt, context=context, model=model)
+            response = llm_client.generate(prompt, context=context, model=planner_model)
             _record_llm_call(
                 call_type="llm.generate",
-                model_name=model,
+                model_name=planner_model,
                 duration_ms=(time.perf_counter() - llm_start) * 1000.0,
                 usage=None,
                 note="Token usage unavailable via legacy generate().",
@@ -3144,8 +3347,11 @@ class InternalMCPChatOrchestrator:
             and self._workflow_selector.enabled()
         ):
             try:
+                classifier_model = _model_for_stage("classifier")
                 selector_selection = self._workflow_selector.select_workflow(
-                    llm_client=llm_client, model=model, turn_text=prompt
+                    llm_client=llm_client,
+                    model=classifier_model,
+                    turn_text=prompt,
                 )
                 if selector_selection.workflow_id:
                     selected_workflow_id = selector_selection.workflow_id
@@ -3188,7 +3394,7 @@ class InternalMCPChatOrchestrator:
                     CHAT_NARRATION_WORKFLOW_ID,
                     data=narration_data,
                     llm_client=llm_client,
-                    model=model,
+                    model=_model_for_stage("narration"),
                     user_namespace=user_namespace,
                     auxiliary_system_prompt=auxiliary_system_prompt,
                     trace=None,
@@ -3238,12 +3444,13 @@ class InternalMCPChatOrchestrator:
         if use_structured:
             self._logger.debug("[mcp_orchestrator] Using structured tool calling path")
             try:
+                tool_call_model = _model_for_stage("tool_call")
                 if trace_enabled and trace is not None:
                     llm_step = trace.start_step(
                         "llm.generate_with_tools",
                         inputs={
                             "prompt": prompt,
-                            "model": model or "default",
+                            "model": tool_call_model or "default",
                             "context_messages": len(augmented_context),
                         },
                     )
@@ -3253,7 +3460,7 @@ class InternalMCPChatOrchestrator:
                     prompt=prompt,
                     available_tools=tool_definitions,
                     context=augmented_context,
-                    model=model,
+                    model=tool_call_model,
                     system_message=None,  # Already in augmented_context
                 )
                 _record_llm_call(
@@ -3261,7 +3468,7 @@ class InternalMCPChatOrchestrator:
                     model_name=(
                         llm_response.model
                         if isinstance(getattr(llm_response, "model", None), str)
-                        else model
+                        else tool_call_model
                     ),
                     duration_ms=(time.perf_counter() - llm_start) * 1000.0,
                     usage=(
@@ -3319,22 +3526,23 @@ class InternalMCPChatOrchestrator:
 
         if not use_structured:
             # Legacy path: generate() returns text, parse tool calls from JSON
+            tool_call_model = _model_for_stage("tool_call")
             if trace_enabled and trace is not None:
                 llm_step = trace.start_step(
                     "llm.generate",
                     inputs={
                         "prompt": prompt,
-                        "model": model or "default",
+                        "model": tool_call_model or "default",
                         "context_messages": len(augmented_context),
                     },
                 )
             llm_start = time.perf_counter()
             response = llm_client.generate(
-                prompt, context=augmented_context, model=model
+                prompt, context=augmented_context, model=tool_call_model
             )
             _record_llm_call(
                 call_type="llm.generate",
-                model_name=model,
+                model_name=tool_call_model,
                 duration_ms=(time.perf_counter() - llm_start) * 1000.0,
                 usage=None,
                 note="Token usage unavailable via legacy generate().",
@@ -3389,10 +3597,11 @@ class InternalMCPChatOrchestrator:
                 "record_llm_call": _record_llm_call,
             }
             if workflow_def is not None:
+                recovery_model = _model_for_stage("tool_recovery")
                 env = WorkflowEnvironment(
                     llm_client=llm_client,
                     gateway=self._gateway,
-                    model=model,
+                    model=recovery_model,
                     user_namespace=user_namespace,
                     auxiliary_system_prompt=auxiliary_system_prompt,
                     max_tool_invocations=self._max_tool_invocations,
@@ -3498,10 +3707,11 @@ class InternalMCPChatOrchestrator:
                         "record_llm_call": _record_llm_call,
                     }
                     if workflow_def is not None:
+                        recovery_model = _model_for_stage("tool_recovery")
                         env = WorkflowEnvironment(
                             llm_client=llm_client,
                             gateway=self._gateway,
-                            model=model,
+                            model=recovery_model,
                             user_namespace=user_namespace,
                             auxiliary_system_prompt=auxiliary_system_prompt,
                             max_tool_invocations=self._max_tool_invocations,
@@ -3816,13 +4026,14 @@ class InternalMCPChatOrchestrator:
                 "If the tool failed, explain the error. "
                 "If you need to call another tool, you may do so."
             )
+            summariser_model = _model_for_stage("summariser")
             llm_start = time.perf_counter()
             current_response = llm_client.generate(
-                follow_up_prompt, context=augmented_context, model=model
+                follow_up_prompt, context=augmented_context, model=summariser_model
             )
             _record_llm_call(
                 call_type="llm.generate",
-                model_name=model,
+                model_name=summariser_model,
                 duration_ms=(time.perf_counter() - llm_start) * 1000.0,
                 usage=None,
                 note="Follow-up after tool execution; token usage unavailable via legacy generate().",

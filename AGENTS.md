@@ -29,8 +29,16 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - Prefer lightweight telemetry where practical (timings, counters, and error summaries) to support UX and future introspection.
 - For high-risk state changes (auth/org handling, DB writes, Vontology mutations), use a single authoritative pathway and reuse it consistently.
 - Strong rule: treat canonical predicate concepts (e.g. #V#is_a_type_of) as the authoritative ontology relations. Do not introduce or rely on structural relationship fields when predicate concepts exist; kind/classification should be derived from canonical predicate usage.
+- **Predicate concepts must be instances of `#V#predicate` (or a specialisation such as `#V#binary_predicate`) and must not keep `is_a_type_of` links that would force kind=`type`.** This ensures `is_predicate()` and the computed kind behave correctly.
 - Do a quick factoring review whenever you touch write paths: search for existing canonical helpers/endpoints (especially for deletes/merges) and route through them rather than adding parallel pathways.
 - Treat ontology/predicate investigation as a normal first step for Vontology work: resolve candidate concepts by name (including spelling variants like programme/program), search for existing predicates/types before inventing new ones, and record the findings (and chosen canonical IDs) in the related Jira issue.
+- When code needs to manipulate real-world or conceptual entities (tasks, organisations, ideas, documents, relations, predicates, claims, assertions, rules, workflows, etc.), **always start by checking whether they already exist in Vontology**. Reuse/connect to existing representations; update them if needed; otherwise create new concepts rigorously.
+- **Vontology representation guidance (from code behaviour):**
+	- **Names:** Display names are resolved from `names[]` (NL then ABBR, preferred language first). Create/update names via `hasName` text relations (primary NL in `en-NZ`), and include CODE names for the `concept_id` and GUID where applicable. Do not rely on legacy top-level `name` fields.
+	- **Descriptions:** Canonical descriptions are stored in `hasDescription` text relations. Avoid writing legacy `description` fields or `concept_data.preserved_fields` directly; use the concept/text relation services.
+	- **Types vs individuals:** Types use `relationships.is_a_type_of` (parents). Individuals use `relationships.is_an_instance_of` (types). Computed kind is derived from these relationships, so avoid mixing them on the same concept.
+	- **Type guidance predicates:** For types, prefer `#V#salient_binary_predicate_for_type` (or `salient_predicate_scopes.type_level`) to drive salient predicate prompts. These lists are consumed by salient predicate aggregation and relation elicitation. It is almost never appropriate for a type to be #V#is_a_type_of #V#thing (similarly, individuals should not be instances of thing). Seach the ontology for suitable types to attach concepts to. Use the most restrictive applicable and appropriate supertypes.
+	- **Suggested relations:** Use the meta-relations service (`suggested_relations_for_type`) for type-level suggestions when possible; legacy `relationships.suggested_relations_for_type` is read as a fallback.
 - **Vontology-first checklist (mandatory for ontology-related work):**
 	1. Resolve candidate concepts by name (MCP search/resolve).
 	2. Check for existing predicate/type concepts before inventing anything.
@@ -49,6 +57,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 ## Tooling and Automation
 - Activate required external tool categories (Jira, Vontology, MongoDB, GitHub) without asking, when clearly needed.
 - Treat tool categories as opt-in per session: activate before first use, and occasionally check whether a matching tool deactivation call exists (to disable categories when no longer needed).
+- Where Vontology search, analysis or manipulation is impeded by the current vontology MCP tools, suggest code improvements to those tools that will facilitate high quality ontological engineering in future.
 - If a tool category is not enabled, request enabling it by exact name.
 - If Vontology or Vonrag MCP tools are not exposed in this session, use the stdio proxy scripts (`scripts/query_vontology_mcp.py`, `scripts/query_vonrag_mcp.py`) and check cached tool lists in `data/mcp_tool_cache/`.
 - After implementing a fix and tests pass, post a Jira summary comment and transition the issue to the correct state.
