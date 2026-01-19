@@ -438,13 +438,14 @@ function New-EnvFile {
         }
         else {
             Write-Host "✗ No .env template found. Creating minimal .env..." -ForegroundColor Yellow
-            @"
+            $envContent = @"
 MONGO_URI=mongodb://localhost:27017/
 VON_DB_NAME=von_db
 MONGO_LOCAL_URI=mongodb://127.0.0.1:27017/?directConnection=true
 MONGO_ALLOW_LOCAL_FALLBACK=1
 OLLAMA_HOSTS_LIST=127.0.0.1
-"@ | Out-File -FilePath ".env" -Encoding UTF8
+"@
+            $envContent | Out-File -FilePath ".env" -Encoding UTF8
             Write-Host "✓ Created minimal .env file" -ForegroundColor Green
         }
     }
@@ -702,6 +703,22 @@ Initialize-Windows -RequestedPythonVersion $PythonVersion
 if ($ConfigureVSCode) {
     # Renamed from VSCODE_FLAG
     Set-VSCode
+
+    # Also fix VS Code MCP server command paths for this workspace.
+    # This prevents failures from hard-coded user-specific paths in .vscode/mcp.json.
+    try {
+        $fixMcpScript = Join-Path $PSScriptRoot 'scripts\\fix_vscode_mcp_paths.ps1'
+        if (Test-Path -LiteralPath $fixMcpScript) {
+            Write-Host "Updating VS Code MCP server paths..." -ForegroundColor Cyan
+            & $fixMcpScript -RepoRoot $PSScriptRoot
+        }
+        else {
+            Write-Host "Warning: MCP path fixer not found at $fixMcpScript" -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "Warning: Failed to update VS Code MCP server paths: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 }
 
 Write-Host "=== Setup Complete! ===" -ForegroundColor Cyan

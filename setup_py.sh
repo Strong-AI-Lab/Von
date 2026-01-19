@@ -173,6 +173,71 @@ EOF
         fi
         echo -e "${GREEN}VS Code settings updated.${NC}"
     fi
+
+    # Update MCP config to use portable workspace paths
+    if [[ -f ".vscode/mcp.json" ]]; then
+        if command_exists python3 || command_exists python; then
+            PYTHON_CMD=$(command_exists python3 && echo "python3" || echo "python")
+
+            if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]]; then
+                MCP_PYTHON='${workspaceFolder}/.venv/Scripts/python.exe'
+            else
+                MCP_PYTHON='${workspaceFolder}/.venv/bin/python'
+            fi
+            MCP_STORAGE='${workspaceFolder}/data/arxiv_papers'
+            MCP_CWD='${workspaceFolder}'
+
+            MCP_PYTHON="$MCP_PYTHON" MCP_STORAGE="$MCP_STORAGE" MCP_CWD="$MCP_CWD" $PYTHON_CMD << 'PYEOF'
+import json
+import os
+import sys
+
+path = '.vscode/mcp.json'
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+except Exception as e:
+    print(f'Warning: Failed to parse {path}: {e}', file=sys.stderr)
+    sys.exit(0)
+
+servers = data.setdefault('servers', {})
+
+def ensure(name: str):
+    server = servers.get(name)
+    if not isinstance(server, dict):
+        server = {}
+        servers[name] = server
+    return server
+
+python_path = os.environ.get('MCP_PYTHON') or '${workspaceFolder}/.venv/bin/python'
+cwd = os.environ.get('MCP_CWD') or '${workspaceFolder}'
+storage = os.environ.get('MCP_STORAGE') or '${workspaceFolder}/data/arxiv_papers'
+
+for name, script in (
+    ('vontology', 'src/backend/mcp_server/mcp_stdio_server.py'),
+    ('vonrag', 'src/backend/mcp_server/rag_mcp_stdio_server.py'),
+):
+    server = ensure(name)
+    server['type'] = 'stdio'
+    server['command'] = python_path
+    server['args'] = ['-m', 'pdm', 'run', 'python', script]
+    server['cwd'] = cwd
+
+arxiv = ensure('arxiv')
+arxiv['type'] = 'stdio'
+arxiv['command'] = 'uv'
+arxiv['args'] = ['tool', 'run', 'arxiv-mcp-server', '--storage-path', storage]
+arxiv['cwd'] = cwd
+
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2)
+
+print('Updated .vscode/mcp.json to use portable workspace paths.')
+PYEOF
+        else
+            echo -e "${YELLOW}Warning: Python not found; skipping MCP config update.${NC}"
+        fi
+    fi
 }
 
 # Function to find compatible Python version
