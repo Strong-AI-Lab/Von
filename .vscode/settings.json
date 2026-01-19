@@ -1,85 +1,11 @@
 {
-  "terminal.integrated.defaultProfile.windows": "PowerShell",
-  "terminal.integrated.shellIntegration.enabled": true,
+  "typescript.enablePromptUseWorkspaceTsdk": true,
   "terminal.integrated.shellIntegration.suggestEnabled": true,
-  "terminal.integrated.environmentChangesRelaunch": false,
-  "terminal.integrated.showEnvironmentContributions": false,
-  "terminal.integrated.automationProfile.windows": {
-    "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-    "args": [
-      "-NoLogo"
-    ]
-  },
-  "terminal.integrated.profiles.windows": {
-    "PowerShell": {
-      "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-      "args": [
-        "-NoLogo"
-      ]
-    }
-  },
-  "atlascode.jira.enabled": true,
-  "files.trimTrailingWhitespace": true,
-  "chat.mcp.autostart": "newAndOutdated",
-  "chat.agent.maxRequests": 100,
-  "workbench.editor.enablePreview": false,
-  "macros": {
-    "addCopilotContextWithToast": [
-      "github.copilot.chat.addActiveEditorAsContext",
-      {
-        "command": "workbench.action.showNotification",
-        "args": {
-          "message": "Copilot: File context added ✅"
-        }
-      }
-    ]
-  },
-  "chat.mcp.assisted.nuget.enabled": true,
-  "atlascode.jira.jqlList": [
-    {
-      "id": "a00b6c75-f462-4934-a15d-c2e5578223c7",
-      "siteId": "b2b12142-9002-4b11-b421-83f073678fd3",
-      "name": "KnowKat Active and Todo",
-      "query": "project = KKAT AND statusCategory != Done",
-      "enabled": true,
-      "monitor": false
-    },
-    {
-      "id": "e5780c55-f2a3-434d-9247-e21bd97b2831",
-      "siteId": "b2b12142-9002-4b11-b421-83f073678fd3",
-      "name": "Von Active and Todo",
-      "query": "project = JVNAUTOSCI AND statusCategory != Done",
-      "enabled": true,
-      "monitor": false
-    }
-  ],
-  "editor.formatOnSave": true,
-  "jupyter.interactiveWindow.textEditor.executeSelection": true,
-  "javascript.suggestionActions.enabled": true,
-  "python.analysis.inlayHints.functionReturnTypes": true,
-  "python.defaultInterpreterPath": ".venv\\Scripts\\python.exe",
-  "python.testing.pytestEnabled": true,
-  "python.envFile": "${workspaceFolder}\\.vscode\\.env.tests",
-  "python.languageServer": "Pylance",
   "python.testing.pytestArgs": [
     "-q",
     "tests"
   ],
-  "python.testing.pytestLogLevel": "WARNING",
-  "python.editor.defaultFormatter": "ms-python.black-formatter",
-  "python.editor.formatOnSave": true,
-  "python.terminal.useEnvFile": true,
-  "python.analysis.importFormat": "absolute",
-  "python.terminal.activateEnvironment": true,
-  "python.exclude": [
-    "**/Von-Private/.venv/**"
-  ],
-  "python.analysis.inlayHints.variableTypes": true,
-  "python.testing.pytestEnv": {
-    "VON_DB_NAME": "test_von_db",
-    "VON_USE_MOCK_DB": "1"
-  },
-  "python.testing.unittestEnabled": false,
+  "security.promptForLocalFileProtocolHandling": false,
   "files.watcherExclude": {
     "**/coverage/**": true,
     "**/dist/**": true,
@@ -89,67 +15,18 @@
     "**/logs/**": true,
     "**/__pycache__/**": true
   },
-  "typescript.tsserver.maxTsServerMemory": 4096,
-  "editor.codeActionsOnSave": {
-    "source.organizeImports": "explicit",
-    "source.fixAll.eslint": "explicit"
-  },
-  "typescript.inlayHints.variableTypes.enabled": true,
-  "typescript.preferences.importModuleSpecifier": "non-relative",
-  "typescript.inlayHints.parameterNames.enabled": "literals",
-  "jest.rootPath": "${workspaceFolder}",
-  "workbench.tree.expandMode": "singleClick",
-  "files.eol": "\n",
-  "jest.runMode": "on-demand",
-  "jest.shell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-  "jest.debugMode": true,
-  "github.copilot.nextEditSuggestions.enabled": true,
-  "chat.instructionsFilesLocations": {
-    ".github/instructions": true,
-    "C:\\Users\\witbr\\.aitk\\instructions\\": true,
-    "C:\\Users\\mwit860\\.aitk\\instructions\\": true
-  },
-  "typescript.inlayHints.functionLikeReturnTypes.enabled": true,
-  "editor.formatOnSaveMode": "file",
-  "editor.trimAutoWhitespace": true,
-  "chat.edits2.enabled": true,
-  "jest.jestCommandLine": "npm run test:frontend --",
-  "git.pruneOnFetch": true,
-  "editor.renderWhitespace": "selection",
-  "typescript.inlayHints.enumMemberValues.enabled": true,
-  "git.confirmSync": false,
-  "security.promptForLocalFileProtocolHandling": false,
-  "search.exclude": {
-    "**/coverage": true,
-    "**/dist": true,
-    "**/node_modules": true,
-    "**/.venv": true,
-    "**/logs": true
-  },
-  "chat.editing.confirmEditRequestRemoval": false,
+  "python.terminal.useEnvFile": true,
   "git.autofetch": true,
-  "jest.enableInlineErrorMessages": true,
-  "jupyter.askForKernelRestart": false,
-  "files.insertFinalNewline": true,
-  "editor.rulers": [
-    100
-  ],
-  "chat.mcp.serverSampling": {
-    "Global in Code - Insiders: mongodb": {
-      "allowedModels": [
-        "copilot/auto",
-        "copilot/claude-sonnet-4",
-        "copilot/gemini-2.5-pro",
-        "copilot/gpt-5"
-      ]
-    },
-    "Global in Code - Insiders: atlassian": {
-      "allowedModels": [
-        "copilot/gpt-5-mini"
-      ]
-    }
+  "python.testing.pytestLogLevel": "WARNING",
+  "editor.tabSize": 4,
+  "typescript.inlayHints.variableTypes.enabled": true,
+  "atlascode.jira.lastCreateSiteAndProject": {
+    "siteId": "b2b12142-9002-4b11-b421-83f073678fd3",
+    "projectKey": "JVNAUTOSCI"
   },
-  "atlassian.jira.cloud.id": "b2b12142-9002-4b11-b421-83f073678fd3",
+  "workbench.tree.expandMode": "singleClick",
+  "typescript.inlayHints.parameterNames.enabled": "literals",
+  "python.terminal.activateEnvironment": true,
   "chat.tools.terminal.autoApprove": {
     "Remove-Item Env:CI": true,
     "Remove-Item Env:ATLASSIAN_CLOUD_ID": true,
@@ -357,18 +234,78 @@
       "matchCommandLine": true
     }
   },
-  "atlascode.jira.lastCreateSiteAndProject": {
-    "siteId": "b2b12142-9002-4b11-b421-83f073678fd3",
-    "projectKey": "JVNAUTOSCI"
-  },
-  "explorer.confirmDragAndDrop": false,
-  "geminicodeassist.project": "big-stream-0f8b1",
+  "chat.mcp.assisted.nuget.enabled": true,
+  "typescript.tsserver.maxTsServerMemory": 4096,
+  "terminal.integrated.environmentChangesRelaunch": false,
   "isort.args": [
     "--profile",
     "black"
   ],
-  "editor.tabSize": 4,
-  "chat.editing.autoAcceptDelay": 20,
+  "explorer.confirmDragAndDrop": false,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit",
+    "source.fixAll.eslint": "explicit"
+  },
+  "python.languageServer": "Pylance",
+  "python.testing.pytestEnv": {
+    "VON_DB_NAME": "test_von_db",
+    "VON_USE_MOCK_DB": "1"
+  },
+  "geminicodeassist.project": "big-stream-0f8b1",
+  "chat.instructionsFilesLocations": {
+    ".github/instructions": true,
+    "C:\\Users\\witbr\\.aitk\\instructions\\": true,
+    "C:\\Users\\mwit860\\.aitk\\instructions\\": true
+  },
+  "atlascode.jira.jqlList": [
+    {
+      "id": "a00b6c75-f462-4934-a15d-c2e5578223c7",
+      "siteId": "b2b12142-9002-4b11-b421-83f073678fd3",
+      "name": "KnowKat Active and Todo",
+      "query": "project = KKAT AND statusCategory != Done",
+      "enabled": true,
+      "monitor": false
+    },
+    {
+      "id": "e5780c55-f2a3-434d-9247-e21bd97b2831",
+      "siteId": "b2b12142-9002-4b11-b421-83f073678fd3",
+      "name": "Von Active and Todo",
+      "query": "project = JVNAUTOSCI AND statusCategory != Done",
+      "enabled": true,
+      "monitor": false
+    }
+  ],
+  "python.defaultInterpreterPath": ".venv\\Scripts\\python.exe",
+  "javascript.suggestionActions.enabled": true,
+  "workbench.editor.enablePreview": false,
+  "python.analysis.inlayHints.functionReturnTypes": true,
+  "jest.jestCommandLine": "npm run test:frontend --",
+  "terminal.integrated.defaultProfile.windows": "PowerShell",
+  "jest.rootPath": "${workspaceFolder}",
+  "files.trimTrailingWhitespace": true,
+  "chat.agent.maxRequests": 100,
+  "atlascode.jira.enabled": true,
+  "typescript.inlayHints.enumMemberValues.enabled": true,
+  "git.pruneOnFetch": true,
+  "terminal.integrated.showEnvironmentContributions": false,
+  "jest.runMode": "on-demand",
+  "editor.rulers": [
+    100
+  ],
+  "files.insertFinalNewline": true,
+  "chat.edits2.enabled": true,
+  "editor.trimAutoWhitespace": true,
+  "terminal.integrated.shellIntegration.enabled": true,
+  "terminal.integrated.profiles.windows": {
+    "PowerShell": {
+      "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "args": [
+        "-NoLogo"
+      ]
+    }
+  },
+  "chat.editing.confirmEditRequestRemoval": false,
+  "python.testing.pytestEnabled": true,
   "files.exclude": {
     "**/__pycache__": true,
     "**/.pytest_cache": true,
@@ -376,6 +313,69 @@
     "**/coverage": true,
     "**/dist": true
   },
-  "typescript.enablePromptUseWorkspaceTsdk": true,
-  "chatgpt.openOnStartup": false
+  "editor.renderWhitespace": "selection",
+  "github.copilot.nextEditSuggestions.enabled": true,
+  "chatgpt.openOnStartup": false,
+  "python.editor.formatOnSave": true,
+  "search.exclude": {
+    "**/coverage": true,
+    "**/dist": true,
+    "**/node_modules": true,
+    "**/.venv": true,
+    "**/logs": true
+  },
+  "jupyter.interactiveWindow.textEditor.executeSelection": true,
+  "python.analysis.inlayHints.variableTypes": true,
+  "python.editor.defaultFormatter": "ms-python.black-formatter",
+  "jest.debugMode": true,
+  "typescript.preferences.importModuleSpecifier": "non-relative",
+  "chat.editing.autoAcceptDelay": 20,
+  "editor.formatOnSaveMode": "file",
+  "jest.enableInlineErrorMessages": true,
+  "jest.shell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  "python.analysis.importFormat": "absolute",
+  "chat.mcp.serverSampling": {
+    "Global in Code - Insiders: mongodb": {
+      "allowedModels": [
+        "copilot/auto",
+        "copilot/claude-sonnet-4",
+        "copilot/gemini-2.5-pro",
+        "copilot/gpt-5"
+      ]
+    },
+    "Global in Code - Insiders: atlassian": {
+      "allowedModels": [
+        "copilot/gpt-5-mini"
+      ]
+    }
+  },
+  "terminal.integrated.automationProfile.windows": {
+    "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "args": [
+      "-NoLogo"
+    ]
+  },
+  "python.testing.unittestEnabled": false,
+  "macros": {
+    "addCopilotContextWithToast": [
+      "github.copilot.chat.addActiveEditorAsContext",
+      {
+        "command": "workbench.action.showNotification",
+        "args": {
+          "message": "Copilot: File context added ✅"
+        }
+      }
+    ]
+  },
+  "editor.formatOnSave": true,
+  "python.envFile": "${workspaceFolder}\\.vscode\\.env.tests",
+  "atlassian.jira.cloud.id": "b2b12142-9002-4b11-b421-83f073678fd3",
+  "python.exclude": [
+    "**/Von-Private/.venv/**"
+  ],
+  "jupyter.askForKernelRestart": false,
+  "typescript.inlayHints.functionLikeReturnTypes.enabled": true,
+  "git.confirmSync": false,
+  "files.eol": "\n",
+  "chat.mcp.autostart": "newAndOutdated"
 }
