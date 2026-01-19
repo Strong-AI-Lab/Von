@@ -46,8 +46,10 @@ Existing building blocks that are **not yet wired into tool planning**:
 
 ### Stage 4: Presenter protocol handling
 1. The model response is parsed for `<screen>` and `<spoken>` tags. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3035-L3120).
+   - Tags inside fenced code blocks are ignored, so “format examples” do not count as real presenter output.
 2. **Screen backfill** runs when tools were used and the screen channel is missing or unsuitable. Heuristics include missing tags, empty screen, tool-dump-like output, or screen identical to spoken. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3050-L3185).
    - Backfill order: response text (if safe) → LLM synthesis using tool summaries → deterministic tool summary. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3185-L3335).
+   - If **no tool messages exist**, screen backfill still runs, but uses a non-tool synthesis prompt (user + model response only).
 3. **Spoken backfill / narration** runs if spoken is missing. It uses either a narration workflow (when tracing is enabled) or a local LLM narration prompt. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L3360-L3535).
 
 ### Stage 5: Response assembly and persistence
@@ -106,6 +108,10 @@ When `VON_BUTTONIFY_MODEL_ENABLE=1`, the backend runs a lightweight model pass (
    - The model may emit invalid predicates (e.g., `has_author`) when no existing predicate ID is surfaced in context.
 6. **Annotation results are not used for tool planning**
    - Annotation suggestions exist but are not part of the orchestrator’s decision context.
+7. **Presenter tags in fenced code blocks**
+   - If the model prints `<spoken>/<screen>` in a code block, it should be treated as explanatory text, not as valid presenter output.
+8. **No-tool presenter response degenerates to spoken-only**
+   - Without backfill, a presenter response that only provides `<spoken>` would collapse into a screen-only line, losing structured output.
 
 ## Known Gaps (Foundations for a Formal Workflow)
 - **Screen grounding check**: validate screen claims against tool outputs before final response emission.
@@ -113,6 +119,42 @@ When `VON_BUTTONIFY_MODEL_ENABLE=1`, the backend runs a lightweight model pass (
 - **Tool policy selection**: explicit budget and policy step that gates tool execution.
 - **Ontology discovery pre-flight**: deterministic, read-only candidate discovery for types/predicates before tool selection.
 - **Multi-turn context persistence**: short-lived cache of discovered concept IDs across follow-up turns.
+
+## Proposed Workflow: Ordered predicate creation + self-correcting execution
+Purpose: ensure **all predicates exist before use**, then execute ontology writes in dependency order, with automatic repair for missing concepts.
+
+### Workflow stages (high level)
+1. **Planner**
+   - Extract intended assertions and required predicates/types.
+   - Build a dependency plan (predicates/types before relationships, salient updates before instance links).
+
+2. **Ontology preflight**
+   - Resolve candidate concept IDs (predicate/type) by name.
+   - Run `concept_exists` for each required ID.
+   - Emit a preflight report with missing/ambiguous IDs.
+
+3. **Create missing predicates (gated)**
+   - For each missing predicate, create concept as `instance_of #V#predicate`.
+   - Add `hasName` (NL + CODE) and `hasDescription` where available.
+   - Re-check existence for all newly created predicates.
+
+4. **Execute ordered writes**
+   - Apply salient predicate updates.
+   - Create instances.
+   - Add relationships using verified predicate IDs.
+
+5. **Verify + summarise**
+   - Re-fetch key nodes or re-run `concept_exists` checks.
+   - Summarise tool ledger and final state.
+
+### Self-correction loop (per step)
+- If a write fails due to **missing predicate/type**, re-enter preflight for the missing ID(s), create them if permitted, then **retry only the failed step**.
+- If creation is not permitted or ambiguous, **stop and ask the user** for the exact predicate/type to use.
+
+### Idempotency + safety rules
+- All steps must be safe to re-run: creation is gated by `concept_exists`, relationships are added only when predicates are verified.
+- Never guess predicate IDs; if a predicate cannot be resolved, halt and request clarification.
+- Tool ledger is the authority for the final screen summary.
 
 ## Stage-to-Model Policy Mapping (Proposed)
 This mapping introduces **per-stage model policies** without changing current behaviour. It documents *where* a workflow model policy should be queried once implemented. For now, the default policy remains **single-model** (the active LLM) for all stages.

@@ -961,6 +961,12 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
     return unique_warnings
 
 
+def _strip_fenced_code_blocks(text: str) -> str:
+    if not isinstance(text, str) or not text:
+        return ""
+    return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+
+
 def _extract_presenter_channels(text: str) -> dict[str, object] | None:
     """Extract presenter-style output blocks.
 
@@ -974,9 +980,11 @@ def _extract_presenter_channels(text: str) -> dict[str, object] | None:
     if not isinstance(text, str) or not text:
         return None
 
+    searchable = _strip_fenced_code_blocks(text)
+
     def _find_block(tag: str) -> str | None:
         pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
-        match = re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE)
+        match = re.search(pattern, searchable, flags=re.DOTALL | re.IGNORECASE)
         if not match:
             return None
         value = match.group(1)
@@ -1012,7 +1020,8 @@ def _presenter_tag_present(text: str, tag: str) -> bool:
     if not isinstance(text, str) or not text:
         return False
     pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
-    return bool(re.search(pattern, text, flags=re.DOTALL | re.IGNORECASE))
+    searchable = _strip_fenced_code_blocks(text)
+    return bool(re.search(pattern, searchable, flags=re.DOTALL | re.IGNORECASE))
 
 
 def _build_presenter_screen_from_tool_messages(
@@ -1080,8 +1089,9 @@ def _build_presenter_screen_from_tool_messages(
 def _extract_screen_only(text: str) -> str | None:
     if not isinstance(text, str) or not text:
         return None
+    searchable = _strip_fenced_code_blocks(text)
     m = re.search(
-        r"<screen>\s*(.*?)\s*</screen>", text, flags=re.DOTALL | re.IGNORECASE
+        r"<screen>\s*(.*?)\s*</screen>", searchable, flags=re.DOTALL | re.IGNORECASE
     )
     if not m:
         return None
@@ -2936,6 +2946,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             if note:
                 payload["note"] = note
             llm_interaction["calls"].append(payload)
+
         if orchestrator is None:
             llm_start_perf = time.perf_counter()
             response_text = llm_client.generate(
@@ -3091,11 +3102,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
 
         presenter_channels = _extract_presenter_channels(response_text)
+        presenter_channels_missing = (
+            not isinstance(presenter_channels, dict) or not presenter_channels
+        )
 
         screen_backfill_second_pass_attempted = False
         screen_backfill_second_pass_reason = None
 
-        if presenter_mode_requested and tool_messages:
+        if presenter_mode_requested:
+            has_tool_messages = bool(tool_messages)
             screen_tag_present = _presenter_tag_present(response_text, "screen")
             screen_text = None
             spoken_text = None
@@ -3159,7 +3174,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 else:
                     screen_backfill_second_pass_reason = "screen_matches_spoken"
 
-                tool_blob = _build_tool_messages_prompt_blob(tool_messages)
+                tool_blob = (
+                    _build_tool_messages_prompt_blob(tool_messages)
+                    if has_tool_messages
+                    else ""
+                )
 
                 def _tool_messages_include_description_write(
                     messages: list[dict],
@@ -3218,8 +3237,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                     return False
 
-                description_write_seen = _tool_messages_include_description_write(
-                    tool_messages
+                description_write_seen = (
+                    _tool_messages_include_description_write(tool_messages)
+                    if has_tool_messages
+                    else False
                 )
 
                 screen_candidate = None
@@ -3236,43 +3257,70 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                 if screen_candidate is None and allow_llm_screen_synthesis:
                     try:
-                        synthesis_system = (
-                            "You are Von. Create the on-screen response for the chat UI. "
-                            "Return ONLY one block: <screen>...</screen>. "
-                            "Do not include <spoken>. Do not include JSON. "
-                            "Use New Zealand English spelling. "
-                            "CRITICAL: Only state facts that are explicitly present in the tool results summary. "
-                            "Do not infer, guess, or add any claims beyond tool outputs."
-                        )
-                        synthesis_user = (
-                            "User request:\n"
-                            f"{prompt_text}\n\n"
-                            "Model response (may be incomplete; NOT authoritative for tool-backed changes):\n"
-                            f"{response_text}\n\n"
-                            + (
-                                "VON CHAT SCREEN CONTENT PROMPT (from Vontology):\n"
-                                "(Applies ONLY to <screen> formatting; it must not override tool-grounded facts.)\n"
-                                + str(screen_prompt_text).strip()
-                                + "\n\n"
-                                if isinstance(screen_prompt_text, str)
-                                and screen_prompt_text.strip()
-                                else ""
+                        if has_tool_messages:
+                            synthesis_system = (
+                                "You are Von. Create the on-screen response for the chat UI. "
+                                "Return ONLY one block: <screen>...</screen>. "
+                                "Do not include <spoken>. Do not include JSON. "
+                                "Use New Zealand English spelling. "
+                                "CRITICAL: Only state facts that are explicitly present in the tool results summary. "
+                                "Do not infer, guess, or add any claims beyond tool outputs."
                             )
-                            + "Tool results summary (authoritative):\n"
-                            f"{tool_blob}\n"
-                            "\nNon-negotiable rule:\n"
-                            "- If the tool results summary does not explicitly show a description update, you MUST NOT claim the description was added/updated. "
-                            "  You may say it is still empty/vacuous or that no tool updated it.\n"
-                            "- You MUST include a short section titled 'Writes ledger (authoritative)' that reflects the tool writes ledger without contradiction.\n"
-                        )
+                            synthesis_user = (
+                                "User request:\n"
+                                f"{prompt_text}\n\n"
+                                "Model response (may be incomplete; NOT authoritative for tool-backed changes):\n"
+                                f"{response_text}\n\n"
+                                + (
+                                    "VON CHAT SCREEN CONTENT PROMPT (from Vontology):\n"
+                                    "(Applies ONLY to <screen> formatting; it must not override tool-grounded facts.)\n"
+                                    + str(screen_prompt_text).strip()
+                                    + "\n\n"
+                                    if isinstance(screen_prompt_text, str)
+                                    and screen_prompt_text.strip()
+                                    else ""
+                                )
+                                + "Tool results summary (authoritative):\n"
+                                f"{tool_blob}\n"
+                                "\nNon-negotiable rule:\n"
+                                "- If the tool results summary does not explicitly show a description update, you MUST NOT claim the description was added/updated. "
+                                "  You may say it is still empty/vacuous or that no tool updated it.\n"
+                                "- You MUST include a short section titled 'Writes ledger (authoritative)' that reflects the tool writes ledger without contradiction.\n"
+                            )
+                        else:
+                            synthesis_system = (
+                                "You are Von. Create the on-screen response for the chat UI. "
+                                "Return ONLY one block: <screen>...</screen>. "
+                                "Do not include <spoken>. Do not include JSON. "
+                                "Use New Zealand English spelling. "
+                                "Use only the user request and the model response as sources. "
+                                "Do not invent facts beyond what is stated there."
+                            )
+                            synthesis_user = (
+                                "User request:\n"
+                                f"{prompt_text}\n\n"
+                                "Model response (may be incomplete; use it as content to display):\n"
+                                f"{response_text}\n\n"
+                                + (
+                                    "VON CHAT SCREEN CONTENT PROMPT (from Vontology):\n"
+                                    "(Applies ONLY to <screen> formatting.)\n"
+                                    + str(screen_prompt_text).strip()
+                                    + "\n\n"
+                                    if isinstance(screen_prompt_text, str)
+                                    and screen_prompt_text.strip()
+                                    else ""
+                                )
+                            )
 
                         synthesis_response = None
                         if orchestrator is not None and hasattr(
                             orchestrator, "_run_llm_with_fallbacks"
                         ):
                             try:
-                                policy_state, _ = orchestrator._load_workflow_model_policy(
-                                    request_language
+                                policy_state, _ = (
+                                    orchestrator._load_workflow_model_policy(
+                                        request_language
+                                    )
                                 )
                                 synthesis_response, screen_model_used, _ = (
                                     orchestrator._run_llm_with_fallbacks(
@@ -3385,8 +3433,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 return None
             import re
 
+            searchable = _strip_fenced_code_blocks(text)
             m = re.search(
-                r"<spoken>\s*(.*?)\s*</spoken>", text, flags=re.DOTALL | re.IGNORECASE
+                r"<spoken>\s*(.*?)\s*</spoken>",
+                searchable,
+                flags=re.DOTALL | re.IGNORECASE,
             )
             if not m:
                 return None
@@ -3455,9 +3506,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # falling back to reading the screen/markdown verbatim.
         needs_spoken_backfill = False
         if presenter_mode_requested:
-            if presenter_channels is None:
+            if presenter_channels_missing:
                 needs_spoken_backfill = True
-                spoken_backfill_second_pass_reason = "missing_presenter_channels"
+                if has_tool_messages:
+                    spoken_backfill_second_pass_reason = "missing_spoken"
+                else:
+                    spoken_backfill_second_pass_reason = "missing_presenter_channels"
             elif isinstance(presenter_channels, dict):
                 spoken_value = presenter_channels.get("spoken")
                 if not isinstance(spoken_value, str) or not spoken_value.strip():
@@ -3644,8 +3698,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
 
                     spoken_fallback = _coerce_spoken_text(narration_response)
+                    spoken_from_screen_text = False
                     if not spoken_fallback:
                         spoken_fallback = _coerce_spoken_text(screen_text)
+                        spoken_from_screen_text = bool(spoken_fallback)
 
                     if spoken_fallback:
                         base_channels = (
@@ -3660,9 +3716,28 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         # For normal tagged responses, surface that narration was added.
                         if existing_format == "tool_results_fallback_v1":
                             base_channels["format"] = existing_format
-                        elif isinstance(
-                            existing_format, str
-                        ) and existing_format.startswith("screen_backfill_"):
+                        elif (
+                            has_tool_messages
+                            and isinstance(existing_format, str)
+                            and existing_format.startswith("screen_backfill_")
+                        ):
+                            base_channels["format"] = existing_format
+                        elif (
+                            not has_tool_messages
+                            and isinstance(existing_format, str)
+                            and existing_format.startswith("screen_backfill_")
+                        ):
+                            base_channels["format"] = "narration_fallback_v1"
+                        elif (
+                            spoken_backfill_second_pass_reason
+                            == "missing_presenter_channels"
+                        ):
+                            base_channels["format"] = "narration_fallback_v1"
+                        elif (
+                            spoken_from_screen_text
+                            and isinstance(existing_format, str)
+                            and existing_format.startswith("screen_backfill_")
+                        ):
                             base_channels["format"] = existing_format
                         else:
                             base_channels["format"] = "narration_fallback_v1"

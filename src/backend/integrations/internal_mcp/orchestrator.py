@@ -2960,11 +2960,14 @@ class InternalMCPChatOrchestrator:
             return []
 
         predicates: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for entry in results:
             if not isinstance(entry, dict):
                 continue
             concept_id = entry.get("concept_id")
             if not isinstance(concept_id, str) or not concept_id:
+                continue
+            if concept_id in seen:
                 continue
             name_texts = get_texts_for_concept(
                 concept_id, predicate="hasName", limit=80
@@ -2972,6 +2975,7 @@ class InternalMCPChatOrchestrator:
             display_name, name_lang = self._select_preferred_name(
                 name_texts, preferred_language
             )
+            display_name = self._normalise_preflight_display_name(display_name)
             predicates.append(
                 {
                     "concept_id": concept_id,
@@ -2979,6 +2983,7 @@ class InternalMCPChatOrchestrator:
                     "name_lang": name_lang,
                 }
             )
+            seen.add(concept_id)
 
         return predicates
 
@@ -3023,7 +3028,58 @@ class InternalMCPChatOrchestrator:
                 "predicates": predicates,
             }
 
-        if not predicates and not explicit_ids:
+        targeted_predicates: list[dict[str, Any]] = []
+        predicate_query: str | None = None
+
+        if self._should_trigger_predicate_search(raw):
+            predicate_query = self._extract_predicate_query_from_text(raw)
+            if predicate_query:
+                try:
+                    from src.backend.services.concept_search_service import (
+                        search_concepts,
+                    )
+                except Exception:
+                    search_concepts = None
+
+                if callable(search_concepts):
+                    try:
+                        result = search_concepts(
+                            query=predicate_query,
+                            filter_kind=["predicate"],
+                            match_type="similarity",
+                            min_similarity=0.55,
+                            limit=12,
+                        )
+                    except Exception:
+                        result = None
+
+                    entries = (
+                        result.get("results") if isinstance(result, dict) else None
+                    )
+                    if isinstance(entries, list):
+                        seen_targeted: set[str] = set()
+                        for entry in entries:
+                            if not isinstance(entry, dict):
+                                continue
+                            concept_id = entry.get("concept_id")
+                            if not isinstance(concept_id, str) or not concept_id:
+                                continue
+                            if concept_id in seen_targeted:
+                                continue
+                            name_value = entry.get("name")
+                            if isinstance(name_value, str) and name_value.strip():
+                                name_value = self._normalise_preflight_display_name(
+                                    name_value
+                                )
+                            targeted_predicates.append(
+                                {
+                                    "concept_id": concept_id,
+                                    "display_name": name_value,
+                                }
+                            )
+                            seen_targeted.add(concept_id)
+
+        if not predicates and not explicit_ids and not targeted_predicates:
             return _OntologyPreflightResult(message=None, telemetry=None)
 
         lines: list[str] = [
@@ -3051,6 +3107,18 @@ class InternalMCPChatOrchestrator:
                 else:
                     lines.append(f"- {concept_id}")
 
+        if targeted_predicates:
+            lines.append("Targeted predicate candidates (from prompt):")
+            for item in targeted_predicates[:12]:
+                concept_id = item.get("concept_id")
+                display_name = item.get("display_name")
+                if not concept_id:
+                    continue
+                if display_name:
+                    lines.append(f'- {concept_id} (name="{display_name}")')
+                else:
+                    lines.append(f"- {concept_id}")
+
         telemetry: dict[str, Any] = {
             "type": "ontology_preflight",
             "stage": "deterministic_preflight",
@@ -3058,6 +3126,8 @@ class InternalMCPChatOrchestrator:
             "predicate_type": self._PREFLIGHT_PREDICATE_TYPE_ID,
             "preflight_predicates": predicates,
             "explicit_ids": explicit_ids,
+            "predicate_query": predicate_query,
+            "targeted_predicates": targeted_predicates,
         }
 
         return _OntologyPreflightResult(message="\n".join(lines), telemetry=telemetry)
@@ -3491,6 +3561,68 @@ class InternalMCPChatOrchestrator:
 
         return None
 
+    @staticmethod
+    def _normalise_preflight_display_name(value: str | None) -> str | None:
+        if not isinstance(value, str):
+            return value
+        if "\\" not in value:
+            return value
+        try:
+            return value.encode("utf-8").decode("unicode_escape")
+        except Exception:
+            return value.replace("\\f", "f")
+
+    @staticmethod
+    def _extract_predicate_query_from_text(text: str) -> str | None:
+        if not isinstance(text, str):
+            return None
+        raw = text.strip()
+        if not raw:
+            return None
+
+        import re
+
+        quoted = re.findall(r'"([^"]{3,80})"|\'([^\']{3,80})\'', raw)
+        for pair in quoted:
+            candidate = next((item for item in pair if item), None)
+            if candidate:
+                return candidate.strip()
+
+        keyword_match = re.search(
+            r"\b(predicate|relationship|relation|related to)\b\s*(?:called|named)?\s*([A-Za-z0-9_\-\s]{3,60})",
+            raw,
+            re.IGNORECASE,
+        )
+        if keyword_match:
+            return keyword_match.group(2).strip()
+
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", raw)
+        if not words:
+            return None
+        return " ".join(words[:6]).strip()
+
+    @staticmethod
+    def _should_trigger_predicate_search(text: str) -> bool:
+        if not isinstance(text, str) or not text.strip():
+            return False
+        import re
+
+        lowered = text.lower()
+        if re.search(r"#V#[A-Za-z0-9][A-Za-z0-9._-]*", text):
+            return False
+        return any(
+            token in lowered
+            for token in (
+                "predicate",
+                "relationship",
+                "relation",
+                "related to",
+                "is an instance of",
+                "is a type of",
+                "has author",
+            )
+        )
+
     def _infer_missing_tool_call_retry_tool_calls(
         self,
         augmented_context: Sequence[Mapping[str, Any]],
@@ -3522,6 +3654,23 @@ class InternalMCPChatOrchestrator:
 
         if not last_user_text:
             return None
+
+        if self._should_trigger_predicate_search(last_user_text):
+            predicate_query = self._extract_predicate_query_from_text(last_user_text)
+            if predicate_query:
+                return [
+                    {
+                        "action": "call_tool",
+                        "tool": "search_concepts",
+                        "payload": {
+                            "query": predicate_query,
+                            "filter_kind": ["predicate"],
+                            "match_type": "similarity",
+                            "min_similarity": 0.55,
+                            "limit": 12,
+                        },
+                    }
+                ]
 
         arxiv_id = self._extract_arxiv_id_from_text(last_user_text)
         if not arxiv_id:

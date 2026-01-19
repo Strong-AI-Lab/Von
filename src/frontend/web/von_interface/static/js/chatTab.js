@@ -14,7 +14,7 @@ import {
     stopSpeaking
 } from './speech.js';
 import { getPreferredLanguage, selectBestNameForContext } from './utils/nameSelection.js';
-import { cartouchifyElementText, cartouchifyVontologyTokensInElement } from './utils/textDecorator.js';
+import { cartouchifyElementText, cartouchifyVontologyTokensInElement, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
 import { showToast } from './utils/toast.js';
 
 // Store LLM debug data for each turn
@@ -133,6 +133,16 @@ function setLoadingIndicatorDetailText(text) {
     const value = String(text ?? '').trim();
     detailEl.textContent = value;
     detailEl.setAttribute('aria-hidden', value ? 'false' : 'true');
+
+    const promptInput = document.getElementById('promptInput');
+    const wrapper = promptInput?.closest?.('.prompt-input-wrapper');
+    if (wrapper) {
+        if (value) {
+            wrapper.classList.add('has-loading-detail');
+        } else {
+            wrapper.classList.remove('has-loading-detail');
+        }
+    }
 }
 
 function createClientRequestId() {
@@ -239,7 +249,7 @@ async function refreshToolUseDuringThinkingSetting(force = false) {
     return showToolUseDuringThinkingSetting;
 }
 
-function formatToolUseProgressText(progress) {
+function formatToolUseProgressText(progress, request = null) {
     if (!progress || typeof progress !== 'object') {
         return DEFAULT_THINKING_TEXT;
     }
@@ -252,6 +262,14 @@ function formatToolUseProgressText(progress) {
     const remaining = Number.isFinite(progress.tool_calls_remaining) ? Number(progress.tool_calls_remaining) : null;
 
     const bits = [];
+
+    const thinkingStartedAtMs = request && Number.isFinite(request.thinkingStartedAtMs)
+        ? Number(request.thinkingStartedAtMs)
+        : null;
+    const elapsedMs = thinkingStartedAtMs === null ? null : Date.now() - thinkingStartedAtMs;
+    if (elapsedMs !== null) {
+        bits.push(`for ${formatThinkingDuration(elapsedMs)}`);
+    }
 
     if (tool) {
         bits.push(`tool: ${tool}`);
@@ -509,7 +527,7 @@ function startToolUseProgressPolling(request) {
 
             poll.consecutiveNotFound = 0;
             poll.nextDelayMs = 350;
-            setLoadingIndicatorText(formatToolUseProgressText(progress));
+            setLoadingIndicatorText(formatToolUseProgressText(progress, request));
             recordToolUseHistory(request, progress);
             setLoadingIndicatorDetailText(formatToolUseHistoryTooltip(request));
 
@@ -1913,8 +1931,9 @@ async function renderChatMarkdownIntoContainer(container, text) {
         // Ignore.
     }
 
-    // Preserve clickable #V# tokens, but never inside code blocks.
+    // Preserve clickable #V# tokens; cartouchify where allowed, otherwise linkify in-place.
     cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
+    linkifyVontologyTokensInElement(container, { skipSelectors: ['a', '.vontology-cartouche', 'button'], plain: true });
     hydrateChatConceptCartouches(container);
 }
 
@@ -1958,6 +1977,7 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
         convertJustSayInstructionsToButtons(messageTextEl);
         convertQuotedInstructionListItemsToButtons(messageTextEl);
         cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
+        linkifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['a', '.vontology-cartouche', 'button'], plain: true });
         hydrateChatConceptCartouches(messageTextEl);
         return;
     }
@@ -5889,14 +5909,19 @@ function restorePromptEditingState(request) {
         return;
     }
 
-    promptInput.value = request.promptRaw || '';
-    promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    const currentValue = String(promptInput.value ?? '').trim();
+    if (!currentValue) {
+        promptInput.value = request.promptRaw || '';
+        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
 
     try {
-        const valueLength = promptInput.value.length;
-        const start = Number.isInteger(request.selectionStart) ? request.selectionStart : valueLength;
-        const end = Number.isInteger(request.selectionEnd) ? request.selectionEnd : start;
-        promptInput.setSelectionRange(Math.min(start, valueLength), Math.min(end, valueLength));
+        if (!currentValue) {
+            const valueLength = promptInput.value.length;
+            const start = Number.isInteger(request.selectionStart) ? request.selectionStart : valueLength;
+            const end = Number.isInteger(request.selectionEnd) ? request.selectionEnd : start;
+            promptInput.setSelectionRange(Math.min(start, valueLength), Math.min(end, valueLength));
+        }
     } catch (err) {
         // Selection range is best-effort; some environments may not support it.
     }

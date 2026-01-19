@@ -42,7 +42,7 @@ export function parseVontologyTokens(text) {
  * The anchors dispatch a custom event 'von:selectConceptById' when clicked,
  * with createConceptTab set to true so clicking opens a concept tab like other concept links.
  */
-export function createAnnotatedFragment(text) {
+export function createAnnotatedFragment(text, options = {}) {
 	const frag = document.createDocumentFragment();
 	const segments = parseVontologyTokens(text);
 	for (const seg of segments) {
@@ -52,7 +52,8 @@ export function createAnnotatedFragment(text) {
 			// We still use an anchor for consistent styling + accessibility.
 			a.href = '#';
 			a.textContent = seg.text;
-			a.className = 'vontology-token';
+			const baseClass = options.className || 'vontology-token';
+			a.className = options.plain ? `${baseClass} vontology-token-plain` : baseClass;
 			a.dataset.conceptId = seg.conceptId;
 			a.addEventListener('click', (e) => {
 				e.preventDefault();
@@ -440,7 +441,10 @@ export function linkifyVontologyTokensInElement(root, options = {}) {
 			continue;
 		}
 
-		const frag = createAnnotatedFragment(normalised);
+		const frag = createAnnotatedFragment(normalised, {
+			className: options.className,
+			plain: options.plain
+		});
 		try {
 			textNode.parentNode.insertBefore(frag, textNode);
 			textNode.parentNode.removeChild(textNode);
