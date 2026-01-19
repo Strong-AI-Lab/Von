@@ -1443,6 +1443,39 @@ function hideTabContextMenu() {
     currentContextMenuTarget = null;
 }
 
+async function copyConceptIdToClipboard(conceptId) {
+    const value = String(conceptId ?? '');
+    if (!value) return;
+
+    try {
+        if (navigator?.clipboard?.writeText) {
+            await navigator.clipboard.writeText(value);
+            showToast('Concept ID copied');
+            return;
+        }
+    } catch (_) {
+        // Fall through to legacy approach.
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+        document.execCommand('copy');
+        showToast('Concept ID copied');
+    } catch (_) {
+        showToast('Copy failed', 'error');
+    } finally {
+        try { textarea.remove(); } catch (_) { }
+    }
+}
+
 /**
  * Reloads concept data from the backend and refreshes the tab UI
  * @param {string} conceptId - The concept ID to reload
@@ -1618,6 +1651,10 @@ function buildTabContextMenuItems(conceptId) {
     addItem('close-others', 'Close Others', () => closeOtherTabs(conceptId));
     addItem('close-right', 'Close Tabs to Right', () => closeTabsToRight(conceptId));
     addItem('close-all', 'Close All', () => closeAllDynamicConceptTabs());
+
+    addItem('copy-concept-id', 'Copy Concept ID', () => {
+        copyConceptIdToClipboard(conceptId);
+    });
 
     // Add reload menu item before bulk close operations
     addItem('reload', '🔄 Reload Concept', () => {
@@ -5535,6 +5572,17 @@ async function renderRelationships(conceptId, suffix, kind) {
                 }
             });
 
+            // Right-click: copy predicate concept ID
+            predicateChip.addEventListener('contextmenu', (e) => {
+                try {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    copyConceptIdToClipboard(toPredicateConceptId(s.key));
+                } catch (err) {
+                    console.warn('[dynamicTabs] Failed to copy predicate concept ID', err);
+                }
+            });
+
             h.appendChild(predicateChip);
             const list = document.createElement('div'); list.className = 'relationship-list'; list.style.display = 'flex'; list.style.flexWrap = 'wrap'; list.style.gap = '6px';
 
@@ -5692,6 +5740,17 @@ async function renderRelationships(conceptId, suffix, kind) {
                     document.dispatchEvent(evt);
                 } catch (e) {
                     console.warn('[dynamicTabs] Failed to open predicate tab', e);
+                }
+            });
+
+            // Right-click: copy predicate concept ID
+            predicateChip.addEventListener('contextmenu', (e) => {
+                try {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    copyConceptIdToClipboard(toPredicateConceptId(dk));
+                } catch (err) {
+                    console.warn('[dynamicTabs] Failed to copy predicate concept ID', err);
                 }
             });
 

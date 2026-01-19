@@ -56,13 +56,15 @@ class OpenAIClient(LLMClient):
         tools = [self._tool_definition_to_dict(tool) for tool in available_tools]
 
         try:
+            request_kwargs = dict(kwargs)
+            if self.config.max_tokens is not None:
+                request_kwargs["max_tokens"] = self.config.max_tokens
             response = await self._client.chat.completions.create(
                 model=self.config.model,
                 messages=messages,  # type: ignore[arg-type]
                 tools=tools,  # type: ignore[arg-type]
                 temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                **kwargs,
+                **request_kwargs,
             )
 
             return self._parse_response(response, available_tools)

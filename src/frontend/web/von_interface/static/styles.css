@@ -3732,7 +3732,7 @@ footer {
     justify-content: center;
     align-items: center;
     gap: 10px;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
 }
 
 .loading-indicator-detail {
@@ -3746,6 +3746,7 @@ footer {
     max-width: min(92vw, 720px);
     text-align: center;
     line-height: 1.4;
+    white-space: pre-line;
 }
 
 .upload-file-status {
@@ -4000,8 +4001,9 @@ footer {
 
 /* When inside the tab-content-area, make the tab content flex to propagate height */
 .tab-content-area .tab-content.active>.content-wrapper {
-    height: calc(100vh - 60px - 80px);
+    min-height: calc(100vh - 60px - 80px);
     /* subtract tab bar + some footer padding allowance */
+    height: auto;
 }
 
 /* Provide a responsive fallback for very small screens */
@@ -4078,6 +4080,12 @@ footer {
 .prompt-input-wrapper {
     position: relative;
     width: 100%;
+    background-color: #fff;
+    border-radius: 6px;
+}
+
+.prompt-input-wrapper.has-loading-detail {
+    margin-top: 4px;
 }
 
 .prompt-input-wrapper .prompt-input {
@@ -4907,6 +4915,18 @@ button.prompt-vontology-cartouche {
 .vontology-token:hover {
     color: #004a99;
     border-bottom-color: #004a99;
+}
+
+.vontology-token.vontology-token-plain {
+    color: inherit;
+    text-decoration: inherit;
+    border-bottom: none;
+    cursor: inherit;
+}
+
+.vontology-token.vontology-token-plain:hover {
+    color: inherit;
+    border-bottom-color: transparent;
 }
 
 /* Annotation suggestion UI */
