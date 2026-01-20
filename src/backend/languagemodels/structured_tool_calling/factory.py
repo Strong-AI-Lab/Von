@@ -26,6 +26,10 @@ def get_llm_client(config: LLMClientConfig) -> LLMClient:
 
     model_lower = config.model.lower()
 
+    # gpt-oss models are local (Ollama) despite the "gpt-" prefix
+    if "gpt-oss" in model_lower:
+        return OllamaClient(config)
+
     # OpenAI models
     if any(x in model_lower for x in ["gpt-", "text-davinci", "text-curie"]):
         return OpenAIClient(config)
