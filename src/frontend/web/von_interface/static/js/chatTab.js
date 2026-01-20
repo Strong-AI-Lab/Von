@@ -5861,8 +5861,17 @@ export function initializeChatTab() {
     // Render non-trigger (#V\u200B#...) concept tokens as cartouches in the prompt.
     initializePromptCartoucheOverlay(promptInput);
 
-    loadRecentChatPair();
-    updateHistoryLength();
+    void loadRecentChatPair({
+        scrollToBottom: true,
+        preserveScroll: false,
+        showResetNotice: false,
+        forceScrollToBottom: true
+    }).then(() => loadChatHistory({
+        segments: 1,
+        scrollToBottom: false,
+        preserveScroll: true,
+        showResetNotice: false
+    })).catch(() => { });
     void refreshChatSessionTabs();
     void refreshToolUseDuringThinkingSetting();
     console.log("Chat tab initialized successfully");

@@ -4275,6 +4275,26 @@ class InternalMCPChatOrchestrator:
         orchestrator_start = time.perf_counter()
         recent_user_prompts = self._extract_recent_user_prompts(context, max_count=5)
 
+        def _infer_provider(model_id: str | None) -> str | None:
+            if not isinstance(model_id, str):
+                return None
+            lowered = model_id.strip().lower()
+            if not lowered:
+                return None
+            if lowered.startswith("openai:"):
+                return "openai"
+            if lowered.startswith(
+                ("gpt-", "o1-", "text-", "davinci", "curie", "babbage", "ada")
+            ):
+                return "openai"
+            if lowered.startswith("gemini"):
+                return "gemini"
+            if lowered.startswith("ollama:"):
+                return "ollama"
+            if ":" in lowered and not lowered.startswith("ft:"):
+                return "ollama"
+            return None
+
         def _record_llm_call(
             *,
             call_type: str,
@@ -4289,7 +4309,7 @@ class InternalMCPChatOrchestrator:
             payload: dict[str, Any] = {
                 "type": call_type,
                 "model": model_name,
-                "provider": provider,
+                "provider": provider or _infer_provider(model_name),
                 "duration_ms": duration_ms,
                 "usage": dict(usage) if isinstance(usage, Mapping) else None,
                 "workflow": "internal_mcp",
