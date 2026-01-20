@@ -124,3 +124,60 @@ def coerce_payload(
 
     ok, errors = validate_payload(schema, payload)
     return payload, errors
+
+
+def coerce_payload_types(
+    schema: Schema, payload: MutableMapping[str, Any]
+) -> Tuple[MutableMapping[str, Any], list[str]]:
+    """Coerce payload fields to expected primitive types when safe.
+
+    This intentionally applies only narrow, predictable coercions to avoid
+    unexpected behaviour changes. It is used as a pre-validation step to
+    recover from common LLM output mismatches (e.g., numeric strings).
+    """
+
+    warnings: list[str] = []
+
+    def _coerce_value(key: str, value: Any, expected: JsonCompatibleType) -> Any:
+        allowed = _normalise_expected(expected)
+
+        if value is None:
+            return value
+
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return value
+
+            if int in allowed and raw.isdigit():
+                warnings.append(f"Coerced field '{key}' from string to int.")
+                return int(raw)
+
+            if float in allowed:
+                try:
+                    coerced = float(raw)
+                except ValueError:
+                    coerced = None
+                if coerced is not None:
+                    warnings.append(f"Coerced field '{key}' from string to float.")
+                    return coerced
+
+            if bool in allowed:
+                lowered = raw.lower()
+                if lowered in {"true", "false"}:
+                    warnings.append(f"Coerced field '{key}' from string to bool.")
+                    return lowered == "true"
+
+        return value
+
+    for key, expected in schema.required.items():
+        if key not in payload:
+            continue
+        payload[key] = _coerce_value(key, payload[key], expected)
+
+    for key, expected in schema.optional.items():
+        if key not in payload:
+            continue
+        payload[key] = _coerce_value(key, payload[key], expected)
+
+    return payload, warnings

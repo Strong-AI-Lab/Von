@@ -24,7 +24,8 @@ from typing import (
     TypedDict,
 )
 
-from .gateway import InternalMCPGateway
+from .gateway import InternalMCPGateway, MethodDefinition
+from .schemas import Schema as McpSchema, coerce_payload_types, validate_payload
 
 # Structured tool calling support (JVNAUTOSCI-799 Phase 3)
 from ...languagemodels.structured_tool_calling import (
@@ -118,6 +119,14 @@ class _MissingToolCallAssessment:
 
 
 @dataclass(frozen=True)
+class _ToolCallPreflightResult:
+    tool_calls: list[_ToolCallRequest] | None
+    errors: list[str]
+    warnings: list[str]
+    tool_unavailable: list[str]
+
+
+@dataclass(frozen=True)
 class _MissingToolCallDetectorSpec:
     """Declarative definition of the missing-tool-call detector."""
 
@@ -171,6 +180,24 @@ class InternalMCPChatOrchestrator:
     _MISSING_TOOL_CALL_ACTION_ID = "#V#detect_missing_tool_call_action"
     _PREFLIGHT_PREDICATE_TYPE_ID = "#V#conversation_preflight_predicate"
     _PREFLIGHT_CACHE_TTL_SECONDS = 120
+    _TOOL_CALL_REPAIR_PROMPT = (
+        "You are a strict tool-call repairer for an MCP agent.\n"
+        "Return ONLY a JSON object or JSON array of tool-call objects.\n"
+        "Do NOT include prose, markdown fences, or explanations.\n\n"
+        "Each tool call must follow:\n"
+        '{{"action": "call_tool", "tool": "tool_name", "payload": {{"param": "value"}}}}\n\n'
+        "Constraints:\n"
+        "- Use only tools that appear in the available tool list.\n"
+        "- Ensure payload types match the schema (e.g. integers are integers).\n"
+        "- If you cannot produce a valid tool call, return an empty JSON array [].\n\n"
+        "Available tools:\n"
+        "{tool_list}\n\n"
+        "Validation errors to fix:\n"
+        "{errors}\n\n"
+        "Original tool-call JSON:\n"
+        "{raw_tool_call}\n"
+    )
+    _TOOL_CALL_REPAIR_PROMPTS = ("#V#tool_call_repair_prompt",)
     _FALLBACK_MISSING_TOOL_CALL_PROMPT = (
         "You are a strict classifier for an agent system that can call tools via JSON.\n"
         "Your job: decide whether the assistant response *promises* to call tools (or says it is about to do so) "
@@ -3056,6 +3083,236 @@ class InternalMCPChatOrchestrator:
 
         return tool_calls
 
+    def _tool_schema_for_name(
+        self,
+        tool_name: str,
+        method_catalogue: Mapping[str, Any],
+    ) -> McpSchema | None:
+        get_definition = getattr(self._gateway, "get_method_definition", None)
+        if callable(get_definition):
+            definition = get_definition(tool_name)
+            if isinstance(definition, MethodDefinition) and isinstance(
+                definition.input_schema, McpSchema
+            ):
+                return definition.input_schema
+
+        metadata = method_catalogue.get(tool_name)
+        if not isinstance(metadata, Mapping):
+            return None
+
+        raw_schema = metadata.get("input_schema")
+        if isinstance(raw_schema, McpSchema):
+            return raw_schema
+        if not isinstance(raw_schema, Mapping):
+            return None
+
+        def _coerce_fields(value: Any) -> Dict[str, Any]:
+            if isinstance(value, Mapping):
+                return dict(value)
+            if isinstance(value, list):
+                return {
+                    item: object for item in value if isinstance(item, str) and item
+                }
+            return {}
+
+        return McpSchema(
+            required=_coerce_fields(raw_schema.get("required") or {}),
+            optional=_coerce_fields(raw_schema.get("optional") or {}),
+            allow_unknown=bool(raw_schema.get("allow_unknown")),
+            description=(
+                raw_schema.get("description")
+                if isinstance(raw_schema.get("description"), str)
+                else None
+            ),
+        )
+
+    def _preflight_tool_calls(
+        self,
+        tool_calls: list[_ToolCallRequest],
+        method_catalogue: Mapping[str, Any],
+        *,
+        user_namespace: str | None,
+        selected_gmail_profile: str | None,
+    ) -> _ToolCallPreflightResult:
+        errors: list[str] = []
+        warnings: list[str] = []
+        tool_unavailable: list[str] = []
+
+        if not tool_calls:
+            return _ToolCallPreflightResult(None, errors, warnings, tool_unavailable)
+
+        available_tools = set(method_catalogue.keys())
+        enforce_availability = bool(available_tools)
+
+        for tool_call in tool_calls:
+            tool_name = tool_call.get(self._TOOL_FIELD)
+            payload = tool_call.get(self._PAYLOAD_FIELD)
+
+            if not isinstance(tool_name, str):
+                errors.append("Tool name must be a string.")
+                continue
+
+            if enforce_availability and tool_name not in available_tools:
+                tool_unavailable.append(tool_name)
+                errors.append(f"Tool '{tool_name}' is not available.")
+                continue
+
+            if not isinstance(payload, MutableMapping):
+                errors.append(f"Tool '{tool_name}' payload must be a JSON object.")
+                continue
+
+            schema = self._tool_schema_for_name(tool_name, method_catalogue)
+
+            self._apply_payload_defaults(
+                tool_name,
+                payload,
+                schema=schema,
+                user_namespace=user_namespace,
+                selected_gmail_profile=selected_gmail_profile,
+            )
+            if schema is None:
+                continue
+
+            _, coercion_warnings = coerce_payload_types(schema, payload)
+            warnings.extend(
+                [f"{tool_name}: {warning}" for warning in coercion_warnings]
+            )
+
+            validation_payload = payload
+            if (
+                not schema.allow_unknown
+                and "namespace" in payload
+                and "namespace" not in schema.required
+                and "namespace" not in schema.optional
+            ):
+                validation_payload = dict(payload)
+                validation_payload.pop("namespace", None)
+
+            ok, validation_errors = validate_payload(schema, validation_payload)
+            if not ok:
+                errors.extend([f"{tool_name}: {error}" for error in validation_errors])
+
+        return _ToolCallPreflightResult(tool_calls, errors, warnings, tool_unavailable)
+
+    def _apply_payload_defaults(
+        self,
+        tool_name: str,
+        payload: MutableMapping[str, Any],
+        *,
+        schema: McpSchema | None,
+        user_namespace: str | None,
+        selected_gmail_profile: str | None,
+    ) -> None:
+        if tool_name.startswith("gmail_"):
+            if not payload.get("profile") and selected_gmail_profile:
+                payload["profile"] = selected_gmail_profile
+            if "namespace" in payload:
+                payload.pop("namespace", None)
+            return
+
+        if user_namespace and "namespace" not in payload:
+            payload["namespace"] = user_namespace
+
+    def _tool_call_repair_enabled(self) -> bool:
+        return os.getenv("VON_TOOL_CALL_REPAIR_ENABLE", "1").lower() in {
+            "1",
+            "true",
+        }
+
+    def _attempt_tool_call_repair(
+        self,
+        *,
+        current_response: str,
+        errors: Sequence[str],
+        tool_list: Sequence[str],
+        llm_client: Any,
+        policy_state: _WorkflowModelPolicyState,
+        default_model: str | None,
+        registry_snapshot: Mapping[str, Any] | None,
+        user_concept_id: str | None,
+        org_concept_id: str | None,
+        aux_llm_calls: list[Mapping[str, Any]],
+        llm_calls_log: list[dict[str, Any]],
+        record_llm_call: Callable[..., None] | None,
+    ) -> list[_ToolCallRequest] | None:
+        if not self._tool_call_repair_enabled():
+            return None
+
+        variables = {
+            "tool_list": "\n".join(f"- {name}" for name in tool_list),
+            "errors": "\n".join(f"- {err}" for err in errors),
+            "raw_tool_call": (current_response[:4000] if current_response else ""),
+        }
+        rendered_prompt = self._prompt_templates.render_prompt(
+            self._TOOL_CALL_REPAIR_PROMPTS,
+            variables=variables,
+            fallback=self._TOOL_CALL_REPAIR_PROMPT.format(**variables),
+            max_chars=4000,
+        )
+        prompt_text = (
+            rendered_prompt.text
+            if rendered_prompt is not None
+            else self._TOOL_CALL_REPAIR_PROMPT.format(**variables)
+        )
+
+        try:
+            aux_llm_calls.append(
+                {
+                    "type": "tool_call_repair",
+                    "stage": "prompt",
+                    "prompt_preview": prompt_text[:800],
+                }
+            )
+        except Exception:
+            pass
+
+        repaired_response = None
+        if isinstance(policy_state, _WorkflowModelPolicyState) and callable(
+            record_llm_call
+        ):
+            repaired_response, _, _ = self._run_llm_with_fallbacks(
+                stage="tool_recovery",
+                prompt=prompt_text,
+                context=[],
+                default_client=llm_client,
+                default_model=default_model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                llm_calls_log=llm_calls_log,
+                aux_log=aux_llm_calls,
+                record_llm_call=record_llm_call,
+            )
+        else:
+            repaired_response = llm_client.generate(
+                prompt_text, context=[], model=default_model
+            )
+
+        try:
+            aux_llm_calls.append(
+                {
+                    "type": "tool_call_repair",
+                    "stage": "response",
+                    "response_preview": (
+                        repaired_response[:800]
+                        if isinstance(repaired_response, str)
+                        else str(repaired_response)[:800]
+                    ),
+                }
+            )
+        except Exception:
+            pass
+
+        try:
+            return self._extract_tool_calls(
+                repaired_response
+                if isinstance(repaired_response, str)
+                else str(repaired_response)
+            )
+        except ToolCallParsingError:
+            return None
+
     @staticmethod
     def _repair_truncated_json(raw: str) -> str | None:
         """Attempt to close unterminated JSON when it looks safely truncated."""
@@ -4373,6 +4630,57 @@ class InternalMCPChatOrchestrator:
                 aux_llm_calls=tuple(aux_llm_calls),
             )
 
+        def _build_tool_call_validation_error_result(
+            errors: Sequence[str],
+            warnings: Sequence[str],
+            tool_unavailable: Sequence[str],
+            *,
+            raw_tool_call: str | None,
+            invocations_override: Sequence[Mapping[str, Any]] = (),
+            tool_messages_override: Sequence[Mapping[str, Any]] = (),
+        ) -> OrchestratorResult:
+            payload: dict[str, Any] = {
+                "errors": list(errors),
+                "warnings": list(warnings),
+                "tool_unavailable": list(tool_unavailable),
+            }
+            if raw_tool_call:
+                payload["raw_tool_call"] = raw_tool_call[:8000]
+
+            tool_invocations = list(invocations_override)
+            tool_invocations.append(
+                {
+                    "tool": "__tool_call_validation_error__",
+                    "payload": payload,
+                    "error": "; ".join(errors) if errors else "validation_failed",
+                }
+            )
+
+            message_lines = [
+                "Tool call was not executed due to a validation error.",
+            ]
+            if tool_unavailable:
+                message_lines.append(
+                    "Unavailable tools: " + ", ".join(sorted(set(tool_unavailable)))
+                )
+            if errors:
+                message_lines.append("Errors:")
+                message_lines.extend([f"- {err}" for err in errors])
+            if warnings:
+                message_lines.append("Warnings:")
+                message_lines.extend([f"- {warning}" for warning in warnings])
+
+            message_lines.append(
+                "\nPlease retry. If this keeps happening, share the debug output so we can reproduce it."
+            )
+
+            return OrchestratorResult(
+                response_text="\n".join(message_lines),
+                extra_messages=tuple(tool_messages_override),
+                tool_invocations=tuple(tool_invocations),
+                aux_llm_calls=tuple(aux_llm_calls),
+            )
+
         trace_enabled = os.getenv("VON_WORKFLOWS_TRACE_ENABLED", "0").lower() in {
             "1",
             "true",
@@ -5125,6 +5433,70 @@ class InternalMCPChatOrchestrator:
             if not tool_calls:
                 break
 
+            preflight = self._preflight_tool_calls(
+                cast(list[_ToolCallRequest], tool_calls),
+                method_catalogue,
+                user_namespace=user_namespace,
+                selected_gmail_profile=selected_gmail_profile,
+            )
+            if preflight.warnings:
+                try:
+                    aux_llm_calls.append(
+                        {
+                            "type": "tool_call_coercions",
+                            "warnings": list(preflight.warnings),
+                        }
+                    )
+                except Exception:
+                    pass
+            if preflight.errors:
+                repaired_calls = None
+                if not preflight.tool_unavailable:
+                    repaired_calls = self._attempt_tool_call_repair(
+                        current_response=(
+                            current_response
+                            if isinstance(current_response, str)
+                            else str(current_response)
+                        ),
+                        errors=preflight.errors,
+                        tool_list=sorted(method_catalogue.keys()),
+                        llm_client=llm_client,
+                        policy_state=policy_state,
+                        default_model=tool_call_model,
+                        registry_snapshot=registry_snapshot,
+                        user_concept_id=user_concept_id,
+                        org_concept_id=org_concept_id,
+                        aux_llm_calls=aux_llm_calls,
+                        llm_calls_log=llm_calls,
+                        record_llm_call=_record_llm_call,
+                    )
+
+                if repaired_calls:
+                    preflight = self._preflight_tool_calls(
+                        repaired_calls,
+                        method_catalogue,
+                        user_namespace=user_namespace,
+                        selected_gmail_profile=selected_gmail_profile,
+                    )
+                    if not preflight.errors:
+                        tool_calls = repaired_calls
+
+            if preflight.errors:
+                result = _build_tool_call_validation_error_result(
+                    preflight.errors,
+                    preflight.warnings,
+                    preflight.tool_unavailable,
+                    raw_tool_call=(
+                        current_response
+                        if isinstance(current_response, str)
+                        else str(current_response)
+                    ),
+                    invocations_override=tuple(invocations),
+                    tool_messages_override=tuple(tool_messages),
+                )
+                _persist_trace(status="completed")
+                return result
+
             # Enforce invocation limit across batched calls.
             remaining = self._max_tool_invocations - iteration_count
             if remaining <= 0:
@@ -5191,6 +5563,11 @@ class InternalMCPChatOrchestrator:
                             else str(current_response)
                         ),
                     )
+                if not isinstance(payload, dict):
+                    payload = dict(payload)
+                else:
+                    payload = dict(payload)
+                tool_request[self._PAYLOAD_FIELD] = payload
 
                 # Safety: block write-category tools unless user explicitly requested a Vontology mutation.
                 # This is intentionally enforced at execution time so it applies to both legacy and
@@ -5258,46 +5635,37 @@ class InternalMCPChatOrchestrator:
                     continue
 
                 try:
+                    schema = self._tool_schema_for_name(tool_name, method_catalogue)
+                    self._apply_payload_defaults(
+                        tool_name,
+                        payload,
+                        schema=schema,
+                        user_namespace=user_namespace,
+                        selected_gmail_profile=selected_gmail_profile,
+                    )
+
                     if tool_name.startswith("gmail_"):
-                        if not payload.get("profile") and selected_gmail_profile:
-                            payload["profile"] = selected_gmail_profile
+                        if payload.get("profile"):
                             self._logger.info(
-                                "[mcp_orchestrator] Injected gmail_profile=%s into tool=%s payload",
-                                selected_gmail_profile,
+                                "[mcp_orchestrator] Using gmail_profile=%s for tool=%s",
+                                payload.get("profile"),
                                 tool_name,
                             )
-                        elif not payload.get("profile"):
+                        else:
                             self._logger.warning(
                                 "[mcp_orchestrator] Gmail tool=%s invoked without profile and no default configured",
                                 tool_name,
                             )
-
-                    # Inject user_namespace into payload for non-Gmail tools only; Gmail MCP rejects unexpected fields
-                    if not tool_name.startswith("gmail_"):
-                        if user_namespace and "namespace" not in payload:
-                            payload["namespace"] = user_namespace
+                    else:
+                        if user_namespace and "namespace" in payload:
                             self._logger.info(
-                                "[mcp_orchestrator] Injected namespace=%s into tool=%s payload",
-                                user_namespace,
+                                "[mcp_orchestrator] Using namespace=%s for tool=%s",
+                                payload.get("namespace"),
                                 tool_name,
                             )
                         elif user_namespace:
-                            self._logger.info(
-                                "[mcp_orchestrator] Tool=%s already has namespace=%s in payload",
-                                tool_name,
-                                payload.get("namespace"),
-                            )
-                        else:
                             self._logger.warning(
                                 "[mcp_orchestrator] No user_namespace available for tool=%s (unauthenticated request)",
-                                tool_name,
-                            )
-                    else:
-                        # Gmail tools must not receive namespace; profile is sufficient for routing
-                        if "namespace" in payload:
-                            payload.pop("namespace", None)
-                            self._logger.info(
-                                "[mcp_orchestrator] Removed namespace from Gmail tool=%s payload to satisfy MCP schema",
                                 tool_name,
                             )
 
