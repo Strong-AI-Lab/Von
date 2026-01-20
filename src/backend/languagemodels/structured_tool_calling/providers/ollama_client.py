@@ -131,9 +131,12 @@ INSTRUCTIONS:
     "payload": "<tool_arguments>"
 }, indent=2)}
 
+   If you need to call multiple tools, respond with a JSON array of tool calls
+   or multiple JSON objects separated by newlines.
+
 3. You can only call tools listed above.
 4. Ensure all JSON is valid and complete.
-5. Do not include any text after the JSON object.
+5. Do not include any text after the JSON.
 
 USER REQUEST:
 {prompt}
@@ -178,30 +181,32 @@ USER REQUEST:
 
         tool_name_map = {tool.name: tool for tool in available_tools}
 
-        # Try to extract JSON tool call from response
-        tool_call = self._extract_json_tool_call(response_text)
+        # Try to extract JSON tool calls from response
+        tool_call_payloads = self._extract_json_tool_calls(response_text)
 
-        if tool_call:
-            try:
-                tool_name = tool_call.get("tool")
-                payload = tool_call.get("payload", {})
+        if tool_call_payloads:
+            for tool_call in tool_call_payloads:
+                try:
+                    tool_name = tool_call.get("tool")
+                    payload = tool_call.get("payload", {})
 
-                if tool_name in tool_name_map:
-                    tool_calls.append(
-                        ToolCall(
-                            tool_name=tool_name,
-                            payload=payload if isinstance(payload, dict) else {},
+                    if tool_name in tool_name_map:
+                        tool_calls.append(
+                            ToolCall(
+                                tool_name=tool_name,
+                                payload=payload if isinstance(payload, dict) else {},
+                            )
                         )
-                    )
-                    # Remove JSON from text response
-                    text_response = self._remove_json_from_text(
-                        response_text, tool_call
-                    )
-                else:
-                    self.logger.warning(f"Unknown tool requested: {tool_name}")
+                    else:
+                        self.logger.warning(f"Unknown tool requested: {tool_name}")
 
-            except (KeyError, ValueError) as exc:
-                self.logger.error(f"Invalid tool call format: {exc}")
+                except (KeyError, ValueError) as exc:
+                    self.logger.error(f"Invalid tool call format: {exc}")
+
+            # Remove JSON from text response
+            text_response = self._remove_json_from_text(
+                response_text, tool_call_payloads
+            )
 
         return LLMResponse(
             text_response=text_response.strip(),
@@ -211,32 +216,68 @@ USER REQUEST:
             usage=None,
         )
 
-    def _extract_json_tool_call(self, text: str) -> Optional[Dict[str, Any]]:
-        """Extract JSON tool call from response text.
+    def _extract_json_tool_calls(self, text: str) -> List[Dict[str, Any]]:
+        """Extract JSON tool calls from response text.
 
-        Looks for JSON object containing "action", "tool", and "payload" fields.
+        Accepts a single JSON object, a JSON array of tool calls, or multiple
+        JSON objects separated by whitespace.
         """
+        stripped = text.strip()
+        if not stripped:
+            return []
+
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = None
+
+            if isinstance(parsed, dict):
+                if parsed.get("action") == "call_tool":
+                    return [parsed]
+            if isinstance(parsed, list):
+                calls: List[Dict[str, Any]] = []
+                for item in parsed:
+                    if isinstance(item, dict) and item.get("action") == "call_tool":
+                        calls.append(item)
+                    else:
+                        return []
+                return calls
+
         import re
 
-        # Try to find JSON object
-        json_match = re.search(r'\{[^{}]*"action"\s*:\s*"call_tool"[^{}]*\}', text)
-
-        if json_match:
+        calls: List[Dict[str, Any]] = []
+        for json_match in re.finditer(
+            r'\{[^{}]*"action"\s*:\s*"call_tool"[^{}]*\}',
+            text,
+        ):
             try:
-                return json.loads(json_match.group())
+                obj = json.loads(json_match.group())
             except json.JSONDecodeError:
-                pass
+                return []
+            if isinstance(obj, dict):
+                calls.append(obj)
 
-        return None
+        return calls
 
     def _remove_json_from_text(
         self,
         text: str,
-        tool_call: Dict[str, Any],
+        tool_calls: List[Dict[str, Any]],
     ) -> str:
-        """Remove JSON tool call from response text."""
+        """Remove JSON tool calls from response text."""
         import re
 
-        # Find and remove the JSON object
-        json_str = json.dumps(tool_call)
-        return re.sub(re.escape(json_str), "", text).strip()
+        cleaned = text
+        if cleaned.strip().startswith("["):
+            try:
+                if isinstance(json.loads(cleaned.strip()), list):
+                    return ""
+            except json.JSONDecodeError:
+                pass
+
+        for tool_call in tool_calls:
+            json_str = json.dumps(tool_call)
+            cleaned = re.sub(re.escape(json_str), "", cleaned)
+
+        return cleaned.strip()
