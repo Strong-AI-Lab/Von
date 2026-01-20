@@ -17,6 +17,8 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 11. Enable pre-commit guardrails: `git config core.hooksPath .githooks`.
 12. **STOP**: Never run backend tests against `VON_DB_NAME=von_db`. Always use the test DB (`VON_DB_NAME=test_von_db`) or the `pytest:backend (test db)` task.
 13. Requiring a user choice is almost always dispreferred; prefer LLM reasoning to achieve reliability and only ask the user when ambiguity cannot be resolved safely.
+14. When in doubt, run tests or re-run tests without requiring user confirmation.
+15. In the case that multiple tests are faiing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
@@ -29,6 +31,9 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - Users may update this file; retain any user changes.
 - Add a regression test for every state/format-loss bug (load -> edit -> save -> re-edit).
 - Prefer lightweight telemetry where practical (timings, counters, and error summaries) to support UX and future introspection.
+- When fixing reliability issues, prefer **systemic, general fixes** over point fixes: update shared pipelines, validators, and policies so that behaviour remains stable across model changes and configuration drift.
+- Changes must be **modification-tolerant**: switching underlying models should not silently remove or change capabilities; differences must be explicit and detectable (telemetry, validation, or policy).
+- **Vontology-first prompt pattern**: any new or modified LLM prompt should be stored as Vontology text relations (hasContent/hasDescription, primary en-NZ), with a code fallback only when the concept is missing or tools are unavailable. Include prompt IDs in diagnostics for introspection and multilingual support.
 - For high-risk state changes (auth/org handling, DB writes, Vontology mutations), use a single authoritative pathway and reuse it consistently.
 - Strong rule: treat canonical predicate concepts (e.g. #V#is_a_type_of) as the authoritative ontology relations. Do not introduce or rely on structural relationship fields when predicate concepts exist; kind/classification should be derived from canonical predicate usage.
 - **Predicate concepts must be instances of `#V#predicate` (or a specialisation such as `#V#binary_predicate`) and must not keep `is_a_type_of` links that would force kind=`type`.** This ensures `is_predicate()` and the computed kind behave correctly.
