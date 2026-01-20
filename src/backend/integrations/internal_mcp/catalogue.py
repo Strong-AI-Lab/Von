@@ -5598,6 +5598,7 @@ def _chat_introspect(
             tool_guidance_text = live_orchestrator._instruction_message(  # type: ignore[attr-defined]
                 user_namespace=namespace,
                 auxiliary_system_prompt=auxiliary_prompt_text,
+                preferred_language=None,
             )
         else:
 
@@ -5609,6 +5610,7 @@ def _chat_introspect(
             tool_guidance_text = dummy_orchestrator._instruction_message(
                 user_namespace=namespace,
                 auxiliary_system_prompt=auxiliary_prompt_text,
+                preferred_language=None,
             )
 
         tool_guidance_hash = hashlib.sha256(
