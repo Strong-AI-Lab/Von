@@ -32,7 +32,7 @@ from ...languagemodels.structured_tool_calling import (
     ToolDefinition,
     ToolCall,
 )
-from ...services.prompt_template_service import PromptTemplateService
+from src.backend.services.prompt_template_service import PromptTemplateService
 from ...workflows.action_registry import (
     ActionRegistry,
     ActionSpec,
@@ -166,6 +166,8 @@ class InternalMCPChatOrchestrator:
     _CALL_ACTION = "call_tool"
     _TOOL_FIELD = "tool"
     _PAYLOAD_FIELD = "payload"
+    _BASE_SYSTEM_PROMPT_TYPE_ID = "#V#von_chat_base_system_prompt"
+    _CURRENT_BASE_SYSTEM_PROMPT_TYPE_ID = "#V#current_von_base_system_prompt"
     _MISSING_TOOL_CALL_ACTION_ID = "#V#detect_missing_tool_call_action"
     _PREFLIGHT_PREDICATE_TYPE_ID = "#V#conversation_preflight_predicate"
     _PREFLIGHT_CACHE_TTL_SECONDS = 120
@@ -264,6 +266,7 @@ class InternalMCPChatOrchestrator:
             },
             classifier_prompt_ids=self._TURN_SELECTOR_PROMPTS,
         )
+        self._last_base_system_prompt_telemetry: dict[str, Any] | None = None
 
     def configure_execution_caps(
         self,
@@ -1126,10 +1129,11 @@ class InternalMCPChatOrchestrator:
         self,
         user_namespace: str | None = None,
         auxiliary_system_prompt: str | None = None,
+        preferred_language: str | None = None,
     ) -> str:
-        """Build system instruction emphasizing immediate tool invocation behavior.
+        """Build system instruction emphasizing immediate tool invocation behaviour.
 
-        Design rationale (JVNAUTOSCI-698): Focus on BEHAVIOR (invoke immediately)
+        Design rationale (JVNAUTOSCI-698): Focus on BEHAVIOUR (invoke immediately)
         rather than FORMAT (JSON structure) to prevent LLMs from outputting JSON as
         a description of intent rather than triggering actual execution.
         """
@@ -1150,50 +1154,83 @@ class InternalMCPChatOrchestrator:
         max_invocations = int(getattr(self, "_max_tool_invocations", 0))
         batch_cap = int(getattr(self, "_tool_batch_cap", 4))
 
-        base_message = (
-            "You have access to internal MCP tools.\n\n"
-            "⚠️ WHEN TO USE TOOLS (CHECK THESE FIRST) ⚠️\n"
-            "If user asks for RECENT, CURRENT, LATEST, NEW, or BREAKING information → USE search_web\n"
-            'If user mentions specific dates (2024+, 2025+, "this year", "this month") → USE search_web\n'
-            'If user explicitly says "search", "look up", "find information on" → USE search_web\n'
-            'If user asks "what\'s new", "recent developments", "latest research" → USE search_web\n'
-            "If user provides a URL to analyse or extract content from → USE extract_url (or resilient_extract_url for JS-heavy/blocked pages)\n"
-            "If user asks a direct factual question needing verification → USE qna_search\n"
-            "If searching within specific domain/context (e.g., site:example.com) → USE context_search\n"
-            "ARXIV TOOL ROUTING:\n"
-            "- To search arXiv by author/topic/keywords → USE search_arxiv\n"
-            "- To list papers already cached locally / already stored → USE list_papers\n"
-            "- To download a specific arXiv PDF and store it durably → USE download_paper (requires arxiv_id)\n"
-            "- To upload a PDF that is already cached and register a file-copy record → USE finalise_cached_paper (requires arxiv_id)\n"
-            "- To read/summarise an already-downloaded paper → USE read_paper (requires arxiv_id)\n"
-            'If user asks "what\'s in my RAG store?" or asks about RAG *collections/sources* → USE rag_list_collections\n'
-            'If user asks about RAG sessions ("how many", "what\'s indexed", "list sessions") → USE rag_list_indexed (often with collection=...)\n'
-            "If user wants to see RAG content from a specific session → USE rag_get_item (often with collection=...)\n"
-            "If user wants semantic/topic search over indexed content → USE search_knowledge_base\n\n"
-            "CRITICAL: Your training data has a cutoff date. For anything described as current/recent/new, "
-            "you MUST use search tools to get up-to-date information.\n\n"
-            "HOW TO INVOKE A TOOL:\n"
-            "Respond with EITHER a single tool-call JSON object OR a JSON array of tool-call objects:\n"
-            "Single:\n"
-            '{"action": "call_tool", "tool": "tool_name", "payload": {"param": "value"}}\n'
-            "Batch (preferred for multi-step workflows; keep it small):\n"
-            '[{"action": "call_tool", "tool": "tool_a", "payload": {}}, {"action": "call_tool", "tool": "tool_b", "payload": {}}]\n\n'
-            "INVOCATION RULES:\n"
-            "- DO NOT explain what you're going to do - just do it\n"
-            "- DO NOT output JSON as an example or description - only output JSON when you want to invoke a tool NOW\n"
-            "- DO NOT say 'I will call' or 'Let me call' - just call it\n"
-            f"- You MAY batch multiple tool calls in ONE message as a JSON array (keep it to <= {batch_cap} calls)\n"
-            f"- Server limits: max tool invocations per turn = {max_invocations}; tool calls per batch = {batch_cap}\n"
-            "- After you receive the tool result (role 'tool'), respond naturally to the user\n\n"
-            "VERIFICATION & CONSISTENCY RULES:\n"
-            "- If the user doubts whether a specific concept_id exists (e.g. '#V#...') or challenges a claim about Vontology state, ALWAYS verify first using fetch_concept (or search_concepts) before responding.\n"
-            "- Do NOT reply with prose-only 'we should verify' / 'I will not assert unless I can verify' without actually calling a tool.\n\n"
-            "If you output JSON, the system will execute that tool call immediately.\n\n"
-            "IMPORTANT: arXiv paper conversions (PDF to markdown) can take 5-10 minutes.\n"
-            "If read_paper fails, the paper may still be converting. Check with list_papers.\n\n"
-            "Available tools:\n"
-            f"{listing}"
+        base_message, base_prompt_concept_id = (
+            self._load_base_system_prompt_from_vontology(
+                preferred_language=preferred_language
+            )
         )
+        if not base_message:
+            base_message = (
+                "You have access to internal MCP tools.\n\n"
+                "{auth_status}\n"
+                "⚠️ WHEN TO USE TOOLS (CHECK THESE FIRST) ⚠️\n"
+                "If user asks for RECENT, CURRENT, LATEST, NEW, or BREAKING information → USE search_web\n"
+                'If user mentions specific dates (2024+, 2025+, "this year", "this month") → USE search_web\n'
+                'If user explicitly says "search", "look up", "find information on" → USE search_web\n'
+                'If user asks "what\'s new", "recent developments", "latest research" → USE search_web\n'
+                "If user provides a URL to analyse or extract content from → USE extract_url (or resilient_extract_url for JS-heavy/blocked pages)\n"
+                "If user asks a direct factual question needing verification → USE qna_search\n"
+                "If searching within specific domain/context (e.g., site:example.com) → USE context_search\n"
+                "ARXIV TOOL ROUTING:\n"
+                "- To search arXiv by author/topic/keywords → USE search_arxiv\n"
+                "- To list papers already cached locally / already stored → USE list_papers\n"
+                "- To download a specific arXiv PDF and store it durably → USE download_paper (requires arxiv_id)\n"
+                "- To upload a PDF that is already cached and register a file-copy record → USE finalise_cached_paper (requires arxiv_id)\n"
+                "- To read/summarise an already-downloaded paper → USE read_paper (requires arxiv_id)\n"
+                'If user asks "what\'s in my RAG store?" or asks about RAG *collections/sources* → USE rag_list_collections\n'
+                'If user asks about RAG sessions ("how many", "what\'s indexed", "list sessions") → USE rag_list_indexed (often with collection=...)\n'
+                "If user wants to see RAG content from a specific session → USE rag_get_item (often with collection=...)\n"
+                "If user wants semantic/topic search over indexed content → USE search_knowledge_base\n\n"
+                "CRITICAL: Your training data has a cutoff date. For anything described as current/recent/new, "
+                "you MUST use search tools to get up-to-date information.\n\n"
+                "HOW TO INVOKE A TOOL:\n"
+                "Respond with EITHER a single tool-call JSON object OR a JSON array of tool-call objects:\n"
+                "Single:\n"
+                '{"action": "call_tool", "tool": "tool_name", "payload": {"param": "value"}}\n'
+                "Batch (preferred for multi-step workflows; keep it small):\n"
+                '[{"action": "call_tool", "tool": "tool_a", "payload": {}}, {"action": "call_tool", "tool": "tool_b", "payload": {}}]\n\n'
+                "INVOCATION RULES:\n"
+                "- DO NOT explain what you're going to do - just do it\n"
+                "- DO NOT output JSON as an example or description - only output JSON when you want to invoke a tool NOW\n"
+                "- DO NOT say 'I will call' or 'Let me call' - just call it\n"
+                "- You MAY batch multiple tool calls in ONE message as a JSON array (keep it to <= {batch_cap} calls)\n"
+                "- Server limits: max tool invocations per turn = {max_tool_invocations}; tool calls per batch = {batch_cap}\n"
+                "- After you receive the tool result (role 'tool'), respond naturally to the user\n\n"
+                "VONTOLOGY KINDS & PREDICATES (MUST FOLLOW):\n"
+                "- Predicates are a distinct logical kind. A usable predicate MUST satisfy: is_an_instance_of #V#predicate (or a predicate subtype).\n"
+                "- Do NOT treat predicates as types or individuals. Predicatehood is NOT inferred from is_a_type_of.\n"
+                "- Types are defined by is_a_type_of. A concept can also be is_an_instance_of #V#type, but that does NOT make it an individual.\n"
+                "- If a concept is NOT a predicate, NOT a type, and DOES have is_an_instance_of, then it is an individual.\n"
+                "- Before using a predicate in add_relationship: fetch_concept(predicate_id) and confirm is_an_instance_of includes #V#predicate (or subtype).\n\n"
+                "VERIFICATION & CONSISTENCY RULES:\n"
+                "- If the user doubts whether a specific concept_id exists (e.g. '#V#...') or challenges a claim about Vontology state, ALWAYS verify first using fetch_concept (or search_concepts) before responding.\n"
+                "- Do NOT reply with prose-only 'we should verify' / 'I will not assert unless I can verify' without actually calling a tool.\n\n"
+                "If you output JSON, the system will execute that tool call immediately.\n\n"
+                "IMPORTANT: arXiv paper conversions (PDF to markdown) can take 5-10 minutes.\n"
+                "If read_paper fails, the paper may still be converting. Check with list_papers.\n\n"
+                "Available tools:\n"
+                "{listing}"
+            )
+
+        base_message = self._inject_prompt_variable(
+            base_message, key="auth_status", value=auth_status.strip() or auth_status
+        )
+        base_message = self._inject_prompt_variable(
+            base_message, key="batch_cap", value=str(batch_cap)
+        )
+        base_message = self._inject_prompt_variable(
+            base_message, key="max_tool_invocations", value=str(max_invocations)
+        )
+        base_message = self._inject_prompt_variable(
+            base_message, key="listing", value=listing
+        )
+
+        self._last_base_system_prompt_telemetry = {
+            "type": "base_system_prompt",
+            "source": "vontology" if base_prompt_concept_id else "code_fallback",
+            "prompt_type_id": self._BASE_SYSTEM_PROMPT_TYPE_ID,
+            "prompt_concept_id": base_prompt_concept_id or "",
+        }
 
         if (
             auxiliary_system_prompt
@@ -1207,6 +1244,269 @@ class InternalMCPChatOrchestrator:
             )
 
         return base_message
+
+    def _load_base_system_prompt_from_vontology(
+        self, *, preferred_language: str | None = None
+    ) -> tuple[str | None, str | None]:
+        """Load the base system prompt from Vontology (best effort)."""
+        try:
+            from src.backend.services.concept_search_service import search_concepts
+        except Exception:
+            return None, None
+
+        try:
+            from src.backend.services.text_value_service import get_texts_for_concept
+        except Exception:
+            return None, None
+
+        try:
+            from src.backend.services.concept_service import (
+                get_concept_by_concept_id,
+                update_concept,
+            )
+        except Exception:
+            get_concept_by_concept_id = None  # type: ignore[assignment]
+            update_concept = None  # type: ignore[assignment]
+
+        try:
+            from bson import ObjectId
+        except Exception:
+            ObjectId = None  # type: ignore[assignment]
+
+        def _normalise_instances(value: Any) -> list[str]:
+            if isinstance(value, str):
+                return [value] if value else []
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, str) and item]
+            return []
+
+        def _is_instance_of(concept: Mapping[str, Any], target_id: str) -> bool:
+            relationships = (
+                concept.get("relationships") if isinstance(concept, Mapping) else None
+            )
+            if not isinstance(relationships, Mapping):
+                return False
+            return target_id in _normalise_instances(
+                relationships.get("is_an_instance_of")
+            )
+
+        def _select_prompt_for_concept(
+            concept_id: str,
+        ) -> tuple[str | None, tuple[int, str] | None]:
+            try:
+                texts = get_texts_for_concept(concept_id, limit=80)
+            except Exception:
+                texts = []
+
+            if not isinstance(texts, list) or not texts:
+                return None, None
+
+            candidates: list[dict[str, Any]] = []
+            for text in texts:
+                if not isinstance(text, dict):
+                    continue
+                predicate = text.get("predicate")
+                if predicate not in {"hasContent", "hasDescription"}:
+                    continue
+                text_value = text.get("text")
+                if not isinstance(text_value, str) or not text_value.strip():
+                    continue
+                candidates.append(text)
+
+            if not candidates:
+                return None, None
+
+            def _type_rank(pred: str | None) -> int:
+                return 0 if pred == "hasContent" else 1
+
+            def _lang_rank(lang: str | None) -> int:
+                if not variants or not isinstance(lang, str):
+                    return 2
+                if lang == variants[0]:
+                    return 0
+                if len(variants) > 1 and lang == variants[1]:
+                    return 1
+                return 2
+
+            candidates.sort(
+                key=lambda item: (
+                    _type_rank(item.get("predicate")),
+                    _lang_rank(item.get("lang")),
+                    str(item.get("text_value_id") or ""),
+                )
+            )
+
+            prompt_text = candidates[0].get("text")
+            if not isinstance(prompt_text, str) or not prompt_text.strip():
+                return None, None
+
+            latest_ts = 0
+            latest_id = ""
+            for item in candidates:
+                text_id = item.get("text_value_id")
+                text_id_str = str(text_id) if text_id is not None else ""
+                ts = 0
+                if ObjectId is not None:
+                    try:
+                        if text_id:
+                            ts = int(ObjectId(str(text_id)).generation_time.timestamp())
+                    except Exception:
+                        ts = 0
+                if ts > latest_ts:
+                    latest_ts = ts
+                    latest_id = text_id_str
+
+            return prompt_text.strip(), (latest_ts, latest_id)
+
+        def _sync_current_prompt_instance(
+            selected_id: str,
+            current_ids: list[str],
+        ) -> None:
+            if not selected_id or not update_concept or not get_concept_by_concept_id:
+                return
+            current_type_id = self._CURRENT_BASE_SYSTEM_PROMPT_TYPE_ID
+
+            try:
+                current_type_doc = get_concept_by_concept_id(current_type_id)
+            except Exception:
+                current_type_doc = None
+            if not isinstance(current_type_doc, Mapping):
+                return
+
+            for cid in current_ids:
+                if not isinstance(cid, str) or not cid or cid == selected_id:
+                    continue
+                try:
+                    concept_doc = get_concept_by_concept_id(cid)
+                except Exception:
+                    concept_doc = None
+                if not isinstance(concept_doc, Mapping):
+                    continue
+                inst = _normalise_instances(
+                    (concept_doc.get("relationships") or {}).get("is_an_instance_of")
+                )
+                if current_type_id in inst:
+                    inst = [item for item in inst if item != current_type_id]
+                    try:
+                        update_concept(
+                            cid,
+                            {"relationships.is_an_instance_of": inst},
+                        )
+                    except Exception:
+                        continue
+
+            try:
+                selected_doc = get_concept_by_concept_id(selected_id)
+            except Exception:
+                selected_doc = None
+            if not isinstance(selected_doc, Mapping):
+                return
+            selected_inst = _normalise_instances(
+                (selected_doc.get("relationships") or {}).get("is_an_instance_of")
+            )
+            if current_type_id not in selected_inst:
+                selected_inst.append(current_type_id)
+                try:
+                    update_concept(
+                        selected_id,
+                        {"relationships.is_an_instance_of": selected_inst},
+                    )
+                except Exception:
+                    return
+
+        try:
+            current_result = search_concepts(
+                query="",
+                instance_of=self._CURRENT_BASE_SYSTEM_PROMPT_TYPE_ID,
+                limit=50,
+                match_type="all",
+            )
+        except Exception:
+            current_result = None
+
+        current_entries = (
+            current_result.get("results")
+            if isinstance(current_result, Mapping)
+            else None
+        )
+        if not isinstance(current_entries, list):
+            current_entries = []
+
+        preferred_language = self._normalise_language(preferred_language)
+        variants = self._language_variants(preferred_language)
+
+        current_candidates: list[str] = []
+        if current_entries and get_concept_by_concept_id:
+            for entry in current_entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                concept_id = entry.get("concept_id")
+                if not isinstance(concept_id, str) or not concept_id:
+                    continue
+                try:
+                    concept_doc = get_concept_by_concept_id(concept_id)
+                except Exception:
+                    concept_doc = None
+                if not isinstance(concept_doc, Mapping):
+                    continue
+                if _is_instance_of(concept_doc, self._BASE_SYSTEM_PROMPT_TYPE_ID):
+                    current_candidates.append(concept_id)
+
+        if len(current_candidates) == 1:
+            prompt_text, _ = _select_prompt_for_concept(current_candidates[0])
+            if prompt_text:
+                return prompt_text, current_candidates[0]
+
+        try:
+            result = search_concepts(
+                query="",
+                instance_of=self._BASE_SYSTEM_PROMPT_TYPE_ID,
+                limit=50,
+                match_type="all",
+            )
+        except Exception:
+            return None, None
+
+        entries = result.get("results") if isinstance(result, Mapping) else None
+        if not isinstance(entries, list):
+            return None, None
+
+        best_prompt: str | None = None
+        best_timestamp: tuple[int, str] | None = None
+        best_concept_id: str | None = None
+
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            concept_id = entry.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+
+            prompt_text, timestamp_key = _select_prompt_for_concept(concept_id)
+            if not prompt_text or not timestamp_key:
+                continue
+
+            if best_timestamp is None or timestamp_key > best_timestamp:
+                best_timestamp = timestamp_key
+                best_prompt = prompt_text
+                best_concept_id = concept_id
+
+        if best_prompt and best_concept_id:
+            current_ids: list[str] = []
+            for entry in current_entries:
+                if not isinstance(entry, Mapping):
+                    continue
+                concept_id = entry.get("concept_id")
+                if isinstance(concept_id, str) and concept_id:
+                    current_ids.append(concept_id)
+            _sync_current_prompt_instance(best_concept_id, current_ids)
+
+        return best_prompt, best_concept_id
+
+    def _consume_base_system_prompt_telemetry(self) -> dict[str, Any] | None:
+        telemetry = self._last_base_system_prompt_telemetry
+        self._last_base_system_prompt_telemetry = None
+        return telemetry
 
     @staticmethod
     def _looks_like_missing_tool_call(response: str) -> bool:
@@ -1695,32 +1995,42 @@ class InternalMCPChatOrchestrator:
                 from src.backend.services.text_value_service import (
                     get_texts_for_concept,
                 )
-
-                rows = get_texts_for_concept(policy_id, predicate=predicate_id, limit=5)
             except Exception:
-                rows = []
-                errors.append("policy_text_fetch_failed")
+                get_texts_for_concept = None  # type: ignore[assignment]
 
-            policy_text = None
-            if isinstance(rows, list):
-                for row in rows:
-                    if isinstance(row, Mapping):
-                        candidate = row.get("text")
-                        if isinstance(candidate, str) and candidate.strip():
-                            policy_text = candidate
-                            break
-
-            if policy_text:
+            rows: list[dict[str, Any]] | None = None
+            if callable(get_texts_for_concept):
                 try:
-                    parsed = json.loads(policy_text)
+                    rows = get_texts_for_concept(
+                        policy_id, predicate=predicate_id, limit=5
+                    )
+                except Exception:
+                    rows = None
+
+            if not rows:
+                errors.append("policy_text_missing")
+            else:
+                try:
+                    import json
+                except Exception:
+                    json = None  # type: ignore[assignment]
+
+                for row in rows:
+                    if not isinstance(row, Mapping):
+                        continue
+                    raw_text = row.get("text")
+                    if not isinstance(raw_text, str) or not raw_text.strip():
+                        continue
+                    parsed = None
+                    if json is not None:
+                        try:
+                            parsed = json.loads(raw_text)
+                        except Exception:
+                            parsed = None
                     if isinstance(parsed, Mapping):
                         policy_payload = parsed
-                    else:
-                        errors.append("policy_json_not_object")
-                except Exception:
-                    errors.append("policy_json_parse_failed")
-            else:
-                errors.append("policy_text_missing")
+                        break
+                    errors.append("policy_json_invalid")
 
         state = _WorkflowModelPolicyState(
             enabled=enabled,
@@ -1766,9 +2076,9 @@ class InternalMCPChatOrchestrator:
         )
 
         for candidate in candidates:
-            if candidate.source == "active_llm":
-                return default_model
-            return self._normalise_llm_model_name(candidate.model) or default_model
+            model_name = self._normalise_llm_model_name(candidate.model)
+            if model_name:
+                return model_name
 
         return default_model
 
@@ -3229,6 +3539,7 @@ class InternalMCPChatOrchestrator:
         user_namespace: str | None = None,
         auxiliary_system_prompt: str | None = None,
         preflight_message: str | None = None,
+        preferred_language: str | None = None,
     ) -> List[Mapping[str, Any]]:
         base: List[Mapping[str, Any]] = []
         if context:
@@ -3256,6 +3567,7 @@ class InternalMCPChatOrchestrator:
         instruction_msg = self._instruction_message(
             user_namespace=user_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
+            preferred_language=preferred_language,
         )
 
         if presenter_protocol:
@@ -4246,7 +4558,12 @@ class InternalMCPChatOrchestrator:
             user_namespace=user_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
             preflight_message=preflight.message,
+            preferred_language=preferred_language,
         )
+
+        base_prompt_telemetry = self._consume_base_system_prompt_telemetry()
+        if base_prompt_telemetry:
+            aux_llm_calls.append(base_prompt_telemetry)
 
         # If the user asks which TTS voice is being used, attach a small session
         # snapshot so the assistant can answer reliably without guessing.

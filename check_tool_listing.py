@@ -32,7 +32,8 @@ def main():
     print("FULL INSTRUCTION MESSAGE (AUTHENTICATED)")
     print("=" * 80)
     instruction = orchestrator._instruction_message(
-        user_namespace="#V#michael_witbrock"
+        user_namespace="#V#michael_witbrock",
+        preferred_language=None,
     )
     print(instruction)
 
