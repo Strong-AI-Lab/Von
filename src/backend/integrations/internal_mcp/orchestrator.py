@@ -2100,10 +2100,49 @@ class InternalMCPChatOrchestrator:
         }
 
         if candidate.source == "active_llm":
-            return default_client, default_model, telemetry
+            resolved_model = default_model
+            resolved_provider = None
+            try:
+                from src.backend.languagemodels.llm_interface import (
+                    resolve_provider_from_model_concept,
+                    resolve_openai_model_name,
+                    resolve_ollama_model_name,
+                )
+
+                resolved_provider = resolve_provider_from_model_concept(default_model)
+                if resolved_provider == "openai":
+                    resolved_model = resolve_openai_model_name(default_model)
+                elif resolved_provider == "ollama":
+                    resolved_model = resolve_ollama_model_name(default_model)
+            except Exception:
+                resolved_provider = None
+
+            if resolved_provider:
+                telemetry["provider"] = resolved_provider
+            if resolved_model:
+                telemetry["model"] = resolved_model
+            return default_client, resolved_model or default_model, telemetry
 
         provider = candidate.provider
         model = self._normalise_llm_model_name(candidate.model)
+
+        if isinstance(candidate.raw, str) and candidate.raw.strip().startswith("#V#"):
+            try:
+                from src.backend.languagemodels.llm_interface import (
+                    resolve_provider_from_model_concept,
+                    resolve_openai_model_name,
+                    resolve_ollama_model_name,
+                )
+
+                resolved_provider = resolve_provider_from_model_concept(candidate.raw)
+                if resolved_provider:
+                    provider = resolved_provider
+                if provider == "openai":
+                    model = resolve_openai_model_name(candidate.raw) or model
+                elif provider == "ollama":
+                    model = resolve_ollama_model_name(candidate.raw) or model
+            except Exception:
+                pass
 
         if provider in {None, "", "openai", "ollama", "gemini"}:
             pass
