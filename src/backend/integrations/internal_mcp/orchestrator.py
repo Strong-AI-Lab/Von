@@ -930,27 +930,45 @@ class InternalMCPChatOrchestrator:
         """
         required_fields = mcp_schema.get("required", {})
         optional_fields = mcp_schema.get("optional", {})
+        allow_unknown = mcp_schema.get("allow_unknown")
 
         properties: Dict[str, Any] = {}
         required_list: List[str] = []
 
-        # Process required fields
-        for field_name, field_type in required_fields.items():
-            properties[field_name] = {
-                "type": self._python_type_to_json_schema_type(field_type)
-            }
-            required_list.append(field_name)
+        # Process required fields (accept dict or list)
+        if isinstance(required_fields, dict):
+            for field_name, field_type in required_fields.items():
+                properties[field_name] = {
+                    "type": self._python_type_to_json_schema_type(field_type)
+                }
+                required_list.append(field_name)
+        elif isinstance(required_fields, list):
+            for field_name in required_fields:
+                if not isinstance(field_name, str):
+                    continue
+                properties[field_name] = {"type": "string"}
+                required_list.append(field_name)
 
-        # Process optional fields
-        for field_name, field_type in optional_fields.items():
-            properties[field_name] = {
-                "type": self._python_type_to_json_schema_type(field_type)
-            }
+        # Process optional fields (accept dict or list)
+        if isinstance(optional_fields, dict):
+            for field_name, field_type in optional_fields.items():
+                properties[field_name] = {
+                    "type": self._python_type_to_json_schema_type(field_type)
+                }
+        elif isinstance(optional_fields, list):
+            for field_name in optional_fields:
+                if not isinstance(field_name, str):
+                    continue
+                if field_name not in properties:
+                    properties[field_name] = {"type": "string"}
 
         json_schema = {
             "type": "object",
             "properties": properties,
         }
+
+        if allow_unknown is True:
+            json_schema["additionalProperties"] = True
 
         if required_list:
             json_schema["required"] = required_list
@@ -2076,6 +2094,8 @@ class InternalMCPChatOrchestrator:
         )
 
         for candidate in candidates:
+            if candidate.source == "active_llm" and default_model:
+                return default_model
             model_name = self._normalise_llm_model_name(candidate.model)
             if model_name:
                 return model_name
@@ -2216,6 +2236,12 @@ class InternalMCPChatOrchestrator:
                     usage=None,
                     note=("Fallback chain generate()" if errors else "llm.generate"),
                     stage=stage,
+                    provider=(
+                        telemetry.get("provider")
+                        if isinstance(telemetry, Mapping)
+                        else None
+                    ),
+                    candidate=telemetry,
                 )
                 aux_log.append(
                     {
@@ -2239,6 +2265,12 @@ class InternalMCPChatOrchestrator:
                     usage=None,
                     note="llm.generate failed; trying fallback",
                     stage=stage,
+                    provider=(
+                        telemetry.get("provider")
+                        if isinstance(telemetry, Mapping)
+                        else None
+                    ),
+                    candidate=telemetry,
                 )
                 error_entry = {
                     "candidate": telemetry,
@@ -2339,6 +2371,12 @@ class InternalMCPChatOrchestrator:
                         else None
                     ),
                     stage=stage,
+                    provider=(
+                        telemetry.get("provider")
+                        if isinstance(telemetry, Mapping)
+                        else None
+                    ),
+                    candidate=telemetry,
                 )
                 aux_log.append(
                     {
@@ -2362,6 +2400,12 @@ class InternalMCPChatOrchestrator:
                     usage=None,
                     note="llm.generate_with_tools failed; trying fallback",
                     stage=stage,
+                    provider=(
+                        telemetry.get("provider")
+                        if isinstance(telemetry, Mapping)
+                        else None
+                    ),
+                    candidate=telemetry,
                 )
                 errors.append(
                     {
@@ -4239,17 +4283,23 @@ class InternalMCPChatOrchestrator:
             usage: Mapping[str, Any] | None = None,
             note: str | None = None,
             stage: str | None = None,
+            provider: str | None = None,
+            candidate: Mapping[str, Any] | None = None,
         ) -> None:
             payload: dict[str, Any] = {
                 "type": call_type,
                 "model": model_name,
+                "provider": provider,
                 "duration_ms": duration_ms,
                 "usage": dict(usage) if isinstance(usage, Mapping) else None,
+                "workflow": "internal_mcp",
             }
             if isinstance(stage, str) and stage.strip():
                 payload["stage"] = stage.strip()
             if isinstance(note, str) and note.strip():
                 payload["note"] = note.strip()
+            if isinstance(candidate, Mapping) and candidate:
+                payload["candidate"] = dict(candidate)
             llm_calls.append(payload)
 
         def _aggregate_usage_total() -> Mapping[str, int] | None:
