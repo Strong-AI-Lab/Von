@@ -221,6 +221,14 @@ class InternalMCPGateway:
 
         return self._catalogue.snapshot()
 
+    def get_method_definition(self, method_name: str) -> MethodDefinition | None:
+        """Return the full method definition if registered."""
+
+        try:
+            return self._catalogue.get(method_name)
+        except Exception:
+            return None
+
     def extend_catalogue(self, definitions: Iterable[MethodDefinition]) -> None:
         for definition in definitions:
             self._catalogue.register(definition)
