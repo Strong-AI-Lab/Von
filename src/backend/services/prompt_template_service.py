@@ -42,16 +42,15 @@ def _detect_variables(template: str) -> List[str]:
 
 
 def _render_template(template: str, variables: Mapping[str, Any]) -> str:
-    missing: List[str] = []
-    for key in _detect_variables(template):
-        if key not in variables:
-            missing.append(key)
+    detected = _detect_variables(template)
+    missing = [key for key in detected if key not in variables]
     if missing:
         raise ValueError(f"Missing template variables: {', '.join(missing)}")
-    try:
-        return template.format(**variables)
-    except Exception as exc:
-        raise ValueError(f"Failed to render prompt template: {exc}") from exc
+
+    rendered = template
+    for key in detected:
+        rendered = rendered.replace("{" + key + "}", str(variables.get(key, "")))
+    return rendered
 
 
 def _best_effort_text_for_concept(concept_id: str) -> Optional[str]:
@@ -116,11 +115,7 @@ class PromptTemplateService:
             return fragment.prompt_id, fragment.text
         if isinstance(fallback, str) and fallback.strip():
             text = fallback.strip()
-            if (
-                isinstance(max_chars, int)
-                and max_chars > 0
-                and len(text) > max_chars
-            ):
+            if isinstance(max_chars, int) and max_chars > 0 and len(text) > max_chars:
                 text = (
                     text[:max_chars]
                     + f"\n... [truncated {len(text) - max_chars} chars]"
@@ -148,11 +143,13 @@ class PromptTemplateService:
         limit = max_chars or self._default_max_chars
         if len(rendered) > limit:
             rendered = (
-                rendered[:limit]
-                + f"\n... [truncated {len(rendered) - limit} chars]"
+                rendered[:limit] + f"\n... [truncated {len(rendered) - limit} chars]"
             )
             truncated = True
 
         return RenderedPrompt(
-            prompt_id=prompt_id, text=rendered, variables=dict(variables), truncated=truncated
+            prompt_id=prompt_id,
+            text=rendered,
+            variables=dict(variables),
+            truncated=truncated,
         )
