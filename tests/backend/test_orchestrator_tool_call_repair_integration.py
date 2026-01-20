@@ -106,3 +106,33 @@ def test_tool_call_repair_recovers_invalid_payload(
     assert gateway.invocations
     assert gateway.invocations[0]["payload"]["top_k"] == 20
     assert "validation error" not in result.response_text.lower()
+
+
+def test_tool_call_repair_recovers_unknown_tool_with_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VON_TOOL_CALL_REPAIR_ENABLE", "1")
+
+    gateway = _Gateway()
+    orchestrator = InternalMCPChatOrchestrator(gateway=cast(Any, gateway))
+
+    llm = _SequencedLLM(
+        [
+            '[{"tool":"#V_concept_search","params":{"query":"test"}}]',
+            '{"action":"call_tool","tool":"search_knowledge_base","payload":{"query":"test","top_k":5}}',
+            "All done.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Search the knowledge base",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert gateway.invocations
+    assert gateway.invocations[0]["tool"] == "search_knowledge_base"
+    assert gateway.invocations[0]["payload"]["top_k"] == 5
+    assert "validation error" not in result.response_text.lower()

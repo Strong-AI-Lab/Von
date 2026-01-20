@@ -2883,6 +2883,12 @@ class InternalMCPChatOrchestrator:
             tool_name = candidate.get(self._TOOL_FIELD)
             payload_value = candidate.get(self._PAYLOAD_FIELD)
             action_value = candidate.get(self._ACTION_FIELD)
+            if not isinstance(payload_value, MutableMapping):
+                for alt_key in ("params", "arguments", "args"):
+                    alt_value = candidate.get(alt_key)
+                    if isinstance(alt_value, MutableMapping):
+                        payload_value = alt_value
+                        break
 
             has_tool = isinstance(tool_name, str)
             has_payload = isinstance(payload_value, MutableMapping)
@@ -2892,6 +2898,9 @@ class InternalMCPChatOrchestrator:
             strict_shape = set(candidate.keys()) <= {
                 self._TOOL_FIELD,
                 self._PAYLOAD_FIELD,
+                "params",
+                "arguments",
+                "args",
             }
 
             if missing_action and has_tool and has_payload and strict_shape:
@@ -2902,7 +2911,7 @@ class InternalMCPChatOrchestrator:
                 if isinstance(catalogue, Mapping) and tool_name in catalogue:
                     has_action = True
                 else:
-                    return None
+                    has_action = True
 
             if not (has_action and has_tool and has_payload):
                 return None
@@ -5451,7 +5460,7 @@ class InternalMCPChatOrchestrator:
                     pass
             if preflight.errors:
                 repaired_calls = None
-                if not preflight.tool_unavailable:
+                if method_catalogue:
                     repaired_calls = self._attempt_tool_call_repair(
                         current_response=(
                             current_response
