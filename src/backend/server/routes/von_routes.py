@@ -2926,6 +2926,26 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "calls": [],
         }
 
+        def _infer_provider(model_id: str | None) -> str | None:
+            if not isinstance(model_id, str):
+                return None
+            lowered = model_id.strip().lower()
+            if not lowered:
+                return None
+            if lowered.startswith("openai:"):
+                return "openai"
+            if lowered.startswith(
+                ("gpt-", "o1-", "text-", "davinci", "curie", "babbage", "ada")
+            ):
+                return "openai"
+            if lowered.startswith("gemini"):
+                return "gemini"
+            if lowered.startswith("ollama:"):
+                return "ollama"
+            if ":" in lowered and not lowered.startswith("ft:"):
+                return "ollama"
+            return None
+
         def _record_stage_llm_call(
             *,
             call_type: str,
@@ -2934,12 +2954,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             usage: dict | None = None,
             note: str | None = None,
             stage: str | None = None,
+            provider: str | None = None,
         ) -> None:
             payload = {
                 "type": call_type,
                 "model": model_name,
+                "provider": provider or _infer_provider(model_name),
                 "duration_ms": duration_ms,
                 "usage": usage,
+                "workflow": "von_generate",
             }
             if stage:
                 payload["stage"] = stage
@@ -2959,8 +2982,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 {
                     "type": "llm.generate",
                     "model": model_name,
+                    "provider": _infer_provider(model_name),
                     "duration_ms": llm_interaction["duration_ms"],
                     "usage": None,
+                    "workflow": "von_generate",
                 }
             ]
             tool_invocations = []
@@ -3363,6 +3388,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 usage=None,
                                 note="Screen backfill synthesis (legacy).",
                                 stage="screen_backfill",
+                                provider=_infer_provider(screen_model_used),
                             )
 
                         screen_candidate = _extract_screen_only(str(synthesis_response))

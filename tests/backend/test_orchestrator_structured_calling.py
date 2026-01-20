@@ -209,6 +209,41 @@ def test_call_id_tracing_in_structured_path(orchestrator):
     assert result.tool_invocations[0]["call_id"] == "call_abc123"
 
 
+def test_tool_definition_conversion_accepts_list_schema():
+    """Regression: accept list-based required/optional schema summaries."""
+    from src.backend.integrations.internal_mcp.orchestrator import (
+        InternalMCPChatOrchestrator,
+    )
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+
+    gateway = MagicMock(spec=InternalMCPGateway)
+    gateway.enabled = True
+    gateway.describe_methods.return_value = {
+        "search_knowledge_base": {
+            "name": "search_knowledge_base",
+            "description": "Search the knowledge base",
+            "input_schema": {
+                "required": ["query"],
+                "optional": ["limit"],
+                "allow_unknown": True,
+                "description": "Search query parameters",
+            },
+            "output_schema": None,
+            "category": "read",
+        }
+    }
+
+    orch = InternalMCPChatOrchestrator(gateway=gateway)
+    tool_defs = orch._convert_mcp_tools_to_structured_definitions()
+
+    assert tool_defs
+    schema = tool_defs[0].input_schema
+    assert schema.get("required") == ["query"]
+    assert schema.get("properties", {}).get("query", {}).get("type") == "string"
+    assert schema.get("properties", {}).get("limit", {}).get("type") == "string"
+    assert schema.get("additionalProperties") is True
+
+
 def test_namespace_injection_preserved(orchestrator):
     """Test that namespace injection still works in structured path."""
     llm_client = MockLLMClientWithTools(should_use_structured=True)
