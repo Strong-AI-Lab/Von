@@ -111,9 +111,14 @@ class OpenAIClient(LLMClient):
         if context:
             for msg in context:
                 if isinstance(msg, dict) and "role" in msg and "content" in msg:
+                    role = msg["role"]
+                    if role in ("tool", "model"):
+                        role = "assistant"
+                    if role not in ("system", "user", "assistant"):
+                        role = "user"
                     messages.append(
                         {
-                            "role": msg["role"],
+                            "role": role,
                             "content": msg["content"],
                         }
                     )

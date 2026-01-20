@@ -2371,7 +2371,9 @@ class InternalMCPChatOrchestrator:
 
         This keeps the original safety constraints:
         - Tool calls must be the first JSON value in the response.
-        - Concatenated JSON objects are rejected.
+        - Concatenated JSON objects are rejected unless they are separated by
+          whitespace and each value is a valid tool-call payload (these are
+          merged into a single batch).
         - Missing action is only accepted for strict {tool, payload} shapes when
           the tool is known.
         """
@@ -2451,7 +2453,8 @@ class InternalMCPChatOrchestrator:
                     raw_response=text,
                 ) from exc
 
-        trailing = raw[end:].strip()
+        raw_trailing = raw[end:]
+        trailing = raw_trailing.strip()
 
         def _normalise_tool_call(candidate: Any) -> _ToolCallRequest | None:
             if not isinstance(candidate, MutableMapping):
@@ -2526,6 +2529,48 @@ class InternalMCPChatOrchestrator:
         # Reject concatenated JSON values, but tolerate non-JSON markers like
         # "[json]" that some models append after a valid tool call.
         if trailing:
+            allow_multi = not (raw_trailing and raw_trailing[0] in ("{", "["))
+            if allow_multi and (trailing.startswith("{") or trailing.startswith("[")):
+                extra_calls: list[_ToolCallRequest] = []
+                remaining = trailing
+                while remaining and (
+                    remaining.startswith("{") or remaining.startswith("[")
+                ):
+                    try:
+                        extra_parsed, extra_end = decoder.raw_decode(remaining)
+                    except json.JSONDecodeError:
+                        extra_calls = []
+                        break
+
+                    if isinstance(extra_parsed, MutableMapping):
+                        extra_call = _normalise_tool_call(extra_parsed)
+                        if extra_call is None:
+                            raise ToolCallParsingError(
+                                "Tool call was not executed: multiple JSON values were emitted in one response.",
+                                raw_response=text,
+                            )
+                        extra_calls.append(extra_call)
+                    elif isinstance(extra_parsed, list):
+                        for item in extra_parsed:
+                            extra_call = _normalise_tool_call(item)
+                            if extra_call is None:
+                                raise ToolCallParsingError(
+                                    "Tool call was not executed: multiple JSON values were emitted in one response.",
+                                    raw_response=text,
+                                )
+                            extra_calls.append(extra_call)
+                    else:
+                        raise ToolCallParsingError(
+                            "Tool call was not executed: multiple JSON values were emitted in one response.",
+                            raw_response=text,
+                        )
+
+                    remaining = remaining[extra_end:].strip()
+
+                if extra_calls:
+                    tool_calls.extend(extra_calls)
+                    trailing = remaining
+
             if trailing.startswith("{") or trailing.startswith("["):
                 try:
                     # Only treat the remainder as a second value if it is itself
@@ -2539,36 +2584,82 @@ class InternalMCPChatOrchestrator:
                         raw_response=text,
                     )
 
-            snippet = trailing
-            if len(snippet) > 120:
-                snippet = snippet[:117] + "..."
-            self._logger.warning(
-                "[mcp_orchestrator] Stripping trailing non-JSON text after tool call (len=%d): %r",
-                len(trailing),
-                snippet,
-            )
+            if trailing:
+                snippet = trailing
+                if len(snippet) > 120:
+                    snippet = snippet[:117] + "..."
+                self._logger.warning(
+                    "[mcp_orchestrator] Stripping trailing non-JSON text after tool call (len=%d): %r",
+                    len(trailing),
+                    snippet,
+                )
 
         if post_fence_trailing:
             if post_fence_trailing.startswith("{") or post_fence_trailing.startswith(
                 "["
             ):
-                try:
-                    decoder.raw_decode(post_fence_trailing)
-                except json.JSONDecodeError:
-                    pass
-                else:
-                    raise ToolCallParsingError(
-                        "Tool call was not executed: multiple JSON values were emitted in one response.",
-                        raw_response=text,
-                    )
-            snippet = post_fence_trailing
-            if len(snippet) > 120:
-                snippet = snippet[:117] + "..."
-            self._logger.warning(
-                "[mcp_orchestrator] Stripping trailing non-JSON text after fenced tool call (len=%d): %r",
-                len(post_fence_trailing),
-                snippet,
-            )
+                extra_calls: list[_ToolCallRequest] = []
+                remaining = post_fence_trailing
+                while remaining and (
+                    remaining.startswith("{") or remaining.startswith("[")
+                ):
+                    try:
+                        extra_parsed, extra_end = decoder.raw_decode(remaining)
+                    except json.JSONDecodeError:
+                        extra_calls = []
+                        break
+
+                    if isinstance(extra_parsed, MutableMapping):
+                        extra_call = _normalise_tool_call(extra_parsed)
+                        if extra_call is None:
+                            raise ToolCallParsingError(
+                                "Tool call was not executed: multiple JSON values were emitted in one response.",
+                                raw_response=text,
+                            )
+                        extra_calls.append(extra_call)
+                    elif isinstance(extra_parsed, list):
+                        for item in extra_parsed:
+                            extra_call = _normalise_tool_call(item)
+                            if extra_call is None:
+                                raise ToolCallParsingError(
+                                    "Tool call was not executed: multiple JSON values were emitted in one response.",
+                                    raw_response=text,
+                                )
+                            extra_calls.append(extra_call)
+                    else:
+                        raise ToolCallParsingError(
+                            "Tool call was not executed: multiple JSON values were emitted in one response.",
+                            raw_response=text,
+                        )
+
+                    remaining = remaining[extra_end:].strip()
+
+                if extra_calls:
+                    tool_calls.extend(extra_calls)
+                    post_fence_trailing = remaining
+
+                if post_fence_trailing.startswith(
+                    "{"
+                ) or post_fence_trailing.startswith("["):
+                    try:
+                        decoder.raw_decode(post_fence_trailing)
+                    except json.JSONDecodeError:
+                        pass
+                    else:
+                        raise ToolCallParsingError(
+                            "Tool call was not executed: multiple JSON values were emitted in one response.",
+                            raw_response=text,
+                        )
+
+            if post_fence_trailing:
+                snippet = post_fence_trailing
+                if len(snippet) > 120:
+                    snippet = snippet[:117] + "..."
+                self._logger.warning(
+                    "[mcp_orchestrator] Stripping trailing non-JSON text after fenced tool call (len=%d): %r",
+                    len(post_fence_trailing),
+                    snippet,
+                )
 
         return tool_calls
 

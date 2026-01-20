@@ -87,6 +87,18 @@ def test_extract_tool_calls_rejects_concatenated_json_values():
     assert "multiple JSON values" in str(excinfo.value)
 
 
+def test_extract_tool_calls_accepts_whitespace_separated_json_values():
+    text = (
+        '{"action":"call_tool","tool":"alpha","payload":{}}\n'
+        '{"action":"call_tool","tool":"beta","payload":{"x":1}}'
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    calls = orchestrator._extract_tool_calls(text)
+    assert calls is not None
+    assert [call["tool"] for call in calls] == ["alpha", "beta"]
+    assert calls[1]["payload"]["x"] == 1
+
+
 def test_extract_tool_calls_accepts_json_array_batch():
     text = (
         '[{"action":"call_tool","tool":"test","payload":{}},'
@@ -287,8 +299,9 @@ def test_extract_tool_calls_rejects_concatenated_json_objects():
         '{"action": "call_tool", "tool": "b", "payload": {}}'
     )
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
-    with pytest.raises(ToolCallParsingError):
-        orchestrator._extract_tool_calls(text)
+    calls = orchestrator._extract_tool_calls(text)
+    assert calls is not None
+    assert [call["tool"] for call in calls] == ["a", "b"]
 
 
 def test_extract_json_blob_pure_json():
