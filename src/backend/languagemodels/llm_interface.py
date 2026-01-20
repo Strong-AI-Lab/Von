@@ -152,6 +152,198 @@ def to_gemini_history(conv: Sequence[LLMMessage]) -> List[Dict[str, Any]]:
     return history
 
 
+_OPENAI_MODEL_PREFIXES = (
+    "gpt-",
+    "o1-",
+    "text-",
+    "davinci",
+    "curie",
+    "babbage",
+    "ada",
+)
+
+
+def _looks_like_openai_model(name: str) -> bool:
+    return isinstance(name, str) and name.startswith(_OPENAI_MODEL_PREFIXES)
+
+
+def _extract_openai_model_id(value: str) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.lower().startswith("openai:"):
+        cleaned = cleaned.split(":", 1)[1].strip()
+    return cleaned or None
+
+
+def _extract_ollama_model_id(value: str) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.lower().startswith("ollama:"):
+        cleaned = cleaned.split(":", 1)[1].strip()
+    return cleaned or None
+
+
+def _looks_like_ollama_model(name: str) -> bool:
+    if not isinstance(name, str):
+        return False
+    raw = name.strip()
+    if not raw:
+        return False
+    if raw.startswith("#V#"):
+        return False
+    if raw.lower().startswith(("openai:", "ft:")):
+        return False
+    direct = _extract_openai_model_id(raw)
+    if direct and _looks_like_openai_model(direct):
+        return False
+    return ":" in raw
+
+
+def resolve_provider_from_model_concept(model: Optional[str]) -> Optional[str]:
+    """Resolve provider from a model concept's #V#has_provider relation."""
+    if not isinstance(model, str):
+        return None
+    model_id = model.strip()
+    if not model_id or not model_id.startswith("#V#"):
+        return None
+
+    try:
+        from ..services.concept_service import get_concept_by_concept_id
+        from ..services.text_value_service import get_texts_for_concept
+        from ..security.access_control import bypass_access_control
+
+        with bypass_access_control():
+            concept = get_concept_by_concept_id(model_id)
+        relationships = (
+            concept.get("relationships") if isinstance(concept, dict) else None
+        )
+        if not isinstance(relationships, dict):
+            return None
+        providers = relationships.get("#V#has_provider")
+        if not isinstance(providers, list) or not providers:
+            return None
+        provider_id = providers[0]
+        if not isinstance(provider_id, str):
+            return None
+
+        with bypass_access_control():
+            names = get_texts_for_concept(provider_id, predicate="hasName", limit=10)
+    except Exception:
+        return None
+
+    for row in names:
+        if not isinstance(row, dict):
+            continue
+        text = row.get("text")
+        if not isinstance(text, str):
+            continue
+        lowered = text.lower()
+        if "openai" in lowered:
+            return "openai"
+        if "ollama" in lowered:
+            return "ollama"
+        if "gemini" in lowered or "google" in lowered:
+            return "gemini"
+
+    return None
+
+
+def resolve_ollama_model_name(model: Optional[str]) -> Optional[str]:
+    """Resolve Ollama model IDs from Vontology concept IDs or prefixed names."""
+    if not isinstance(model, str):
+        return model
+    raw = model.strip()
+    if not raw:
+        return raw
+
+    direct = _extract_ollama_model_id(raw)
+    if direct and _looks_like_ollama_model(direct):
+        return direct
+
+    if raw.startswith("#V#"):
+        try:
+            from ..services.text_value_service import get_texts_for_concept
+            from ..security.access_control import bypass_access_control
+
+            with bypass_access_control():
+                rows = get_texts_for_concept(raw, predicate="hasName", limit=20)
+        except Exception:
+            rows = []
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            text = row.get("text")
+            if not isinstance(text, str):
+                continue
+            candidate = _extract_ollama_model_id(text)
+            if candidate and _looks_like_ollama_model(candidate):
+                return candidate
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            text = row.get("text")
+            if not isinstance(text, str):
+                continue
+            candidate = _extract_ollama_model_id(text)
+            if candidate:
+                return candidate
+
+    return direct or raw
+
+
+def resolve_openai_model_name(model: Optional[str]) -> Optional[str]:
+    """Resolve OpenAI model IDs from Vontology concept IDs or prefixed names."""
+    if not isinstance(model, str):
+        return model
+    raw = model.strip()
+    if not raw:
+        return raw
+
+    direct = _extract_openai_model_id(raw)
+    if direct and _looks_like_openai_model(direct):
+        return direct
+
+    if raw.startswith("#V#"):
+        try:
+            from ..services.text_value_service import get_texts_for_concept
+            from ..security.access_control import bypass_access_control
+
+            with bypass_access_control():
+                rows = get_texts_for_concept(raw, predicate="hasName", limit=20)
+        except Exception:
+            rows = []
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            text = row.get("text")
+            if not isinstance(text, str):
+                continue
+            candidate = _extract_openai_model_id(text)
+            if candidate and _looks_like_openai_model(candidate):
+                return candidate
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            text = row.get("text")
+            if not isinstance(text, str):
+                continue
+            candidate = _extract_openai_model_id(text)
+            if candidate:
+                return candidate
+
+    return direct or raw
+
+
 def initialize_clients(force: bool = False):
     """
     Initialize LLM clients based on settings.
@@ -179,10 +371,11 @@ def initialize_clients(force: bool = False):
                 # Get current model from settings for validation
                 active_llm = get_active_llm_setting()
                 current_model = active_llm.get("model", "") if active_llm else ""
+                resolved_model = resolve_openai_model_name(current_model)
 
                 # Validate configuration and emit warnings
                 is_valid, error_messages = validate_openai_config(
-                    current_env_var, current_model, current_key
+                    current_env_var, resolved_model or current_model, current_key
                 )
                 for message in error_messages:
                     # Avoid false-positive model name warnings when the model clearly matches allowed prefixes
@@ -746,8 +939,9 @@ class OpenAIClient(LLMInterface):
 
     def _get_structured_client_config(self, model: Optional[str]) -> LLMClientConfig:
         """Get configuration for structured tool calling client (JVNAUTOSCI-799)."""
+        resolved_model = resolve_openai_model_name(model)
         return LLMClientConfig(
-            model=model or self.DEFAULT_MODEL,
+            model=resolved_model or self.DEFAULT_MODEL,
             api_key=self.api_key,
             temperature=0.7,
         )
@@ -823,7 +1017,9 @@ class OpenAIClient(LLMInterface):
     ) -> str:
         """Generate a response using the OpenAI API. Raises RuntimeError on failure."""
         # REFACTORING_NOTE: Model is now determined by the get_llm_client factory.
-        target_model = model or self.DEFAULT_MODEL
+        target_model = (
+            resolve_openai_model_name(model or self.DEFAULT_MODEL) or self.DEFAULT_MODEL
+        )
 
         logger.info(f"Generating response using OpenAI model: {target_model}")
         if _should_log_llm_io():
@@ -848,7 +1044,7 @@ class OpenAIClient(LLMInterface):
             logger.debug(f"OpenAI raw response: {response}")
 
             # Track which model actually processed the request
-            actual_model = getattr(response, "model", target_model)
+            actual_model = getattr(response, "model", None) or target_model
             # Only warn about model mismatch if the caller explicitly requested a model
             if (
                 model is not None
@@ -1238,8 +1434,31 @@ def get_llm_client(
             logger.warning("No active LLM setting found. Defaulting to Ollama.")
             provider = "ollama"
 
+    if isinstance(model, str) and model.strip().startswith("#V#"):
+        resolved_provider = resolve_provider_from_model_concept(model)
+        if resolved_provider and resolved_provider != provider:
+            logger.info(
+                "Resolved provider '%s' from model concept %s (was '%s').",
+                resolved_provider,
+                model,
+                provider,
+            )
+            provider = resolved_provider
+
     logger.info(f"--- LLM Client Selection ---")
     logger.info(f"Provider: {provider}, Model: {model}, Host: {host}")
+
+    if (
+        provider == "openai"
+        and isinstance(model, str)
+        and _looks_like_ollama_model(model)
+    ):
+        logger.warning(
+            "OpenAI provider configured with Ollama model '%s'; routing to Ollama instead.",
+            model,
+        )
+        provider = "ollama"
+        model = _extract_ollama_model_id(model) or model
 
     if provider == "openai":
         if _openai_client:
@@ -1257,6 +1476,8 @@ def get_llm_client(
                 raise RuntimeError("No LLM clients available")
 
     elif provider == "ollama":
+        if isinstance(model, str):
+            model = resolve_ollama_model_name(model) or model
         # Always create a new client with the specific host for this model
         # This ensures the correct remote host is used when a model from that host is selected
 
@@ -1397,12 +1618,26 @@ def get_active_model_name() -> Optional[str]:
                 user_concept_id=user_concept_id, org_concept_id=org_concept_id
             )
             if active_llm:
-                return active_llm.get("model")
+                provider = active_llm.get("provider")
+                model = active_llm.get("model")
+                if provider == "openai":
+                    return resolve_openai_model_name(model)
+                return model
     except Exception:
         pass
 
     # Fallback to global setting
     active_llm = get_active_llm_setting()
     if active_llm:
-        return active_llm.get("model")
+        provider = active_llm.get("provider")
+        model = active_llm.get("model")
+        if isinstance(model, str) and model.strip().startswith("#V#"):
+            resolved_provider = resolve_provider_from_model_concept(model)
+            if resolved_provider:
+                provider = resolved_provider
+        if provider == "openai":
+            return resolve_openai_model_name(model)
+        if provider == "ollama":
+            return resolve_ollama_model_name(model)
+        return model
     return None

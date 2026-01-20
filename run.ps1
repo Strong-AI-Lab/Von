@@ -320,16 +320,16 @@ function Get-MongoConnectionSummary {
         if ($null -eq $resp) { return "Mongo: unknown" }
         $usingFallback = $resp.using_fallback
         $atlasDetected = $resp.atlas_detected
-        $host = $resp.effective_host
+        $effectiveHost = $resp.effective_host
         if ($usingFallback -eq $true) {
-            if ($host) { return "Mongo: local fallback ($host)" }
+            if ($effectiveHost) { return "Mongo: local fallback ($effectiveHost)" }
             return "Mongo: local fallback"
         }
         if ($atlasDetected -eq $true) {
-            if ($host) { return "Mongo: Atlas ($host)" }
+            if ($effectiveHost) { return "Mongo: Atlas ($effectiveHost)" }
             return "Mongo: Atlas"
         }
-        if ($host) { return "Mongo: $host" }
+        if ($effectiveHost) { return "Mongo: $effectiveHost" }
         return "Mongo: unknown"
     }
     catch {
@@ -709,10 +709,10 @@ function Invoke-DailyBackupIfDue {
 # Backward-compatible convenience: if called as ".\run.ps1 -BackupDryRun" (no explicit action)
 # then run the backup action, even if the server is already running.
 if ($Action -eq 'start' -and (
-    $PSBoundParameters.ContainsKey('BackupDryRun') -or
-    $PSBoundParameters.ContainsKey('BackupTag') -or
-    $PSBoundParameters.ContainsKey('BackupOutDir')
-)) {
+        $PSBoundParameters.ContainsKey('BackupDryRun') -or
+        $PSBoundParameters.ContainsKey('BackupTag') -or
+        $PSBoundParameters.ContainsKey('BackupOutDir')
+    )) {
     Write-LauncherLog "Start requested with backup flags; running backup action only."
     $Action = 'backup'
 }
@@ -1283,7 +1283,7 @@ function Invoke-DailyGovernanceScan {
     $exitCode = $LASTEXITCODE
     $parsed = $null
     try {
-        $jsonStart = ($output | Select-String -Pattern '^\{' -SimpleMatch | Select-Object -First 1).LineNumber
+        $jsonStart = ($output | Select-String -Pattern '^\s*\{' | Select-Object -First 1).LineNumber
         if ($jsonStart -gt 0) {
             $jsonText = ($output | Select-Object -Skip ($jsonStart - 1)) -join "`n"
             try { $parsed = $jsonText | ConvertFrom-Json -ErrorAction Stop } catch { }
@@ -1358,7 +1358,7 @@ function Invoke-ConceptDataAbsenceCheck {
     $parsed = $null
     $total = 0; $missing = 0; $virtual = 0; $warnings = 0
     try {
-        $jsonStart = ($output | Select-String -Pattern '^\{' -SimpleMatch | Select-Object -First 1).LineNumber
+        $jsonStart = ($output | Select-String -Pattern '^\s*\{' | Select-Object -First 1).LineNumber
         if ($jsonStart -gt 0) {
             $jsonText = ($output | Select-Object -Skip ($jsonStart - 1)) -join "`n"
             try { $parsed = $jsonText | ConvertFrom-Json -ErrorAction Stop } catch { }
@@ -1878,7 +1878,7 @@ function Invoke-ResidualLegacyTextAudit {
     $parsed = $null
     $updated = 0; $warnings = 0
     try {
-        $jsonStart = ($output | Select-String -Pattern '^\{' -SimpleMatch | Select-Object -First 1).LineNumber
+        $jsonStart = ($output | Select-String -Pattern '^\s*\{' | Select-Object -First 1).LineNumber
         if ($jsonStart -gt 0) {
             $jsonText = ($output | Select-Object -Skip ($jsonStart - 1)) -join "`n"
             try { $parsed = $jsonText | ConvertFrom-Json -ErrorAction Stop } catch { }
@@ -1946,7 +1946,7 @@ function Invoke-CleanupPreservedFields {
     $parsed = $null
     $updated = 0; $warnings = 0
     try {
-        $jsonStart = ($output | Select-String -Pattern '^\{' -SimpleMatch | Select-Object -First 1).LineNumber
+        $jsonStart = ($output | Select-String -Pattern '^\s*\{' | Select-Object -First 1).LineNumber
         if ($jsonStart -gt 0) {
             $jsonText = ($output | Select-Object -Skip ($jsonStart - 1)) -join "`n"
             try { $parsed = $jsonText | ConvertFrom-Json -ErrorAction Stop } catch { }
