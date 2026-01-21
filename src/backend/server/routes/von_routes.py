@@ -24,7 +24,9 @@ from ...services.settings_service import (
     get_internal_mcp_max_tool_invocations,
     get_internal_mcp_tool_batch_cap,
     get_show_tool_use_during_thinking,
+    get_buttonify_model_enabled,
 )
+from ...services.prompt_template_service import PromptTemplateService
 from ...workflows import (
     CHAT_NARRATION_WORKFLOW_ID,
     WorkflowExecutionTrace,
@@ -698,6 +700,109 @@ def _limit_context_size(context: list[dict], max_messages: int = 20) -> list[dic
         return system_msg + recent_msgs
     else:
         return context[-max_messages:]
+
+
+_BUTTONIFY_PROMPT_IDS = ("#V#buttonify_prompt_v1",)
+
+
+def _normalise_buttonify_option(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.strip("-–—•*\t ")
+    cleaned = re.sub(r"^[\"'“‘]+|[\"'”’]+$", "", cleaned).strip()
+    cleaned = cleaned.rstrip(".,;:")
+    if not cleaned:
+        return None
+    if len(cleaned) > 60:
+        return None
+    if len(cleaned.split()) > 4:
+        return None
+    return cleaned
+
+
+def _add_buttonify_option(
+    options: list[str],
+    seen: set[str],
+    value: str | None,
+) -> None:
+    cleaned = _normalise_buttonify_option(value)
+    if not cleaned:
+        return
+    key = cleaned.lower()
+    if key in seen:
+        return
+    seen.add(key)
+    options.append(cleaned)
+
+
+def _extract_buttonify_options_heuristic(text: str | None) -> list[str]:
+    if not isinstance(text, str) or not text.strip():
+        return []
+
+    options: list[str] = []
+    seen: set[str] = set()
+
+    quote_patterns = [
+        r'"([^"\n\r]{1,200})"',
+        r"“([^”\n\r]{1,200})”",
+        r"‘([^’\n\r]{1,200})’",
+        r"(?<!\w)'([^'\n\r]{1,200})'(?!\w)",
+    ]
+
+    for pattern in quote_patterns:
+        for match in re.findall(pattern, text):
+            _add_buttonify_option(options, seen, match)
+            if len(options) >= 4:
+                return options[:4]
+
+    for line in text.splitlines():
+        match = re.match(r"\s*(?:[-*•]|\d+[.)])\s+(.+)", line)
+        if not match:
+            continue
+        _add_buttonify_option(options, seen, match.group(1))
+        if len(options) >= 4:
+            return options[:4]
+
+    if not options:
+        marker = re.search(
+            r"(?:reply|respond|answer|choose|pick)\s+(?:with\s+)?one\s+of\s*[:\-–—]?\s*(.+)",
+            text,
+            re.IGNORECASE,
+        )
+        if marker:
+            tail = marker.group(1)
+            for part in re.split(r"\s*(?:,|/|;|\bor\b)\s*", tail):
+                _add_buttonify_option(options, seen, part)
+                if len(options) >= 4:
+                    return options[:4]
+
+    implicit = re.search(
+        r"\b(?:would|do)\s+(?:you\s+)?(?:like|want)\s+(?:to\s+)?([^?.!\n]{1,80}?)\s+or\s+([^?.!\n]{1,80}?)[?.!]",
+        text,
+        re.IGNORECASE,
+    )
+    if implicit:
+        _add_buttonify_option(options, seen, implicit.group(1))
+        _add_buttonify_option(options, seen, implicit.group(2))
+
+    if not options:
+        if re.search(r"\byes\s*/\s*no\b|\byes\s+or\s+no\b", text, re.IGNORECASE):
+            _add_buttonify_option(options, seen, "Yes")
+            _add_buttonify_option(options, seen, "No")
+        else:
+            trimmed = text.strip()
+            if trimmed.endswith("?") and re.match(
+                r"\s*(?:Do|Would|Is|Are|Did|Can|Should|Will|Have|Has)\b",
+                trimmed,
+                re.IGNORECASE,
+            ):
+                _add_buttonify_option(options, seen, "Yes")
+                _add_buttonify_option(options, seen, "No")
+
+    return options[:4]
 
 
 def _calculate_context_stats(messages: list[dict]) -> dict:
@@ -3192,6 +3297,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
             if needs_screen_backfill:
                 screen_backfill_second_pass_attempted = True
+                if show_tool_use_progress:
+                    _set_tool_progress(
+                        progress_scope_key,
+                        request_id,
+                        {
+                            "status": "workflow",
+                            "request_id": request_id,
+                            "workflow_task": "screen_backfill",
+                        },
+                    )
                 if not screen_tag_present or not screen_text:
                     screen_backfill_second_pass_reason = "missing_screen"
                 elif _screen_looks_like_tool_dump(screen_text or ""):
@@ -3550,6 +3665,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         if needs_spoken_backfill:
             try:
                 spoken_backfill_second_pass_attempted = True
+                if show_tool_use_progress:
+                    _set_tool_progress(
+                        progress_scope_key,
+                        request_id,
+                        {
+                            "status": "workflow",
+                            "request_id": request_id,
+                            "workflow_task": "narration_planning",
+                        },
+                    )
                 if isinstance(presenter_channels, dict) and isinstance(
                     presenter_channels.get("screen"), str
                 ):
@@ -3840,27 +3965,73 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         buttonify_options: list[str] = []
         buttonify_meta: dict[str, Any] | None = None
-        buttonify_enabled = os.getenv("VON_BUTTONIFY_MODEL_ENABLE", "0").lower() in {
-            "1",
-            "true",
-        }
-        if buttonify_enabled and isinstance(response_text, str) and response_text:
-            buttonify_prompt = (
-                "Extract up to 4 short quick-reply options for the user. "
-                "Each option must be 1-4 words, imperative or yes/no style, and safe to send verbatim. "
-                "Return ONLY a JSON array of strings (no prose, no Markdown). "
-                "If there are no clear options, return []."
+        buttonify_enabled = get_buttonify_model_enabled()
+        buttonify_allowed = (
+            not presenter_mode_requested
+            and not current_app.testing
+            and not os.getenv("PYTEST_CURRENT_TEST")
+            and (
+                orchestrator is None or hasattr(orchestrator, "_run_llm_with_fallbacks")
             )
-            buttonify_context = [
-                {
-                    "role": "system",
-                    "content": "You generate quick-reply options for a chat UI.",
-                },
-                {
-                    "role": "user",
-                    "content": f"User message:\n{prompt_text}\n\nAssistant response:\n{response_text}",
-                },
-            ]
+        )
+        if (
+            buttonify_enabled
+            and buttonify_allowed
+            and isinstance(response_text, str)
+            and response_text
+        ):
+            if show_tool_use_progress:
+                _set_tool_progress(
+                    progress_scope_key,
+                    request_id,
+                    {
+                        "status": "workflow",
+                        "request_id": request_id,
+                        "workflow_task": "buttonify",
+                    },
+                )
+            buttonify_prompt_template = (
+                "You generate quick-reply button options for a chat UI.\n\n"
+                "Use the user message and assistant response. Extract up to 4 options that the user could tap next.\n\n"
+                "Rules:\n"
+                "- Return ONLY a JSON array of strings. No prose, no Markdown.\n"
+                "- Each option must be 1-4 words and safe to send verbatim.\n"
+                "- Prefer exact wording from the response when explicit (lists, quoted replies, template choices).\n"
+                '- If the response presents implicit alternatives (e.g. "Would you like to continue or stop?"), convert them into concise options (e.g. ["Continue", "Stop"]).\n'
+                '- If the response is a yes/no question without explicit options, return ["Yes", "No"].\n'
+                "- If there are no clear options or it is open-ended, return [].\n"
+                "- Do not invent options beyond what is stated or clearly implied.\n"
+                "- Avoid punctuation, emojis, or more than 4 words.\n\n"
+                "User message:\n{user_message}\n\nAssistant response:\n{assistant_response}"
+            )
+
+            prompt_service = PromptTemplateService()
+            rendered_buttonify_prompt = None
+            try:
+                rendered_buttonify_prompt = prompt_service.render_prompt(
+                    _BUTTONIFY_PROMPT_IDS,
+                    variables={
+                        "user_message": prompt_text,
+                        "assistant_response": response_text,
+                    },
+                    fallback=buttonify_prompt_template,
+                )
+            except Exception:
+                rendered_buttonify_prompt = None
+
+            if rendered_buttonify_prompt:
+                buttonify_prompt = rendered_buttonify_prompt.text
+                buttonify_prompt_id = rendered_buttonify_prompt.prompt_id
+                buttonify_prompt_truncated = rendered_buttonify_prompt.truncated
+            else:
+                buttonify_prompt = buttonify_prompt_template.format(
+                    user_message=prompt_text,
+                    assistant_response=response_text,
+                )
+                buttonify_prompt_id = None
+                buttonify_prompt_truncated = False
+
+            buttonify_context: list[dict[str, Any]] = []
             buttonify_response = None
             buttonify_model_used = model_name
             if orchestrator is not None and hasattr(
@@ -3921,10 +4092,20 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             except Exception:
                 buttonify_options = []
 
+            buttonify_source = "llm" if buttonify_options else "none"
+            if not buttonify_options:
+                heuristic_options = _extract_buttonify_options_heuristic(response_text)
+                if heuristic_options:
+                    buttonify_options = heuristic_options
+                    buttonify_source = "heuristic"
+
             buttonify_meta = {
                 "enabled": True,
                 "model": buttonify_model_used,
                 "options": buttonify_options,
+                "source": buttonify_source,
+                "prompt_id": buttonify_prompt_id,
+                "prompt_truncated": buttonify_prompt_truncated,
             }
 
         context_stats = _calculate_context_stats(sent_context_stats_messages)
