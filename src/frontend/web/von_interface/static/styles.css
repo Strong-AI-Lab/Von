@@ -4272,9 +4272,9 @@ button.prompt-vontology-cartouche {
 }
 
 .vontology-cartouche-kind.predicate {
-    background-color: #fff3cd;
-    color: #997404;
-    border-color: #ffeeba;
+    background-color: #f5f0ff;
+    color: #4a3871;
+    border-color: #d4c5f9;
 }
 
 /* Inline-code cartouches: only used when a <code> span contains exactly one #V#... token. */
