@@ -1940,6 +1940,69 @@ def _read_file_copy(**kwargs):
     return _run_read()
 
 
+def _get_predicate_extent(**kwargs):
+    from ...server.routes.predicate_routes import get_predicate_extent_data
+
+    concept_id = kwargs.get("concept_id") or kwargs.get("predicate_concept_id")
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return {"success": False, "error": "Missing required parameter: concept_id"}
+
+    def _coerce_int(value, field, *, default=None, minimum=None, maximum=None):
+        if value is None:
+            return default
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid {field}")
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{field} must be >= {minimum}")
+        if maximum is not None and value > maximum:
+            value = maximum
+        return value
+
+    try:
+        limit = _coerce_int(
+            kwargs.get("limit"), "limit", default=100, minimum=1, maximum=1000
+        )
+        offset = _coerce_int(kwargs.get("offset"), "offset", default=0, minimum=0)
+        sample_size = _coerce_int(
+            kwargs.get("sample_size"),
+            "sample_size",
+            default=None,
+            minimum=1,
+            maximum=1000,
+        )
+        sample_seed = _coerce_int(
+            kwargs.get("sample_seed"), "sample_seed", default=None
+        )
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+
+    sort_by = kwargs.get("sort_by") or "created_at"
+    sort_order = kwargs.get("sort_order") or "desc"
+    subject_type = kwargs.get("subject_type") or None
+    object_type = kwargs.get("object_type") or None
+    source_filter = kwargs.get("source") or "all"
+
+    payload = get_predicate_extent_data(
+        concept_id=concept_id.strip(),
+        limit=limit,
+        offset=offset,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        subject_type=subject_type,
+        object_type=object_type,
+        source_filter=source_filter,
+        sample_size=sample_size,
+        sample_seed=sample_seed,
+    )
+
+    if payload.get("error"):
+        return {"success": False, **payload}
+
+    return {"success": True, **payload}
+
+
 # Search MCP handlers
 def _search_web(**kwargs):
     import asyncio
@@ -2405,6 +2468,58 @@ def _concept_search_output_schema() -> Schema:
         optional={},
         allow_unknown=True,
         description="search_concepts output: results (list of {concept_id, name, kind, relevance_score, similarity_score?, hierarchy?}), total_count (int), match_types_used (list[str]), query_info (dict). hierarchy (when include_hierarchy_path=true): {primary_path, paths[], all_parents, max_depth, is_root}",
+    )
+
+
+def _predicate_extent_input_schema() -> Schema:
+    return Schema(
+        required={
+            "concept_id": str,
+        },
+        optional={
+            "limit": (int, type(None)),
+            "offset": (int, type(None)),
+            "sort_by": (str, type(None)),
+            "sort_order": (str, type(None)),
+            "subject_type": (str, type(None)),
+            "object_type": (str, type(None)),
+            "source": (str, type(None)),
+            "sample_size": (int, type(None)),
+            "sample_seed": (int, type(None)),
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "get_predicate_extent input: concept_id (predicate concept_id), limit (int, default 100), "
+            "offset (int), sort_by (str), sort_order ('asc'|'desc'), subject_type (concept_id), "
+            "object_type (concept_id), source ('text_relations'|'structured'|'all'), "
+            "sample_size (int, optional random sample size), sample_seed (int, optional)."
+        ),
+    )
+
+
+def _predicate_extent_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "concept_id": str,
+            "extent": list,
+            "total_count": int,
+            "limit": int,
+            "offset": int,
+            "has_more": bool,
+        },
+        optional={
+            "sampled": (bool, type(None)),
+            "sample_size": (int, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "get_predicate_extent output: success (bool), concept_id (str), extent (list of triples), "
+            "total_count (int), limit (int), offset (int), has_more (bool), sampled (bool, optional), "
+            "sample_size (int, optional), error (str if failed)."
+        ),
     )
 
 
@@ -5943,6 +6058,17 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=concept_search_output_schema,
             category="read",
             description="Find concepts. For 'list instances of X': use instance_of='#V#type' param (e.g., instance_of='#V#researcher'). For 'find X': use query param. Other key params: filter_kind=['individual'|'type'], include_hierarchy_path=true (shows paths), match_type='exact'|'substring'|'similarity'.",
+        ),
+        MethodDefinition(
+            name="get_predicate_extent",
+            handler=_get_predicate_extent,
+            input_schema=_predicate_extent_input_schema(),
+            output_schema=_predicate_extent_output_schema(),
+            category="read",
+            description=(
+                "Return the extent (all uses) of a predicate concept. Supports filtering by subject/object type, "
+                "source (text_relations|structured|all), pagination, and optional sampling (sample_size)."
+            ),
         ),
         MethodDefinition(
             name="vontology_concept_search",

@@ -33,6 +33,7 @@ def get_predicate_extent(concept_id: str):
     - subject_type (str): Filter by subject type (concept_id)
     - object_type (str): Filter by object type (concept_id)
     - source (str): Filter by source - 'text_relations', 'structured', or 'all' (default: 'all')
+    - sample_size (int): Optional sample size (random subset). When provided, pagination is ignored.
 
     Returns:
     {
@@ -62,11 +63,57 @@ def get_predicate_extent(concept_id: str):
         subject_type = request.args.get("subject_type")
         object_type = request.args.get("object_type")
         source_filter = request.args.get("source", default="all")
+        sample_size = request.args.get("sample_size", type=int)
 
-        extent_items = []
-        total_count = 0
+        extent_payload = get_predicate_extent_data(
+            concept_id=concept_id,
+            limit=limit,
+            offset=offset,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            subject_type=subject_type,
+            object_type=object_type,
+            source_filter=source_filter,
+            sample_size=sample_size,
+        )
 
-        # Query text_relations collection if requested
+        return (
+            jsonify(extent_payload),
+            200,
+        )
+
+    except Exception as e:
+        current_app.logger.error(
+            f"Failed to get extent for predicate {concept_id}: {e}", exc_info=True
+        )
+        return jsonify({"error": f"Failed to get predicate extent: {str(e)}"}), 500
+
+
+def get_predicate_extent_data(
+    *,
+    concept_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+    subject_type: Optional[str] = None,
+    object_type: Optional[str] = None,
+    source_filter: str = "all",
+    sample_size: Optional[int] = None,
+    sample_seed: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Return predicate extent data for API/MCP callers."""
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return {"error": "Missing predicate concept_id"}
+
+    concept_id = concept_id.strip()
+    if sample_size is not None:
+        sample_size = max(1, min(int(sample_size), 1000))
+
+    extent_items: List[Dict[str, Any]] = []
+    total_count = 0
+
+    if sample_size is None:
         if source_filter in ("text_relations", "all"):
             text_rel_items, text_rel_count = _query_text_relations_extent(
                 concept_id,
@@ -80,7 +127,6 @@ def get_predicate_extent(concept_id: str):
             extent_items.extend(text_rel_items)
             total_count += text_rel_count
 
-        # Query structured relations from concepts collection if requested
         if source_filter in ("structured", "all"):
             struct_rel_items, struct_rel_count = _query_structured_relations_extent(
                 concept_id,
@@ -94,32 +140,58 @@ def get_predicate_extent(concept_id: str):
             extent_items.extend(struct_rel_items)
             total_count += struct_rel_count
 
-        # Sort combined results if querying both sources
         if source_filter == "all" and extent_items:
             extent_items = _sort_extent_items(extent_items, sort_by, sort_order)
 
-        # Apply pagination to combined results
         paginated_items = extent_items[offset : offset + limit]
+        return {
+            "concept_id": concept_id,
+            "extent": paginated_items,
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(paginated_items) < total_count,
+            "sampled": False,
+        }
 
-        return (
-            jsonify(
-                {
-                    "concept_id": concept_id,
-                    "extent": paginated_items,
-                    "total_count": total_count,
-                    "limit": limit,
-                    "offset": offset,
-                    "has_more": offset + len(paginated_items) < total_count,
-                }
-            ),
-            200,
+    # Sampled path
+    if source_filter in ("text_relations", "all"):
+        text_rel_items, text_rel_count = _sample_text_relations_extent(
+            concept_id,
+            subject_type,
+            object_type,
+            sample_size,
         )
+        extent_items.extend(text_rel_items)
+        total_count += text_rel_count
 
-    except Exception as e:
-        current_app.logger.error(
-            f"Failed to get extent for predicate {concept_id}: {e}", exc_info=True
+    if source_filter in ("structured", "all"):
+        struct_rel_items, struct_rel_count = _sample_structured_relations_extent(
+            concept_id,
+            subject_type,
+            object_type,
+            sample_size,
         )
-        return jsonify({"error": f"Failed to get predicate extent: {str(e)}"}), 500
+        extent_items.extend(struct_rel_items)
+        total_count += struct_rel_count
+
+    if extent_items and source_filter == "all" and len(extent_items) > sample_size:
+        import random
+
+        rng = random.Random(sample_seed)
+        rng.shuffle(extent_items)
+        extent_items = extent_items[:sample_size]
+
+    return {
+        "concept_id": concept_id,
+        "extent": extent_items,
+        "total_count": total_count,
+        "limit": sample_size,
+        "offset": 0,
+        "has_more": False,
+        "sampled": True,
+        "sample_size": sample_size,
+    }
 
 
 @predicate_bp.route("/<concept_id>/metadata", methods=["GET"])
@@ -221,6 +293,9 @@ def _query_text_relations_extent(
         if text_rel_coll is None:
             return [], 0
 
+        if object_type:
+            return [], 0
+
         # Build query filter
         query_filter: Dict[str, Any] = {"predicate": predicate_concept_id}
 
@@ -296,6 +371,15 @@ def _query_structured_relations_extent(
             f"relationships.{predicate_concept_id}": {"$exists": True, "$ne": None}
         }
 
+        object_ids: Optional[set[str]] = None
+        if object_type:
+            object_ids = _resolve_object_type_ids(object_type, concepts_coll)
+            if not object_ids:
+                return [], 0
+            query_filter[f"relationships.{predicate_concept_id}"] = {
+                "$in": list(object_ids)
+            }
+
         # Apply subject type filter if specified
         if subject_type:
             query_filter["relationships.is_an_instance_of"] = subject_type
@@ -318,6 +402,11 @@ def _query_structured_relations_extent(
             # Handle both single values and arrays
             if not isinstance(object_values, list):
                 object_values = [object_values] if object_values else []
+
+            if object_ids is not None:
+                object_values = [obj for obj in object_values if obj in object_ids]
+                if not object_values:
+                    continue
 
             # Create extent items (one per object if multiple)
             for obj_value in object_values:
@@ -342,6 +431,134 @@ def _query_structured_relations_extent(
     except Exception as e:
         current_app.logger.error(
             f"Error querying structured relations extent: {e}", exc_info=True
+        )
+        return [], 0
+
+
+def _sample_text_relations_extent(
+    predicate_concept_id: str,
+    subject_type: Optional[str],
+    object_type: Optional[str],
+    sample_size: int,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Sample text_relations extent for a predicate."""
+    try:
+        text_rel_coll = get_text_relations_collection()
+        if text_rel_coll is None:
+            return [], 0
+
+        if object_type:
+            return [], 0
+
+        query_filter: Dict[str, Any] = {"predicate": predicate_concept_id}
+        if subject_type:
+            query_filter["subject_concept_id"] = {"$regex": f"^{subject_type}"}
+
+        total_count = text_rel_coll.count_documents(query_filter)
+
+        pipeline = [
+            {"$match": query_filter},
+            {"$sample": {"size": sample_size}},
+        ]
+
+        extent_items = []
+        for rel in text_rel_coll.aggregate(pipeline):
+            text_value = TextValuesRepository.find_one(
+                {"_id": ObjectId(rel.get("object_text_id"))}
+            )
+            subject_name = _get_concept_name(rel.get("subject_concept_id"))
+            extent_items.append(
+                {
+                    "subject": rel.get("subject_concept_id"),
+                    "subject_name": subject_name,
+                    "predicate": predicate_concept_id,
+                    "object": text_value.get("text") if text_value else None,
+                    "object_language": text_value.get("lang") if text_value else None,
+                    "source": "text_relations",
+                    "created_at": rel.get("created_at"),
+                    "updated_at": rel.get("updated_at"),
+                }
+            )
+
+        return extent_items, total_count
+
+    except Exception as e:
+        current_app.logger.error(
+            f"Error sampling text_relations extent: {e}", exc_info=True
+        )
+        return [], 0
+
+
+def _sample_structured_relations_extent(
+    predicate_concept_id: str,
+    subject_type: Optional[str],
+    object_type: Optional[str],
+    sample_size: int,
+) -> tuple[List[Dict[str, Any]], int]:
+    """Sample structured relations extent for a predicate."""
+    try:
+        concepts_coll = get_concepts_collection()
+        if concepts_coll is None:
+            return [], 0
+
+        query_filter: Dict[str, Any] = {
+            f"relationships.{predicate_concept_id}": {"$exists": True, "$ne": None}
+        }
+
+        object_ids: Optional[set[str]] = None
+        if object_type:
+            object_ids = _resolve_object_type_ids(object_type, concepts_coll)
+            if not object_ids:
+                return [], 0
+            query_filter[f"relationships.{predicate_concept_id}"] = {
+                "$in": list(object_ids)
+            }
+        if subject_type:
+            query_filter["relationships.is_an_instance_of"] = subject_type
+
+        total_count = concepts_coll.count_documents(query_filter)
+
+        pipeline = [
+            {"$match": query_filter},
+            {"$sample": {"size": sample_size}},
+        ]
+
+        extent_items = []
+        for concept in concepts_coll.aggregate(pipeline):
+            subject_id = concept.get("concept_id")
+            subject_name = concept.get("name") or subject_id
+
+            relationships = concept.get("relationships", {})
+            object_values = relationships.get(predicate_concept_id)
+            if not isinstance(object_values, list):
+                object_values = [object_values] if object_values else []
+
+            if object_ids is not None:
+                object_values = [obj for obj in object_values if obj in object_ids]
+                if not object_values:
+                    continue
+
+            for obj_value in object_values:
+                obj_name = (
+                    _get_concept_name(obj_value) if isinstance(obj_value, str) else None
+                )
+                extent_items.append(
+                    {
+                        "subject": subject_id,
+                        "subject_name": subject_name,
+                        "predicate": predicate_concept_id,
+                        "object": obj_value,
+                        "object_name": obj_name,
+                        "source": "structured",
+                        "updated_at": concept.get("updated_at"),
+                    }
+                )
+
+        return extent_items, total_count
+
+    except Exception as e:
+        current_app.logger.error(
+            f"Error sampling structured extent: {e}", exc_info=True
         )
         return [], 0
 
@@ -374,6 +591,25 @@ def _get_concept_name(concept_id: str) -> Optional[str]:
 
     except Exception:
         return None
+
+
+def _resolve_object_type_ids(object_type: str, concepts_coll) -> set[str]:
+    """Resolve concept IDs that match the given object type."""
+    if not isinstance(object_type, str) or not object_type.strip():
+        return set()
+
+    object_type = object_type.strip()
+    ids = set(
+        concepts_coll.distinct(
+            "concept_id", {"relationships.is_an_instance_of": object_type}
+        )
+    )
+    ids.update(
+        concepts_coll.distinct(
+            "concept_id", {"relationships.is_a_type_of": object_type}
+        )
+    )
+    return {cid for cid in ids if isinstance(cid, str) and cid.strip()}
 
 
 def _find_meta_fact(

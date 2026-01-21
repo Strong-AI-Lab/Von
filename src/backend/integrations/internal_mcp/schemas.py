@@ -167,6 +167,16 @@ def coerce_payload_types(
                 if lowered in {"true", "false"}:
                     return lowered == "true"
 
+            if list in allowed:
+                lowered = raw.lower()
+                if lowered in {"none", "null"}:
+                    if NoneType in allowed:
+                        warnings.append(f"Coerced field '{key}' from string to None.")
+                        return None
+                    return value
+                warnings.append(f"Coerced field '{key}' from string to list.")
+                return [raw]
+
         return value
 
     for key, expected in schema.required.items():
