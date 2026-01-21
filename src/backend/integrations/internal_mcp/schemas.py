@@ -165,7 +165,6 @@ def coerce_payload_types(
             if bool in allowed:
                 lowered = raw.lower()
                 if lowered in {"true", "false"}:
-                    warnings.append(f"Coerced field '{key}' from string to bool.")
                     return lowered == "true"
 
         return value

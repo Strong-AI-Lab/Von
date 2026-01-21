@@ -1809,6 +1809,10 @@ def _read_file_copy(**kwargs):
                 is_pdf = False
 
             if is_pdf:
+                text: str | None = None
+                extraction_method: str | None = None
+                extraction_error: str | None = None
+
                 try:
                     import fitz  # type: ignore[import-not-found] # PyMuPDF
 
@@ -1817,9 +1821,7 @@ def _read_file_copy(**kwargs):
                     for page in doc:
                         extracted_pages.append(page.get_text("text"))
                     text = "\n".join(extracted_pages).strip()
-                    payload["text"] = text
-                    payload["encoding"] = "utf-8"
-                    payload["text_extraction"] = "pymupdf"
+                    extraction_method = "pymupdf"
                     if not text:
                         try:
                             import pytesseract  # type: ignore[import-not-found]
@@ -1836,13 +1838,45 @@ def _read_file_copy(**kwargs):
                                 ocr_pages.append(pytesseract.image_to_string(img))
                             ocr_text = "\n".join(ocr_pages).strip()
                             if ocr_text:
-                                payload["text"] = ocr_text
-                                payload["text_extraction"] = "pymupdf_ocr"
+                                text = ocr_text
+                                extraction_method = "pymupdf_ocr"
                         except Exception as exc:
-                            payload["text_extraction_error"] = str(exc)
+                            extraction_error = str(exc)
+                except ModuleNotFoundError as exc:
+                    extraction_method = "pymupdf_missing"
+                    extraction_error = str(exc)
                 except Exception as exc:
-                    payload["text_extraction"] = "pymupdf_failed"
-                    payload["text_extraction_error"] = str(exc)
+                    extraction_method = "pymupdf_failed"
+                    extraction_error = str(exc)
+
+                if not text:
+                    try:
+                        import io
+                        from pdfminer.high_level import extract_text  # type: ignore[import-not-found]
+
+                        text = extract_text(io.BytesIO(bytes(data_bytes))).strip()
+                        if text:
+                            extraction_method = "pdfminer"
+                            extraction_error = None
+                    except Exception as exc:
+                        if extraction_method is None:
+                            extraction_method = "pdfminer_failed"
+                            extraction_error = str(exc)
+                        elif extraction_error:
+                            extraction_error = f"{extraction_error}; pdfminer: {exc}"
+                        else:
+                            extraction_error = str(exc)
+
+                if text:
+                    payload["text"] = text
+                    payload["encoding"] = "utf-8"
+                    if extraction_method:
+                        payload["text_extraction"] = extraction_method
+                else:
+                    if extraction_method:
+                        payload["text_extraction"] = extraction_method
+                    if extraction_error:
+                        payload["text_extraction_error"] = extraction_error
                     try:
                         text = bytes(data_bytes).decode(str(encoding), errors="replace")
                     except LookupError:

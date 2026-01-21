@@ -144,6 +144,7 @@ dependencies = [
     "bleach>=6.3.0",
     "pymupdf>=1.24.10",
     "pytesseract>=0.3.13",
+    "pdfminer.six>=20231228",
 ]
 
 [build-system]
