@@ -2838,6 +2838,7 @@ class InternalMCPChatOrchestrator:
                 f'"{self._TOOL_FIELD}"',
                 f'"{self._PAYLOAD_FIELD}"',
                 '"call_tool"',
+                '"tool_calls"',
             )
         )
 
@@ -2881,11 +2882,23 @@ class InternalMCPChatOrchestrator:
                 return None
 
             tool_name = candidate.get(self._TOOL_FIELD)
+            if not isinstance(tool_name, str):
+                alt_name = candidate.get("name")
+                if isinstance(alt_name, str) and alt_name:
+                    tool_name = alt_name
             payload_value = candidate.get(self._PAYLOAD_FIELD)
             action_value = candidate.get(self._ACTION_FIELD)
             if not isinstance(payload_value, MutableMapping):
                 for alt_key in ("params", "arguments", "args"):
                     alt_value = candidate.get(alt_key)
+                    if isinstance(alt_value, str) and alt_value.strip():
+                        try:
+                            parsed_alt = json.loads(alt_value)
+                        except json.JSONDecodeError:
+                            parsed_alt = None
+                        if isinstance(parsed_alt, MutableMapping):
+                            payload_value = parsed_alt
+                            break
                     if isinstance(alt_value, MutableMapping):
                         payload_value = alt_value
                         break
@@ -2901,6 +2914,9 @@ class InternalMCPChatOrchestrator:
                 "params",
                 "arguments",
                 "args",
+                "name",
+                "id",
+                "tool_call_id",
             }
 
             if missing_action and has_tool and has_payload and strict_shape:
@@ -2922,20 +2938,32 @@ class InternalMCPChatOrchestrator:
                 self._PAYLOAD_FIELD: cast(MutableMapping[str, Any], payload_value),
             }
 
-            call_id = candidate.get("_call_id")
+            call_id = (
+                candidate.get("_call_id")
+                or candidate.get("id")
+                or candidate.get("tool_call_id")
+            )
             if isinstance(call_id, str) and call_id:
                 tool_call["_call_id"] = call_id
 
             return tool_call
 
         tool_calls: list[_ToolCallRequest] = []
+        parsed_list: list[Any] | None = None
         if isinstance(parsed, MutableMapping):
-            tool_call = _normalise_tool_call(parsed)
-            if tool_call is None:
-                return None
-            tool_calls = [tool_call]
+            wrapped_calls = parsed.get("tool_calls")
+            if isinstance(wrapped_calls, list):
+                parsed_list = wrapped_calls
+            else:
+                tool_call = _normalise_tool_call(parsed)
+                if tool_call is None:
+                    return None
+                tool_calls = [tool_call]
         elif isinstance(parsed, list):
-            for item in parsed:
+            parsed_list = parsed
+
+        if parsed_list is not None:
+            for item in parsed_list:
                 tool_call = _normalise_tool_call(item)
                 if tool_call is None:
                     if looks_like_tool_call:
@@ -2947,7 +2975,7 @@ class InternalMCPChatOrchestrator:
                 tool_calls.append(tool_call)
             if not tool_calls:
                 return None
-        else:
+        elif not tool_calls:
             if looks_like_tool_call:
                 raise ToolCallParsingError(
                     "Tool call was not executed: tool call must be a JSON object or array.",

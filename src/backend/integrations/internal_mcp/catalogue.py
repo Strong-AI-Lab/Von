@@ -1819,7 +1819,8 @@ def _read_file_copy(**kwargs):
                     doc = fitz.open(stream=bytes(data_bytes), filetype="pdf")
                     extracted_pages: list[str] = []
                     for page in doc:
-                        extracted_pages.append(page.get_text("text"))
+                        page_text: str = str(page.get_text("text"))
+                        extracted_pages.append(page_text)
                     text = "\n".join(extracted_pages).strip()
                     extraction_method = "pymupdf"
                     if not text:
