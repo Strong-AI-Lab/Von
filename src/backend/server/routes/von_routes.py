@@ -3967,8 +3967,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         buttonify_meta: dict[str, Any] | None = None
         buttonify_enabled = get_buttonify_model_enabled()
         buttonify_allowed = (
-            not presenter_mode_requested
-            and not current_app.testing
+            not current_app.testing
             and not os.getenv("PYTEST_CURRENT_TEST")
             and (
                 orchestrator is None or hasattr(orchestrator, "_run_llm_with_fallbacks")
