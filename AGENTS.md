@@ -90,6 +90,7 @@ Do not "hack around" MCP failures with ad-hoc scripts or direct REST calls. Fix 
 - Tasks can set an Epic as `parent` via edit tooling (`{"parent": {"key": "JVNAUTOSCI-123"}}`).
 - If an issue is created without an assignee, fix it via the Jira edit tool rather than duplicating.
 - Jira site URL: https://naoinstitute.atlassian.net/
+- If a cloudId is required, fetch it from https://naoinstitute.atlassian.net/_edge/tenant_info and include that URL when requesting it.
 
 ## PowerShell-First Shell Rules
 - Avoid Bash-only syntax: heredocs, `export`, `$(cmd)`, `source venv/bin/activate`.

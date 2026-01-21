@@ -256,6 +256,7 @@ function formatToolUseProgressText(progress, request = null) {
 
     const status = typeof progress.status === 'string' ? progress.status : 'thinking';
     const tool = typeof progress.tool === 'string' ? progress.tool : null;
+    const workflowTask = typeof progress.workflow_task === 'string' ? progress.workflow_task : null;
     const batchSize = Number.isFinite(progress.batch_size) ? Number(progress.batch_size) : null;
     const done = Number.isFinite(progress.tool_calls_done) ? Number(progress.tool_calls_done) : null;
     const cap = Number.isFinite(progress.tool_calls_cap) ? Number(progress.tool_calls_cap) : null;
@@ -273,6 +274,10 @@ function formatToolUseProgressText(progress, request = null) {
 
     if (tool) {
         bits.push(`tool: ${tool}`);
+    }
+
+    if (workflowTask) {
+        bits.push(`task: ${workflowTask}`);
     }
 
     if (batchSize !== null) {
@@ -309,7 +314,8 @@ function recordToolUseHistory(request, progress) {
     }
 
     const tool = typeof progress.tool === 'string' ? progress.tool.trim() : '';
-    if (!tool) {
+    const workflowTask = typeof progress.workflow_task === 'string' ? progress.workflow_task.trim() : '';
+    if (!tool && !workflowTask) {
         return;
     }
 
@@ -322,13 +328,14 @@ function recordToolUseHistory(request, progress) {
     const history = request.toolUseProgressHistory;
     const last = history.length ? history[history.length - 1] : null;
     const lastTool = last && typeof last.tool === 'string' ? last.tool : null;
+    const lastTask = last && typeof last.workflowTask === 'string' ? last.workflowTask : null;
     const lastBatch = last && Number.isFinite(last.batchSize) ? Number(last.batchSize) : null;
 
-    if (lastTool === tool && lastBatch === batchSize) {
+    if (lastTool === tool && lastTask === workflowTask && lastBatch === batchSize) {
         return;
     }
 
-    history.push({ tool, batchSize });
+    history.push({ tool, workflowTask, batchSize });
 }
 
 function formatThinkingDuration(elapsedMs) {
@@ -370,14 +377,17 @@ function formatToolUseHistoryTooltip(request) {
     lines.push('Tools this turn:');
     for (const entry of history) {
         const tool = entry && typeof entry.tool === 'string' ? entry.tool : '';
+        const workflowTask = entry && typeof entry.workflowTask === 'string' ? entry.workflowTask : '';
         if (!tool) {
-            continue;
+            if (!workflowTask) {
+                continue;
+            }
         }
         const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
         if (batchSize === null) {
-            lines.push(`- ${tool}`);
+            lines.push(`- ${tool || workflowTask}`);
         } else {
-            lines.push(`- ${tool} (batch ${batchSize})`);
+            lines.push(`- ${tool || workflowTask} (batch ${batchSize})`);
         }
     }
 

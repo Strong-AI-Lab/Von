@@ -37,6 +37,8 @@ from ...services.settings_service import (
     set_internal_mcp_tool_batch_cap,
     get_disable_write_tool_conservatism,
     set_disable_write_tool_conservatism,
+    get_buttonify_model_enabled,
+    set_buttonify_model_enabled,
 )
 from ...services.feature_flags import (
     get_expert_footer_enabled,
@@ -141,6 +143,8 @@ def _validate_unified_concept_schema(concept, index):
 settings_bp = Blueprint(
     "settings", __name__
 )  # REMOVED url_prefix, as it's set during registration
+
+_BUTTONIFY_PROMPT_IDS = ("#V#buttonify_prompt_v1",)
 
 
 def _is_admin_or_owner_session() -> bool:
@@ -555,6 +559,11 @@ def get_all_settings_data():
             "internal_mcp_max_tool_invocations": get_internal_mcp_max_tool_invocations(),
             "internal_mcp_tool_batch_cap": get_internal_mcp_tool_batch_cap(),
             "show_tool_use_during_thinking": get_show_tool_use_during_thinking(),
+            "buttonify_model_enabled": get_buttonify_model_enabled(),
+            "buttonify_prompt_ids": list(_BUTTONIFY_PROMPT_IDS),
+            "buttonify_prompt_active": (
+                _BUTTONIFY_PROMPT_IDS[0] if _BUTTONIFY_PROMPT_IDS else None
+            ),
             "expert_tabs_enabled": get_expert_tabs_enabled(),
             "expert_footer_enabled": get_expert_footer_enabled(),
             "jira_project_allow_list_raw": jira_allow_list_raw,
@@ -703,6 +712,14 @@ def save_all_settings():
                 "show_tool_use_during_thinking updated: %s",
                 enabled,
             )
+
+        if "buttonify_model_enabled" in data:
+            try:
+                enabled = bool(data.get("buttonify_model_enabled"))
+            except Exception:
+                enabled = True
+            set_buttonify_model_enabled(enabled)
+            current_app.logger.info("buttonify_model_enabled updated: %s", enabled)
 
         # user/org/language fields intentionally ignored (browser-local)
 

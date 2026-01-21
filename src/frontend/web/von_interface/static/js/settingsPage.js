@@ -1192,6 +1192,43 @@ if (preloadVontologyToggle) {
   });
 }
 
+// Quick-reply buttonify toggle (server-persisted)
+const buttonifyToggle = document.getElementById('buttonifyModelEnabledToggle');
+if (buttonifyToggle) {
+  try {
+    // Load current server value via existing loadAndDisplaySettings pipeline
+  } catch { }
+  buttonifyToggle.addEventListener('change', async () => {
+    try {
+      await saveAllSettings();
+      showStatusMessage('settingsStatusMessage', 'Saved. Applies to new chat turns.', false);
+    } catch (e) {
+      console.warn('Failed to save buttonify toggle', e);
+      showStatusMessage('settingsStatusMessage', 'Failed to save setting', true);
+    }
+  });
+}
+
+const buttonifyPromptLink = document.getElementById('buttonifyPromptLink');
+if (buttonifyPromptLink) {
+  buttonifyPromptLink.addEventListener('click', (event) => {
+    try {
+      event.preventDefault();
+    } catch { }
+    const conceptId = buttonifyPromptLink.dataset?.conceptId;
+    if (!conceptId) return;
+    const detail = { conceptId, createConceptTab: true, modifierKeys: { shiftKey: !!event.shiftKey } };
+    try {
+      document.dispatchEvent(new CustomEvent('von:selectConceptById', { detail }));
+    } catch { }
+    try {
+      if (window.parent?.document) {
+        window.parent.document.dispatchEvent(new CustomEvent('von:selectConceptById', { detail }));
+      }
+    } catch { }
+  });
+}
+
 // Salient inheritance recompute controls
 document.getElementById('salientDryRunButton')?.addEventListener('click', () => triggerSalientRecompute({ dry_run: true }));
 document.getElementById('salientRecomputeButton')?.addEventListener('click', () => triggerSalientRecompute({}));
@@ -1201,12 +1238,12 @@ document.getElementById('salientForceButton')?.addEventListener('click', () => t
 document.getElementById('shutdownServerButton')?.addEventListener('click', shutdownServer);
 document.getElementById('refreshDeprecationMetricsButton')?.addEventListener('click', () => loadDeprecationMetrics(true));
 // Reset local preferences button
-  document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () => {
-    try {
-      localStorage.removeItem(LS_USER_KEY);
-      localStorage.removeItem(LS_ORG_KEY);
-      localStorage.removeItem(LS_LANG_KEY);
-      localStorage.removeItem(LS_GMAIL_PROFILE);
+document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () => {
+  try {
+    localStorage.removeItem(LS_USER_KEY);
+    localStorage.removeItem(LS_ORG_KEY);
+    localStorage.removeItem(LS_LANG_KEY);
+    localStorage.removeItem(LS_GMAIL_PROFILE);
     localStorage.removeItem(LS_SHOW_CODE_NAMES);
     localStorage.removeItem(LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE);
     // Reset selects visually
@@ -1448,6 +1485,33 @@ async function loadAndDisplaySettings() {
       }
     } catch { }
 
+    // Populate buttonify quick-reply toggle
+    try {
+      const buttonifyToggleEl = document.getElementById('buttonifyModelEnabledToggle');
+      if (buttonifyToggleEl) {
+        const flag = Object.prototype.hasOwnProperty.call(settings, 'buttonify_model_enabled')
+          ? !!settings.buttonify_model_enabled
+          : true;
+        buttonifyToggleEl.checked = !!flag;
+      }
+    } catch { }
+
+    // Populate buttonify prompt link
+    try {
+      const promptLinkEl = document.getElementById('buttonifyPromptLink');
+      if (promptLinkEl) {
+        const promptId = settings.buttonify_prompt_active || '#V#buttonify_prompt_v1';
+        promptLinkEl.textContent = promptId || '—';
+        if (promptId) {
+          promptLinkEl.dataset.conceptId = promptId;
+          promptLinkEl.disabled = false;
+        } else {
+          delete promptLinkEl.dataset.conceptId;
+          promptLinkEl.disabled = true;
+        }
+      }
+    } catch { }
+
     // Populate admin-only write-tool conservatism toggle (inverse of disable flag).
     try {
       const adminToggleEl = document.getElementById('disableWriteToolConservatismToggle');
@@ -1684,6 +1748,7 @@ async function saveAllSettings(changedProvider = null) {
       10,
     ),
     show_tool_use_during_thinking: !!document.getElementById('showToolUseDuringThinkingToggle')?.checked,
+    buttonify_model_enabled: !!document.getElementById('buttonifyModelEnabledToggle')?.checked,
   };
 
   if (__vonIsAdminOrOwner) {
