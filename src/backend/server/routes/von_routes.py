@@ -6336,6 +6336,87 @@ def respond_shared_conversation_invite():
         return jsonify({"error": str(e)}), 500
 
 
+@von_bp.route("/api/shared_conversations/stream", methods=["GET"])
+def stream_shared_conversation():
+    """SSE endpoint for real-time shared conversation turn updates.
+
+    Query params:
+        session_id: The shared conversation session to subscribe to
+
+    Requires:
+        - Authenticated user
+        - Accepted invite for the session (or ownership)
+
+    Returns:
+        SSE stream with events:
+            - user_turn: A user message was added
+            - assistant_turn: An assistant response was added
+            - keepalive: Periodic ping to keep connection alive
+    """
+    from flask import Response, stream_with_context
+
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+        from ...services.shared_conversation_service import (
+            get_accepted_invite_for_user_session,
+            resolve_conversation_owner,
+        )
+        from ...services.shared_conversation_stream_service import get_stream_service
+
+        user_concept_id = get_effective_user_concept_id()
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        session_id = request.args.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return jsonify({"error": "session_id required"}), 400
+        session_id = session_id.strip()
+
+        # Verify access: must be owner or have accepted invite
+        is_owner = False
+        has_invite = False
+
+        owner_id = resolve_conversation_owner(session_id=session_id)
+        if owner_id == user_concept_id:
+            is_owner = True
+        else:
+            invite = get_accepted_invite_for_user_session(
+                user_concept_id=user_concept_id,
+                session_id=session_id,
+            )
+            if isinstance(invite, dict):
+                has_invite = True
+
+        if not is_owner and not has_invite:
+            return jsonify({"error": "Not authorized for this conversation"}), 403
+
+        stream_service = get_stream_service()
+        subscriber = stream_service.subscribe(
+            session_id=session_id,
+            user_concept_id=user_concept_id,
+        )
+
+        def generate():
+            try:
+                for event_data in stream_service.generate_events(subscriber):
+                    yield event_data
+            finally:
+                stream_service.unsubscribe(subscriber)
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # Disable nginx buffering
+            },
+        )
+    except Exception as e:
+        print(f"Error in shared conversation stream: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/api/organisations/my_organisations", methods=["GET"])
 def get_my_organisations():
     """

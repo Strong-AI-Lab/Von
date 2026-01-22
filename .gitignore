@@ -1,6 +1,5 @@
 # JSON files (with exceptions)
 *.json
-!.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/settings.json
 !package.json
@@ -63,7 +62,6 @@ venv.bak/
 
 # VS Code (ignore all, then allowlist specific config & scripts)
 .vscode/*
-!.vscode/tasks.json
 !.vscode/mcp.json
 !.vscode/launch.json
 !.vscode/settings.json
