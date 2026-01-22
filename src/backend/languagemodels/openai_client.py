@@ -11,6 +11,20 @@ logger = logging.getLogger(__name__)
 class OpenAIClient:
     def __init__(self, api_key_env_var="OPENAI_API_KEY"):
         self.api_key = os.getenv(api_key_env_var)
+        if not self.api_key and api_key_env_var:
+            try:
+                from dotenv import dotenv_values  # type: ignore
+                from pathlib import Path
+
+                repo_root = Path(__file__).resolve().parents[3]
+                env_path = repo_root / ".env"
+                if env_path.exists():
+                    values = dotenv_values(env_path)
+                    raw = values.get(api_key_env_var)
+                    if raw is not None:
+                        self.api_key = str(raw)
+            except Exception:
+                self.api_key = self.api_key or None
         if not self.api_key:
             raise ValueError(f"Environment variable {api_key_env_var} not set.")
         self.client = OpenAI(api_key=self.api_key)

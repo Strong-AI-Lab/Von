@@ -1597,6 +1597,7 @@ def _maybe_handle_prompt_introspection_fastpath(
     *,
     prompt_text: str,
     user_concept_id: str,
+    history_user_id: str | None,
     session_id: str,
     auxiliary_system_prompt: str | None,
     user_prompt_debug: dict,
@@ -1627,7 +1628,6 @@ def _maybe_handle_prompt_introspection_fastpath(
             payload = tool_result.payload
             duration_ms = getattr(tool_result, "duration_ms", None)
             used_tool = True
-
             tool_messages = [
                 {
                     "role": "tool",
@@ -1707,22 +1707,29 @@ def _maybe_handle_prompt_introspection_fastpath(
             )
 
     # Store messages in history/context, matching the direct-tool-call pattern.
-    chat_history_service.add_message_to_history(
-        user_concept_id,
-        session_id,
-        {"role": "user", "content": prompt_text},
-    )
+    if history_user_id:
+        chat_history_service.add_message_to_history(
+            history_user_id,
+            session_id,
+            {
+                "role": "user",
+                "content": prompt_text,
+                "author_user_id": user_concept_id,
+            },
+        )
     for tool_msg in _truncate_large_tool_results(
         tool_messages, max_tool_content_chars=5000
     ):
+        if history_user_id:
+            chat_history_service.add_message_to_history(
+                history_user_id, session_id, tool_msg
+            )
+    if history_user_id:
         chat_history_service.add_message_to_history(
-            user_concept_id, session_id, tool_msg
+            history_user_id,
+            session_id,
+            {"role": "assistant", "content": response_text},
         )
-    chat_history_service.add_message_to_history(
-        user_concept_id,
-        session_id,
-        {"role": "assistant", "content": response_text},
-    )
 
     current_app.config["CONTEXT"] = _limit_context_size(
         current_app.config.get("CONTEXT", []), max_messages=20
@@ -1780,6 +1787,7 @@ def _maybe_handle_tool_inventory_fastpath(
     *,
     prompt_text: str,
     user_concept_id: str | None,
+    history_user_id: str | None,
     session_id: str,
     context: list[dict],
     interaction_timestamp_utc: str,
@@ -1803,9 +1811,7 @@ def _maybe_handle_tool_inventory_fastpath(
                 f"Could not retrieve tool inventory from the internal gateway: {exc}"
             )
     else:
-        response_text = (
-            "Internal MCP gateway is disabled; tool inventory is unavailable."
-        )
+        response_text = ()
 
     current_turn_messages = [{"role": "user", "content": prompt_text}]
     context_stats = _calculate_context_stats(context)
@@ -1855,14 +1861,18 @@ def _maybe_handle_tool_inventory_fastpath(
 
     llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
 
-    if user_concept_id:
+    if history_user_id:
         chat_history_service.add_message_to_history(
-            user_concept_id,
+            history_user_id,
             session_id,
-            {"role": "user", "content": prompt_text},
+            {
+                "role": "user",
+                "content": prompt_text,
+                "author_user_id": user_concept_id,
+            },
         )
         chat_history_service.add_message_to_history(
-            user_concept_id,
+            history_user_id,
             session_id,
             {"role": "assistant", "content": response_text},
         )
@@ -1895,6 +1905,7 @@ def _maybe_handle_rag_status_fastpath(
     *,
     prompt_text: str,
     user_concept_id: str,
+    history_user_id: str | None,
     session_id: str,
     context: list[dict],
     interaction_timestamp_utc: str,
@@ -1953,22 +1964,29 @@ def _maybe_handle_rag_status_fastpath(
         response_text = "Internal MCP gateway is disabled; RAG status is unavailable."
 
     # Persist messages in history/context.
-    chat_history_service.add_message_to_history(
-        user_concept_id,
-        session_id,
-        {"role": "user", "content": prompt_text},
-    )
+    if history_user_id:
+        chat_history_service.add_message_to_history(
+            history_user_id,
+            session_id,
+            {
+                "role": "user",
+                "content": prompt_text,
+                "author_user_id": user_concept_id,
+            },
+        )
     for tool_msg in _truncate_large_tool_results(
         tool_messages, max_tool_content_chars=5000
     ):
+        if history_user_id:
+            chat_history_service.add_message_to_history(
+                history_user_id, session_id, tool_msg
+            )
+    if history_user_id:
         chat_history_service.add_message_to_history(
-            user_concept_id, session_id, tool_msg
+            history_user_id,
+            session_id,
+            {"role": "assistant", "content": response_text},
         )
-    chat_history_service.add_message_to_history(
-        user_concept_id,
-        session_id,
-        {"role": "assistant", "content": response_text},
-    )
 
     current_app.config["CONTEXT"] = _limit_context_size(
         current_app.config.get("CONTEXT", []), max_messages=20
@@ -2043,7 +2061,6 @@ def onboard_new_member():
 
 @von_bp.route("/update_model", methods=["POST"])
 def update_model():
-    """Update the model based on user input."""
     data = request.get_json()
     new_model = data.get("model")
 
@@ -2051,8 +2068,7 @@ def update_model():
         current_app.config["MODEL"] = new_model
         print(f"Model updated to: {new_model}")  # Add server-side logging
         return jsonify({"message": f"Model updated to {new_model}"}), 200
-    else:
-        return jsonify({"error": "No model provided."}), 400
+    return jsonify({"error": "No model provided."}), 400
 
 
 @von_bp.route("/")
@@ -2145,12 +2161,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     session_id = session["session_id"]
 
     user_concept_id = session.get("user_concept_id")
-
-    # Use existing context from database
-    if user_concept_id:
-        context = chat_history_service.get_chat_history(user_concept_id, session_id)
-    else:
-        context = current_app.config.get("CONTEXT", [])
+    context = current_app.config.get("CONTEXT", [])
 
     # REFACTORING_NOTE: Use the new factory to get the correct client and model
     # Get user and org context for per-user/org LLM settings
@@ -2179,6 +2190,30 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     except Exception:
         user_concept_id = None
         org_concept_id = None
+
+    history_owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+        user_concept_id=user_concept_id, session_id=session_id
+    )
+    history_user_id = history_owner_user_id or user_concept_id
+
+    if history_user_id:
+        if (
+            shared_invite
+            and history_owner_user_id
+            and user_concept_id
+            and history_owner_user_id != user_concept_id
+        ):
+            owner_history = chat_history_service.get_chat_history(
+                history_owner_user_id, session_id
+            )
+            invitee_history = chat_history_service.get_chat_history(
+                user_concept_id, session_id
+            )
+            owner_history = _apply_default_author(owner_history, history_owner_user_id)
+            invitee_history = _apply_default_author(invitee_history, user_concept_id)
+            context = _merge_shared_histories(owner_history, invitee_history)
+        else:
+            context = chat_history_service.get_chat_history(history_user_id, session_id)
 
     progress_scope_key = _get_tool_progress_scope_key()
     show_tool_use_progress = False
@@ -2364,6 +2399,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 return _maybe_handle_prompt_introspection_fastpath(
                     prompt_text=prompt_text,
                     user_concept_id=user_concept_id,
+                    history_user_id=history_user_id,
                     session_id=session_id,
                     auxiliary_system_prompt=auxiliary_system_prompt,
                     user_prompt_debug=user_prompt_debug,
@@ -2377,6 +2413,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 return _maybe_handle_rag_status_fastpath(
                     prompt_text=prompt_text,
                     user_concept_id=user_concept_id,
+                    history_user_id=history_user_id,
                     session_id=session_id,
                     context=context,
                     interaction_timestamp_utc=interaction_timestamp_utc,
@@ -2391,6 +2428,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             return _maybe_handle_tool_inventory_fastpath(
                 prompt_text=prompt_text,
                 user_concept_id=user_concept_id,
+                history_user_id=history_user_id,
                 session_id=session_id,
                 context=context,
                 interaction_timestamp_utc=interaction_timestamp_utc,
@@ -2696,7 +2734,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         ):
             import json as _json
 
-            user_id_for_history: str = user_concept_id
+            user_id_for_history: str | None = history_user_id or user_concept_id
 
             tool_invocations = []
             try:
@@ -2791,22 +2829,29 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 tool_messages = []
 
             # Persist messages in history/context.
-            chat_history_service.add_message_to_history(
-                user_id_for_history,
-                session_id,
-                {"role": "user", "content": prompt_text},
-            )
+            if user_id_for_history:
+                chat_history_service.add_message_to_history(
+                    user_id_for_history,
+                    session_id,
+                    {
+                        "role": "user",
+                        "content": prompt_text,
+                        "author_user_id": user_concept_id,
+                    },
+                )
             for tool_msg in _truncate_large_tool_results(
                 tool_messages, max_tool_content_chars=5000
             ):
+                if user_id_for_history:
+                    chat_history_service.add_message_to_history(
+                        user_id_for_history, session_id, tool_msg
+                    )
+            if user_id_for_history:
                 chat_history_service.add_message_to_history(
-                    user_id_for_history, session_id, tool_msg
+                    user_id_for_history,
+                    session_id,
+                    {"role": "assistant", "content": response_text},
                 )
-            chat_history_service.add_message_to_history(
-                user_id_for_history,
-                session_id,
-                {"role": "assistant", "content": response_text},
-            )
             current_app.config["CONTEXT"] = _limit_context_size(
                 current_app.config["CONTEXT"], max_messages=20
             )
@@ -2934,20 +2979,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             ]
 
                     # Skip LLM generation for direct tool calls
-                    if user_concept_id:
+                    if history_user_id:
                         chat_history_service.add_message_to_history(
-                            user_concept_id,
+                            history_user_id,
                             session_id,
-                            {"role": "user", "content": prompt_text},
+                            {
+                                "role": "user",
+                                "content": prompt_text,
+                                "author_user_id": user_concept_id,
+                            },
                         )
                         for tool_msg in _truncate_large_tool_results(
                             tool_messages, max_tool_content_chars=5000
                         ):
                             chat_history_service.add_message_to_history(
-                                user_concept_id, session_id, tool_msg
+                                history_user_id, session_id, tool_msg
                             )
                         chat_history_service.add_message_to_history(
-                            user_concept_id,
+                            history_user_id,
                             session_id,
                             {"role": "assistant", "content": response_text},
                         )
@@ -4241,17 +4290,23 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             tool_messages, max_tool_content_chars=5000
         )
 
-        if user_concept_id:
+        if history_user_id:
             chat_history_service.add_message_to_history(
-                user_concept_id, session_id, {"role": "user", "content": prompt_text}
+                history_user_id,
+                session_id,
+                {
+                    "role": "user",
+                    "content": prompt_text,
+                    "author_user_id": user_concept_id,
+                },
             )
             for tool_msg in truncated_tool_messages:
                 chat_history_service.add_message_to_history(
-                    user_concept_id, session_id, tool_msg
+                    history_user_id, session_id, tool_msg
                 )
             # Save assistant message WITH debug data
             chat_history_service.add_message_to_history(
-                user_concept_id,
+                history_user_id,
                 session_id,
                 {"role": "assistant", "content": response_text},
                 llm_debug_data=llm_debug_info,
@@ -4348,8 +4403,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 @von_bp.route("/history", methods=["GET"])
 def history():
     """Retrieve chat history segments for the current user."""
-    # Try to get user_id from session first, then query param
-    user_concept_id = session.get("user_concept_id") or request.args.get("user_id")
+    # SECURITY: derive user id server-side
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
 
     requested_session_id = request.args.get("session_id")
     if isinstance(requested_session_id, str) and requested_session_id.strip():
@@ -4394,21 +4454,74 @@ def history():
 
     try:
         namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
-        segments_result = chat_history_service.get_chat_history_segments(
-            user_concept_id,
-            session_id,
-            include_locations=True,
-            namespace=namespace,
-            segment_size=segment_size,
-            include_debug=include_debug,
-            history_tail_limit=history_tail_limit,
-            return_meta=True,
+        owner_user_id = user_concept_id
+        shared_invite = None
+
+        owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+            user_concept_id=user_concept_id, session_id=session_id
         )
-        if isinstance(segments_result, tuple):
-            segments, meta = segments_result
+        if shared_invite:
+            if not owner_user_id:
+                return jsonify({"error": "Not authorised for conversation"}), 403
+        elif not chat_history_service.has_chat_history_session(
+            user_concept_id, session_id, namespace=namespace
+        ):
+            return jsonify({"error": "Not authorised for conversation"}), 403
+
+        if not isinstance(owner_user_id, str) or not owner_user_id:
+            return jsonify({"error": "Not authorised for conversation"}), 403
+
+        if shared_invite and user_concept_id and owner_user_id != user_concept_id:
+            owner_history = chat_history_service.get_chat_history(
+                owner_user_id, session_id
+            )
+            invitee_history = chat_history_service.get_chat_history(
+                user_concept_id, session_id
+            )
+            owner_history = _apply_default_author(owner_history, owner_user_id)
+            invitee_history = _apply_default_author(invitee_history, user_concept_id)
+            merged_history = _merge_shared_histories(owner_history, invitee_history)
+
+            history_truncated = False
+            if history_tail_limit and len(merged_history) > history_tail_limit:
+                merged_history = merged_history[-history_tail_limit:]
+                history_truncated = True
+
+            segments = chat_history_service._split_history_into_segments_with_locations(
+                merged_history,
+                session_id=session_id,
+                include_debug=include_debug,
+                owner_user_id=owner_user_id,
+            )
+            segments = chat_history_service._chunk_history_segments(
+                segments, segment_size
+            )
+            meta = {"history_truncated": history_truncated}
         else:
-            segments = segments_result
-            meta = {"history_truncated": False}
+            if shared_invite:
+                owner_namespace = _derive_namespace_for_user_org(
+                    owner_user_id,
+                    shared_invite.get("organisation_concept_id"),
+                ) or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+            else:
+                owner_namespace = chat_history_service.resolve_chat_history_namespace(
+                    owner_user_id
+                )
+            segments_result = chat_history_service.get_chat_history_segments(
+                owner_user_id,
+                session_id,
+                include_locations=True,
+                namespace=owner_namespace,
+                segment_size=segment_size,
+                include_debug=include_debug,
+                history_tail_limit=history_tail_limit,
+                return_meta=True,
+            )
+            if isinstance(segments_result, tuple):
+                segments, meta = segments_result
+            else:
+                segments = segments_result
+                meta = {"history_truncated": False}
         total_segments = len(segments)
 
         if total_segments == 0:
@@ -4429,6 +4542,9 @@ def history():
         has_more = history_truncated or segments_returned < total_segments
         if history_truncated and total_segments <= segments_returned:
             total_segments = segments_returned + 1
+
+        # Shared sessions are read from the conversation owner's history so all
+        # participants see the same canonical thread.
 
         return jsonify(
             {
@@ -4465,12 +4581,29 @@ def history_debug():
         return jsonify({"error": "history_index required"}), 400
 
     try:
+        session_id = session_id.strip()
         namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        owner_user_id = user_concept_id
+        shared_invite = None
+
+        if not chat_history_service.has_chat_history_session(
+            user_concept_id, session_id, namespace=namespace
+        ):
+            owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+                user_concept_id=user_concept_id, session_id=session_id
+            )
+            if not owner_user_id:
+                return jsonify({"error": "Not authorised for conversation"}), 403
+
+        owner_namespace = _derive_namespace_for_user_org(
+            owner_user_id,
+            shared_invite.get("organisation_concept_id") if shared_invite else None,
+        ) or chat_history_service.resolve_chat_history_namespace(owner_user_id)
         debug_data = chat_history_service.get_chat_history_debug_entry(
-            user_id=user_concept_id,
-            session_id=session_id.strip(),
+            user_id=owner_user_id,
+            session_id=session_id,
             history_index=history_index,
-            namespace=namespace,
+            namespace=owner_namespace,
         )
         if not debug_data:
             return jsonify(
@@ -4478,7 +4611,7 @@ def history_debug():
                     "success": False,
                     "error": "debug_not_available",
                     "history_location": {
-                        "session_id": session_id.strip(),
+                        "session_id": session_id,
                         "history_index": history_index,
                     },
                 }
@@ -4487,7 +4620,7 @@ def history_debug():
             {
                 "success": True,
                 "history_location": {
-                    "session_id": session_id.strip(),
+                    "session_id": session_id,
                     "history_index": history_index,
                 },
                 "llm_debug_data": debug_data,
@@ -4531,6 +4664,21 @@ def history_backfill_spoken():
 
     force = bool(data.get("force"))
 
+    target_session_id = target_session_id.strip()
+    owner_user_id = user_concept_id
+    try:
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        if not chat_history_service.has_chat_history_session(
+            user_concept_id, target_session_id, namespace=namespace
+        ):
+            owner_user_id, shared_invite = _resolve_shared_conversation_owner(
+                user_concept_id=user_concept_id, session_id=target_session_id
+            )
+            if not owner_user_id:
+                return jsonify({"error": "Not authorised for conversation"}), 403
+    except Exception:
+        owner_user_id = user_concept_id
+
     # Fetch the stored assistant message and associated previous user prompt.
     try:
         chat_history_coll = chat_history_service.get_chat_history_collection_service()
@@ -4541,7 +4689,7 @@ def history_backfill_spoken():
             )
 
         doc = chat_history_coll.find_one(
-            {"user_id": user_concept_id, "session_id": target_session_id},
+            {"user_id": owner_user_id, "session_id": target_session_id},
             {"history": 1},
         )
         history = (doc or {}).get("history") or []
@@ -4788,8 +4936,12 @@ def history_length():
 @von_bp.route("/history/sessions", methods=["GET"])
 def history_sessions():
     """Return per-session chat history counts for the current user."""
+    try:
+        from ...security.access_control import get_effective_user_concept_id
 
-    user_concept_id = session.get("user_concept_id")
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
     if not user_concept_id:
         return jsonify({"authenticated": False, "sessions": []})
 
@@ -4798,6 +4950,11 @@ def history_sessions():
     if not isinstance(summary_mode, str) or not summary_mode.strip():
         summary_mode = "full"
     try:
+        from ...services.shared_conversation_service import (
+            list_accepted_invites_for_user,
+            resolve_conversation_owner,
+        )
+
         namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
         sessions = chat_history_service.get_chat_history_session_summaries(
             user_concept_id,
@@ -4805,10 +4962,80 @@ def history_sessions():
             namespace=namespace,
             summary_mode=summary_mode,
         )
+
+        shared_invites = list_accepted_invites_for_user(user_concept_id=user_concept_id)
+        existing_session_ids = {
+            s.get("session_id") for s in sessions if isinstance(s, dict)
+        }
+        shared_sessions = []
+        for invite in shared_invites:
+            if not isinstance(invite, dict):
+                continue
+            inviter_id = _normalise_concept_id(invite.get("inviter_user_id"))
+            owner_id = _normalise_concept_id(
+                invite.get("conversation_owner_user_id")
+                or invite.get("inviter_user_id")
+            )
+            session_id = invite.get("session_id")
+            if not owner_id or not isinstance(session_id, str) or not session_id:
+                continue
+            if not invite.get("conversation_owner_user_id"):
+                resolved_owner = resolve_conversation_owner(session_id=session_id)
+                resolved_owner_id = _normalise_concept_id(resolved_owner)
+                if resolved_owner_id:
+                    owner_id = resolved_owner_id
+            if session_id in existing_session_ids:
+                continue
+            owner_namespace = _derive_namespace_for_user_org(
+                owner_id, invite.get("organisation_concept_id")
+            ) or chat_history_service.resolve_chat_history_namespace(owner_id)
+            summary = chat_history_service.get_chat_history_session_summary(
+                owner_id,
+                session_id,
+                namespace=owner_namespace,
+                summary_mode=summary_mode,
+            )
+            if not isinstance(summary, dict) and owner_id:
+                summary = chat_history_service.get_chat_history_session_summary(
+                    owner_id,
+                    session_id,
+                    namespace=None,
+                    summary_mode=summary_mode,
+                )
+            if not isinstance(summary, dict):
+                continue
+            shared_timestamp = (
+                invite.get("accepted_at")
+                or invite.get("updated_at")
+                or invite.get("created_at")
+            )
+            existing_last = summary.get("last_message_at")
+            if not existing_last:
+                shared_dt = chat_history_service._coerce_datetime(shared_timestamp)
+                if shared_dt:
+                    summary["last_message_at"] = shared_dt.isoformat().replace(
+                        "+00:00", "Z"
+                    )
+            summary["shared_with_me"] = True
+            if inviter_id:
+                summary["shared_from_user_id"] = inviter_id
+            summary["invite_id"] = invite.get("invite_id")
+            summary["shared_accepted_at"] = shared_timestamp
+            shared_sessions.append(summary)
+
+        combined = sessions + shared_sessions
+        combined.sort(
+            key=lambda s: chat_history_service._coerce_datetime(
+                s.get("last_message_at") if isinstance(s, dict) else None
+            )
+            or datetime(1970, 1, 1, tzinfo=timezone.utc),
+            reverse=True,
+        )
+
         return jsonify(
             {
                 "authenticated": True,
-                "sessions": sessions,
+                "sessions": combined,
                 "active_session_id": session.get("session_id"),
             }
         )
@@ -5271,7 +5498,32 @@ def set_chat_session():
         projection = {"session_name": 1}
         if include_history:
             projection["history"] = 1
-        doc = coll.find_one(query, projection)
+        user_doc = coll.find_one(query, projection)
+        owner_user_id, invite = _resolve_shared_conversation_owner(
+            user_concept_id=user_concept_id, session_id=session_id
+        )
+        owner_doc = None
+        owner_namespace = None
+        if owner_user_id and invite:
+            org_id = invite.get("organisation_concept_id") if invite else None
+            owner_namespace = _derive_namespace_for_user_org(
+                owner_user_id, org_id
+            ) or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+            shared_query = chat_history_service.build_chat_history_query(
+                user_id=owner_user_id,
+                session_id=session_id,
+                namespace=owner_namespace,
+            )
+            owner_doc = coll.find_one(shared_query, projection)
+            if not owner_doc:
+                shared_query = chat_history_service.build_chat_history_query(
+                    user_id=owner_user_id,
+                    session_id=session_id,
+                    namespace=None,
+                )
+                owner_doc = coll.find_one(shared_query, projection)
+
+        doc = owner_doc or user_doc
         if not doc:
             return jsonify({"error": "Session not found"}), 404
 
@@ -5289,6 +5541,34 @@ def set_chat_session():
             history = doc.get("history") or []
             if not isinstance(history, list):
                 history = []
+            if invite and owner_doc is not None:
+                owner_history = owner_doc.get("history") or []
+                if not isinstance(owner_history, list):
+                    owner_history = []
+                user_history = user_doc.get("history") if user_doc else []
+                if not isinstance(user_history, list):
+                    user_history = []
+                owner_history = _apply_default_author(owner_history, owner_user_id)
+                user_history = _apply_default_author(user_history, user_concept_id)
+                history = _merge_shared_histories(owner_history, user_history)
+                if owner_user_id and len(history) > len(owner_history):
+                    try:
+                        chat_history_service.set_chat_history_for_session(
+                            user_id=owner_user_id,
+                            session_id=session_id,
+                            history=history,
+                            namespace=owner_namespace,
+                            set_updated_at=False,
+                            extra_set_fields={
+                                "shared_history_migrated_at": datetime.now(
+                                    timezone.utc
+                                ),
+                                "shared_history_migrated_from": user_concept_id,
+                            },
+                        )
+                    except Exception:
+                        pass
+
             for msg in history:
                 if not isinstance(msg, dict):
                     continue
@@ -5577,6 +5857,153 @@ def _normalise_concept_id(value: str | None) -> str | None:
     if not value.startswith("#V#"):
         value = f"#V#{value}"
     return value
+
+
+def _normalise_history_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    if isinstance(value, str) and value.strip():
+        return chat_history_service._coerce_datetime(value)
+    return None
+
+
+def _history_merge_key(message: dict) -> tuple | None:
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role")
+    content = message.get("content")
+    author = message.get("author_user_id")
+    ts = message.get("timestamp")
+    if isinstance(ts, datetime):
+        ts_key = ts.isoformat()
+    elif isinstance(ts, str):
+        ts_key = ts
+    else:
+        ts_key = None
+    return (role, content, author, ts_key)
+
+
+def _merge_shared_histories(
+    owner_history: list[dict], invitee_history: list[dict]
+) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple] = set()
+
+    combined = (owner_history or []) + (invitee_history or [])
+    for msg in combined:
+        if not isinstance(msg, dict):
+            continue
+        key = _history_merge_key(msg)
+        if key is not None and key in seen:
+            continue
+        if key is not None:
+            seen.add(key)
+        merged.append(msg)
+
+    indexed = []
+    for idx, msg in enumerate(merged):
+        ts = _normalise_history_timestamp(msg.get("timestamp"))
+        if ts is None:
+            ts = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        indexed.append((ts, idx, msg))
+
+    indexed.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in indexed]
+
+
+def _apply_default_author(
+    history: list[dict], author_user_id: str | None
+) -> list[dict]:
+    if not author_user_id:
+        return history
+    updated: list[dict] = []
+    for msg in history:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "user" and not msg.get("author_user_id"):
+            patched = dict(msg)
+            patched["author_user_id"] = author_user_id
+            updated.append(patched)
+        else:
+            updated.append(msg)
+    return updated
+
+
+def _derive_namespace_for_user_org(
+    user_concept_id: str | None, org_concept_id: str | None
+) -> str | None:
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return None
+    try:
+        from ...services.namespace_service import derive_namespace
+
+        user_slug = user_concept_id.strip()
+        if user_slug.startswith("#V#"):
+            user_slug = user_slug[3:]
+        if "@" in user_slug:
+            user_slug = user_slug.split("@", 1)[0]
+        if "+" in user_slug:
+            user_slug = user_slug.split("+", 1)[0]
+        user_slug = re.sub(r"[^a-z0-9]+", "_", user_slug.strip().lower()).strip("_")
+
+        org_slug = None
+        if isinstance(org_concept_id, str) and org_concept_id.strip():
+            org_slug = org_concept_id.strip()
+            if org_slug.startswith("#V#"):
+                org_slug = org_slug[3:]
+            if "@" in org_slug:
+                org_slug = org_slug.split("@", 1)[0]
+            if "+" in org_slug:
+                org_slug = org_slug.split("+", 1)[0]
+            org_slug = re.sub(r"[^a-z0-9]+", "_", org_slug.strip().lower()).strip("_")
+
+        return (
+            derive_namespace(user_slug, org_slug)
+            if org_slug
+            else derive_namespace(user_slug)
+        )
+    except Exception:
+        return None
+
+
+def _resolve_shared_conversation_owner(
+    *, user_concept_id: str | None, session_id: str | None
+) -> tuple[str | None, dict | None]:
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return None, None
+    if not isinstance(session_id, str) or not session_id.strip():
+        return user_concept_id.strip(), None
+    try:
+        from ...services.shared_conversation_service import (
+            get_accepted_invite_for_user_session,
+            resolve_conversation_owner,
+        )
+
+        invite = get_accepted_invite_for_user_session(
+            user_concept_id=user_concept_id.strip(),
+            session_id=session_id.strip(),
+        )
+        if not isinstance(invite, dict):
+            return user_concept_id.strip(), None
+        owner = invite.get("conversation_owner_user_id") or invite.get(
+            "inviter_user_id"
+        )
+        owner_id = _normalise_concept_id(owner)
+        if not invite.get("conversation_owner_user_id"):
+            try:
+                resolved_owner = resolve_conversation_owner(
+                    session_id=session_id.strip()
+                )
+                resolved_owner_id = _normalise_concept_id(resolved_owner)
+                if resolved_owner_id:
+                    owner_id = resolved_owner_id
+            except Exception:
+                pass
+        return owner_id or user_concept_id.strip(), invite
+    except Exception:
+        return user_concept_id.strip(), None
 
 
 def _collect_relationship_concept_ids(concept: dict) -> set[str]:

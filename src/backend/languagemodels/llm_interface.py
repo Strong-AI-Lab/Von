@@ -929,6 +929,20 @@ class OpenAIClient(LLMInterface):
             api_key_env_var: Name of environment variable containing the API key
         """
         env_val = os.environ.get(api_key_env_var) if api_key_env_var else None
+        if not env_val and api_key_env_var:
+            try:
+                from dotenv import dotenv_values  # type: ignore
+                from pathlib import Path
+
+                repo_root = Path(__file__).resolve().parents[3]
+                env_path = repo_root / ".env"
+                if env_path.exists():
+                    values = dotenv_values(env_path)
+                    raw = values.get(api_key_env_var)
+                    if raw is not None:
+                        env_val = str(raw)
+            except Exception:
+                env_val = env_val or None
         self.api_key = api_key or env_val or ""
         if not self.api_key:
             raise ValueError(

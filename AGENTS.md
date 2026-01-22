@@ -19,6 +19,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 13. Requiring a user choice is almost always dispreferred; prefer LLM reasoning to achieve reliability and only ask the user when ambiguity cannot be resolved safely.
 14. When in doubt, run tests or re-run tests without requiring user confirmation.
 15. In the case that multiple tests are faiing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
+16. If you think you've finished implementing a JIRA task, read the task again and check.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.

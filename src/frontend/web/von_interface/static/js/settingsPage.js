@@ -1847,7 +1847,11 @@ export async function checkOpenAiEnvVar() {
       verifyButton.style.backgroundColor = '#28a745'; // Green
       verifyButton.style.display = 'inline-block';
       verifyButton.disabled = false;
-      statusMessage.textContent = `Key found: ${response.masked_value}`;
+      if (response.source === 'dotenv') {
+        statusMessage.textContent = `Key found (from .env because not in process environment): ${response.masked_value}`;
+      } else {
+        statusMessage.textContent = `Key found: ${response.masked_value}`;
+      }
       statusMessage.className = 'status-message success';
       statusMessage.style.display = 'block';
       return true;
