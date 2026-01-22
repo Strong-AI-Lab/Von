@@ -56,6 +56,15 @@ let chatSessionMetadataCollapsed = null;
 const chatSessionConceptMetaCache = new Map();
 const chatSessionConceptMetaInFlight = new Map();
 
+// JVNAUTOSCI-1000: Shared conversation invite UI state
+const INVITE_LIST_FILTER_THRESHOLD = 40;
+let invitePopupState = {
+    invitees: [],
+    sessionLinks: null,
+    orderedBy: null,
+    totalCount: 0
+};
+
 // Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
 // Stored locally only; intended to feed future introspection.
 const LS_CHAT_TABS_LOAD_STATS = 'von:chatSessionTabsLoadStats';
@@ -5598,6 +5607,242 @@ function initializeHistoryControls() {
     });
 }
 
+function getInvitePopupElements() {
+    return {
+        popup: document.getElementById('inviteConversationPopup'),
+        closeButton: document.getElementById('closeInviteConversation'),
+        inviteButton: document.getElementById('inviteConversationBtn'),
+        list: document.getElementById('inviteList'),
+        status: document.getElementById('inviteStatus'),
+        searchInput: document.getElementById('inviteSearchInput'),
+        programmeFilter: document.getElementById('inviteProgrammeFilter'),
+        projectFilter: document.getElementById('inviteProjectFilter'),
+        filtersNote: document.getElementById('inviteFiltersNote')
+    };
+}
+
+function setInviteStatus(message) {
+    const { status } = getInvitePopupElements();
+    if (!status) return;
+    status.textContent = message || '';
+}
+
+function setInvitePopupVisible(visible) {
+    const { popup } = getInvitePopupElements();
+    if (!popup) return;
+    if (visible) {
+        popup.classList.remove('hidden');
+        popup.setAttribute('aria-hidden', 'false');
+    } else {
+        popup.classList.add('hidden');
+        popup.setAttribute('aria-hidden', 'true');
+    }
+}
+
+async function populateInviteFilters(sessionLinks) {
+    const { programmeFilter, projectFilter } = getInvitePopupElements();
+    if (!programmeFilter || !projectFilter) return;
+
+    const links = _normaliseChatSessionLinks(sessionLinks || {});
+
+    const buildOptions = async (selectEl, ids, placeholder) => {
+        selectEl.innerHTML = '';
+        const defaultOption = document.createElement('option');
+        defaultOption.value = '';
+        defaultOption.textContent = placeholder;
+        selectEl.appendChild(defaultOption);
+
+        for (const id of ids) {
+            const meta = await _getConceptMetaForChatSession(id);
+            const option = document.createElement('option');
+            option.value = id;
+            option.textContent = meta?.displayName || _deriveNameFromConceptId(id) || id;
+            selectEl.appendChild(option);
+        }
+    };
+
+    await buildOptions(programmeFilter, links.programmes || [], 'All programmes');
+    await buildOptions(projectFilter, links.projects || [], 'All projects');
+}
+
+function getInviteFilterValues() {
+    const { programmeFilter, projectFilter, searchInput } = getInvitePopupElements();
+    return {
+        programmeId: programmeFilter?.value || '',
+        projectId: projectFilter?.value || '',
+        search: (searchInput?.value || '').trim().toLowerCase()
+    };
+}
+
+function filterInvitees(invitees) {
+    const { programmeId, projectId, search } = getInviteFilterValues();
+    return invitees.filter((invitee) => {
+        const name = String(invitee?.name || '').toLowerCase();
+        if (search && !name.includes(search)) {
+            return false;
+        }
+        const match = invitee?.match || {};
+        if (programmeId && !(match.programmes || []).includes(programmeId)) {
+            return false;
+        }
+        if (projectId && !(match.projects || []).includes(projectId)) {
+            return false;
+        }
+        return true;
+    });
+}
+
+async function sendSharedConversationInvite(invitee) {
+    if (!activeChatSessionId || !invitee?.concept_id) {
+        return;
+    }
+    setInviteStatus('Sending invite…');
+    try {
+        const response = await fetch('/von/api/shared_conversations/invite', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: activeChatSessionId,
+                invitee_concept_id: invitee.concept_id
+            })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            setInviteStatus(data?.error || 'Invite failed.');
+            return;
+        }
+        invitee.invite_status = data?.invite?.status || 'pending';
+        setInviteStatus('Invite sent.');
+        renderInviteesList();
+    } catch (e) {
+        console.error('Invite error', e);
+        setInviteStatus('Invite failed.');
+    }
+}
+
+function renderInviteesList() {
+    const { list, filtersNote } = getInvitePopupElements();
+    if (!list) return;
+
+    list.innerHTML = '';
+    const filtered = filterInvitees(invitePopupState.invitees || []);
+
+    if (!filtered.length) {
+        const empty = document.createElement('div');
+        empty.className = 'invite-row';
+        empty.textContent = 'No matching people.';
+        list.appendChild(empty);
+        return;
+    }
+
+    for (const invitee of filtered) {
+        const row = document.createElement('div');
+        row.className = 'invite-row';
+        row.setAttribute('role', 'listitem');
+
+        const info = document.createElement('div');
+        const name = document.createElement('div');
+        name.className = 'invite-row-name';
+        name.textContent = invitee.name || 'Unknown';
+        const meta = document.createElement('div');
+        meta.className = 'invite-row-meta';
+        meta.textContent = invitee.role ? `Role: ${invitee.role}` : '';
+        info.appendChild(name);
+        info.appendChild(meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'invite-row-actions';
+
+        const status = invitee.invite_status;
+        if (status) {
+            const pill = document.createElement('span');
+            pill.className = 'invite-pill';
+            pill.textContent = status;
+            actions.appendChild(pill);
+        }
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn-mini';
+        button.textContent = status === 'accepted' ? 'Shared' : 'Invite';
+        button.disabled = status === 'pending' || status === 'accepted';
+        button.addEventListener('click', () => sendSharedConversationInvite(invitee));
+        actions.appendChild(button);
+
+        row.appendChild(info);
+        row.appendChild(actions);
+        list.appendChild(row);
+    }
+
+    if (filtersNote) {
+        if ((invitePopupState.totalCount || 0) > INVITE_LIST_FILTER_THRESHOLD) {
+            filtersNote.textContent = 'Sorted by conversation programmes/projects. Use filters to narrow the list.';
+        } else {
+            filtersNote.textContent = invitePopupState.orderedBy === 'conversation_links'
+                ? 'Sorted by conversation links.'
+                : '';
+        }
+    }
+}
+
+async function loadInviteesForSession(sessionId) {
+    if (!sessionId) return;
+    setInviteStatus('Loading invitees…');
+
+    try {
+        const resp = await fetch(`/von/api/shared_conversations/invitees?session_id=${encodeURIComponent(sessionId)}`);
+        if (!resp.ok) {
+            const data = await resp.json();
+            setInviteStatus(data?.error || 'Unable to load invitees.');
+            invitePopupState = { invitees: [], sessionLinks: null, orderedBy: null, totalCount: 0 };
+            renderInviteesList();
+            return;
+        }
+        const data = await resp.json();
+        invitePopupState = {
+            invitees: data?.invitees || [],
+            sessionLinks: data?.session_links || {},
+            orderedBy: data?.ordered_by || null,
+            totalCount: data?.total_count || 0
+        };
+        await populateInviteFilters(invitePopupState.sessionLinks);
+        const { programmeFilter, projectFilter } = getInvitePopupElements();
+        if (
+            invitePopupState.totalCount > INVITE_LIST_FILTER_THRESHOLD
+            && programmeFilter
+            && projectFilter
+            && !programmeFilter.value
+            && !projectFilter.value
+        ) {
+            const links = _normaliseChatSessionLinks(invitePopupState.sessionLinks || {});
+            if (links.programmes?.length) {
+                programmeFilter.value = links.programmes[0];
+            } else if (links.projects?.length) {
+                projectFilter.value = links.projects[0];
+            }
+        }
+        setInviteStatus('');
+        renderInviteesList();
+    } catch (e) {
+        console.error('Invite load error', e);
+        setInviteStatus('Unable to load invitees.');
+    }
+}
+
+function openInvitePopup() {
+    if (!activeChatSessionId) {
+        showToast('Select a conversation before inviting.');
+        return;
+    }
+    setInvitePopupVisible(true);
+    void loadInviteesForSession(activeChatSessionId);
+}
+
+function closeInvitePopup() {
+    setInvitePopupVisible(false);
+    setInviteStatus('');
+}
+
 export function initializeChatTab() {
     console.log("Initializing chat tab...");
 
@@ -5614,6 +5859,11 @@ export function initializeChatTab() {
     const uploadFileInput = document.getElementById('uploadFileInput');
     const uploadFileStatus = document.getElementById('uploadFileStatus');
     const chatTab = document.getElementById('chatTab');
+    const inviteButton = document.getElementById('inviteConversationBtn');
+    const inviteCloseButton = document.getElementById('closeInviteConversation');
+    const inviteSearchInput = document.getElementById('inviteSearchInput');
+    const inviteProgrammeFilter = document.getElementById('inviteProgrammeFilter');
+    const inviteProjectFilter = document.getElementById('inviteProjectFilter');
 
     if (!sendButton || !resetButton || !promptInput) {
         console.error("Chat tab elements not found");
@@ -5733,6 +5983,22 @@ export function initializeChatTab() {
     }
     if (exportConversationMarkdownBtn) {
         exportConversationMarkdownBtn.addEventListener('click', handleExportConversationMarkdown);
+    }
+
+    if (inviteButton) {
+        inviteButton.addEventListener('click', openInvitePopup);
+    }
+    if (inviteCloseButton) {
+        inviteCloseButton.addEventListener('click', closeInvitePopup);
+    }
+    if (inviteSearchInput) {
+        inviteSearchInput.addEventListener('input', renderInviteesList);
+    }
+    if (inviteProgrammeFilter) {
+        inviteProgrammeFilter.addEventListener('change', renderInviteesList);
+    }
+    if (inviteProjectFilter) {
+        inviteProjectFilter.addEventListener('change', renderInviteesList);
     }
 
     // Load annotation toggle state from localStorage (default: false)

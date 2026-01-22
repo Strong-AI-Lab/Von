@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Constants for relationship kinds
 MEMBERSHIP_RELATIONSHIP_KIND = "memberOf"
+ALT_MEMBERSHIP_RELATIONSHIP = "#V#member_of_organisation"
 ROLE_PREDICATE = "#V#hasRole"
 
 
@@ -135,6 +136,31 @@ def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
     # Get memberOf relationships
     memberships_dict = user_concept.get("relationships", {})
     org_ids = memberships_dict.get(MEMBERSHIP_RELATIONSHIP_KIND, [])
+    alt_org_ids = memberships_dict.get(ALT_MEMBERSHIP_RELATIONSHIP, [])
+
+    if isinstance(org_ids, str):
+        org_ids = [org_ids]
+    if not isinstance(org_ids, list):
+        org_ids = []
+    if isinstance(alt_org_ids, str):
+        alt_org_ids = [alt_org_ids]
+    if not isinstance(alt_org_ids, list):
+        alt_org_ids = []
+
+    merged_org_ids = []
+    seen_orgs: Set[str] = set()
+    for value in [*org_ids, *alt_org_ids]:
+        if not isinstance(value, str):
+            continue
+        if not value.strip():
+            continue
+        org_id = value.strip()
+        if not org_id.startswith("#V#"):
+            org_id = f"#V#{org_id}"
+        if org_id in seen_orgs:
+            continue
+        seen_orgs.add(org_id)
+        merged_org_ids.append(org_id)
 
     # Fetch roles from text relations
     from ..db.repositories.text_value_repository import TextRelationsRepository
@@ -160,7 +186,7 @@ def get_user_memberships(user_concept_id: str) -> Dict[str, Any]:
 
     # Build result
     memberships = []
-    for org_id in org_ids:
+    for org_id in merged_org_ids:
         role = org_role_map.get(
             org_id, "member"
         )  # Default to member if no role specified
@@ -201,13 +227,9 @@ def get_organisation_members(
     if not org_concept:
         raise ValueError(f"Organisation concept '{organisation_concept_id}' not found")
 
-    # Find inverse memberOf relationships (users who are members of this org)
-    # In the relationships structure, memberOf relationships on the org concept point inward
-    # We need to find all user concepts that have memberOf pointing to this org
-
+    # Build map of user_id -> role from text relations (if present)
     from ..db.repositories.text_value_repository import TextRelationsRepository
 
-    # Find all text relations with this org in the context (role associations)
     role_relations = TextRelationsRepository.find(
         {
             "predicate": ROLE_PREDICATE,
@@ -215,7 +237,6 @@ def get_organisation_members(
         }
     )
 
-    # Build map of user_id -> role
     user_role_map: Dict[str, str] = {}
     user_ids: Set[str] = set()
 
@@ -223,7 +244,6 @@ def get_organisation_members(
         user_id = rel.get("subject_concept_id")
         if user_id:
             user_ids.add(user_id)
-            # Get the text value for the role
             text_value_id = rel.get("object_text_id")
             if text_value_id:
                 from ..db.repositories.text_value_repository import TextValuesRepository
@@ -232,7 +252,33 @@ def get_organisation_members(
                 if tv:
                     user_role_map[user_id] = tv.get("text", "member")
                 else:
-                    user_role_map[user_id] = "member"  # Default if text value not found
+                    user_role_map[user_id] = "member"
+
+    # Fallback: include concepts with membership edges even if no role text relation.
+    org_id_variants = {organisation_concept_id}
+    if isinstance(organisation_concept_id, str) and organisation_concept_id.startswith(
+        "#V#"
+    ):
+        org_id_variants.add(organisation_concept_id[3:])
+
+    membership_query = {
+        "$or": [
+            {
+                f"relationships.{MEMBERSHIP_RELATIONSHIP_KIND}": {
+                    "$in": list(org_id_variants)
+                }
+            },
+            {
+                f"relationships.{ALT_MEMBERSHIP_RELATIONSHIP}": {
+                    "$in": list(org_id_variants)
+                }
+            },
+        ]
+    }
+    for doc in ConceptsRepository.find(membership_query, projection={"concept_id": 1}):
+        concept_id = doc.get("concept_id") if isinstance(doc, dict) else None
+        if isinstance(concept_id, str) and concept_id.strip():
+            user_ids.add(concept_id.strip())
 
     # Filter by role if specified
     members = []

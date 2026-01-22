@@ -9,6 +9,10 @@ import { createOrActivateConceptTab } from './dynamicTabs.js';
 import { fetchPredicateExtent } from './predicateUtils.js';
 import { selectBestNameForContext } from './utils/nameSelection.js';
 
+const CONCEPT_SEARCH_API = '/vontology/api/vontology/search';
+const CONCEPT_SEARCH_LIMIT = 8;
+const CONCEPT_SEARCH_DEBOUNCE_MS = 200;
+
 /**
  * Cache for concept display names to avoid repeated fetches.
  */
@@ -111,6 +115,7 @@ export function createPredicateExtentDisplay(conceptId, container) {
     let paginationElement = null;
     let errorElement = null;
     let loadingElement = null;
+    let addStatusElement = null;
 
     /**
      * Initialise the component.
@@ -151,12 +156,102 @@ export function createPredicateExtentDisplay(conceptId, container) {
         tableElement.className = 'predicate-extent-table-container';
         rootElement.appendChild(tableElement);
 
+        addStatusElement = document.createElement('div');
+        addStatusElement.className = 'predicate-extent-add-status';
+        rootElement.appendChild(addStatusElement);
+
         // Pagination section
         paginationElement = document.createElement('div');
         paginationElement.className = 'predicate-extent-pagination';
         rootElement.appendChild(paginationElement);
 
         container.appendChild(rootElement);
+    }
+
+    function setAddStatus(message, tone = 'info') {
+        if (!addStatusElement) return;
+        addStatusElement.textContent = message || '';
+        addStatusElement.dataset.tone = tone;
+    }
+
+    function buildConceptSearchUrl(query) {
+        const q = String(query ?? '').trim();
+        const params = new URLSearchParams();
+        params.set('q', q);
+        params.set('limit', String(CONCEPT_SEARCH_LIMIT));
+        params.set('include_individuals', 'true');
+        params.set('fallback_substring', 'true');
+        return `${CONCEPT_SEARCH_API}?${params.toString()}`;
+    }
+
+    async function searchConcepts(query) {
+        if (!query || query.trim().length < 1) return [];
+        const resp = await fetch(buildConceptSearchUrl(query));
+        if (!resp.ok) return [];
+        const data = await resp.json();
+        return Array.isArray(data?.results) ? data.results : [];
+    }
+
+    function attachConceptSearch(inputEl, resultsEl) {
+        if (!inputEl || !resultsEl) return;
+        let debounceId = null;
+        let active = false;
+
+        const closeResults = () => {
+            resultsEl.innerHTML = '';
+            resultsEl.classList.remove('open');
+            active = false;
+        };
+
+        const renderResults = (items) => {
+            resultsEl.innerHTML = '';
+            if (!items.length) {
+                closeResults();
+                return;
+            }
+            resultsEl.classList.add('open');
+            active = true;
+            items.forEach((item) => {
+                const row = document.createElement('div');
+                row.className = 'predicate-extent-search-item';
+
+                const name = document.createElement('span');
+                name.textContent = item.name || item.id;
+                name.title = `${item.name || item.id} — ${item.id}`;
+
+                const kind = document.createElement('span');
+                kind.className = `predicate-extent-search-kind ${item.kind || 'type'}`;
+                kind.textContent = item.kind === 'predicate' ? 'Predicate'
+                    : (item.kind === 'individual' ? 'Individual' : 'Type');
+
+                row.appendChild(name);
+                row.appendChild(kind);
+
+                row.addEventListener('click', () => {
+                    inputEl.value = item.id;
+                    closeResults();
+                });
+
+                resultsEl.appendChild(row);
+            });
+        };
+
+        inputEl.addEventListener('input', () => {
+            const query = inputEl.value || '';
+            if (debounceId) {
+                clearTimeout(debounceId);
+            }
+            debounceId = setTimeout(async () => {
+                const results = await searchConcepts(query);
+                renderResults(results);
+            }, CONCEPT_SEARCH_DEBOUNCE_MS);
+        });
+
+        inputEl.addEventListener('blur', () => {
+            setTimeout(() => {
+                if (active) closeResults();
+            }, 150);
+        });
     }
 
     /**
@@ -421,6 +516,91 @@ export function createPredicateExtentDisplay(conceptId, container) {
         });
 
         table.appendChild(tbody);
+
+        // Add grounding row
+        const tfoot = document.createElement('tfoot');
+        const addRow = document.createElement('tr');
+        addRow.className = 'predicate-extent-add-row';
+
+        const buildSearchCell = (placeholder) => {
+            const cell = document.createElement('td');
+            const wrap = document.createElement('div');
+            wrap.className = 'predicate-extent-search-wrap';
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'predicate-extent-input';
+            input.placeholder = placeholder;
+
+            const results = document.createElement('div');
+            results.className = 'predicate-extent-search-results';
+
+            wrap.appendChild(input);
+            wrap.appendChild(results);
+            cell.appendChild(wrap);
+
+            attachConceptSearch(input, results);
+            return { cell, input };
+        };
+
+        const subject = buildSearchCell('Subject concept…');
+        const object = buildSearchCell('Object concept…');
+
+        addRow.appendChild(subject.cell);
+        addRow.appendChild(createConceptCell(state.conceptId));
+        addRow.appendChild(object.cell);
+
+        const sourceCell = document.createElement('td');
+        sourceCell.textContent = 'structured';
+        addRow.appendChild(sourceCell);
+
+        const actionCell = document.createElement('td');
+        const addButton = document.createElement('button');
+        addButton.className = 'btn-primary';
+        addButton.textContent = 'Add grounding';
+        addButton.addEventListener('click', async () => {
+            const subjectId = (subject.input.value || '').trim();
+            const objectId = (object.input.value || '').trim();
+            if (!subjectId || !subjectId.startsWith('#V#')) {
+                setAddStatus('Select a valid subject concept ID.', 'error');
+                return;
+            }
+            if (!objectId || !objectId.startsWith('#V#')) {
+                setAddStatus('Select a valid object concept ID.', 'error');
+                return;
+            }
+            if (subjectId === objectId) {
+                setAddStatus('Subject and object must differ.', 'error');
+                return;
+            }
+            setAddStatus('Adding grounding…', 'info');
+            try {
+                const resp = await fetch('/vontology/api/vontology/relationships/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_id: subjectId,
+                        kind: state.conceptId,
+                        target_id: objectId
+                    })
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok || data.error) {
+                    throw new Error(data.error || `HTTP ${resp.status}`);
+                }
+                subject.input.value = '';
+                object.input.value = '';
+                setAddStatus('Grounding added.', 'success');
+                await loadData();
+            } catch (err) {
+                setAddStatus(`Failed to add grounding: ${err.message}`, 'error');
+            }
+        });
+        actionCell.appendChild(addButton);
+        addRow.appendChild(actionCell);
+
+        tfoot.appendChild(addRow);
+        table.appendChild(tfoot);
         tableElement.innerHTML = '';
         tableElement.appendChild(table);
     }

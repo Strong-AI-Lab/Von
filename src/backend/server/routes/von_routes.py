@@ -5568,6 +5568,303 @@ def chat_session_links():
         return jsonify({"error": str(e)}), 500
 
 
+def _normalise_concept_id(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if not value.startswith("#V#"):
+        value = f"#V#{value}"
+    return value
+
+
+def _collect_relationship_concept_ids(concept: dict) -> set[str]:
+    relationships = concept.get("relationships") if isinstance(concept, dict) else None
+    if not isinstance(relationships, dict):
+        return set()
+    found: set[str] = set()
+    for value in relationships.values():
+        if isinstance(value, str):
+            cid = _normalise_concept_id(value)
+            if cid:
+                found.add(cid)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    cid = _normalise_concept_id(item)
+                    if cid:
+                        found.add(cid)
+    return found
+
+
+def _build_invitee_entry(concept: dict, *, role: str, match_details: dict) -> dict:
+    from ...services.concept_service import enrich_concept_with_text_relations
+    from ...vontology.utils_vontology import (
+        get_concept_display_name_with_names_fallback,
+    )
+
+    enriched = enrich_concept_with_text_relations(concept)
+    display_name = get_concept_display_name_with_names_fallback(enriched)
+    return {
+        "concept_id": concept.get("concept_id"),
+        "name": display_name or concept.get("name") or "Unknown",
+        "role": role,
+        "match": match_details,
+    }
+
+
+@von_bp.route("/api/shared_conversations/invitees", methods=["GET"])
+def get_shared_conversation_invitees():
+    """List eligible invitees for a shared conversation.
+
+    Returns organisation-scoped users, ordered by relevance to session links.
+    """
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+        from ...services import chat_history_service
+        from ...services.organisation_membership_service import (
+            get_organisation_members,
+            get_user_memberships,
+        )
+        from ...services.concept_service import get_concept_by_concept_id
+        from ...services.shared_conversation_service import get_invite_status_map
+
+        user_concept_id = get_effective_user_concept_id()
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        session_id = request.args.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return jsonify({"error": "session_id required"}), 400
+        session_id = session_id.strip()
+
+        organisation_concept_id = session.get("organisation_concept_id")
+        organisation_concept_id = _normalise_concept_id(organisation_concept_id)
+        if not organisation_concept_id:
+            return jsonify({"error": "No organisation context"}), 400
+
+        memberships = get_user_memberships(user_concept_id)
+        if not any(
+            m.get("organisation_concept_id") == organisation_concept_id
+            for m in memberships.get("memberships", [])
+        ):
+            return jsonify({"error": "Not authorised for organisation"}), 403
+
+        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        session_links = chat_history_service.get_chat_session_links(
+            user_id=user_concept_id,
+            session_id=session_id,
+            namespace=namespace,
+        )
+
+        link_sets = {
+            key: set(session_links.get(key) or [])
+            for key in ("programmes", "projects", "activities", "modalities")
+        }
+
+        org_members = get_organisation_members(organisation_concept_id)
+        candidates = []
+        invitee_ids: list[str] = []
+        for member in org_members.get("members", []):
+            candidate_id = member.get("user_concept_id")
+            candidate_id = _normalise_concept_id(candidate_id)
+            if not candidate_id or candidate_id == user_concept_id:
+                continue
+            concept = get_concept_by_concept_id(concept_id=candidate_id)
+            if not isinstance(concept, dict):
+                continue
+
+            related_ids = _collect_relationship_concept_ids(concept)
+            match_details: dict[str, Any] = {
+                key: sorted(link_sets[key] & related_ids) for key in link_sets
+            }
+            match_score = sum(len(vals) for vals in match_details.values())
+            match_details["score"] = match_score
+
+            entry = _build_invitee_entry(
+                concept,
+                role=member.get("role") or "member",
+                match_details=match_details,
+            )
+            candidates.append(entry)
+            invitee_ids.append(candidate_id)
+
+        status_map = get_invite_status_map(
+            session_id=session_id, invitee_ids=invitee_ids
+        )
+        for entry in candidates:
+            invitee_id = entry.get("concept_id")
+            if invitee_id and invitee_id in status_map:
+                entry["invite_status"] = status_map[invitee_id]
+
+        candidates.sort(
+            key=lambda item: (
+                -(item.get("match", {}).get("score") or 0),
+                (item.get("name") or "").lower(),
+            )
+        )
+
+        return (
+            jsonify(
+                {
+                    "invitees": candidates,
+                    "total_count": len(candidates),
+                    "session_links": session_links,
+                    "ordered_by": "conversation_links",
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error listing invitees: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/shared_conversations/invite", methods=["POST"])
+def invite_to_shared_conversation():
+    """Create a shared conversation invite for a session."""
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+        from ...services.organisation_membership_service import (
+            get_organisation_members,
+            get_user_memberships,
+        )
+        from ...services.shared_conversation_service import create_invite
+        from ...services.episode_logging_service import log_episode
+
+        user_concept_id = get_effective_user_concept_id()
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        invitee_concept_id = _normalise_concept_id(
+            data.get("invitee_concept_id") or data.get("invitee_user_id")
+        )
+
+        if not isinstance(session_id, str) or not session_id.strip():
+            return jsonify({"error": "session_id required"}), 400
+        session_id = session_id.strip()
+
+        if not invitee_concept_id:
+            return jsonify({"error": "invitee_concept_id required"}), 400
+
+        organisation_concept_id = _normalise_concept_id(
+            session.get("organisation_concept_id")
+        )
+        if not organisation_concept_id:
+            return jsonify({"error": "No organisation context"}), 400
+
+        memberships = get_user_memberships(user_concept_id)
+        if not any(
+            m.get("organisation_concept_id") == organisation_concept_id
+            for m in memberships.get("memberships", [])
+        ):
+            return jsonify({"error": "Not authorised for organisation"}), 403
+
+        org_members = get_organisation_members(organisation_concept_id)
+        valid_ids = {
+            _normalise_concept_id(m.get("user_concept_id"))
+            for m in org_members.get("members", [])
+        }
+        if invitee_concept_id not in valid_ids:
+            return jsonify({"error": "Invitee not in organisation"}), 403
+
+        result = create_invite(
+            session_id=session_id,
+            inviter_user_id=user_concept_id,
+            invitee_user_id=invitee_concept_id,
+            organisation_concept_id=organisation_concept_id,
+        )
+
+        log_episode(
+            episode_type="shared_conversation_invite_created",
+            actor_user_id=user_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            session_id=session_id,
+            related_invite_id=result.get("invite", {}).get("invite_id"),
+            payload={
+                "invitee_user_id": invitee_concept_id,
+                "created": bool(result.get("created")),
+            },
+            status="created" if result.get("created") else "exists",
+        )
+
+        return jsonify({"status": "ok", **result}), 200
+    except Exception as e:
+        print(f"Error creating invite: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/shared_conversations/invites", methods=["GET"])
+def list_shared_conversation_invites():
+    """List incoming invites for the authenticated user."""
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+        from ...services.shared_conversation_service import list_invites_for_user
+
+        user_concept_id = get_effective_user_concept_id()
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        status = request.args.get("status") or "pending"
+        session_id = request.args.get("session_id")
+
+        invites = list_invites_for_user(
+            user_concept_id=user_concept_id,
+            status=status,
+            direction="incoming",
+            session_id=session_id,
+        )
+        return jsonify({"invites": invites, "total_count": len(invites)}), 200
+    except Exception as e:
+        print(f"Error listing invites: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@von_bp.route("/api/shared_conversations/invites/respond", methods=["POST"])
+def respond_shared_conversation_invite():
+    """Accept or decline a shared conversation invite."""
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+        from ...services.shared_conversation_service import respond_to_invite
+        from ...services.episode_logging_service import log_episode
+
+        user_concept_id = get_effective_user_concept_id()
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        invite_id = data.get("invite_id")
+        action = data.get("action")
+        if not isinstance(invite_id, str) or not invite_id.strip():
+            return jsonify({"error": "invite_id required"}), 400
+
+        updated = respond_to_invite(
+            invite_id=invite_id.strip(),
+            user_concept_id=user_concept_id,
+            action=action or "",
+        )
+        if not updated:
+            return jsonify({"error": "Invite not found"}), 404
+
+        log_episode(
+            episode_type="shared_conversation_invite_responded",
+            actor_user_id=user_concept_id,
+            organisation_concept_id=updated.get("organisation_concept_id"),
+            session_id=updated.get("session_id"),
+            related_invite_id=invite_id.strip(),
+            payload={"action": action},
+            status=updated.get("status"),
+        )
+
+        return jsonify({"status": "ok", "invite": updated}), 200
+    except Exception as e:
+        print(f"Error responding to invite: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/api/organisations/my_organisations", methods=["GET"])
 def get_my_organisations():
     """

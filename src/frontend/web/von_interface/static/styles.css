@@ -1008,6 +1008,94 @@ body {
     display: none !important;
 }
 
+/* Shared conversation invite popup */
+.invite-popup {
+    width: 520px;
+    max-width: 92vw;
+}
+
+.invite-popup-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.invite-search-input {
+    width: 100%;
+    padding: 6px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 0.9rem;
+}
+
+.invite-filter-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.invite-filter-row select {
+    flex: 1 1 200px;
+}
+
+.invite-filters-note {
+    font-size: 0.75rem;
+    color: #4b5563;
+}
+
+.invite-list {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 6px;
+    max-height: 45vh;
+    overflow: auto;
+    background: #f9fafb;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.invite-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 6px 8px;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+}
+
+.invite-row-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.invite-row-meta {
+    font-size: 0.75rem;
+    color: #6b7280;
+}
+
+.invite-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.invite-pill {
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: #e5e7eb;
+    color: #374151;
+}
+
+.invite-status {
+    font-size: 0.8rem;
+    color: #374151;
+    margin-top: 6px;
+}
+
 /* LLM debug button in chat messages */
 .llm-debug-button {
     font-size: 0.75rem;
@@ -6929,6 +7017,98 @@ body.settings-body {
 
 .predicate-extent-table td.source-structured {
     color: #28a745;
+}
+
+.predicate-extent-add-row td {
+    background: #f8f9fa;
+}
+
+.predicate-extent-search-wrap {
+    position: relative;
+    display: inline-block;
+    width: 100%;
+}
+
+.predicate-extent-input {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #ced4da;
+    border-radius: 4px;
+    font-size: 0.9em;
+}
+
+.predicate-extent-search-results {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 10;
+    background: #fff;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+    max-height: 220px;
+    overflow-y: auto;
+    display: none;
+}
+
+.predicate-extent-search-results.open {
+    display: block;
+}
+
+.predicate-extent-search-item {
+    padding: 6px 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    cursor: pointer;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.predicate-extent-search-item:last-child {
+    border-bottom: none;
+}
+
+.predicate-extent-search-item:hover {
+    background: #f3f4f6;
+}
+
+.predicate-extent-search-kind {
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 10px;
+    background: #e5e7eb;
+    color: #374151;
+    white-space: nowrap;
+}
+
+.predicate-extent-search-kind.individual {
+    background: #d4edda;
+    color: #155724;
+}
+
+.predicate-extent-search-kind.type {
+    background: #cfe2ff;
+    color: #084298;
+}
+
+.predicate-extent-search-kind.predicate {
+    background: #fff3cd;
+    color: #997404;
+}
+
+.predicate-extent-add-status {
+    margin-top: 6px;
+    font-size: 0.85rem;
+}
+
+.predicate-extent-add-status[data-tone="error"] {
+    color: #b91c1c;
+}
+
+.predicate-extent-add-status[data-tone="success"] {
+    color: #15803d;
 }
 
 /* Cartouche styling for concept links */
