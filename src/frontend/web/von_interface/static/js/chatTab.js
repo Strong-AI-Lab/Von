@@ -26,6 +26,7 @@ let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 let activeChatSessionId = null;
 let activeChatSessionName = null;
+let activeChatSessionOwnerId = null;
 let sessionTabsCache = [];
 const sessionHistoryCache = new Map();
 let loadingChatSessionId = null;
@@ -3117,6 +3118,16 @@ function setActiveChatSession(sessionId, sessionName) {
     activeChatSessionName = (typeof sessionName === 'string' && sessionName.trim())
         ? sessionName.trim()
         : null;
+    activeChatSessionOwnerId = null;
+
+    if (activeChatSessionId) {
+        const cachedSession = sessionTabsCache.find(
+            session => String(session?.session_id || '') === activeChatSessionId
+        );
+        if (cachedSession?.shared_owner_user_id) {
+            activeChatSessionOwnerId = String(cachedSession.shared_owner_user_id || '').trim() || null;
+        }
+    }
 }
 
 function getChatSessionTabsContainer() {
@@ -4378,6 +4389,9 @@ async function refreshChatSessionTabs() {
                     if (!existing.shared_from_user_id && invite?.inviter_user_id) {
                         existing.shared_from_user_id = invite.inviter_user_id;
                     }
+                    if (!existing.shared_owner_user_id && invite?.conversation_owner_user_id) {
+                        existing.shared_owner_user_id = invite.conversation_owner_user_id;
+                    }
                     if (!existing.invite_id && invite?.invite_id) {
                         existing.invite_id = invite.invite_id;
                     }
@@ -4388,6 +4402,7 @@ async function refreshChatSessionTabs() {
                     session_name: null,
                     shared_with_me: true,
                     shared_from_user_id: invite?.inviter_user_id || null,
+                    shared_owner_user_id: invite?.conversation_owner_user_id || null,
                     invite_id: invite?.invite_id || null,
                     last_message_at: invite?.accepted_at || invite?.updated_at || invite?.created_at || null
                 });
@@ -4434,6 +4449,13 @@ async function refreshChatSessionTabs() {
         const activeSessionId = (typeof data?.active_session_id === 'string' && data.active_session_id.trim())
             ? data.active_session_id.trim()
             : null;
+
+        if (activeSessionId) {
+            const activeSession = sessions.find(
+                s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
+            );
+            activeChatSessionOwnerId = activeSession?.shared_owner_user_id || null;
+        }
 
         if (activeSessionId) {
             const activeSession = sessions.find(
@@ -4551,6 +4573,13 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             tab.title = `${tab.title} • Shared`;
         }
 
+        if (session?.shared_owner_user_id) {
+            const ownerName = _deriveNameFromConceptId(session.shared_owner_user_id) || session.shared_owner_user_id;
+            tab.title = `${tab.title} • Owner: ${ownerName}`;
+            tab.setAttribute('data-keep-title', 'true');
+            tab.dataset.sharedOwnerId = session.shared_owner_user_id;
+        }
+
         const header = document.createElement('span');
         header.className = 'chat-session-tab-header';
 
@@ -4558,6 +4587,17 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         label.className = 'chat-session-tab-label';
         label.textContent = displayName;
         header.appendChild(label);
+
+        if (session?.shared_owner_user_id) {
+            const ownerName = _deriveNameFromConceptId(session.shared_owner_user_id) || session.shared_owner_user_id;
+            const ownerBadge = document.createElement('span');
+            ownerBadge.className = 'chat-session-tab-owner-indicator';
+            ownerBadge.textContent = '👑';
+            ownerBadge.title = `Owner: ${ownerName}`;
+            ownerBadge.setAttribute('aria-label', `Owner: ${ownerName}`);
+            ownerBadge.setAttribute('data-keep-title', 'true');
+            header.appendChild(ownerBadge);
+        }
 
         const messageCount = Number.isFinite(session?.message_count) ? Number(session.message_count) : null;
         const turnCount = messageCount === null ? null : Math.max(0, Math.ceil(messageCount / 2));
@@ -5589,6 +5629,9 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
                 const authorId = _normalisePotentialConceptId(msg.author_user_id);
                 if (authorId) {
                     label = _deriveNameFromConceptId(authorId) || label;
+                    if (activeChatSessionOwnerId && authorId === activeChatSessionOwnerId) {
+                        label = `👑 ${label}`;
+                    }
                 }
             }
 
