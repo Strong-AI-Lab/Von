@@ -4964,6 +4964,49 @@ def history_sessions():
         )
 
         shared_invites = list_accepted_invites_for_user(user_concept_id=user_concept_id)
+        invite_by_session: dict[str, dict] = {}
+        for invite in shared_invites:
+            if not isinstance(invite, dict):
+                continue
+            invite_session_id = invite.get("session_id")
+            if isinstance(invite_session_id, str) and invite_session_id:
+                invite_by_session.setdefault(invite_session_id, invite)
+
+        if invite_by_session:
+            for summary in sessions:
+                if not isinstance(summary, dict):
+                    continue
+                session_id = summary.get("session_id")
+                if not isinstance(session_id, str) or not session_id:
+                    continue
+                invite = invite_by_session.get(session_id)
+                if not isinstance(invite, dict):
+                    continue
+
+                inviter_id = _normalise_concept_id(invite.get("inviter_user_id"))
+                owner_id = _normalise_concept_id(
+                    invite.get("conversation_owner_user_id")
+                    or invite.get("inviter_user_id")
+                )
+                if not invite.get("conversation_owner_user_id"):
+                    resolved_owner = resolve_conversation_owner(session_id=session_id)
+                    resolved_owner_id = _normalise_concept_id(resolved_owner)
+                    if resolved_owner_id:
+                        owner_id = resolved_owner_id
+
+                summary["shared_with_me"] = True
+                if inviter_id:
+                    summary["shared_from_user_id"] = inviter_id
+                if owner_id:
+                    summary["shared_owner_user_id"] = owner_id
+                if invite.get("invite_id"):
+                    summary["invite_id"] = invite.get("invite_id")
+                shared_timestamp = (
+                    invite.get("accepted_at")
+                    or invite.get("updated_at")
+                    or invite.get("created_at")
+                )
+                summary["shared_accepted_at"] = shared_timestamp
         existing_session_ids = {
             s.get("session_id") for s in sessions if isinstance(s, dict)
         }
@@ -5019,6 +5062,7 @@ def history_sessions():
             summary["shared_with_me"] = True
             if inviter_id:
                 summary["shared_from_user_id"] = inviter_id
+            summary["shared_owner_user_id"] = owner_id
             summary["invite_id"] = invite.get("invite_id")
             summary["shared_accepted_at"] = shared_timestamp
             shared_sessions.append(summary)
