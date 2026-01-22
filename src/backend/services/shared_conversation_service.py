@@ -87,11 +87,55 @@ def create_invite(
     if existing:
         return {"invite": existing, "created": False}
 
+    conversation_owner_user_id = None
+    owner_source = None
+    try:
+        existing_owner = coll.find_one(
+            {"session_id": session_id, "conversation_owner_user_id": {"$exists": True}},
+            {"_id": 0, "conversation_owner_user_id": 1},
+        )
+        if isinstance(existing_owner, dict):
+            raw_owner = existing_owner.get("conversation_owner_user_id")
+            if isinstance(raw_owner, str) and raw_owner.strip():
+                conversation_owner_user_id = raw_owner.strip()
+                owner_source = "existing_invite"
+    except Exception:
+        pass
+
+    if not conversation_owner_user_id:
+        try:
+            from . import chat_history_service
+
+            if chat_history_service.has_chat_history_session(
+                inviter_user_id, session_id, namespace=None
+            ):
+                conversation_owner_user_id = inviter_user_id
+                owner_source = "inviter"
+            else:
+                coll_history = (
+                    chat_history_service.get_chat_history_collection_service()
+                )
+                if coll_history is not None:
+                    owner_doc = coll_history.find_one(
+                        {"session_id": session_id},
+                        {"_id": 0, "user_id": 1, "created_at": 1},
+                        sort=[("created_at", ASCENDING)],
+                    )
+                    if isinstance(owner_doc, dict):
+                        owner_id = owner_doc.get("user_id")
+                        if isinstance(owner_id, str) and owner_id.strip():
+                            conversation_owner_user_id = owner_id.strip()
+                            owner_source = "history_lookup"
+        except Exception:
+            pass
+
     doc = {
         "invite_id": invite_id,
         "session_id": session_id,
         "inviter_user_id": inviter_user_id,
         "invitee_user_id": invitee_user_id,
+        "conversation_owner_user_id": conversation_owner_user_id,
+        "conversation_owner_source": owner_source,
         "organisation_concept_id": organisation_concept_id,
         "status": "pending",
         "created_at": now,
@@ -102,6 +146,51 @@ def create_invite(
         doc = dict(doc)
         doc.pop("_id", None)
     return {"invite": doc, "created": True}
+
+
+def resolve_conversation_owner(*, session_id: str) -> Optional[str]:
+    coll = _get_collection()
+    if coll is None:
+        return None
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+
+    session_id = session_id.strip()
+
+    try:
+        doc = coll.find_one(
+            {
+                "session_id": session_id,
+                "conversation_owner_user_id": {"$exists": True, "$ne": None},
+            },
+            {"_id": 0, "conversation_owner_user_id": 1},
+        )
+        if isinstance(doc, dict):
+            owner = doc.get("conversation_owner_user_id")
+            if isinstance(owner, str) and owner.strip():
+                return owner.strip()
+    except Exception:
+        pass
+
+    try:
+        from . import chat_history_service
+
+        coll_history = chat_history_service.get_chat_history_collection_service()
+        if coll_history is None:
+            return None
+        owner_doc = coll_history.find_one(
+            {"session_id": session_id},
+            {"_id": 0, "user_id": 1, "created_at": 1},
+            sort=[("created_at", ASCENDING)],
+        )
+        if isinstance(owner_doc, dict):
+            owner_id = owner_doc.get("user_id")
+            if isinstance(owner_id, str) and owner_id.strip():
+                return owner_id.strip()
+    except Exception:
+        return None
+
+    return None
 
 
 def list_invites_for_user(
@@ -129,6 +218,37 @@ def list_invites_for_user(
 
     cursor = coll.find(query, {"_id": 0}).sort("updated_at", DESCENDING)
     return [doc for doc in cursor if isinstance(doc, dict)]
+
+
+def get_accepted_invite_for_user_session(
+    *, user_concept_id: str, session_id: str
+) -> Optional[Dict[str, Any]]:
+    coll = _get_collection()
+    if coll is None:
+        return None
+
+    if not isinstance(user_concept_id, str) or not user_concept_id.strip():
+        return None
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+
+    doc = coll.find_one(
+        {
+            "invitee_user_id": user_concept_id.strip(),
+            "session_id": session_id.strip(),
+            "status": "accepted",
+        },
+        {"_id": 0},
+    )
+    return doc if isinstance(doc, dict) else None
+
+
+def list_accepted_invites_for_user(*, user_concept_id: str) -> List[Dict[str, Any]]:
+    return list_invites_for_user(
+        user_concept_id=user_concept_id,
+        status="accepted",
+        direction="incoming",
+    )
 
 
 def get_invite_status_map(*, session_id: str, invitee_ids: List[str]) -> Dict[str, str]:

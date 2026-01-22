@@ -397,6 +397,7 @@ def _split_history_into_segments_with_locations(
     session_id: str,
     include_debug: bool = True,
     history_offset: int = 0,
+    owner_user_id: Optional[str] = None,
 ) -> List[List[Dict[str, Any]]]:
     """Split history into segments, attaching stable location metadata.
 
@@ -426,6 +427,14 @@ def _split_history_into_segments_with_locations(
             "content": entry.get("content"),
             "timestamp": entry.get("timestamp"),
         }
+        author_user_id = entry.get("author_user_id")
+        if not isinstance(author_user_id, str) or not author_user_id.strip():
+            author_user_id = None
+        if not author_user_id and entry.get("role") == "user":
+            if isinstance(owner_user_id, str) and owner_user_id.strip():
+                author_user_id = owner_user_id
+        if author_user_id:
+            copied["author_user_id"] = author_user_id
         if include_debug and "llm_debug_data" in entry:
             copied["llm_debug_data"] = entry.get("llm_debug_data")
         existing_location = entry.get("history_location")
@@ -599,6 +608,7 @@ def get_chat_history_segments(
                 session_id=session_id,
                 include_debug=include_debug,
                 history_offset=history_offset,
+                owner_user_id=user_id,
             )
         else:
             segments = _split_history_into_segments(history)
@@ -894,6 +904,13 @@ def add_message_to_history(
 
         # Add timestamp to message (and llm_debug_data if present)
         message_with_timestamp = {**message, "timestamp": datetime.now(timezone.utc)}
+        author_user_id = message.get("author_user_id")
+        if not isinstance(author_user_id, str) or not author_user_id.strip():
+            author_user_id = None
+        if not author_user_id and message.get("role") == "user":
+            author_user_id = user_id
+        if author_user_id:
+            message_with_timestamp["author_user_id"] = author_user_id
         if llm_debug_data:
             message_with_timestamp["llm_debug_data"] = llm_debug_data
 
@@ -1000,6 +1017,49 @@ def add_message_to_history(
     except PyMongoError as e:
         logger.error(f"Error adding message to history: {e}", exc_info=True)
         raise ChatHistoryServiceError(f"Could not add message to history: {e}") from e
+
+
+def set_chat_history_for_session(
+    *,
+    user_id: str,
+    session_id: str,
+    history: List[Dict[str, Any]],
+    namespace: Optional[str] = None,
+    set_updated_at: bool = False,
+    extra_set_fields: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not user_id or not session_id:
+        raise ChatHistoryServiceError("user_id and session_id are required.")
+    if not isinstance(history, list):
+        raise ChatHistoryServiceError("history must be a list.")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    set_fields: Dict[str, Any] = {"history": history}
+    if isinstance(namespace, str) and namespace.strip():
+        set_fields["namespace"] = namespace.strip()
+    if set_updated_at:
+        set_fields["updated_at"] = datetime.now(timezone.utc)
+    if isinstance(extra_set_fields, dict) and extra_set_fields:
+        set_fields.update(extra_set_fields)
+
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=True,
+    )
+
+    try:
+        result = chat_history_coll.update_one(query, {"$set": set_fields})
+        updated = bool(getattr(result, "modified_count", 0) > 0)
+        matched = bool(getattr(result, "matched_count", 0) > 0)
+        return {"updated": updated, "matched": matched}
+    except PyMongoError as e:
+        logger.error("Error setting chat history: %s", e, exc_info=True)
+        raise ChatHistoryServiceError(f"Could not set chat history: {e}") from e
 
 
 def add_reset_marker_to_history(user_id: str, session_id: str) -> None:
@@ -1308,6 +1368,157 @@ def get_chat_history_session_summaries(
         raise ChatHistoryServiceError(
             f"Could not retrieve chat history session summaries: {e}"
         ) from e
+
+
+def has_chat_history_session(
+    user_id: str,
+    session_id: str,
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+) -> bool:
+    if not user_id or not session_id:
+        return False
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+    return chat_history_coll.find_one(query, {"_id": 1}) is not None
+
+
+def get_chat_history_session_summary(
+    user_id: str,
+    session_id: str,
+    *,
+    namespace: Optional[str] = None,
+    include_legacy: bool = True,
+    summary_mode: str = "full",
+) -> Optional[Dict[str, Any]]:
+    if not user_id or not session_id:
+        raise ChatHistoryServiceError("user_id and session_id are required.")
+
+    chat_history_coll = get_chat_history_collection_service()
+    if chat_history_coll is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+
+    mode = summary_mode.strip().lower() if isinstance(summary_mode, str) else "full"
+    light_mode = mode in ("light", "minimal", "summary")
+
+    query = build_chat_history_query(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=include_legacy,
+    )
+
+    if light_mode:
+        pipeline = [
+            {"$match": query},
+            {
+                "$project": {
+                    "session_id": 1,
+                    "session_name": 1,
+                    "created_at": 1,
+                    "updated_at": 1,
+                    "namespace": 1,
+                    "history_tail": {"$slice": [{"$ifNull": ["$history", []]}, -1]},
+                    "message_count": {
+                        "$size": {
+                            "$filter": {
+                                "input": {"$ifNull": ["$history", []]},
+                                "as": "msg",
+                                "cond": {
+                                    "$not": {
+                                        "$and": [
+                                            {"$eq": ["$$msg.role", "system"]},
+                                            {"$eq": ["$$msg.content", "__RESET__"]},
+                                        ]
+                                    }
+                                },
+                            }
+                        }
+                    },
+                }
+            },
+        ]
+        doc = next(chat_history_coll.aggregate(pipeline), None)
+        history_field = "history_tail"
+    else:
+        projection: Dict[str, Any] = {
+            "session_id": 1,
+            "history": 1,
+            "created_at": 1,
+            "updated_at": 1,
+            "namespace": 1,
+            "session_name": 1,
+        }
+        doc = chat_history_coll.find_one(query, projection)
+        history_field = "history"
+
+    if not isinstance(doc, dict):
+        return None
+
+    history = doc.get(history_field) or []
+    if not isinstance(history, list):
+        history = []
+
+    session_name = _normalise_session_name(doc.get("session_name"))
+    non_reset = list(_iter_non_reset_messages(history))
+    has_messages = bool(history) if light_mode else bool(non_reset)
+    if not has_messages and not session_name:
+        return None
+
+    last_entry = None
+    for entry in reversed(history):
+        if isinstance(entry, dict):
+            last_entry = entry
+            break
+
+    is_completed = bool(last_entry and _is_reset_marker(last_entry))
+    completed_at_dt = None
+    if is_completed and isinstance(last_entry, dict):
+        completed_at_dt = _coerce_datetime(last_entry.get("timestamp"))
+
+    last_ts = _infer_last_message_timestamp(doc)
+    created_ts = _infer_created_timestamp(doc)
+
+    message_count = None
+    preview = None
+    if light_mode:
+        if isinstance(doc.get("message_count"), int):
+            message_count = doc.get("message_count")
+    else:
+        message_count = len(non_reset)
+        last_user_msg = None
+        for msg in reversed(non_reset):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    last_user_msg = content.strip()
+                    break
+
+        preview = last_user_msg
+        if isinstance(preview, str) and len(preview) > 140:
+            preview = preview[:140] + "."
+
+    return {
+        "session_id": session_id,
+        "session_name": session_name,
+        "message_count": message_count,
+        "last_message_at": last_ts.isoformat() if last_ts else None,
+        "is_completed": is_completed,
+        "completed_at": completed_at_dt.isoformat() if completed_at_dt else None,
+        "created_at": created_ts.isoformat() if created_ts else None,
+        "namespace": doc.get("namespace"),
+        "preview": preview,
+    }
 
 
 def create_chat_session(

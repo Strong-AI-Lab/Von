@@ -71,6 +71,42 @@ if (-not (Get-Command Write-LauncherLog -ErrorAction SilentlyContinue)) {
     }
 }
 
+function Set-EnvFromDotEnv {
+    param([string]$EnvPath)
+    if (-not $EnvPath) { return }
+    if (-not (Test-Path $EnvPath)) { return }
+
+    $applied = 0
+    Get-Content $EnvPath -ErrorAction SilentlyContinue | ForEach-Object {
+        $line = $_.Trim()
+        if (-not $line) { return }
+        if ($line.StartsWith('#')) { return }
+
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
+            $key = $Matches[1]
+            $raw = $Matches[2]
+            if (-not $key) { return }
+            $value = $raw.Trim()
+            if ($value.Length -ge 2) {
+                $first = $value.Substring(0, 1)
+                $last = $value.Substring($value.Length - 1, 1)
+                if (($first -eq '"' -and $last -eq '"') -or ($first -eq "'" -and $last -eq "'")) {
+                    $value = $value.Substring(1, $value.Length - 2)
+                }
+            }
+
+            [Environment]::SetEnvironmentVariable($key, $value, "Process")
+            $applied++
+        }
+    }
+
+    if ($applied -gt 0) {
+        Write-LauncherLog "Loaded $applied .env override(s) from $EnvPath"
+    }
+}
+
+Set-EnvFromDotEnv -EnvPath (Join-Path $Root '.env')
+
 # Backup root resolution:
 # - Prefer explicit VON_BACKUP_ROOT if already present in environment.
 # - Else prefer W:\von_backups if W: exists and is writable.

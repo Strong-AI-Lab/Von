@@ -813,8 +813,27 @@ def check_environment_variable():
 
     current_app.logger.info(f"Checking environment variable: {env_var_name}")
     value = os.getenv(env_var_name)
+    source = "process" if value else None
+
+    if not value:
+        try:
+            from dotenv import dotenv_values  # type: ignore
+            from pathlib import Path
+
+            repo_root = Path(__file__).resolve().parents[4]
+            env_path = repo_root / ".env"
+            if env_path.exists():
+                values = dotenv_values(env_path)
+                raw = values.get(env_var_name)
+                if raw is not None:
+                    value = str(raw)
+                    source = "dotenv"
+        except Exception:
+            value = value or None
 
     response_data: Dict[str, Any] = {"exists": bool(value)}
+    if source:
+        response_data["source"] = source
     if value:
         # Return a masked version of the key for verification
         masked_value = f"{value[:5]}...{value[-4:]}" if len(value) > 9 else value

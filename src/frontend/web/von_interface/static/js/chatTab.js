@@ -65,6 +65,15 @@ let invitePopupState = {
     totalCount: 0
 };
 
+let incomingInviteState = {
+    invites: [],
+    acceptedInvites: [],
+    totalCount: 0
+};
+
+const INCOMING_INVITE_POLL_INTERVAL_MS = 60_000;
+let incomingInvitePollTimerId = null;
+
 // Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
 // Stored locally only; intended to feed future introspection.
 const LS_CHAT_TABS_LOAD_STATS = 'von:chatSessionTabsLoadStats';
@@ -4351,6 +4360,39 @@ async function refreshChatSessionTabs() {
         }
 
         const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+        const acceptedInvites = Array.isArray(incomingInviteState?.acceptedInvites)
+            ? incomingInviteState.acceptedInvites
+            : [];
+        if (acceptedInvites.length > 0) {
+            const sessionMap = new Map(
+                sessions
+                    .filter(s => s && typeof s.session_id === 'string')
+                    .map(s => [s.session_id, s])
+            );
+            acceptedInvites.forEach((invite) => {
+                const sid = (typeof invite?.session_id === 'string') ? invite.session_id.trim() : '';
+                if (!sid) return;
+                const existing = sessionMap.get(sid);
+                if (existing) {
+                    existing.shared_with_me = true;
+                    if (!existing.shared_from_user_id && invite?.inviter_user_id) {
+                        existing.shared_from_user_id = invite.inviter_user_id;
+                    }
+                    if (!existing.invite_id && invite?.invite_id) {
+                        existing.invite_id = invite.invite_id;
+                    }
+                    return;
+                }
+                sessions.push({
+                    session_id: sid,
+                    session_name: null,
+                    shared_with_me: true,
+                    shared_from_user_id: invite?.inviter_user_id || null,
+                    invite_id: invite?.invite_id || null,
+                    last_message_at: invite?.accepted_at || invite?.updated_at || invite?.created_at || null
+                });
+            });
+        }
 
         // If the server temporarily reports no sessions (e.g. after creating a new chat
         // while history is still updating), keep the existing UI rather than hiding it.
@@ -4492,6 +4534,10 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             tab.classList.add('is-loading');
         }
 
+        if (session?.shared_with_me || session?.shared_from_user_id || session?.invite_id) {
+            tab.classList.add('is-shared');
+        }
+
         if (session?.is_completed === true) {
             tab.classList.add('is-completed');
             const completedLabel = formatCompletedLabel(session?.completed_at);
@@ -4499,6 +4545,10 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         } else {
             tab.classList.add('is-open');
             tab.title = `${displayName} • ${timestampLabel}`;
+        }
+
+        if (session?.shared_with_me || session?.shared_from_user_id || session?.invite_id) {
+            tab.title = `${tab.title} • Shared`;
         }
 
         const header = document.createElement('span');
@@ -5219,7 +5269,8 @@ async function updateHistoryLength() {
                                 const nameAttr = nameRaw ? escapeHtml(nameRaw) : '';
                                 const isActive = activeSessionId && sidRaw === activeSessionId;
                                 const isCompleted = s?.is_completed === true;
-                                const rowClass = `history-session-row${isActive ? ' is-active' : ''}${isCompleted ? ' is-completed' : ''}`;
+                                const isShared = Boolean(s?.shared_with_me || s?.shared_from_user_id || s?.invite_id);
+                                const rowClass = `history-session-row${isActive ? ' is-active' : ''}${isCompleted ? ' is-completed' : ''}${isShared ? ' is-shared' : ''}`;
                                 const idSnippet = nameRaw ? `  id ${escapeHtml(sidShort)}` : '';
                                 const completionSnippet = isCompleted
                                     ? `  ${escapeHtml(formatCompletedLabel(s?.completed_at))}`
@@ -5533,7 +5584,13 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
     historyMessages.forEach((msg, index) => {
         if (msg.role === 'user' || msg.role === 'assistant') {
             const turnId = `history-${msg.role}-${index}`;
-            const label = msg.role === 'user' ? 'User' : 'Von';
+            let label = msg.role === 'user' ? 'User' : 'Von';
+            if (msg.role === 'user') {
+                const authorId = _normalisePotentialConceptId(msg.author_user_id);
+                if (authorId) {
+                    label = _deriveNameFromConceptId(authorId) || label;
+                }
+            }
 
             // Restore debug data before rendering so markdown gating can see model info.
             const hasDebugData = msg.role === 'assistant'
@@ -5843,6 +5900,319 @@ function closeInvitePopup() {
     setInviteStatus('');
 }
 
+function getIncomingInviteElements() {
+    return {
+        popup: document.getElementById('incomingInvitesPopup'),
+        openButton: document.getElementById('incomingInvitesBtn'),
+        closeButton: document.getElementById('closeIncomingInvites'),
+        badge: document.getElementById('incomingInvitesBadge'),
+        list: document.getElementById('incomingInvitesList'),
+        status: document.getElementById('incomingInvitesStatus')
+    };
+}
+
+function setIncomingInviteStatus(message) {
+    const { status } = getIncomingInviteElements();
+    if (!status) return;
+    status.textContent = message || '';
+}
+
+function setIncomingInvitePopupVisible(visible) {
+    const { popup } = getIncomingInviteElements();
+    if (!popup) return;
+    if (visible) {
+        popup.classList.remove('hidden');
+        popup.setAttribute('aria-hidden', 'false');
+    } else {
+        popup.classList.add('hidden');
+        popup.setAttribute('aria-hidden', 'true');
+    }
+}
+
+function setIncomingInviteBadge(count) {
+    const { badge, openButton } = getIncomingInviteElements();
+    if (!badge) return;
+    const numeric = Number.isFinite(Number(count)) ? Number(count) : 0;
+    if (numeric > 0) {
+        badge.textContent = numeric > 99 ? '99+' : String(numeric);
+        badge.classList.remove('hidden');
+    } else {
+        badge.textContent = '';
+        badge.classList.add('hidden');
+    }
+    if (openButton) {
+        const label = numeric > 0
+            ? `View ${numeric} conversation invite${numeric === 1 ? '' : 's'}`
+            : 'View conversation invites';
+        openButton.setAttribute('aria-label', label);
+        openButton.setAttribute('title', label);
+    }
+}
+
+function _formatInviteSessionLabel(sessionId) {
+    const raw = String(sessionId || '').trim();
+    if (!raw) return 'Session: unknown';
+    if (raw.length > 16) {
+        return `Session: ${raw.slice(0, 8)}…`;
+    }
+    return `Session: ${raw}`;
+}
+
+function _getChatSessionTabElement(sessionId) {
+    if (!sessionId) return null;
+    const escaped = String(sessionId).replace(/"/g, '\\"');
+    return document.querySelector(`.chat-session-tab[data-session-id="${escaped}"]`);
+}
+
+function _scrollToChatSession(sessionId) {
+    if (!sessionId) return;
+    const tab = _getChatSessionTabElement(sessionId);
+    if (!tab) {
+        scheduleChatSessionTabsRefresh(true);
+        setTimeout(() => _scrollToChatSession(sessionId), 600);
+        return;
+    }
+    try {
+        tab.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+        tab.classList.add('is-shared-highlight');
+        setTimeout(() => tab.classList.remove('is-shared-highlight'), 2000);
+    } catch (_) {
+        // Ignore scroll errors.
+    }
+}
+
+async function _resolveInviterName(invite) {
+    const inviterId = _normalisePotentialConceptId(invite?.inviter_user_id || invite?.inviter_user_concept_id);
+    if (!inviterId) return '';
+    const meta = await _getConceptMetaForChatSession(inviterId);
+    return meta?.displayName || _deriveNameFromConceptId(inviterId) || inviterId;
+}
+
+async function renderIncomingInvitesList() {
+    const { list } = getIncomingInviteElements();
+    if (!list) return;
+
+    list.innerHTML = '';
+    const invites = Array.isArray(incomingInviteState.invites) ? incomingInviteState.invites : [];
+    const acceptedInvites = Array.isArray(incomingInviteState.acceptedInvites)
+        ? incomingInviteState.acceptedInvites
+        : [];
+
+    if (!invites.length && !acceptedInvites.length) {
+        const empty = document.createElement('div');
+        empty.className = 'invite-row';
+        empty.textContent = 'No pending invites.';
+        list.appendChild(empty);
+        return;
+    }
+
+    if (invites.length) {
+        const header = document.createElement('div');
+        header.className = 'invite-section-title';
+        header.textContent = 'Pending invites';
+        list.appendChild(header);
+    }
+
+    for (const invite of invites) {
+        const row = document.createElement('div');
+        row.className = 'invite-row';
+        row.setAttribute('role', 'listitem');
+
+        const info = document.createElement('div');
+        const name = document.createElement('div');
+        name.className = 'invite-row-name';
+        const inviterName = await _resolveInviterName(invite);
+        name.textContent = inviterName ? `Invite from ${inviterName}` : 'Conversation invite';
+        const meta = document.createElement('div');
+        meta.className = 'invite-row-meta';
+        const sessionLabel = _formatInviteSessionLabel(invite?.session_id);
+        meta.textContent = sessionLabel;
+        info.appendChild(name);
+        info.appendChild(meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'invite-row-actions';
+
+        const status = String(invite?.status || 'pending');
+        if (status) {
+            const pill = document.createElement('span');
+            pill.className = 'invite-pill';
+            pill.textContent = status;
+            actions.appendChild(pill);
+        }
+
+        if (status === 'pending') {
+            const acceptButton = document.createElement('button');
+            acceptButton.type = 'button';
+            acceptButton.className = 'btn-mini';
+            acceptButton.textContent = 'Accept';
+            acceptButton.addEventListener('click', () => respondToSharedConversationInvite(invite, 'accept'));
+
+            const declineButton = document.createElement('button');
+            declineButton.type = 'button';
+            declineButton.className = 'btn-mini';
+            declineButton.textContent = 'Decline';
+            declineButton.addEventListener('click', () => respondToSharedConversationInvite(invite, 'decline'));
+
+            actions.appendChild(acceptButton);
+            actions.appendChild(declineButton);
+        }
+
+        row.appendChild(info);
+        row.appendChild(actions);
+        list.appendChild(row);
+    }
+
+    if (acceptedInvites.length) {
+        const header = document.createElement('div');
+        header.className = 'invite-section-title';
+        header.textContent = 'Accepted invites';
+        list.appendChild(header);
+    }
+
+    for (const invite of acceptedInvites) {
+        const row = document.createElement('div');
+        row.className = 'invite-row';
+        row.setAttribute('role', 'listitem');
+
+        const info = document.createElement('div');
+        const name = document.createElement('div');
+        name.className = 'invite-row-name';
+        const inviterName = await _resolveInviterName(invite);
+        name.textContent = inviterName ? `Shared by ${inviterName}` : 'Shared conversation';
+        const meta = document.createElement('div');
+        meta.className = 'invite-row-meta';
+        const sessionLabel = _formatInviteSessionLabel(invite?.session_id);
+        meta.textContent = sessionLabel;
+        info.appendChild(name);
+        info.appendChild(meta);
+
+        const actions = document.createElement('div');
+        actions.className = 'invite-row-actions';
+
+        const pill = document.createElement('span');
+        pill.className = 'invite-pill';
+        pill.textContent = 'accepted';
+        actions.appendChild(pill);
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn-mini';
+        button.textContent = 'Show conversation';
+        button.addEventListener('click', async () => {
+            const sessionId = invite?.session_id;
+            if (!sessionId) {
+                showToast('Unable to open conversation: missing session id.');
+                return;
+            }
+            closeIncomingInvitesPopup();
+            const result = await switchToChatSession(sessionId);
+            if (!result?.ok) {
+                showToast(result?.error || 'Unable to open conversation.');
+                return;
+            }
+            _scrollToChatSession(sessionId);
+        });
+        actions.appendChild(button);
+
+        row.appendChild(info);
+        row.appendChild(actions);
+        list.appendChild(row);
+    }
+}
+
+async function loadIncomingInvites({ silent = false } = {}) {
+    if (!silent) {
+        setIncomingInviteStatus('Loading invites…');
+    }
+    try {
+        const [pendingResp, acceptedResp] = await Promise.all([
+            fetch('/von/api/shared_conversations/invites?status=pending', { cache: 'no-store' }),
+            fetch('/von/api/shared_conversations/invites?status=accepted', { cache: 'no-store' })
+        ]);
+
+        const pendingData = await pendingResp.json();
+        const acceptedData = await acceptedResp.json();
+        if (!pendingResp.ok || !acceptedResp.ok) {
+            if (!silent) {
+                setIncomingInviteStatus(pendingData?.error || acceptedData?.error || 'Unable to load invites.');
+            }
+            incomingInviteState = { invites: [], acceptedInvites: [], totalCount: 0 };
+            setIncomingInviteBadge(0);
+            await renderIncomingInvitesList();
+            return;
+        }
+
+        const invites = Array.isArray(pendingData?.invites) ? pendingData.invites : [];
+        const acceptedInvites = Array.isArray(acceptedData?.invites) ? acceptedData.invites : [];
+        incomingInviteState = {
+            invites,
+            acceptedInvites,
+            totalCount: typeof pendingData?.total_count === 'number' ? pendingData.total_count : invites.length
+        };
+        setIncomingInviteBadge(incomingInviteState.totalCount);
+        if (!silent) {
+            setIncomingInviteStatus('');
+        }
+        await renderIncomingInvitesList();
+    } catch (e) {
+        console.error('Invite list error', e);
+        if (!silent) {
+            setIncomingInviteStatus('Unable to load invites.');
+        }
+    }
+}
+
+async function respondToSharedConversationInvite(invite, action) {
+    const inviteId = invite?.invite_id;
+    if (!inviteId) return;
+
+    const actionLabel = action === 'accept' ? 'Accepting invite…' : 'Declining invite…';
+    setIncomingInviteStatus(actionLabel);
+    try {
+        const response = await fetch('/von/api/shared_conversations/invites/respond', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ invite_id: inviteId, action })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            setIncomingInviteStatus(data?.error || 'Invite update failed.');
+            return;
+        }
+
+        invite.status = data?.invite?.status || invite.status;
+        setIncomingInviteStatus('');
+        if (action === 'accept') {
+            showToast('Invite accepted. The conversation will appear in your list.');
+            scheduleChatSessionTabsRefresh(true);
+        } else {
+            showToast('Invite declined.');
+        }
+        await loadIncomingInvites({ silent: true });
+    } catch (e) {
+        console.error('Invite response error', e);
+        setIncomingInviteStatus('Invite update failed.');
+    }
+}
+
+function openIncomingInvitesPopup() {
+    setIncomingInvitePopupVisible(true);
+    void loadIncomingInvites();
+}
+
+function closeIncomingInvitesPopup() {
+    setIncomingInvitePopupVisible(false);
+    setIncomingInviteStatus('');
+}
+
+function startIncomingInvitePolling() {
+    if (incomingInvitePollTimerId) return;
+    incomingInvitePollTimerId = window.setInterval(() => {
+        void loadIncomingInvites({ silent: true });
+    }, INCOMING_INVITE_POLL_INTERVAL_MS);
+}
+
 export function initializeChatTab() {
     console.log("Initializing chat tab...");
 
@@ -5864,6 +6234,8 @@ export function initializeChatTab() {
     const inviteSearchInput = document.getElementById('inviteSearchInput');
     const inviteProgrammeFilter = document.getElementById('inviteProgrammeFilter');
     const inviteProjectFilter = document.getElementById('inviteProjectFilter');
+    const incomingInvitesButton = document.getElementById('incomingInvitesBtn');
+    const incomingInvitesCloseButton = document.getElementById('closeIncomingInvites');
 
     if (!sendButton || !resetButton || !promptInput) {
         console.error("Chat tab elements not found");
@@ -6000,6 +6372,16 @@ export function initializeChatTab() {
     if (inviteProjectFilter) {
         inviteProjectFilter.addEventListener('change', renderInviteesList);
     }
+
+    if (incomingInvitesButton) {
+        incomingInvitesButton.addEventListener('click', openIncomingInvitesPopup);
+    }
+    if (incomingInvitesCloseButton) {
+        incomingInvitesCloseButton.addEventListener('click', closeIncomingInvitesPopup);
+    }
+
+    void loadIncomingInvites({ silent: true });
+    startIncomingInvitePolling();
 
     // Load annotation toggle state from localStorage (default: false)
     const savedState = localStorage.getItem('annotationToggleEnabled');
@@ -7515,23 +7897,37 @@ function handleExportConversationJson() {
         turns: []
     };
 
-    // Convert Map entries to array and sort by turnId timestamp
-    const sortedEntries = Array.from(llmDebugData.entries()).sort((a, b) => {
-        // Extract timestamp from turnId (format: 'a-1234567890' or 'u-1234567890')
-        const getTimestamp = (turnId) => {
-            const parts = turnId.split('-');
-            return parts.length > 1 ? parseInt(parts[1], 10) : 0;
-        };
-        return getTimestamp(a[0]) - getTimestamp(b[0]);
-    });
+    if (llmDebugData.size > 0) {
+        // Convert Map entries to array and sort by turnId timestamp
+        const sortedEntries = Array.from(llmDebugData.entries()).sort((a, b) => {
+            // Extract timestamp from turnId (format: 'a-1234567890' or 'u-1234567890')
+            const getTimestamp = (turnId) => {
+                const parts = turnId.split('-');
+                return parts.length > 1 ? parseInt(parts[1], 10) : 0;
+            };
+            return getTimestamp(a[0]) - getTimestamp(b[0]);
+        });
 
-    // Build conversation data
-    for (const [turnId, debugData] of sortedEntries) {
-        const enrichedDebugData = enrichDebugDataWithSpeechPlanning(debugData, { turnId });
-        conversationData.turns.push({
-            turn_id: turnId,
-            timestamp: new Date((debugData && debugData.timestamp) || Date.now()).toISOString(),
-            debug_data: enrichedDebugData
+        // Build conversation data
+        for (const [turnId, debugData] of sortedEntries) {
+            const enrichedDebugData = enrichDebugDataWithSpeechPlanning(debugData, { turnId });
+            conversationData.turns.push({
+                turn_id: turnId,
+                timestamp: new Date((debugData && debugData.timestamp) || Date.now()).toISOString(),
+                debug_data: enrichedDebugData
+            });
+        }
+    } else if (Array.isArray(transcriptTurns) && transcriptTurns.length > 0) {
+        conversationData.metadata.total_turns = transcriptTurns.length;
+        conversationData.metadata.source = 'transcript';
+        transcriptTurns.forEach((turn, index) => {
+            const timestamp = turn.timestamp ? new Date(turn.timestamp).toISOString() : new Date().toISOString();
+            conversationData.turns.push({
+                turn_id: `t-${index + 1}`,
+                timestamp,
+                role: turn.sender || null,
+                content: turn.message ?? ''
+            });
         });
     }
 

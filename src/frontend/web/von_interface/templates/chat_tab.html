@@ -9,6 +9,11 @@
           title="Invite someone to this conversation" aria-label="Invite to conversation">
           <span class="btn-icon">👥</span>
         </button>
+        <button id="incomingInvitesBtn" class="chat-export-btn" type="button" title="View conversation invites"
+          aria-label="View conversation invites">
+          <span class="btn-icon">📨</span>
+          <span id="incomingInvitesBadge" class="invite-badge hidden" aria-hidden="true"></span>
+        </button>
         <button id="exportConversationMarkdownBtn" class="chat-export-btn" type="button"
           title="Copy conversation as Markdown formatted transcript" aria-label="Export conversation as Markdown">
           <span class="btn-icon">MD</span>
@@ -148,6 +153,17 @@
       </div>
       <div id="inviteList" class="invite-list" role="list"></div>
       <div id="inviteStatus" class="invite-status" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <div id="incomingInvitesPopup" class="llm-popup hidden invite-popup" aria-hidden="true">
+    <div class="llm-popup-header">
+      <span>Conversation invites</span>
+      <button id="closeIncomingInvites" class="btn-mini" title="Close">✕</button>
+    </div>
+    <div class="llm-popup-body">
+      <div id="incomingInvitesList" class="invite-list" role="list"></div>
+      <div id="incomingInvitesStatus" class="invite-status" aria-live="polite"></div>
     </div>
   </div>
 </div>
