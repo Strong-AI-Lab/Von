@@ -875,6 +875,9 @@ def add_message_to_history(
     session_id: str,
     message: Dict[str, Any],
     llm_debug_data: Optional[Dict[str, Any]] = None,
+    *,
+    broadcast_to_shared: Optional[bool] = None,
+    exclude_user_from_broadcast: Optional[str] = None,
 ) -> None:
     """
     Adds a message to the chat history for a specific user and session.
@@ -884,6 +887,9 @@ def add_message_to_history(
         session_id: The session UUID
         message: Message dictionary with 'role' and 'content' keys
         llm_debug_data: Optional LLM debug information (model, context stats, tool usage, etc.)
+        broadcast_to_shared: If True, broadcast the turn to SSE subscribers.
+            If None (default), auto-detect based on whether the session has subscribers.
+        exclude_user_from_broadcast: User ID to exclude from broadcast (typically the author)
     """
     if not user_id or not session_id:
         raise ChatHistoryServiceError("user_id and session_id are required.")
@@ -1013,6 +1019,62 @@ def add_message_to_history(
                     )
                 except Exception:
                     pass
+
+        # Broadcast to shared conversation subscribers (JVNAUTOSCI-1002)
+        # Auto-detect if session has subscribers when broadcast_to_shared is None
+        should_broadcast = broadcast_to_shared
+        if should_broadcast is None:
+            try:
+                from .shared_conversation_stream_service import get_stream_service
+
+                should_broadcast = (
+                    get_stream_service().get_subscriber_count(session_id) > 0
+                )
+            except Exception:
+                should_broadcast = False
+
+        if should_broadcast:
+            try:
+                from .shared_conversation_stream_service import broadcast_shared_turn
+
+                role = message.get("role", "unknown")
+                content = message.get("content", "")
+                # Generate a turn_id from session+timestamp for deduplication
+                turn_id = (
+                    f"{session_id}_{message_with_timestamp['timestamp'].isoformat()}"
+                )
+                notified = broadcast_shared_turn(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    speaker=role,
+                    content=content,
+                    created_at=message_with_timestamp.get("timestamp"),
+                    author_user_id=author_user_id,
+                    exclude_user_id=exclude_user_from_broadcast,
+                )
+
+                # Log episode for cross-user delivery (JVNAUTOSCI-1002)
+                if notified > 0:
+                    try:
+                        from .episode_logging_service import log_episode
+
+                        log_episode(
+                            episode_type="shared_conversation_turn_broadcast",
+                            actor_user_id=author_user_id or user_id,
+                            session_id=session_id,
+                            payload={
+                                "turn_id": turn_id,
+                                "speaker": role,
+                                "recipients_notified": notified,
+                                "content_length": len(content) if content else 0,
+                            },
+                            status="delivered",
+                        )
+                    except Exception:
+                        pass  # Episode logging is best-effort
+            except Exception as e:
+                # Best effort - don't fail the main operation
+                logger.warning(f"Failed to broadcast shared turn: {e}")
 
     except PyMongoError as e:
         logger.error(f"Error adding message to history: {e}", exc_info=True)

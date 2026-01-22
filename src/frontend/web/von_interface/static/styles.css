@@ -1753,6 +1753,43 @@ h1 {
     border-radius: 5px;
 }
 
+/* JVNAUTOSCI-1002: Shared conversation remote message styles */
+.shared-remote-message {
+    border-left: 3px solid #9c27b0;
+    /* Purple indicator for shared messages */
+}
+
+.shared-remote-message.user-message {
+    background-color: #7b1fa2;
+    /* Darker purple for shared user messages */
+}
+
+.shared-message-source {
+    font-size: 0.75rem;
+    opacity: 0.8;
+    margin-bottom: 4px;
+    font-style: italic;
+}
+
+.new-shared-messages-indicator {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: linear-gradient(135deg, #9c27b0, #7b1fa2);
+    color: white;
+    padding: 8px 16px;
+    text-align: center;
+    cursor: pointer;
+    font-size: 0.85rem;
+    border-radius: 0 0 8px 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    display: none;
+}
+
+.new-shared-messages-indicator:hover {
+    background: linear-gradient(135deg, #7b1fa2, #6a1b9a);
+}
+
 /* Dropdown */
 select {
     background-color: #fff;

@@ -75,6 +75,14 @@ let incomingInviteState = {
 const INCOMING_INVITE_POLL_INTERVAL_MS = 60_000;
 let incomingInvitePollTimerId = null;
 
+// JVNAUTOSCI-1002: SSE streaming for shared conversation turn updates
+let sharedConversationEventSource = null;
+let sharedConversationSessionId = null;
+const seenSharedTurnIds = new Set();
+const SSE_RECONNECT_BASE_DELAY_MS = 1000;
+const SSE_RECONNECT_MAX_DELAY_MS = 30000;
+let sseReconnectAttempts = 0;
+
 // Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
 // Stored locally only; intended to feed future introspection.
 const LS_CHAT_TABS_LOAD_STATS = 'von:chatSessionTabsLoadStats';
@@ -4914,6 +4922,11 @@ async function switchToChatSession(sessionId) {
     const previousSessionId = activeChatSessionId;
     const previousSessionName = activeChatSessionName;
 
+    // JVNAUTOSCI-1002: Close SSE stream when switching away from session
+    if (previousSessionId && previousSessionId !== sid) {
+        closeSharedConversationStream();
+    }
+
     // Best-effort: flush any pending metadata save before switching away.
     if (previousSessionId) {
         void _flushPendingChatSessionLinksSave(previousSessionId);
@@ -5059,6 +5072,9 @@ async function switchToChatSession(sessionId) {
         document.dispatchEvent(new CustomEvent('von:contextReset', {
             detail: { trigger: 'history_session_switch', session_id: sid, session_name: data?.session_name || targetName }
         }));
+
+        // JVNAUTOSCI-1002: Start SSE stream if this is a shared conversation
+        startSharedConversationStream(sid);
 
         const promptInput = document.getElementById('promptInput');
         if (promptInput) {
@@ -6247,6 +6263,240 @@ function openIncomingInvitesPopup() {
 function closeIncomingInvitesPopup() {
     setIncomingInvitePopupVisible(false);
     setIncomingInviteStatus('');
+}
+
+// JVNAUTOSCI-1002: SSE streaming for shared conversation turn updates
+/**
+ * Check if the current session is a shared conversation (either owner with accepted invites
+ * or invitee with an accepted invite).
+ */
+function isSharedConversationSession(sessionId) {
+    if (!sessionId) return false;
+
+    // Check if we have any accepted invites for this session (as invitee)
+    const acceptedInvites = Array.isArray(incomingInviteState?.acceptedInvites)
+        ? incomingInviteState.acceptedInvites
+        : [];
+    const isInvitee = acceptedInvites.some(
+        invite => invite?.session_id === sessionId
+    );
+    if (isInvitee) return true;
+
+    // Check if this session has shared_owner_user_id set (indicates shared)
+    const cachedSession = sessionTabsCache.find(
+        s => String(s?.session_id || '') === sessionId
+    );
+    if (cachedSession?.shared_owner_user_id) return true;
+
+    return false;
+}
+
+/**
+ * Close any existing SSE connection for shared conversation streaming.
+ */
+function closeSharedConversationStream() {
+    if (sharedConversationEventSource) {
+        console.log('[chatTab] Closing shared conversation SSE stream');
+        sharedConversationEventSource.close();
+        sharedConversationEventSource = null;
+    }
+    sharedConversationSessionId = null;
+    sseReconnectAttempts = 0;
+}
+
+/**
+ * Start SSE stream for a shared conversation session.
+ * Only connects if the session is a shared conversation.
+ */
+function startSharedConversationStream(sessionId) {
+    if (!sessionId) return;
+
+    // Close any existing connection
+    closeSharedConversationStream();
+
+    // Only connect if this is a shared conversation
+    if (!isSharedConversationSession(sessionId)) {
+        console.log('[chatTab] Session is not shared, skipping SSE stream', { sessionId });
+        return;
+    }
+
+    console.log('[chatTab] Starting shared conversation SSE stream', { sessionId });
+    sharedConversationSessionId = sessionId;
+    seenSharedTurnIds.clear();
+
+    const url = `/von/api/shared_conversations/stream?session_id=${encodeURIComponent(sessionId)}`;
+    const eventSource = new EventSource(url);
+    sharedConversationEventSource = eventSource;
+
+    eventSource.onopen = () => {
+        console.log('[chatTab] SSE stream connected', { sessionId });
+        sseReconnectAttempts = 0;
+    };
+
+    eventSource.onerror = (event) => {
+        console.warn('[chatTab] SSE stream error', { sessionId, readyState: eventSource.readyState });
+
+        // EventSource will automatically try to reconnect, but we handle manual reconnect
+        // for cases where the connection is closed
+        if (eventSource.readyState === EventSource.CLOSED) {
+            eventSource.close();
+            sharedConversationEventSource = null;
+
+            // Check if we should reconnect (still on same session and still shared)
+            if (sharedConversationSessionId === sessionId && activeChatSessionId === sessionId) {
+                sseReconnectAttempts++;
+                const delay = Math.min(
+                    SSE_RECONNECT_BASE_DELAY_MS * Math.pow(2, sseReconnectAttempts - 1),
+                    SSE_RECONNECT_MAX_DELAY_MS
+                );
+                console.log('[chatTab] SSE reconnecting in', delay, 'ms, attempt', sseReconnectAttempts);
+                setTimeout(() => {
+                    if (activeChatSessionId === sessionId && isSharedConversationSession(sessionId)) {
+                        startSharedConversationStream(sessionId);
+                    }
+                }, delay);
+            }
+        }
+    };
+
+    // Handle user_turn and assistant_turn events
+    eventSource.addEventListener('user_turn', (event) => {
+        handleSharedTurnEvent(sessionId, event, 'user');
+    });
+
+    eventSource.addEventListener('assistant_turn', (event) => {
+        handleSharedTurnEvent(sessionId, event, 'assistant');
+    });
+}
+
+/**
+ * Handle an incoming turn event from the SSE stream.
+ */
+function handleSharedTurnEvent(expectedSessionId, event, speaker) {
+    // Ignore if we've switched to a different session
+    if (activeChatSessionId !== expectedSessionId) {
+        console.log('[chatTab] Ignoring shared turn for non-active session', { expectedSessionId, activeChatSessionId });
+        return;
+    }
+
+    let data;
+    try {
+        data = JSON.parse(event.data);
+    } catch (e) {
+        console.warn('[chatTab] Failed to parse SSE event data', e);
+        return;
+    }
+
+    const { turn_id, content, author_user_id, created_at, history_index } = data;
+
+    // Dedupe by turn_id
+    if (turn_id && seenSharedTurnIds.has(turn_id)) {
+        console.log('[chatTab] Duplicate shared turn, skipping', { turn_id });
+        return;
+    }
+    if (turn_id) {
+        seenSharedTurnIds.add(turn_id);
+    }
+
+    console.log('[chatTab] Received shared turn', { turn_id, speaker, content_length: content?.length, author_user_id });
+
+    // Append the message to the transcript
+    appendSharedTurnToTranscript({
+        role: speaker,
+        content: content || '',
+        author_user_id,
+        timestamp: created_at,
+        history_index
+    });
+}
+
+/**
+ * Append a remotely-received turn to the chat transcript.
+ */
+function appendSharedTurnToTranscript(message) {
+    const scrollableField = document.getElementById('scrollableField');
+    if (!scrollableField) return;
+
+    const { role, content, author_user_id } = message;
+
+    // Create message element similar to existing rendering
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `chat-message ${role === 'user' ? 'user-message' : 'assistant-message'} shared-remote-message`;
+
+    // Add indicator that this is from another user
+    const sourceIndicator = document.createElement('div');
+    sourceIndicator.className = 'shared-message-source';
+    if (role === 'user' && author_user_id) {
+        // Extract user name from concept ID if possible
+        const userName = author_user_id.startsWith('#V#')
+            ? author_user_id.slice(3).replace(/_/g, ' ')
+            : author_user_id;
+        sourceIndicator.textContent = `From: ${userName}`;
+    } else if (role === 'assistant') {
+        sourceIndicator.textContent = 'Response (shared)';
+    }
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+
+    // Render markdown if available, otherwise plain text
+    if (typeof window.renderMarkdown === 'function') {
+        contentDiv.innerHTML = window.renderMarkdown(content || '');
+    } else {
+        contentDiv.textContent = content || '';
+    }
+
+    messageDiv.appendChild(sourceIndicator);
+    messageDiv.appendChild(contentDiv);
+
+    // Check if user is scrolled to bottom before appending
+    const wasAtBottom = scrollableField.scrollHeight - scrollableField.scrollTop <= scrollableField.clientHeight + 50;
+
+    scrollableField.appendChild(messageDiv);
+
+    // Auto-scroll if user was at bottom
+    if (wasAtBottom) {
+        scrollableField.scrollTop = scrollableField.scrollHeight;
+    } else {
+        // Show "new messages" indicator
+        showNewSharedMessagesIndicator();
+    }
+}
+
+/**
+ * Show indicator that new messages arrived while scrolled up.
+ */
+function showNewSharedMessagesIndicator() {
+    let indicator = document.getElementById('newSharedMessagesIndicator');
+    if (!indicator) {
+        indicator = document.createElement('div');
+        indicator.id = 'newSharedMessagesIndicator';
+        indicator.className = 'new-shared-messages-indicator';
+        indicator.textContent = 'New messages from shared conversation';
+        indicator.addEventListener('click', () => {
+            const scrollableField = document.getElementById('scrollableField');
+            if (scrollableField) {
+                scrollableField.scrollTop = scrollableField.scrollHeight;
+            }
+            indicator.style.display = 'none';
+        });
+
+        const scrollableField = document.getElementById('scrollableField');
+        if (scrollableField?.parentElement) {
+            scrollableField.parentElement.insertBefore(indicator, scrollableField);
+        }
+    }
+    indicator.style.display = 'block';
+}
+
+/**
+ * Hide the new messages indicator (e.g., when user scrolls to bottom).
+ */
+function hideNewSharedMessagesIndicator() {
+    const indicator = document.getElementById('newSharedMessagesIndicator');
+    if (indicator) {
+        indicator.style.display = 'none';
+    }
 }
 
 function startIncomingInvitePolling() {
