@@ -460,7 +460,11 @@ async function fetchConceptMeta(fullId) {
                     node?.node?.display_name ||
                     node?.node?.name ||
                     fullId;
-                const kind = node?.kind || node?.node?.kind || 'type';
+                const computedKind = node?.computed_kind || node?.node?.computed_kind || null;
+                let kind = node?.kind || node?.node?.kind || computedKind || 'type';
+                if (computedKind && (kind === 'type' || !kind)) {
+                    kind = computedKind;
+                }
                 const meta = { name: String(name), kind: String(kind) };
                 promptConceptMetaCache.set(fullId, meta);
                 return meta;
