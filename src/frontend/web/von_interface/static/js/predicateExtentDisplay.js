@@ -8,10 +8,44 @@
 import { createOrActivateConceptTab } from './dynamicTabs.js';
 import { fetchPredicateExtent } from './predicateUtils.js';
 import { selectBestNameForContext } from './utils/nameSelection.js';
+import { showToast } from './utils/toast.js';
 
 const CONCEPT_SEARCH_API = '/vontology/api/vontology/search';
 const CONCEPT_SEARCH_LIMIT = 8;
 const CONCEPT_SEARCH_DEBOUNCE_MS = 200;
+
+async function copyConceptIdToClipboard(conceptId) {
+    const value = String(conceptId ?? '').trim();
+    if (!value) return;
+
+    try {
+        if (navigator?.clipboard?.writeText) {
+            await navigator.clipboard.writeText(value);
+            showToast('Concept ID copied');
+            return;
+        }
+    } catch (_) {
+        // Fall through to legacy approach.
+    }
+
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+        document.execCommand('copy');
+        showToast('Concept ID copied');
+    } catch (_) {
+        showToast('Copy failed', 'error');
+    } finally {
+        try { textarea.remove(); } catch (_) { }
+    }
+}
 
 /**
  * Cache for concept display names to avoid repeated fetches.
@@ -422,6 +456,11 @@ export function createPredicateExtentDisplay(conceptId, container) {
                     e.stopPropagation(); // Prevent row selection
                     createOrActivateConceptTab(conceptId, displayName, true);
                 };
+                link.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void copyConceptIdToClipboard(conceptId);
+                });
 
                 cell.appendChild(link);
             } else {
@@ -478,6 +517,11 @@ export function createPredicateExtentDisplay(conceptId, container) {
                             e.stopPropagation(); // Prevent row selection
                             createOrActivateConceptTab(obj, displayName, true);
                         };
+                        link.addEventListener('contextmenu', (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            void copyConceptIdToClipboard(obj);
+                        });
 
                         objectCell.appendChild(link);
                     } else {

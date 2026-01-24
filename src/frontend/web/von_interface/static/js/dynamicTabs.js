@@ -5633,6 +5633,15 @@ async function renderRelationships(conceptId, suffix, kind) {
                         console.warn('[dynamicTabs] Failed to open related concept tab', e);
                     }
                 });
+                name.addEventListener('contextmenu', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    try {
+                        copyConceptIdToClipboard(norm.id);
+                    } catch (err) {
+                        console.warn('[dynamicTabs] Failed to copy concept ID', err);
+                    }
+                });
                 const remove = document.createElement('button');
                 remove.type = 'button';
                 remove.className = 'chip-remove';
@@ -5823,6 +5832,15 @@ async function renderRelationships(conceptId, suffix, kind) {
                         // Use backend's kind from metadata
                         const evt = new CustomEvent('open-concept-tab', { detail: { conceptId: norm.id, conceptName: norm.name || norm.id, kind: metadata.kind, activate: true } });
                         document.dispatchEvent(evt);
+                    });
+                    name.addEventListener('contextmenu', (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        try {
+                            copyConceptIdToClipboard(norm.id);
+                        } catch (err) {
+                            console.warn('[dynamicTabs] Failed to copy concept ID', err);
+                        }
                     });
                 }
 

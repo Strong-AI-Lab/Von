@@ -3397,6 +3397,35 @@ export async function performVontologySearch(q) {
   }
 }
 
+async function copySearchConceptIdToClipboard(conceptId) {
+  const value = String(conceptId ?? '');
+  if (!value) return;
+
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return;
+    }
+  } catch (_) {
+    // Fall through to legacy approach.
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  try {
+    document.execCommand('copy');
+  } finally {
+    try { textarea.remove(); } catch (_) { }
+  }
+}
+
 function renderSearchResults(items) {
   const results = elements.vontologySearchResults;
   if (!results) return;
@@ -3438,6 +3467,15 @@ function renderSearchResults(items) {
     row.addEventListener('mouseenter', () => setActiveIndex(idx));
     row.addEventListener('mouseleave', () => setActiveIndex(-1));
     row.addEventListener('click', () => selectSearchItem(it));
+    row.addEventListener('contextmenu', (e) => {
+      try {
+        e.preventDefault();
+        e.stopPropagation();
+        copySearchConceptIdToClipboard(it.id);
+      } catch (_) {
+        // no-op
+      }
+    });
     list.appendChild(row);
   });
   results.appendChild(list);

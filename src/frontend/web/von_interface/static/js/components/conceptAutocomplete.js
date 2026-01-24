@@ -212,8 +212,8 @@ function renderDropdown(results) {
             kindBadge.style.backgroundColor = '#cfe2ff';
             kindBadge.style.color = '#084298';
         } else if (result.kind === 'predicate') {
-            kindBadge.style.backgroundColor = '#fff3cd';
-            kindBadge.style.color = '#997404';
+            kindBadge.style.backgroundColor = '#f3e8ff';
+            kindBadge.style.color = '#6b21a8';
         }
 
         item.appendChild(nameSpan);
