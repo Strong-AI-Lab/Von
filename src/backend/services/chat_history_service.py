@@ -1039,6 +1039,46 @@ def add_message_to_history(
 
                 role = message.get("role", "unknown")
                 content = message.get("content", "")
+                history_index = None
+                try:
+                    query = build_chat_history_query(
+                        user_id=user_id,
+                        session_id=session_id,
+                        namespace=ns,
+                        include_legacy=True,
+                    )
+                    history_length = None
+                    if hasattr(chat_history_coll, "aggregate") and callable(
+                        getattr(chat_history_coll, "aggregate")
+                    ):
+                        try:
+                            doc = next(
+                                chat_history_coll.aggregate(
+                                    [
+                                        {"$match": query},
+                                        {
+                                            "$project": {
+                                                "history_length": {"$size": "$history"}
+                                            }
+                                        },
+                                    ]
+                                ),
+                                None,
+                            )
+                        except Exception:
+                            doc = None
+                        if doc and isinstance(doc.get("history_length"), int):
+                            history_length = doc["history_length"]
+                    if history_length is None:
+                        doc = chat_history_coll.find_one(query, {"history": 1})
+                        if doc is not None:
+                            history = doc.get("history") or []
+                            if isinstance(history, list):
+                                history_length = len(history)
+                    if isinstance(history_length, int) and history_length > 0:
+                        history_index = history_length - 1
+                except Exception:
+                    history_index = None
                 # Generate a turn_id from session+timestamp for deduplication
                 turn_id = (
                     f"{session_id}_{message_with_timestamp['timestamp'].isoformat()}"
@@ -1050,6 +1090,7 @@ def add_message_to_history(
                     content=content,
                     created_at=message_with_timestamp.get("timestamp"),
                     author_user_id=author_user_id,
+                    history_index=history_index,
                     exclude_user_id=exclude_user_from_broadcast,
                 )
 

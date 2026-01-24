@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+import types
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -73,6 +74,7 @@ class TestSharedConversationStreamService:
 
             # Check the event was queued
             event = subscriber.event_queue.get_nowait()
+            assert event is not None
             assert event.turn_id == "turn-1"
             assert event.speaker == "user"
             assert event.content == "Hello, world!"
@@ -135,6 +137,7 @@ class TestSharedConversationStreamService:
 
             # Should only have one event
             event1 = subscriber.event_queue.get_nowait()
+            assert event1 is not None
             assert event1.content == "First"
             assert subscriber.event_queue.empty()
         finally:
@@ -199,6 +202,7 @@ class TestBroadcastSharedTurnConvenience:
 
             assert notified == 1
             event = subscriber.event_queue.get_nowait()
+            assert event is not None
             assert event.content == "Via convenience function"
         finally:
             service.unsubscribe(subscriber)
@@ -226,6 +230,142 @@ class TestSubscriberState:
             assert "state-turn-1" in subscriber.seen_turn_ids
         finally:
             service.shutdown()
+
+
+@pytest.fixture
+def app_client(monkeypatch):
+    # Use mongomock so tests do not require a running Mongo.
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
+
+    # Stub Google auth deps pulled in by utils_flask -> auth_routes imports.
+    import sys
+
+    fake_flow_module = types.ModuleType("google_auth_oauthlib.flow")
+
+    class _DummyFlow:
+        def __init__(self, *args, **kwargs):
+            self.credentials = types.SimpleNamespace(id_token="dummy-token")
+            self.redirect_uri = kwargs.get("redirect_uri")
+            self.client_config = {"web": {"redirect_uris": [self.redirect_uri]}}
+
+        @classmethod
+        def from_client_config(cls, *args, **kwargs):
+            return cls(**kwargs)
+
+        def authorization_url(self, *args, **kwargs):
+            return "https://auth.example", "state-token"
+
+        def fetch_token(self, *args, **kwargs):
+            return None
+
+    fake_flow_module.Flow = _DummyFlow  # type: ignore[attr-defined]
+    sys.modules["google_auth_oauthlib"] = types.ModuleType("google_auth_oauthlib")
+    sys.modules["google_auth_oauthlib"].flow = fake_flow_module  # type: ignore[attr-defined]
+    sys.modules["google_auth_oauthlib.flow"] = fake_flow_module
+
+    fake_id_token_module = types.ModuleType("google.oauth2.id_token")
+    fake_id_token_module.verify_oauth2_token = lambda *args, **kwargs: {  # type: ignore[attr-defined]
+        "sub": "dummy-user"
+    }
+
+    fake_credentials_module = types.ModuleType("google.oauth2.credentials")
+
+    class _DummyCredentials:
+        def __init__(self, id_token: str = "dummy-token"):
+            self.id_token = id_token
+
+    fake_credentials_module.Credentials = _DummyCredentials  # type: ignore[attr-defined]
+
+    fake_service_account_module = types.ModuleType("google.oauth2.service_account")
+
+    class _DummyServiceAccountCredentials:
+        def __init__(self, *args, **kwargs):
+            self.project_id = kwargs.get("project_id")
+
+    fake_service_account_module.Credentials = _DummyServiceAccountCredentials  # type: ignore[attr-defined]
+
+    fake_oauth2_package = types.ModuleType("google.oauth2")
+    fake_oauth2_package.id_token = fake_id_token_module  # type: ignore[attr-defined]
+    fake_oauth2_package.credentials = fake_credentials_module  # type: ignore[attr-defined]
+    fake_oauth2_package.service_account = fake_service_account_module  # type: ignore[attr-defined]
+
+    sys.modules["google.oauth2"] = fake_oauth2_package
+    sys.modules["google.oauth2.id_token"] = fake_id_token_module
+    sys.modules["google.oauth2.credentials"] = fake_credentials_module
+    sys.modules["google.oauth2.service_account"] = fake_service_account_module
+
+    import src.backend.server.utils_flask as utils_flask
+
+    monkeypatch.setattr(utils_flask, "ensure_monitor_started", lambda: None)
+    monkeypatch.setattr(
+        utils_flask,
+        "prompt_concept_health_status",
+        lambda: {"available": True, "source_field": "stub"},
+    )
+
+    app = utils_flask.create_flask_app(
+        list_models_func=lambda: ["dummy-model"],
+        generate_func=lambda prompt, context, model: "ok",
+    )
+    app.config["TESTING"] = True
+
+    with app.test_client() as client:
+        yield app, client
+
+
+class TestSharedConversationStreamRoute:
+    """Route-level tests for the SSE stream endpoint."""
+
+    def test_stream_requires_authentication(self, app_client, monkeypatch):
+        _, client = app_client
+        monkeypatch.setattr(
+            "src.backend.security.access_control.get_effective_user_concept_id",
+            lambda: None,
+        )
+
+        resp = client.get("/von/api/shared_conversations/stream?session_id=test")
+
+        assert resp.status_code == 401
+        assert resp.get_json()["error"] == "Not authenticated"
+
+    def test_stream_rejects_unauthorised_user(self, app_client, monkeypatch):
+        _, client = app_client
+        monkeypatch.setattr(
+            "src.backend.security.access_control.get_effective_user_concept_id",
+            lambda: "#V#user_a",
+        )
+        monkeypatch.setattr(
+            "src.backend.services.shared_conversation_service.resolve_conversation_owner",
+            lambda **_kwargs: "#V#owner",
+        )
+        monkeypatch.setattr(
+            "src.backend.services.shared_conversation_service.get_accepted_invite_for_user_session",
+            lambda **_kwargs: None,
+        )
+
+        resp = client.get("/von/api/shared_conversations/stream?session_id=test")
+
+        assert resp.status_code == 403
+        assert resp.get_json()["error"] == "Not authorized for this conversation"
+
+    def test_stream_allows_owner(self, app_client, monkeypatch):
+        _, client = app_client
+        monkeypatch.setattr(
+            "src.backend.security.access_control.get_effective_user_concept_id",
+            lambda: "#V#owner",
+        )
+        monkeypatch.setattr(
+            "src.backend.services.shared_conversation_service.resolve_conversation_owner",
+            lambda **_kwargs: "#V#owner",
+        )
+
+        resp = client.get(
+            "/von/api/shared_conversations/stream?session_id=test",
+            buffered=False,
+        )
+
+        assert resp.status_code == 200
+        assert resp.mimetype == "text/event-stream"
 
     def test_last_event_at_updated_on_broadcast(self):
         """Test that last_event_at is updated when event is queued."""
