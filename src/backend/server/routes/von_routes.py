@@ -4955,15 +4955,29 @@ def history_sessions():
             resolve_conversation_owner,
         )
 
+        organisation_concept_id = _normalise_concept_id(
+            session.get("organisation_concept_id")
+        )
         namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        include_legacy = True
         sessions = chat_history_service.get_chat_history_session_summaries(
             user_concept_id,
             limit=limit,
             namespace=namespace,
+            include_legacy=include_legacy,
             summary_mode=summary_mode,
         )
 
         shared_invites = list_accepted_invites_for_user(user_concept_id=user_concept_id)
+        if organisation_concept_id:
+            shared_invites = [
+                invite
+                for invite in shared_invites
+                if (
+                    _normalise_concept_id(invite.get("organisation_concept_id"))
+                    in (None, organisation_concept_id)
+                )
+            ]
         invite_by_session: dict[str, dict] = {}
         for invite in shared_invites:
             if not isinstance(invite, dict):
@@ -5647,6 +5661,101 @@ def set_chat_session():
         return jsonify({"error": str(e)}), 500
 
 
+@von_bp.route("/api/session/assign_chat_session_org", methods=["POST"])
+def assign_chat_session_org():
+    """Assign a chat session to the current organisation namespace if missing."""
+    try:
+        user_concept_id = session.get("user_concept_id")
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        organisation_concept_id = _normalise_concept_id(
+            session.get("organisation_concept_id")
+        )
+        if not organisation_concept_id:
+            return jsonify({"error": "No organisation context"}), 400
+
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return jsonify({"error": "session_id required"}), 400
+        session_id = session_id.strip()
+
+        coll = chat_history_service.get_chat_history_collection_service()
+        if coll is None:
+            return jsonify({"error": "Chat history unavailable"}), 503
+
+        target_namespace = _derive_namespace_for_user_org(
+            user_concept_id, organisation_concept_id
+        )
+        if not target_namespace:
+            return jsonify({"error": "Unable to derive namespace"}), 500
+
+        query = chat_history_service.build_chat_history_query(
+            user_id=user_concept_id,
+            session_id=session_id,
+            namespace=None,
+            include_legacy=True,
+        )
+        doc = coll.find_one(query, {"namespace": 1, "organisation_concept_id": 1})
+        if not isinstance(doc, dict):
+            return jsonify({"error": "Session not found"}), 404
+
+        existing_namespace = doc.get("namespace")
+        if isinstance(existing_namespace, str) and existing_namespace.strip():
+            if existing_namespace.strip() != target_namespace:
+                return (
+                    jsonify(
+                        {
+                            "error": "Session already assigned to a different organisation",
+                            "namespace": existing_namespace,
+                        }
+                    ),
+                    409,
+                )
+            return jsonify({"status": "ok", "namespace": existing_namespace}), 200
+
+        existing_org = _normalise_concept_id(doc.get("organisation_concept_id"))
+        if existing_org and existing_org != organisation_concept_id:
+            return (
+                jsonify(
+                    {
+                        "error": "Session already assigned to a different organisation",
+                        "organisation_concept_id": existing_org,
+                    }
+                ),
+                409,
+            )
+
+        result = coll.update_one(
+            {"_id": doc.get("_id")},
+            {
+                "$set": {
+                    "namespace": target_namespace,
+                    "organisation_concept_id": organisation_concept_id,
+                    "role_in_org": session.get("role_in_org"),
+                }
+            },
+        )
+
+        return (
+            jsonify(
+                {
+                    "status": "updated",
+                    "session_id": session_id,
+                    "namespace": target_namespace,
+                    "organisation_concept_id": organisation_concept_id,
+                    "matched": bool(getattr(result, "matched_count", 0) > 0),
+                    "updated": bool(getattr(result, "modified_count", 0) > 0),
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error assigning chat session org: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/api/session/create_chat_session", methods=["POST"])
 def create_chat_session():
     """Create and switch to a new named chat session for the current user."""
@@ -6161,6 +6270,22 @@ def get_shared_conversation_invitees():
             candidates.append(entry)
             invitee_ids.append(candidate_id)
 
+        debug_payload = None
+        if request.args.get("debug") == "1" and session.get("role_in_org") == "admin":
+            debug_payload = {
+                "user_concept_id": user_concept_id,
+                "organisation_concept_id": organisation_concept_id,
+                "membership_org_ids": [
+                    m.get("organisation_concept_id")
+                    for m in memberships.get("memberships", [])
+                    if m.get("organisation_concept_id")
+                ],
+                "org_member_count": len(org_members.get("members", [])),
+                "candidate_count": len(candidates),
+                "excluded_self": user_concept_id,
+                "session_links": session_links,
+            }
+
         status_map = get_invite_status_map(
             session_id=session_id, invitee_ids=invitee_ids
         )
@@ -6183,6 +6308,7 @@ def get_shared_conversation_invitees():
                     "total_count": len(candidates),
                     "session_links": session_links,
                     "ordered_by": "conversation_links",
+                    "debug": debug_payload,
                 }
             ),
             200,
@@ -6408,7 +6534,6 @@ def stream_shared_conversation():
             mimetype="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",  # Disable nginx buffering
             },
         )

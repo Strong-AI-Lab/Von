@@ -199,6 +199,20 @@ def get_effective_user_concept_id() -> Optional[str]:
     if session_user:
         return session_user
 
+    # Fallback: derive a candidate concept id from session user_id/email when
+    # user_concept_id is missing (e.g. older login flow or partial session).
+    session_slug = session.get("user_id") or session.get("user_email")
+    if isinstance(session_slug, str) and session_slug.strip():
+        slug = session_slug.strip()
+        if "@" in slug:
+            slug = slug.split("@", 1)[0]
+        candidate = f"#V#{slug}" if not slug.startswith("#V#") else slug
+        candidate = _normalise_concept_id(candidate)
+        if candidate:
+            validated = _validate_person_concept(candidate)
+            if validated:
+                return validated
+
     # Allow a guarded per-request override via headers for trusted automation
     # clients (legacy behaviour relied on this pathway). We validate that the
     # supplied identifier maps to an existing person concept before accepting it.
