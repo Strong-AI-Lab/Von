@@ -3,22 +3,57 @@
 ## Purpose
 Define a **Vontology-backed model policy** that selects models per workflow stage, with safe fallback chains and backward compatibility (single-model default).
 
-This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993).
+This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993) and JVNAUTOSCI-998.
 
-## Vontology representation (proposed)
+## Vontology representation (implemented)
 ### Core concepts
-- `#V#workflow_model_policy`
-- `#V#workflow_stage`
-- `#V#model_capability`
-- `#V#foundation_model`
+- `#V#workflow_model_policy` - Type for policy definitions
+- `#V#workflow_stage` - Type for stage definitions
+- `#V#workflow_stage_configuration` - Type for stage-specific configuration
+- `#V#model_capability` - (planned) capability annotations
+- `#V#foundation_model` - (planned) model definitions
+
+### Stage instances (created per JVNAUTOSCI-998)
+- `#V#planner_stage`
+- `#V#tool_call_stage`
+- `#V#tool_recovery_stage`
+- `#V#classifier_stage`
+- `#V#critic_stage`
+- `#V#screen_backfill_stage`
+- `#V#narration_stage`
+- `#V#summariser_stage`
+- `#V#buttonify_stage`
+
+### Stage configuration instances
+- `#V#default_planner_config`
+- `#V#default_tool_call_config`
+- `#V#default_tool_recovery_config`
+- `#V#default_classifier_config`
+- `#V#default_critic_config`
+- `#V#default_screen_backfill_config`
+- `#V#default_narration_config`
+- `#V#default_summariser_config`
+- `#V#default_buttonify_config`
 
 ### Predicates
-- `#V#applies_to_workflow_stage`
-- `#V#has_model_policy_json` (text relation)
-- `#V#has_fallback_model`
-- `#V#has_capability_tag`
-- `#V#has_cost_tier`
-- `#V#has_latency_tier`
+- `#V#applies_to_workflow_stage` - Links config → stage
+- `#V#has_stage_configuration` - Links policy → configs
+- `#V#has_model_policy_json` (text relation) - Legacy JSON storage
+- `#V#has_primary_model` (text relation) - Primary model for stage
+- `#V#has_fallback_model` (text relation) - Fallback model(s)
+- `#V#has_local_only_constraint` (text relation) - Local-only flag
+- `#V#has_max_fallback_hops` (text relation) - Global constraint
+- `#V#uses_prompt` - Links stage → prompt concept
+- `#V#has_capability_tag` - (planned)
+- `#V#has_cost_tier` - (planned)
+- `#V#has_latency_tier` - (planned)
+
+### Current linked prompts
+- `#V#buttonify_stage` → `#V#buttonify_prompt_v1`
+- `#V#narration_stage` → `#V#von_chat_narration_prompt_for_witbrock`
+- `#V#screen_backfill_stage` → `#V#von_screen_content_prompt_for_witbrock`
+- `#V#classifier_stage` → `#V#missing_tool_call_classifier_prompt`
+- `#V#tool_recovery_stage` → `#V#tool_call_repair_prompt`
 
 ### Required metadata
 - policy scope (global, organisation, user, programme/project)
@@ -120,7 +155,23 @@ This document supports JVNAUTOSCI-994 (subtask of JVNAUTOSCI-993).
 ## Compatibility note
 The first policy instance **must preserve current behaviour** by mapping all stages to the active LLM, with optional local-only fallbacks for low-risk classifier stages. No runtime behaviour changes are required until the orchestrator consumes this policy.
 
-## Next steps
-- Resolve canonical Vontology IDs for the above concepts/predicates.
-- Store the policy JSON as a text relation on `#V#workflow_model_policy`.
-- Add a brief note in the Conversation Turn Workflow doc describing the mapping (see [docs/Conversation Turn Workdlow.md](docs/Conversation%20Turn%20Workdlow.md)).
+## Implementation status (JVNAUTOSCI-998)
+Completed:
+- ✅ Resolved canonical Vontology IDs for concepts/predicates
+- ✅ Created stage instances and configurations in Vontology
+- ✅ Stored model/fallback/constraint relations on stage configs
+- ✅ Linked stages to prompt concepts where applicable
+- ✅ Added graph-based policy resolver (`workflow_policy_graph_service.py`)
+- ✅ Integrated graph resolver into orchestrator with JSON fallback
+- ✅ Added diagnostic endpoint `/admin/policy_comparison`
+
+Remaining:
+- Add tests for graph resolver
+- Update Conversation Turn Workflow doc (see [docs/Conversation Turn Workdlow.md](docs/Conversation%20Turn%20Workdlow.md))
+- Once graph parity is confirmed via diagnostics, consider deprecating JSON
+
+## Diagnostic endpoint
+`GET /admin/policy_comparison?policy_id=#V#default_workflow_model_policy`
+
+Returns a comparison report between JSON and graph representations, showing mismatches.
+

@@ -1959,6 +1959,27 @@ def create_flask_app(
         # Delegate to the blueprint handler
         return get_instance_counts()
 
+    # --- Workflow Model Policy Diagnostics (JVNAUTOSCI-998) ---
+    @app.route("/admin/policy_comparison")
+    def admin_policy_comparison():
+        """Compare JSON-based and graph-based workflow model policy representations.
+
+        Returns a diagnostic report showing differences between the two.
+        Used to validate graph parity before deprecating JSON fallback.
+        """
+        try:
+            from ..services.workflow_policy_graph_service import (
+                compare_policy_json_vs_graph,
+            )
+
+            policy_id = request.args.get(
+                "policy_id", "#V#default_workflow_model_policy"
+            )
+            report = compare_policy_json_vs_graph(policy_id)
+            return jsonify(report)
+        except Exception as e:
+            return jsonify(error=str(e), status="error"), 500
+
     # Optional background prewarm (model list + tree) to reduce first-request latency.
     # Placed AFTER all routes to ensure decorators complete before any internal
     # test_client calls. Skipped when running under pytest (env PYTEST_CURRENT_TEST) or
