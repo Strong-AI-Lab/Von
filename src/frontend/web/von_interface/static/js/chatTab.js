@@ -1,5 +1,5 @@
 // Chat Tab Module
-import { annotateTurn, getUserContext } from './apiService.js';
+import { annotateTurn, getUserContext, postJson } from './apiService.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { elements, renderSpanSuggestions } from './domUtils.js';
@@ -97,6 +97,9 @@ let activeHistoryRequest = null;
 let historyRequestCounter = 0;
 const HISTORY_SEGMENT_SIZE = 200;
 const HISTORY_TAIL_SEGMENT_SIZE = 30;
+
+let orgSwitchListenerBound = false;
+let authStatusListenerBound = false;
 
 // JVNAUTOSCI-942: Tool-use progress while "Thinking..."
 const DEFAULT_THINKING_TEXT = 'Thinking...';
@@ -3215,6 +3218,89 @@ function _deriveNameFromConceptId(conceptId) {
     return slug.replace(/_/g, ' ');
 }
 
+function _getStoredOrgContext() {
+    try {
+        const raw = localStorage.getItem('von_current_org');
+        if (raw) {
+            return JSON.parse(raw);
+        }
+        const alt = localStorage.getItem('von_org_context');
+        return alt ? JSON.parse(alt) : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+function _getSessionMetaById(sessionId) {
+    if (!sessionId || !Array.isArray(sessionTabsCache)) return null;
+    return sessionTabsCache.find((session) => String(session?.session_id || '') === String(sessionId || '')) || null;
+}
+
+function _sessionHasNamespace(session) {
+    const ns = session?.namespace;
+    return typeof ns === 'string' && ns.trim().length > 0;
+}
+
+function _getOrgConceptIdFromNamespace(namespace) {
+    const raw = typeof namespace === 'string' ? namespace.trim() : '';
+    if (!raw || !raw.includes('@')) return null;
+    const atIndex = raw.indexOf('@');
+    if (atIndex <= 0) return null;
+    const orgSlug = raw.slice(atIndex + 1).trim();
+    if (!orgSlug) return null;
+    return orgSlug.startsWith('#V#') ? orgSlug : `#V#${orgSlug}`;
+}
+
+function _getStoredNamespace() {
+    try {
+        const ns = localStorage.getItem('current_user_namespace');
+        if (ns && typeof ns === 'string') return ns.trim();
+    } catch (_) { /* ignore */ }
+    try {
+        const ns = localStorage.getItem('von_namespace');
+        if (ns && typeof ns === 'string') return ns.trim();
+    } catch (_) { /* ignore */ }
+    return '';
+}
+
+async function assignChatSessionToCurrentOrg(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return;
+
+    await _ensureInviteSessionContext();
+
+    const ctx = getUserContext();
+    if (!ctx?.org_id) {
+        showToast('No organisation selected.', 'error');
+        return;
+    }
+
+    try {
+        const resp = await postJson('/von/api/session/assign_chat_session_org', { session_id: sid });
+        const updatedNamespace = resp?.namespace;
+        if (updatedNamespace) {
+            sessionTabsCache = sessionTabsCache.map((session) => {
+                if (String(session?.session_id || '') === sid) {
+                    return { ...session, namespace: updatedNamespace };
+                }
+                return session;
+            });
+        }
+        showToast('Conversation updated to current organisation.', 'success');
+        _renderChatSessionMetadataPanel({
+            sessionId: sid,
+            links: activeChatSessionLinks?.links,
+            statusText: activeChatSessionLinks?.statusText,
+            statusTone: activeChatSessionLinks?.statusTone,
+            disabled: activeChatSessionLinks?.disabled
+        });
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId || sid);
+    } catch (e) {
+        console.error('Assign org error', e);
+        showToast('Unable to assign conversation to organisation.', 'error');
+    }
+}
+
 async function _getConceptMetaForChatSession(conceptId) {
     const id = String(conceptId || '').trim();
     if (!id || !id.startsWith('#V#')) return null;
@@ -3589,6 +3675,93 @@ function _renderChatSessionMetadataPanel({ sessionId, links, statusText, statusT
     body.className = 'chat-session-metadata-body';
     if (isCollapsed) {
         body.classList.add('is-collapsed');
+    }
+
+    const sessionMeta = _getSessionMetaById(sid);
+    const sessionNamespace = typeof sessionMeta?.namespace === 'string' ? sessionMeta.namespace.trim() : '';
+    const sessionOrgId = _getOrgConceptIdFromNamespace(sessionNamespace);
+    const sessionOrgName = sessionOrgId ? _deriveNameFromConceptId(sessionOrgId) || sessionOrgId : '';
+    const orgCtx = _getStoredOrgContext();
+    const storedNamespace = _getStoredNamespace();
+    const orgFromNamespace = _getOrgConceptIdFromNamespace(storedNamespace);
+    const orgId = orgCtx?.concept_id || orgCtx?.id || getUserContext()?.org_id || orgFromNamespace || null;
+    const orgName = orgCtx?.name || _deriveNameFromConceptId(orgId) || orgId || '';
+    const isSharedSession = !!(sessionMeta?.shared_with_me || sessionMeta?.shared_from_user_id || sessionMeta?.invite_id);
+    const showAssignOrg = !disabled && !!orgId && !isSharedSession && (!sessionMeta || !_sessionHasNamespace(sessionMeta));
+
+    if (showAssignOrg) {
+        const row = document.createElement('div');
+        row.className = 'chat-session-metadata-row';
+
+        const label = document.createElement('div');
+        label.className = 'chat-session-metadata-label';
+        label.textContent = 'Organisation';
+
+        const values = document.createElement('div');
+        values.className = 'chat-session-metadata-values';
+
+        const info = document.createElement('span');
+        info.style.fontSize = '12px';
+        info.style.color = '#475569';
+        info.textContent = orgName ? `Assign to ${orgName}` : 'Assign to current organisation';
+
+        const actions = document.createElement('div');
+        actions.className = 'chat-session-metadata-actions';
+
+        const assignBtn = document.createElement('button');
+        assignBtn.type = 'button';
+        assignBtn.className = 'btn-mini';
+        assignBtn.textContent = 'Set to current org';
+        assignBtn.addEventListener('click', () => assignChatSessionToCurrentOrg(sid));
+
+        actions.appendChild(assignBtn);
+        values.appendChild(info);
+        values.appendChild(actions);
+        row.appendChild(label);
+        row.appendChild(values);
+        body.appendChild(row);
+    }
+
+    if (sessionOrgId) {
+        const row = document.createElement('div');
+        row.className = 'chat-session-metadata-row';
+
+        const label = document.createElement('div');
+        label.className = 'chat-session-metadata-label';
+        label.textContent = 'Organisation';
+
+        const values = document.createElement('div');
+        values.className = 'chat-session-metadata-values';
+
+        const nameEl = document.createElement('span');
+        nameEl.style.fontSize = '12px';
+        nameEl.style.color = '#475569';
+        nameEl.textContent = sessionOrgName || sessionOrgId;
+
+        values.appendChild(nameEl);
+        row.appendChild(label);
+        row.appendChild(values);
+        body.appendChild(row);
+    } else if (isSharedSession) {
+        const row = document.createElement('div');
+        row.className = 'chat-session-metadata-row';
+
+        const label = document.createElement('div');
+        label.className = 'chat-session-metadata-label';
+        label.textContent = 'Organisation';
+
+        const values = document.createElement('div');
+        values.className = 'chat-session-metadata-values';
+
+        const nameEl = document.createElement('span');
+        nameEl.style.fontSize = '12px';
+        nameEl.style.color = '#64748b';
+        nameEl.textContent = 'No organisation assigned';
+
+        values.appendChild(nameEl);
+        row.appendChild(label);
+        row.appendChild(values);
+        body.appendChild(row);
     }
 
     const safeLinks = _normaliseChatSessionLinks(links);
@@ -4323,6 +4496,7 @@ async function refreshChatSessionTabs() {
     if (!container) {
         return;
     }
+    await _ensureInviteSessionContext();
 
     const hasCachedTabs = Array.isArray(sessionTabsCache) && sessionTabsCache.length > 0;
     const containerLooksEmpty = container.hidden || !container.firstElementChild;
@@ -5461,6 +5635,8 @@ async function loadChatHistory(options = {}) {
     const requestedSegments = Number.isInteger(segments) && segments > 0 ? segments : historySegmentsShown;
     const segmentCount = Math.max(requestedSegments || 1, 1);
 
+    await _ensureInviteSessionContext();
+
     const requestedSessionId = activeChatSessionId;
     abortActiveHistoryRequest();
     const requestId = ++historyRequestCounter;
@@ -5782,6 +5958,42 @@ function setInvitePopupVisible(visible) {
     }
 }
 
+async function _fetchSessionContext() {
+    try {
+        const resp = await fetch('/von/api/session/context', { cache: 'no-cache' });
+        if (!resp.ok) return null;
+        return await resp.json();
+    } catch (e) {
+        console.warn('[invite] Failed to fetch session context', e);
+        return null;
+    }
+}
+
+async function _ensureInviteSessionContext() {
+    const ctx = getUserContext();
+    if (!ctx?.user_id) {
+        return;
+    }
+
+    const sessionCtx = await _fetchSessionContext();
+
+    if (!sessionCtx || sessionCtx.user_id !== ctx.user_id) {
+        try {
+            await postJson('/von/api/session/set_user_concept', { user_concept_id: ctx.user_id });
+        } catch (e) {
+            console.warn('[invite] Failed to sync session user concept', e);
+        }
+    }
+
+    if (ctx.org_id && (!sessionCtx || sessionCtx.organisation_id !== ctx.org_id)) {
+        try {
+            await postJson('/von/api/session/set_organisation', { organisation_concept_id: ctx.org_id });
+        } catch (e) {
+            console.warn('[invite] Failed to sync session organisation', e);
+        }
+    }
+}
+
 async function populateInviteFilters(sessionLinks) {
     const { programmeFilter, projectFilter } = getInvitePopupElements();
     if (!programmeFilter || !projectFilter) return;
@@ -5839,6 +6051,7 @@ async function sendSharedConversationInvite(invitee) {
     if (!activeChatSessionId || !invitee?.concept_id) {
         return;
     }
+    await _ensureInviteSessionContext();
     setInviteStatus('Sending invite…');
     try {
         const response = await fetch('/von/api/shared_conversations/invite', {
@@ -5932,6 +6145,8 @@ async function loadInviteesForSession(sessionId) {
     if (!sessionId) return;
     setInviteStatus('Loading invitees…');
 
+    await _ensureInviteSessionContext();
+
     try {
         const resp = await fetch(`/von/api/shared_conversations/invitees?session_id=${encodeURIComponent(sessionId)}`);
         if (!resp.ok) {
@@ -5972,13 +6187,13 @@ async function loadInviteesForSession(sessionId) {
     }
 }
 
-function openInvitePopup() {
+async function openInvitePopup() {
     if (!activeChatSessionId) {
         showToast('Select a conversation before inviting.');
         return;
     }
     setInvitePopupVisible(true);
-    void loadInviteesForSession(activeChatSessionId);
+    await loadInviteesForSession(activeChatSessionId);
 }
 
 function closeInvitePopup() {
@@ -6539,7 +6754,7 @@ function syncSharedConversationStreams() {
     });
 
     desiredSessions.forEach((sid) => {
-        startSharedConversationStream(sid);
+        void startSharedConversationStream(sid);
     });
 }
 
@@ -6547,7 +6762,7 @@ function syncSharedConversationStreams() {
  * Start SSE stream for a shared conversation session.
  * Only connects if the session is a shared conversation.
  */
-function startSharedConversationStream(sessionId) {
+async function startSharedConversationStream(sessionId) {
     const sid = String(sessionId || '').trim();
     if (!sid) return;
 
@@ -6559,6 +6774,8 @@ function startSharedConversationStream(sessionId) {
     if (sharedConversationStreams.has(sid)) {
         return;
     }
+
+    await _ensureInviteSessionContext();
 
     console.log('[chatTab] Starting shared conversation SSE stream', { sessionId: sid });
     getSeenSharedTurnIds(sid).clear();
@@ -6592,7 +6809,7 @@ function startSharedConversationStream(sessionId) {
                 console.log('[chatTab] SSE reconnecting in', delay, 'ms, attempt', attempts);
                 setTimeout(() => {
                     if ((activeChatSessionId === sid || isSharedConversationSession(sid)) && !sharedConversationStreams.has(sid)) {
-                        startSharedConversationStream(sid);
+                        void startSharedConversationStream(sid);
                     }
                 }, delay);
             }
@@ -6766,6 +6983,48 @@ function startIncomingInvitePolling() {
     }, INCOMING_INVITE_POLL_INTERVAL_MS);
 }
 
+function handleOrgSwitchForChatTab(detail) {
+    const container = getChatSessionTabsContainer();
+    sessionTabsCache = [];
+    lastRenderedSessionCount = 0;
+    chatSessionMetadataOpenKey = null;
+    _clearChatSessionMetadata();
+
+    closeSharedConversationStream();
+
+    if (container) {
+        renderChatSessionTabsPlaceholder('loading');
+        container.hidden = false;
+    }
+
+    scheduleChatSessionTabsRefresh(true);
+    void loadIncomingInvites({ silent: true });
+}
+
+try {
+    window.refreshChatSessionTabsForOrgSwitch = () => {
+        handleOrgSwitchForChatTab({});
+    };
+} catch (_) {
+    // ignore
+}
+
+function handleAuthStatusChangeForChatTab(detail) {
+    const container = getChatSessionTabsContainer();
+    sessionTabsCache = [];
+    lastRenderedSessionCount = 0;
+    chatSessionMetadataOpenKey = null;
+    _clearChatSessionMetadata();
+
+    if (container) {
+        renderChatSessionTabsPlaceholder(detail?.authenticated ? 'loading' : 'unauthenticated');
+        container.hidden = false;
+    }
+
+    scheduleChatSessionTabsRefresh(true);
+    void loadIncomingInvites({ silent: true });
+}
+
 export function initializeChatTab() {
     console.log("Initializing chat tab...");
 
@@ -6793,6 +7052,24 @@ export function initializeChatTab() {
     if (!sendButton || !resetButton || !promptInput) {
         console.error("Chat tab elements not found");
         return;
+    }
+
+    if (!orgSwitchListenerBound) {
+        orgSwitchListenerBound = true;
+        document.addEventListener('orgSwitched', (e) => {
+            const { organisation_id, namespace } = e.detail || {};
+            console.log('[chatTab] Organisation switched', { organisation_id, namespace });
+            handleOrgSwitchForChatTab(e.detail || {});
+        });
+    }
+
+    if (!authStatusListenerBound) {
+        authStatusListenerBound = true;
+        document.addEventListener('authStatusChanged', (e) => {
+            const { authenticated, email } = e.detail || {};
+            console.log('[chatTab] Auth status changed', { authenticated, email });
+            handleAuthStatusChangeForChatTab(e.detail || {});
+        });
     }
 
     if (!isAnnotationEnabled() && annotationToggle) {

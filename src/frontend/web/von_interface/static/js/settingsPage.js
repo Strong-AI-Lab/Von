@@ -1404,6 +1404,26 @@ async function loadAndDisplaySettings() {
         } catch { }
         if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
 
+        try {
+          if (window.refreshChatSessionTabsForOrgSwitch) {
+            window.refreshChatSessionTabsForOrgSwitch();
+          } else if (window.parent?.refreshChatSessionTabsForOrgSwitch) {
+            window.parent.refreshChatSessionTabsForOrgSwitch();
+          }
+        } catch { }
+
+        try {
+          if (window.parent?.document) {
+            window.parent.document.dispatchEvent(new CustomEvent('orgSwitched', {
+              detail: {
+                organisation_id: orgId || null,
+                role: null,
+                namespace: namespace || null
+              }
+            }));
+          }
+        } catch { }
+
         renderActiveNamespace();
         void loadRagStatus(null);
       });

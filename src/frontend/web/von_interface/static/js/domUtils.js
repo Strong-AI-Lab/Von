@@ -126,9 +126,18 @@ async function getCurrentUserInfo() {
 }
 
 async function getCurrentOrganisationInfo() {
+  const switching = readStoredJson('von_org_switching');
+  if (switching) {
+    const name = switching.name ? `${switching.name} (switching…)` : 'Switching…';
+    return { id: null, conceptId: switching.concept_id || null, name };
+  }
   const stored = readStoredJson('von_current_org');
   if (stored) {
     return { id: stored.id || null, conceptId: stored.concept_id || null, name: stored.name || null };
+  }
+  const storedCtx = readStoredJson('von_org_context');
+  if (storedCtx) {
+    return { id: storedCtx.id || null, conceptId: storedCtx.concept_id || null, name: storedCtx.name || null };
   }
   const settings = await getSettings();
   return { id: settings.current_organisation_id || null, conceptId: settings.current_organisation_concept_id || null, name: settings.current_organisation_name || null };

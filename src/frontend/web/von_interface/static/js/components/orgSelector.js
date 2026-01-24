@@ -138,8 +138,38 @@ export async function renderOrgSelector(containerId) {
             select.addEventListener('change', async (e) => {
                 const orgId = e.target.value || null;
                 try {
+                    try {
+                        const selected = e.target.selectedOptions?.[0];
+                        const label = selected ? String(selected.textContent || '').trim() : '';
+                        const name = label.replace(/\s*\(.+\)\s*$/, '').trim();
+                        localStorage.setItem('von_org_switching', JSON.stringify({
+                            concept_id: orgId || null,
+                            name: name || null
+                        }));
+                        if (window.parent?.updateModelInfoFooterDisplay) {
+                            window.parent.updateModelInfoFooterDisplay();
+                        } else if (window.updateModelInfoFooterDisplay) {
+                            window.updateModelInfoFooterDisplay();
+                        }
+                    } catch { }
                     if (orgId) {
-                        await switchOrganisation(orgId);
+                        const response = await switchOrganisation(orgId);
+                        try {
+                            const selected = e.target.selectedOptions?.[0];
+                            const label = selected ? String(selected.textContent || '').trim() : '';
+                            const name = label.replace(/\s*\(.+\)\s*$/, '').trim();
+                            localStorage.setItem('von_current_org', JSON.stringify({
+                                id: null,
+                                concept_id: orgId,
+                                name: name || null
+                            }));
+                        } catch { }
+                        try {
+                            if (response?.namespace) {
+                                localStorage.setItem('current_user_namespace', response.namespace);
+                            }
+                        } catch { }
+                        try { localStorage.removeItem('von_org_switching'); } catch { }
                     } else {
                         // Switch back to personal (no org)
                         const response = await postJson('/von/api/session/set_organisation', {
@@ -148,6 +178,13 @@ export async function renderOrgSelector(containerId) {
                         // Clear localStorage
                         localStorage.removeItem(LS_ORG_CONTEXT);
                         localStorage.removeItem(LS_ORG_ROLE);
+                        try { localStorage.removeItem('von_current_org'); } catch { }
+                        try {
+                            if (response?.namespace) {
+                                localStorage.setItem('current_user_namespace', response.namespace);
+                            }
+                        } catch { }
+                        try { localStorage.removeItem('von_org_switching'); } catch { }
 
                         // Dispatch event
                         const event = new CustomEvent('orgSwitched', {
@@ -165,6 +202,7 @@ export async function renderOrgSelector(containerId) {
                 } catch (err) {
                     console.error('Error switching organisation:', err);
                     alert('Failed to switch organisation: ' + err.message);
+                    try { localStorage.removeItem('von_org_switching'); } catch { }
                     // Revert selection
                     await renderOrgSelector(containerId);
                 }

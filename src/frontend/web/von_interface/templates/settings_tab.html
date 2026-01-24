@@ -648,6 +648,10 @@
                     <button onclick="loginWithGoogle()" class="btn-primary">Login with Google</button>
                 `;
             }
+
+            try {
+                document.dispatchEvent(new CustomEvent('authStatusChanged', { detail: authStatus || {} }));
+            } catch { }
         }
 
         function authoriseAgentGmail() {

@@ -545,6 +545,31 @@ function ConvertFrom-CronSchedule {
     }
 }
 
+function ConvertTo-CronSchedule {
+    param([Parameter(Mandatory = $true)] [string]$Schedule)
+
+    $clean = $Schedule.Trim()
+    if (-not $clean) { return $clean }
+
+    # Strip inline comments (e.g. "... # note")
+    $hashIndex = $clean.IndexOf('#')
+    if ($hashIndex -ge 0) {
+        $clean = $clean.Substring(0, $hashIndex).Trim()
+    }
+
+    # Remove stray wrapping quotes
+    $clean = $clean -replace "^[\""']+", ''
+    $clean = $clean -replace "[\""']+$", ''
+
+    # If extra tokens exist, keep only the first 5 cron fields
+    $tokens = ($clean -split '\s+')
+    if ($tokens.Count -gt 5) {
+        $clean = ($tokens[0..4] -join ' ')
+    }
+
+    return $clean
+}
+
 function Test-CronDayMatch {
     param(
         [Parameter(Mandatory = $true)] $Cron,
@@ -656,7 +681,8 @@ function Invoke-DailyBackupIfDue {
     }
     $schedule = $null
     if ($env:VON_BACKUP_SCHEDULE -and $env:VON_BACKUP_SCHEDULE.ToString().Trim()) {
-        $schedule = $env:VON_BACKUP_SCHEDULE.ToString().Trim().Trim('"')
+        $rawSchedule = $env:VON_BACKUP_SCHEDULE.ToString()
+        $schedule = ConvertTo-CronSchedule -Schedule $rawSchedule
     }
     $intervalHours = 24
     try { if ($env:VON_BACKUP_INTERVAL_HOURS) { $intervalHours = [int]$env:VON_BACKUP_INTERVAL_HOURS } } catch { }

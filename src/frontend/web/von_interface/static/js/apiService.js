@@ -72,13 +72,22 @@ export function getUserContext() {
 
   try {
     const storedOrg = JSON.parse(localStorage.getItem('von_current_org') || 'null');
-    // Prefer concept_id (e.g., #V#strong_ai_lab) over id (MongoDB ObjectID)
-    // Settings page may populate either field depending on data source
     if (storedOrg) {
       ctx.org_id = storedOrg.concept_id || storedOrg.id || null;
     }
   } catch (e) {
     console.debug('[context] Failed to parse von_current_org', e);
+  }
+
+  if (!ctx.org_id) {
+    try {
+      const storedOrgCtx = JSON.parse(localStorage.getItem('von_org_context') || 'null');
+      if (storedOrgCtx) {
+        ctx.org_id = storedOrgCtx.concept_id || storedOrgCtx.id || null;
+      }
+    } catch (e) {
+      console.debug('[context] Failed to parse von_org_context', e);
+    }
   }
 
   // Get language preference from localStorage or fallback
