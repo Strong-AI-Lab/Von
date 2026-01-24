@@ -53,6 +53,50 @@
             </div>
             <small class="settings-note">Non-NL names (e.g., ABBR/CODE) are not filtered. Stored only in this browser.
                 Default: disabled.</small>
+
+            <div class="settings-subsection mt-3">
+                <h3 class="settings-subsection-title">Vontology Concept Appearance</h3>
+
+                <div class="inline-form inline-form-tight mt-2">
+                    <input type="checkbox" id="settingsCartoucheShowNameToggle" />
+                    <label for="settingsCartoucheShowNameToggle" class="ml-1"
+                        title="Show the concept name in cartouches.">Include name in cartouches</label>
+                </div>
+                <small class="settings-note">Stored only in this browser (localStorage). Default: enabled.</small>
+
+                <div class="inline-form inline-form-tight mt-2">
+                    <input type="checkbox" id="settingsCartoucheShortestNameToggle" />
+                    <label for="settingsCartoucheShortestNameToggle" class="ml-1"
+                        title="When enabled, cartouches prefer the shortest available name in your preferred language (when names are shown).">Use
+                        shortest name in cartouches</label>
+                </div>
+                <small class="settings-note">Stored only in this browser (localStorage). Default: disabled.</small>
+
+                <div class="inline-form inline-form-tight mt-2">
+                    <input type="checkbox" id="settingsCartoucheShowIdToggle" />
+                    <label for="settingsCartoucheShowIdToggle" class="ml-1"
+                        title="Show the concept ID inside cartouches (copy via right-click still works when hidden).">Include
+                        concept ID in cartouches</label>
+                </div>
+                <small class="settings-note">Stored only in this browser (localStorage). Default: disabled. At least one
+                    of name or ID will remain visible.</small>
+
+                <div class="inline-form inline-form-tight mt-2">
+                    <input type="checkbox" id="settingsCartoucheShowKindToggle" />
+                    <label for="settingsCartoucheShowKindToggle" class="ml-1"
+                        title="Show the kind marker (Type/Predicate/Individual) on cartouches.">Include kind marker in
+                        cartouches</label>
+                </div>
+                <small class="settings-note">Stored only in this browser (localStorage). Default: enabled.</small>
+
+                <div class="inline-form inline-form-tight mt-2">
+                    <input type="checkbox" id="settingsCartoucheKindAsBackgroundToggle" />
+                    <label for="settingsCartoucheKindAsBackgroundToggle" class="ml-1"
+                        title="Colour the whole cartouche by kind and hide the kind capsule.">Use kind colour for full
+                        cartouche</label>
+                </div>
+                <small class="settings-note">Stored only in this browser (localStorage). Default: disabled.</small>
+            </div>
             <div class="inline-form inline-form-tight mt-8-align-center">
                 <button type="button" id="resetLocalPrefsButton" class="btn-danger"
                     title="Clear stored user/org/language preferences for this browser">Reset Local Preferences</button>

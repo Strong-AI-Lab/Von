@@ -4481,6 +4481,46 @@ button.prompt-vontology-cartouche {
     border-color: #d4c5f9;
 }
 
+.vontology-cartouche.cartouche-hide-id .vontology-cartouche-id {
+    display: none;
+}
+
+.vontology-cartouche.cartouche-hide-name .vontology-cartouche-name {
+    display: none;
+}
+
+.vontology-cartouche.cartouche-hide-kind .vontology-cartouche-kind {
+    display: none;
+}
+
+.vontology-cartouche.cartouche-kind-as-bg.type {
+    background: #cfe2ff;
+    border-color: #b6d4fe;
+    color: #084298;
+}
+
+.vontology-cartouche.cartouche-kind-as-bg.individual {
+    background: #d4edda;
+    border-color: #c3e6cb;
+    color: #155724;
+}
+
+.vontology-cartouche.cartouche-kind-as-bg.predicate {
+    background: #f5f0ff;
+    border-color: #d4c5f9;
+    color: #4a3871;
+}
+
+.settings-subsection {
+    margin-top: 12px;
+}
+
+.settings-subsection-title {
+    font-size: 0.95em;
+    font-weight: 600;
+    margin: 10px 0 6px;
+}
+
 /* Inline-code cartouches: only used when a <code> span contains exactly one #V#... token. */
 .vontology-cartouche.vontology-cartouche-inline-code {
     padding: 1px 8px;

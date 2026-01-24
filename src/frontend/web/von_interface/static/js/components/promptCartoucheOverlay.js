@@ -5,8 +5,8 @@
 // (#V\u200B#...) into the textarea so autocomplete does not re-trigger.
 // The overlay renders those tokens as cartouches and supports removal.
 
-import { getPreferredLanguage, selectBestNameForContext } from '../utils/nameSelection.js';
-import { createVontologyCartouche } from '../utils/textDecorator.js';
+import { getPreferredLanguage, selectBestNameForContext, selectShortestNameForContext } from '../utils/nameSelection.js';
+import { applyCartoucheAppearance, createVontologyCartouche, getCartoucheAppearanceSettings } from '../utils/textDecorator.js';
 
 const ZWSP = '\u200B';
 
@@ -453,6 +453,7 @@ async function fetchConceptMeta(fullId) {
                     node?.node?.names ||
                     null;
                 const bestName = selectBestNameForContext(rawNames, preferredLanguage);
+                const shortestName = selectShortestNameForContext(rawNames, preferredLanguage);
                 const name =
                     bestName ||
                     node?.display_name ||
@@ -465,7 +466,12 @@ async function fetchConceptMeta(fullId) {
                 if (computedKind && (kind === 'type' || !kind)) {
                     kind = computedKind;
                 }
-                const meta = { name: String(name), kind: String(kind) };
+                const meta = {
+                    name: String(name),
+                    bestName: bestName ? String(bestName) : null,
+                    shortestName: shortestName ? String(shortestName) : null,
+                    kind: String(kind)
+                };
                 promptConceptMetaCache.set(fullId, meta);
                 return meta;
             }
@@ -483,7 +489,12 @@ async function fetchConceptMeta(fullId) {
                 promptConceptMetaCache.set(fullId, null);
                 return null;
             }
-            const meta = { name: String(match.name ?? ''), kind: String(match.kind ?? '') };
+            const meta = {
+                name: String(match.name ?? ''),
+                bestName: match.name ? String(match.name) : null,
+                shortestName: match.name ? String(match.name) : null,
+                kind: String(match.kind ?? '')
+            };
             promptConceptMetaCache.set(fullId, meta);
             return meta;
         } catch (_) {
@@ -502,9 +513,15 @@ function updatePromptCartouche(cartoucheEl, meta) {
     if (!cartoucheEl || !meta) {
         return;
     }
+    const prefs = getCartoucheAppearanceSettings();
     const nameEl = cartoucheEl.querySelector('.vontology-cartouche-name');
-    if (nameEl && meta.name) {
-        nameEl.textContent = meta.name;
+    if (nameEl) {
+        const nextName = prefs?.useShortestName
+            ? (meta.shortestName || meta.bestName || meta.name)
+            : (meta.bestName || meta.name || meta.shortestName);
+        if (nextName) {
+            nameEl.textContent = nextName;
+        }
     }
     const kindEl = cartoucheEl.querySelector('.vontology-cartouche-kind');
     if (kindEl) {
@@ -516,7 +533,10 @@ function updatePromptCartouche(cartoucheEl, meta) {
         if (kindClass && kindClass !== 'type') {
             cartoucheEl.classList.add(kindClass);
         }
+        cartoucheEl.dataset.kind = meta.kind || '';
     }
+
+    applyCartoucheAppearance(cartoucheEl, prefs);
 }
 
 function hydratePromptCartouches(root, onUpdated) {
@@ -690,6 +710,18 @@ export function initializePromptCartoucheOverlay(textarea) {
         scheduleScrollSync();
         scheduleCaretUpdate();
     });
+
+    const prefsHandler = (event) => {
+        const key = event?.detail?.key;
+        if (key === 'von_cartouche_use_shortest_name' || key === 'von_cartouche_show_name' || key === 'von_cartouche_show_id' || key === 'von_cartouche_show_kind' || key === 'von_cartouche_kind_as_background') {
+            rerender();
+        }
+    };
+    try {
+        window.addEventListener('von-preferences-changed', prefsHandler);
+    } catch (_) {
+        // ignore
+    }
 
     // If the caret lands inside a cartouche token, treat backspace/delete as removing the whole token.
     textarea.addEventListener('keydown', (event) => {
