@@ -159,6 +159,7 @@ def _get_paper_metadata(**kwargs):
 
 def _create_concepts(**kwargs):
     from ...vontology.utils_vontology import create_vontology_concept
+    from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
 
     parent_id = kwargs.get("parent_id")
     concepts = kwargs.get("concepts", [])
@@ -175,7 +176,7 @@ def _create_concepts(**kwargs):
             continue
 
         name = concept_data.get("name")
-        kind = concept_data.get("kind", "type")  # Default to type
+        kind = (concept_data.get("kind") or "type").strip().lower()
 
         if not name:
             results.append(
@@ -184,10 +185,18 @@ def _create_concepts(**kwargs):
             continue
 
         # Map kind to create_as_instance parameter
-        create_as_instance = kind == "instance"
+        if kind == "individual":
+            kind = "instance"
+
+        if kind == "predicate":
+            create_as_instance = True
+            parent_id_for_concept = PREDICATE_TYPE_ID
+        else:
+            create_as_instance = kind == "instance"
+            parent_id_for_concept = parent_id
 
         result = create_vontology_concept(
-            parent_id=parent_id,
+            parent_id=parent_id_for_concept,
             new_concept_name=name,
             create_as_instance=create_as_instance,
             description=concept_data.get("description"),
