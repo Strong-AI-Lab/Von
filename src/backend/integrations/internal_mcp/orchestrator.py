@@ -2035,7 +2035,24 @@ class InternalMCPChatOrchestrator:
             errors.append("predicate_not_resolved")
 
         policy_payload: Mapping[str, Any] | None = None
-        if policy_id and predicate_id:
+        policy_source = "none"
+
+        # Try graph-based resolution first (JVNAUTOSCI-998)
+        if policy_id:
+            try:
+                from src.backend.services.workflow_policy_graph_service import (
+                    resolve_policy_from_graph,
+                )
+
+                graph_policy = resolve_policy_from_graph(policy_id)
+                if graph_policy and isinstance(graph_policy, Mapping):
+                    policy_payload = graph_policy
+                    policy_source = "graph"
+            except Exception:
+                pass  # Fall through to JSON fallback
+
+        # JSON fallback if graph resolution failed
+        if policy_payload is None and policy_id and predicate_id:
             try:
                 from src.backend.services.text_value_service import (
                     get_texts_for_concept,
@@ -2074,6 +2091,7 @@ class InternalMCPChatOrchestrator:
                             parsed = None
                     if isinstance(parsed, Mapping):
                         policy_payload = parsed
+                        policy_source = "json"
                         break
                     errors.append("policy_json_invalid")
 
@@ -2091,6 +2109,7 @@ class InternalMCPChatOrchestrator:
             "policy_id": policy_id or "",
             "predicate_id": predicate_id or "",
             "loaded": bool(policy_payload),
+            "policy_source": policy_source,
             "errors": list(errors),
         }
 
