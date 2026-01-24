@@ -76,12 +76,14 @@ const INCOMING_INVITE_POLL_INTERVAL_MS = 60_000;
 let incomingInvitePollTimerId = null;
 
 // JVNAUTOSCI-1002: SSE streaming for shared conversation turn updates
-let sharedConversationEventSource = null;
-let sharedConversationSessionId = null;
-const seenSharedTurnIds = new Set();
+const sharedConversationStreams = new Map();
+const sharedConversationReconnectAttempts = new Map();
+const seenSharedTurnIds = new Map();
+const sharedConversationUnreadSessions = new Set();
+const sharedConversationLastHistoryIndex = new Map();
+const sharedConversationResyncInFlight = new Set();
 const SSE_RECONNECT_BASE_DELAY_MS = 1000;
 const SSE_RECONNECT_MAX_DELAY_MS = 30000;
-let sseReconnectAttempts = 0;
 
 // Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
 // Stored locally only; intended to feed future introspection.
@@ -4473,6 +4475,7 @@ async function refreshChatSessionTabs() {
         }
 
         renderChatSessionTabs(sessions, activeChatSessionId || activeSessionId);
+        syncSharedConversationStreams();
 
         const sidForMeta = activeChatSessionId || activeSessionId;
         if (sidForMeta) {
@@ -4596,6 +4599,17 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         label.textContent = displayName;
         header.appendChild(label);
 
+        const unreadCount = Number.isFinite(session?.shared_unread_count)
+            ? Number(session.shared_unread_count)
+            : 0;
+        if (unreadCount > 0) {
+            tab.classList.add('has-unread');
+            const unreadBadge = document.createElement('span');
+            unreadBadge.className = 'chat-session-tab-unread';
+            unreadBadge.textContent = String(unreadCount);
+            header.appendChild(unreadBadge);
+        }
+
         if (session?.shared_owner_user_id) {
             const ownerName = _deriveNameFromConceptId(session.shared_owner_user_id) || session.shared_owner_user_id;
             const ownerBadge = document.createElement('span');
@@ -4623,8 +4637,19 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         meta.className = 'chat-session-tab-meta';
         meta.textContent = timestampLabel;
 
+        const previewText = formatChatSessionPreview(session?.preview);
+        const preview = document.createElement('span');
+        preview.className = 'chat-session-tab-preview';
+        if (previewText) {
+            preview.textContent = previewText;
+            preview.title = previewText;
+        }
+
         tab.appendChild(header);
         tab.appendChild(meta);
+        if (previewText) {
+            tab.appendChild(preview);
+        }
         tab.addEventListener('click', () => {
             if (sid === activeChatSessionId) {
                 return;
@@ -4922,9 +4947,9 @@ async function switchToChatSession(sessionId) {
     const previousSessionId = activeChatSessionId;
     const previousSessionName = activeChatSessionName;
 
-    // JVNAUTOSCI-1002: Close SSE stream when switching away from session
+    // JVNAUTOSCI-1002: Sync SSE streams when switching away from session
     if (previousSessionId && previousSessionId !== sid) {
-        closeSharedConversationStream();
+        syncSharedConversationStreams();
     }
 
     // Best-effort: flush any pending metadata save before switching away.
@@ -4946,6 +4971,8 @@ async function switchToChatSession(sessionId) {
     });
 
     setActiveChatSession(sid, cachedSession?.session_name);
+    clearSharedSessionUnread(sid);
+    hideNewSharedMessagesIndicator();
     if (sessionTabsCache.length > 0) {
         renderChatSessionTabs(sessionTabsCache, sid);
     }
@@ -5073,8 +5100,8 @@ async function switchToChatSession(sessionId) {
             detail: { trigger: 'history_session_switch', session_id: sid, session_name: data?.session_name || targetName }
         }));
 
-        // JVNAUTOSCI-1002: Start SSE stream if this is a shared conversation
-        startSharedConversationStream(sid);
+        // JVNAUTOSCI-1002: Ensure shared conversation streams are in sync
+        syncSharedConversationStreams();
 
         const promptInput = document.getElementById('promptInput');
         if (promptInput) {
@@ -6292,16 +6319,228 @@ function isSharedConversationSession(sessionId) {
 }
 
 /**
+ * Get the per-session dedupe set for shared turn IDs.
+ */
+function getSeenSharedTurnIds(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return new Set();
+    let seen = seenSharedTurnIds.get(sid);
+    if (!seen) {
+        seen = new Set();
+        seenSharedTurnIds.set(sid, seen);
+    }
+    return seen;
+}
+
+function getChatSessionTabElement(sessionId) {
+    const container = getChatSessionTabsContainer();
+    if (!container) return null;
+    const sid = String(sessionId || '').trim();
+    if (!sid) return null;
+    const escaped = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(sid) : sid.replace(/"/g, '\\"');
+    return container.querySelector(`.chat-session-tab[data-session-id="${escaped}"]`);
+}
+
+function updateChatSessionTabTimestamp(sessionId, timestampValue) {
+    const tab = getChatSessionTabElement(sessionId);
+    if (!tab) return;
+    const meta = tab.querySelector('.chat-session-tab-meta');
+    if (!meta) return;
+    const label = formatSessionTimestamp(timestampValue || '') || '-';
+    meta.textContent = label;
+}
+
+function formatChatSessionPreview(text) {
+    if (typeof text !== 'string') return '';
+    const normalised = text.replace(/\s+/g, ' ').trim();
+    if (!normalised) return '';
+    if (normalised.length <= 60) return normalised;
+    return `${normalised.slice(0, 57)}…`;
+}
+
+function updateChatSessionTabPreview(sessionId, previewText) {
+    const tab = getChatSessionTabElement(sessionId);
+    if (!tab) return;
+    const preview = formatChatSessionPreview(previewText);
+    const existing = tab.querySelector('.chat-session-tab-preview');
+    if (preview) {
+        if (existing) {
+            existing.textContent = preview;
+            existing.title = preview;
+        } else {
+            const previewEl = document.createElement('span');
+            previewEl.className = 'chat-session-tab-preview';
+            previewEl.textContent = preview;
+            previewEl.title = preview;
+            tab.appendChild(previewEl);
+        }
+    } else if (existing) {
+        existing.remove();
+    }
+}
+
+function updateChatSessionTabUnreadBadge(sessionId, unreadCount) {
+    const tab = getChatSessionTabElement(sessionId);
+    if (!tab) return;
+    const existing = tab.querySelector('.chat-session-tab-unread');
+    const count = Number.isFinite(unreadCount) ? Number(unreadCount) : 0;
+    if (count > 0) {
+        if (existing) {
+            existing.textContent = String(count);
+        } else {
+            const badge = document.createElement('span');
+            badge.className = 'chat-session-tab-unread';
+            badge.textContent = String(count);
+            const header = tab.querySelector('.chat-session-tab-header');
+            if (header) {
+                header.appendChild(badge);
+            } else {
+                tab.appendChild(badge);
+            }
+        }
+        tab.classList.add('has-unread');
+    } else {
+        if (existing) {
+            existing.remove();
+        }
+        tab.classList.remove('has-unread');
+    }
+}
+
+function updateSharedSessionCache(sessionId, payload) {
+    const sid = String(sessionId || '').trim();
+    if (!sid || !Array.isArray(sessionTabsCache)) return null;
+    const session = sessionTabsCache.find(
+        s => String(s?.session_id || '') === sid
+    );
+    if (!session) return null;
+    const createdAt = payload?.created_at;
+    const content = payload?.content;
+    if (typeof createdAt === 'string' && createdAt.trim()) {
+        session.last_message_at = createdAt;
+    }
+    if (typeof content === 'string' && content.trim()) {
+        session.preview = content.trim();
+        updateChatSessionTabPreview(sid, session.preview);
+    }
+    return session;
+}
+
+function markSharedSessionUnread(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return;
+    sharedConversationUnreadSessions.add(sid);
+    const session = updateSharedSessionCache(sid, {});
+    if (session) {
+        const current = Number.isFinite(session.shared_unread_count)
+            ? Number(session.shared_unread_count)
+            : 0;
+        session.shared_unread_count = current + 1;
+        updateChatSessionTabUnreadBadge(sid, session.shared_unread_count);
+        updateChatSessionTabTimestamp(sid, session.last_message_at);
+    } else {
+        scheduleChatSessionTabsRefresh(true);
+    }
+}
+
+function clearSharedSessionUnread(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return;
+    sharedConversationUnreadSessions.delete(sid);
+    const session = updateSharedSessionCache(sid, {});
+    if (session) {
+        session.shared_unread_count = 0;
+        updateChatSessionTabUnreadBadge(sid, 0);
+    }
+}
+
+function recordSharedHistoryIndex(sessionId, historyIndex) {
+    if (!Number.isInteger(historyIndex)) return false;
+    const sid = String(sessionId || '').trim();
+    if (!sid) return false;
+    const lastIndex = sharedConversationLastHistoryIndex.get(sid);
+    const hasGap = Number.isInteger(lastIndex) && historyIndex > lastIndex + 1;
+    if (!Number.isInteger(lastIndex) || historyIndex > lastIndex) {
+        sharedConversationLastHistoryIndex.set(sid, historyIndex);
+    }
+    return hasGap;
+}
+
+function scheduleSharedHistoryResync(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid || sharedConversationResyncInFlight.has(sid)) return;
+    sharedConversationResyncInFlight.add(sid);
+
+    if (activeChatSessionId === sid) {
+        loadChatHistory({
+            segments: 1,
+            scrollToBottom: false,
+            preserveScroll: true,
+            showResetNotice: false
+        }).finally(() => {
+            sharedConversationResyncInFlight.delete(sid);
+        });
+        return;
+    }
+
+    scheduleChatSessionTabsRefresh(true);
+    setTimeout(() => {
+        sharedConversationResyncInFlight.delete(sid);
+    }, 1500);
+}
+
+/**
  * Close any existing SSE connection for shared conversation streaming.
  */
-function closeSharedConversationStream() {
-    if (sharedConversationEventSource) {
-        console.log('[chatTab] Closing shared conversation SSE stream');
-        sharedConversationEventSource.close();
-        sharedConversationEventSource = null;
+function closeSharedConversationStream(sessionId = null) {
+    if (sessionId) {
+        const stream = sharedConversationStreams.get(sessionId);
+        if (stream) {
+            console.log('[chatTab] Closing shared conversation SSE stream', { sessionId });
+            stream.close();
+        }
+        sharedConversationStreams.delete(sessionId);
+        sharedConversationReconnectAttempts.delete(sessionId);
+        return;
     }
-    sharedConversationSessionId = null;
-    sseReconnectAttempts = 0;
+
+    sharedConversationStreams.forEach((stream, sid) => {
+        try {
+            console.log('[chatTab] Closing shared conversation SSE stream', { sessionId: sid });
+            stream.close();
+        } catch (_) {
+            // Ignore.
+        }
+    });
+    sharedConversationStreams.clear();
+    sharedConversationReconnectAttempts.clear();
+}
+
+function syncSharedConversationStreams() {
+    const desiredSessions = new Set();
+    if (Array.isArray(sessionTabsCache)) {
+        sessionTabsCache.forEach((session) => {
+            const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+            if (!sid) return;
+            if (isSharedConversationSession(sid)) {
+                desiredSessions.add(sid);
+            }
+        });
+    }
+
+    if (activeChatSessionId && isSharedConversationSession(activeChatSessionId)) {
+        desiredSessions.add(activeChatSessionId);
+    }
+
+    Array.from(sharedConversationStreams.keys()).forEach((sid) => {
+        if (!desiredSessions.has(sid)) {
+            closeSharedConversationStream(sid);
+        }
+    });
+
+    desiredSessions.forEach((sid) => {
+        startSharedConversationStream(sid);
+    });
 }
 
 /**
@@ -6309,63 +6548,63 @@ function closeSharedConversationStream() {
  * Only connects if the session is a shared conversation.
  */
 function startSharedConversationStream(sessionId) {
-    if (!sessionId) return;
+    const sid = String(sessionId || '').trim();
+    if (!sid) return;
 
-    // Close any existing connection
-    closeSharedConversationStream();
-
-    // Only connect if this is a shared conversation
-    if (!isSharedConversationSession(sessionId)) {
-        console.log('[chatTab] Session is not shared, skipping SSE stream', { sessionId });
+    if (!isSharedConversationSession(sid)) {
+        closeSharedConversationStream(sid);
         return;
     }
 
-    console.log('[chatTab] Starting shared conversation SSE stream', { sessionId });
-    sharedConversationSessionId = sessionId;
-    seenSharedTurnIds.clear();
+    if (sharedConversationStreams.has(sid)) {
+        return;
+    }
 
-    const url = `/von/api/shared_conversations/stream?session_id=${encodeURIComponent(sessionId)}`;
+    console.log('[chatTab] Starting shared conversation SSE stream', { sessionId: sid });
+    getSeenSharedTurnIds(sid).clear();
+
+    const url = `/von/api/shared_conversations/stream?session_id=${encodeURIComponent(sid)}`;
     const eventSource = new EventSource(url);
-    sharedConversationEventSource = eventSource;
+    sharedConversationStreams.set(sid, eventSource);
 
     eventSource.onopen = () => {
-        console.log('[chatTab] SSE stream connected', { sessionId });
-        sseReconnectAttempts = 0;
+        console.log('[chatTab] SSE stream connected', { sessionId: sid });
+        sharedConversationReconnectAttempts.set(sid, 0);
     };
 
-    eventSource.onerror = (event) => {
-        console.warn('[chatTab] SSE stream error', { sessionId, readyState: eventSource.readyState });
+    eventSource.onerror = () => {
+        if (sharedConversationStreams.get(sid) !== eventSource) {
+            return;
+        }
+        console.warn('[chatTab] SSE stream error', { sessionId: sid, readyState: eventSource.readyState });
 
-        // EventSource will automatically try to reconnect, but we handle manual reconnect
-        // for cases where the connection is closed
         if (eventSource.readyState === EventSource.CLOSED) {
             eventSource.close();
-            sharedConversationEventSource = null;
+            sharedConversationStreams.delete(sid);
 
-            // Check if we should reconnect (still on same session and still shared)
-            if (sharedConversationSessionId === sessionId && activeChatSessionId === sessionId) {
-                sseReconnectAttempts++;
+            if (isSharedConversationSession(sid) || activeChatSessionId === sid) {
+                const attempts = (sharedConversationReconnectAttempts.get(sid) || 0) + 1;
+                sharedConversationReconnectAttempts.set(sid, attempts);
                 const delay = Math.min(
-                    SSE_RECONNECT_BASE_DELAY_MS * Math.pow(2, sseReconnectAttempts - 1),
+                    SSE_RECONNECT_BASE_DELAY_MS * Math.pow(2, attempts - 1),
                     SSE_RECONNECT_MAX_DELAY_MS
                 );
-                console.log('[chatTab] SSE reconnecting in', delay, 'ms, attempt', sseReconnectAttempts);
+                console.log('[chatTab] SSE reconnecting in', delay, 'ms, attempt', attempts);
                 setTimeout(() => {
-                    if (activeChatSessionId === sessionId && isSharedConversationSession(sessionId)) {
-                        startSharedConversationStream(sessionId);
+                    if ((activeChatSessionId === sid || isSharedConversationSession(sid)) && !sharedConversationStreams.has(sid)) {
+                        startSharedConversationStream(sid);
                     }
                 }, delay);
             }
         }
     };
 
-    // Handle user_turn and assistant_turn events
     eventSource.addEventListener('user_turn', (event) => {
-        handleSharedTurnEvent(sessionId, event, 'user');
+        handleSharedTurnEvent(sid, event, 'user');
     });
 
     eventSource.addEventListener('assistant_turn', (event) => {
-        handleSharedTurnEvent(sessionId, event, 'assistant');
+        handleSharedTurnEvent(sid, event, 'assistant');
     });
 }
 
@@ -6373,12 +6612,6 @@ function startSharedConversationStream(sessionId) {
  * Handle an incoming turn event from the SSE stream.
  */
 function handleSharedTurnEvent(expectedSessionId, event, speaker) {
-    // Ignore if we've switched to a different session
-    if (activeChatSessionId !== expectedSessionId) {
-        console.log('[chatTab] Ignoring shared turn for non-active session', { expectedSessionId, activeChatSessionId });
-        return;
-    }
-
     let data;
     try {
         data = JSON.parse(event.data);
@@ -6388,17 +6621,44 @@ function handleSharedTurnEvent(expectedSessionId, event, speaker) {
     }
 
     const { turn_id, content, author_user_id, created_at, history_index } = data;
+    const sessionId = (typeof data?.session_id === 'string' && data.session_id.trim())
+        ? data.session_id.trim()
+        : String(expectedSessionId || '').trim();
+    if (!sessionId) return;
+
+    const isActiveSession = activeChatSessionId === sessionId;
 
     // Dedupe by turn_id
-    if (turn_id && seenSharedTurnIds.has(turn_id)) {
+    const seenIds = getSeenSharedTurnIds(sessionId);
+    if (turn_id && seenIds.has(turn_id)) {
         console.log('[chatTab] Duplicate shared turn, skipping', { turn_id });
         return;
     }
     if (turn_id) {
-        seenSharedTurnIds.add(turn_id);
+        seenIds.add(turn_id);
     }
 
-    console.log('[chatTab] Received shared turn', { turn_id, speaker, content_length: content?.length, author_user_id });
+    console.log('[chatTab] Received shared turn', {
+        session_id: sessionId,
+        turn_id,
+        speaker,
+        content_length: content?.length,
+        author_user_id
+    });
+
+    updateSharedSessionCache(sessionId, { content, created_at });
+    updateChatSessionTabTimestamp(sessionId, created_at);
+
+    if (recordSharedHistoryIndex(sessionId, history_index)) {
+        scheduleSharedHistoryResync(sessionId);
+    }
+
+    if (!isActiveSession) {
+        markSharedSessionUnread(sessionId);
+        return;
+    }
+
+    clearSharedSessionUnread(sessionId);
 
     // Append the message to the transcript
     appendSharedTurnToTranscript({
@@ -6565,6 +6825,17 @@ export function initializeChatTab() {
     }
 
     if (chatTab && scrollableField) {
+        if (!scrollableField._sharedIndicatorWired) {
+            scrollableField._sharedIndicatorWired = true;
+            scrollableField.addEventListener('scroll', () => {
+                const isAtBottom = scrollableField.scrollHeight - scrollableField.scrollTop
+                    <= scrollableField.clientHeight + 50;
+                if (isAtBottom) {
+                    hideNewSharedMessagesIndicator();
+                }
+            });
+        }
+
         // Prevent the browser navigating away when dropping files.
         const preventIfFiles = (event) => {
             if (!isFileDragEvent(event)) return;
