@@ -86,6 +86,66 @@ function normaliseKindClass(kind) {
 	return 'type';
 }
 
+const LS_CARTOUCHE_SHORTEST_NAME = 'von_cartouche_use_shortest_name';
+const LS_CARTOUCHE_SHOW_NAME = 'von_cartouche_show_name';
+const LS_CARTOUCHE_SHOW_ID = 'von_cartouche_show_id';
+const LS_CARTOUCHE_SHOW_KIND = 'von_cartouche_show_kind';
+const LS_CARTOUCHE_KIND_AS_BG = 'von_cartouche_kind_as_background';
+
+function parseBoolSetting(value, fallbackValue) {
+	if (value === null || value === undefined) {
+		return fallbackValue;
+	}
+	return String(value) === 'true';
+}
+
+export function getCartoucheAppearanceSettings() {
+	let useShortestName = false;
+	let showName = true;
+	let showId = false;
+	let showKind = true;
+	let kindAsBackground = false;
+	try {
+		useShortestName = parseBoolSetting(localStorage.getItem(LS_CARTOUCHE_SHORTEST_NAME), false);
+		showName = parseBoolSetting(localStorage.getItem(LS_CARTOUCHE_SHOW_NAME), true);
+		showId = parseBoolSetting(localStorage.getItem(LS_CARTOUCHE_SHOW_ID), false);
+		showKind = parseBoolSetting(localStorage.getItem(LS_CARTOUCHE_SHOW_KIND), true);
+		kindAsBackground = parseBoolSetting(localStorage.getItem(LS_CARTOUCHE_KIND_AS_BG), false);
+	} catch (_) {
+		// ignore
+	}
+	if (!showName && !showId) {
+		showId = true;
+	}
+	if (kindAsBackground && showKind) {
+		showKind = false;
+	}
+	return { useShortestName, showName, showId, showKind, kindAsBackground };
+}
+
+export function applyCartoucheAppearance(cartoucheEl, prefs = getCartoucheAppearanceSettings()) {
+	if (!cartoucheEl) return;
+	const showName = prefs?.showName !== false;
+	const showId = prefs?.showId !== false;
+	const showKind = prefs?.showKind !== false;
+	const kindAsBackground = prefs?.kindAsBackground === true;
+	try {
+		cartoucheEl.classList.toggle('cartouche-hide-name', !showName);
+		cartoucheEl.classList.toggle('cartouche-hide-id', !showId);
+		cartoucheEl.classList.toggle('cartouche-hide-kind', !showKind);
+		cartoucheEl.classList.toggle('cartouche-kind-as-bg', kindAsBackground);
+
+		const kindValue = cartoucheEl.dataset?.kind || '';
+		const kindClass = normaliseKindClass(kindValue);
+		cartoucheEl.classList.remove('type', 'individual', 'predicate');
+		if (kindClass) {
+			cartoucheEl.classList.add(kindClass);
+		}
+	} catch (_) {
+		// ignore
+	}
+}
+
 let cartoucheContextMenu = null;
 let lastCartoucheContextMenuTriggerEl = null;
 let lastCartoucheContextMenuOpenAt = 0;
@@ -243,6 +303,8 @@ export function createVontologyCartouche(conceptId, opts = {}) {
 	btn.appendChild(name);
 	btn.appendChild(id);
 	btn.appendChild(kind);
+
+	applyCartoucheAppearance(btn);
 
 	btn.addEventListener('click', (e) => {
 		e.preventDefault();

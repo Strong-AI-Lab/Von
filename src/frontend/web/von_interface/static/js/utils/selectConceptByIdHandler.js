@@ -1,4 +1,5 @@
-import { getPreferredLanguage, selectBestNameForContext } from './nameSelection.js';
+import { getPreferredLanguage, selectBestNameForContext, selectShortestNameForContext } from './nameSelection.js';
+import { applyCartoucheAppearance, getCartoucheAppearanceSettings } from './textDecorator.js';
 import { showToast } from './toast.js';
 
 export function normaliseVontologyId(value) {
@@ -140,8 +141,13 @@ async function fetchConceptMetadata(conceptId, fetchFn) {
         const json = await res.json();
         const preferredLanguage = getPreferredLanguage();
         const bestName = selectBestNameForContext(json?.raw_doc?.names, preferredLanguage);
+        const shortestName = selectShortestNameForContext(json?.raw_doc?.names, preferredLanguage);
+        const prefs = getCartoucheAppearanceSettings();
+        const displayName = (prefs?.useShortestName ? (shortestName || bestName) : (bestName || shortestName)) || json?.display_name || null;
         return {
-            displayName: bestName || json?.display_name || null,
+            displayName,
+            bestName: bestName ? String(bestName) : null,
+            shortestName: shortestName ? String(shortestName) : null,
             kind: json?.kind || json?.computed_kind || null
         };
     } catch (_) {
@@ -158,7 +164,10 @@ function updateCartouchesForConcept(conceptId, metadata) {
         try {
             if (el?.dataset?.fullConceptId !== id) continue;
 
-            const displayName = metadata.displayName || deriveNameFromConceptId(id);
+            const prefs = getCartoucheAppearanceSettings();
+            const displayName = (prefs?.useShortestName
+                ? (metadata.shortestName || metadata.displayName)
+                : (metadata.displayName || metadata.shortestName)) || deriveNameFromConceptId(id);
             const nameEl = el.querySelector('.vontology-cartouche-name');
             if (nameEl) nameEl.textContent = displayName;
 
@@ -170,6 +179,7 @@ function updateCartouchesForConcept(conceptId, metadata) {
                 kindEl.textContent = formatKindLabel(kind);
             }
             el.dataset.kind = kind;
+            applyCartoucheAppearance(el, prefs);
         } catch (_) {
             // Ignore per-cartouche update failures.
         }

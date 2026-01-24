@@ -189,5 +189,88 @@ export function selectBestNameForContext(names, preferredLanguage = getPreferred
     return unique[0]?.text || null;
 }
 
+/**
+ * Choose the shortest display label from a names array while still
+ * respecting preferred-language ranking and avoiding GUID-like candidates
+ * when possible.
+ */
+export function selectShortestNameForContext(names, preferredLanguage = getPreferredLanguage()) {
+    if (!Array.isArray(names) || names.length === 0) {
+        return null;
+    }
+
+    const expanded = [];
+    for (const entry of names) {
+        const candidates = _normaliseNameEntry(entry);
+        if (!candidates) continue;
+        for (const c of candidates) {
+            expanded.push(c);
+        }
+    }
+
+    if (!expanded.length) {
+        return null;
+    }
+
+    const bestByText = new Map();
+    for (const c of expanded) {
+        const key = c.text;
+        const prev = bestByText.get(key);
+        if (!prev) {
+            bestByText.set(key, c);
+            continue;
+        }
+
+        const prevScore = [
+            _languageScore(prev.language, preferredLanguage),
+            _typeScore(prev.type),
+            _guidPenalty(prev),
+            prev.text.length
+        ];
+        const nextScore = [
+            _languageScore(c.language, preferredLanguage),
+            _typeScore(c.type),
+            _guidPenalty(c),
+            c.text.length
+        ];
+        if (
+            nextScore[0] < prevScore[0] ||
+            (nextScore[0] === prevScore[0] &&
+                (nextScore[1] < prevScore[1] ||
+                    (nextScore[1] === prevScore[1] &&
+                        (nextScore[2] < prevScore[2] ||
+                            (nextScore[2] === prevScore[2] && nextScore[3] < prevScore[3])))))
+        ) {
+            bestByText.set(key, c);
+        }
+    }
+
+    const unique = Array.from(bestByText.values());
+    let minLangScore = Infinity;
+    for (const c of unique) {
+        const score = _languageScore(c.language, preferredLanguage);
+        if (score < minLangScore) minLangScore = score;
+    }
+
+    let filtered = unique.filter((c) => _languageScore(c.language, preferredLanguage) === minLangScore);
+    const nonGuid = filtered.filter((c) => _guidPenalty(c) === 0);
+    if (nonGuid.length) {
+        filtered = nonGuid;
+    }
+
+    filtered.sort((a, b) => {
+        const len = a.text.length - b.text.length;
+        if (len !== 0) return len;
+
+        const aType = _typeScore(a.type);
+        const bType = _typeScore(b.type);
+        if (aType !== bType) return aType - bType;
+
+        return a.text.localeCompare(b.text);
+    });
+
+    return filtered[0]?.text || null;
+}
+
 export { DEFAULT_LANGUAGE };
 

@@ -13,8 +13,8 @@ import {
     startSpeechRecognition,
     stopSpeaking
 } from './speech.js';
-import { getPreferredLanguage, selectBestNameForContext } from './utils/nameSelection.js';
-import { cartouchifyElementText, cartouchifyVontologyTokensInElement, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
+import { getPreferredLanguage, selectBestNameForContext, selectShortestNameForContext } from './utils/nameSelection.js';
+import { applyCartoucheAppearance, cartouchifyElementText, cartouchifyVontologyTokensInElement, getCartoucheAppearanceSettings, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
 import { showToast } from './utils/toast.js';
 
 // Store LLM debug data for each turn
@@ -2115,15 +2115,23 @@ async function fetchConceptMetaForChat(fullId) {
                 node?.node?.names ||
                 null;
             const bestName = selectBestNameForContext(rawNames, preferredLanguage);
+            const shortestName = selectShortestNameForContext(rawNames, preferredLanguage);
+            const prefs = getCartoucheAppearanceSettings();
             const name =
-                bestName ||
+                (prefs?.useShortestName ? (shortestName || bestName) : (bestName || shortestName)) ||
                 node?.display_name ||
                 node?.name ||
                 node?.node?.display_name ||
                 node?.node?.name ||
                 fullId;
             const kind = node?.kind || node?.node?.kind || 'type';
-            return { name: String(name), kind: String(kind), source: 'node_content' };
+            return {
+                name: String(name),
+                bestName: bestName ? String(bestName) : null,
+                shortestName: shortestName ? String(shortestName) : null,
+                kind: String(kind),
+                source: 'node_content'
+            };
         }
 
         // Fallback to search endpoint if node_content is unavailable.
@@ -2138,6 +2146,8 @@ async function fetchConceptMetaForChat(fullId) {
 
         return {
             name: match.name || match.id,
+            bestName: match.name ? String(match.name) : null,
+            shortestName: match.name ? String(match.name) : null,
             kind: match.kind || 'type',
             source: 'search',
             provisional: true
@@ -2176,8 +2186,10 @@ async function fetchConceptMetaForChatNodeOnly(fullId) {
             node?.node?.names ||
             null;
         const bestName = selectBestNameForContext(rawNames, preferredLanguage);
+        const shortestName = selectShortestNameForContext(rawNames, preferredLanguage);
+        const prefs = getCartoucheAppearanceSettings();
         const name =
-            bestName ||
+            (prefs?.useShortestName ? (shortestName || bestName) : (bestName || shortestName)) ||
             node?.display_name ||
             node?.name ||
             node?.node?.display_name ||
@@ -2185,7 +2197,13 @@ async function fetchConceptMetaForChatNodeOnly(fullId) {
             fullId;
         const kind = node?.kind || node?.node?.kind || 'type';
 
-        return { name: String(name), kind: String(kind), source: 'node_content' };
+        return {
+            name: String(name),
+            bestName: bestName ? String(bestName) : null,
+            shortestName: shortestName ? String(shortestName) : null,
+            kind: String(kind),
+            source: 'node_content'
+        };
     } catch (err) {
         console.debug('[chatTab] fetchConceptMetaForChatNodeOnly failed', err);
         return null;
@@ -2266,17 +2284,28 @@ function updateCartoucheElement(cartoucheEl, meta) {
         return;
     }
 
+    const prefs = getCartoucheAppearanceSettings();
+
     const nameEl = cartoucheEl.querySelector('.vontology-cartouche-name');
     const kindEl = cartoucheEl.querySelector('.vontology-cartouche-kind');
 
     if (nameEl) {
-        nameEl.textContent = meta.name || (cartoucheEl.dataset.fullConceptId || '');
+        const displayName = prefs?.useShortestName
+            ? (meta.shortestName || meta.bestName || meta.name)
+            : (meta.bestName || meta.name || meta.shortestName);
+        nameEl.textContent = displayName || (cartoucheEl.dataset.fullConceptId || '');
     }
     if (kindEl) {
         const kindClass = normaliseKindClass(meta.kind);
         kindEl.className = `vontology-cartouche-kind ${kindClass}`;
         kindEl.textContent = formatKindLabel(meta.kind);
     }
+
+    try {
+        cartoucheEl.dataset.kind = meta.kind || '';
+    } catch (_) { }
+
+    applyCartoucheAppearance(cartoucheEl, prefs);
 }
 
 function hydrateChatConceptCartouches(root) {
@@ -2344,6 +2373,32 @@ function hydrateChatConceptCartouches(root) {
                 scheduleChatConceptMetaRetry(fullId);
             });
     }
+}
+
+function refreshChatCartoucheAppearance() {
+    const cartouches = Array.from(document.querySelectorAll('.vontology-cartouche[data-full-concept-id]'));
+    if (!cartouches.length) return;
+    const prefs = getCartoucheAppearanceSettings();
+    for (const el of cartouches) {
+        const fullId = el.dataset.fullConceptId;
+        const meta = fullId ? chatConceptMetaCache.get(fullId) : null;
+        if (meta) {
+            updateCartoucheElement(el, meta);
+        } else {
+            applyCartoucheAppearance(el, prefs);
+        }
+    }
+}
+
+try {
+    window.addEventListener('von-preferences-changed', (event) => {
+        const key = event?.detail?.key;
+        if (key === 'von_cartouche_use_shortest_name' || key === 'von_cartouche_show_name' || key === 'von_cartouche_show_id' || key === 'von_cartouche_show_kind' || key === 'von_cartouche_kind_as_background') {
+            refreshChatCartoucheAppearance();
+        }
+    });
+} catch (_) {
+    // ignore
 }
 
 // Export for testing.

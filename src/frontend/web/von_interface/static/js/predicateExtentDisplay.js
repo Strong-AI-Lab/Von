@@ -7,7 +7,8 @@
 
 import { createOrActivateConceptTab } from './dynamicTabs.js';
 import { fetchPredicateExtent } from './predicateUtils.js';
-import { selectBestNameForContext } from './utils/nameSelection.js';
+import { selectBestNameForContext, selectShortestNameForContext } from './utils/nameSelection.js';
+import { getCartoucheAppearanceSettings } from './utils/textDecorator.js';
 import { showToast } from './utils/toast.js';
 
 const CONCEPT_SEARCH_API = '/vontology/api/vontology/search';
@@ -105,7 +106,10 @@ async function getConceptMetadata(conceptId) {
             return metadata;
         }
 
-        const displayName = selectBestNameForContext(names) || doc.name || doc.display_name || conceptId;
+        const bestName = selectBestNameForContext(names);
+        const shortestName = selectShortestNameForContext(names);
+        const prefs = getCartoucheAppearanceSettings();
+        const displayName = (prefs?.useShortestName ? (shortestName || bestName) : (bestName || shortestName)) || doc.name || doc.display_name || conceptId;
         const metadata = { displayName, kind };
         conceptMetadataCache.set(conceptId, metadata);
         return metadata;
