@@ -7703,7 +7703,11 @@ async function handleSendPrompt() {
                     spokenText
                 });
                 llmDebugData.set(assistantTurnId, enriched);
-                console.log('[chatTab] Stored LLM debug data for turn:', assistantTurnId);
+                console.log('[chatTab] Stored LLM debug data for turn:', assistantTurnId, {
+                    hasButtonify: !!data.llm_debug?.buttonify,
+                    buttonifyOptions: data.llm_debug?.buttonify?.options,
+                    enrichedHasButtonify: !!enriched?.buttonify
+                });
             }
 
             const fastpathMeta = data.fastpath || (data.llm_debug && data.llm_debug.fastpath) || null;
@@ -8242,9 +8246,15 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageContent.appendChild(messageText);
             try {
                 const debugData = turnId ? llmDebugData.get(turnId) : null;
+                console.log('[chatTab] Quick reply check:', {
+                    turnId,
+                    hasDebugData: !!debugData,
+                    buttonifyExists: debugData?.buttonify !== undefined,
+                    buttonifyOptions: debugData?.buttonify?.options
+                });
                 appendQuickReplyButtons(messageContent, debugData?.buttonify?.options);
-            } catch (_) {
-                // Ignore quick-reply rendering failures.
+            } catch (err) {
+                console.warn('[chatTab] Quick reply rendering failed:', err);
             }
             messageContainer.appendChild(vonImage);
             messageContainer.appendChild(messageContent);
