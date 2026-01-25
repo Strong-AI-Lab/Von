@@ -322,6 +322,38 @@
                 <small id="fetchCountsOnLoadHelp" class="settings-note">Disabling this can make initial tree display
                     faster; counts will still appear shortly after as they are loaded lazily.</small>
             </div>
+
+            <h3 class="mt-3">Vontology Concept Appearance</h3>
+            <p class="settings-note">Controls how #V# concept cartouches render across chat, prompt overlay, and
+                Vontology
+                panels. Stored only in this browser.</p>
+
+            <div class="cartouche-appearance-settings">
+                <div class="inline-form inline-form-tight">
+                    <input type="checkbox" id="cartoucheShowNameToggle" />
+                    <label for="cartoucheShowNameToggle" class="ml-1">Show concept name</label>
+                </div>
+                <div class="inline-form inline-form-tight">
+                    <input type="checkbox" id="cartoucheShortestNameToggle" />
+                    <label for="cartoucheShortestNameToggle" class="ml-1">Prefer shortest name</label>
+                </div>
+                <div class="inline-form inline-form-tight">
+                    <input type="checkbox" id="cartoucheShowIdToggle" />
+                    <label for="cartoucheShowIdToggle" class="ml-1">Show concept ID</label>
+                </div>
+                <div class="inline-form inline-form-tight">
+                    <input type="checkbox" id="cartoucheShowKindToggle" />
+                    <label for="cartoucheShowKindToggle" class="ml-1">Show kind marker</label>
+                </div>
+                <div class="inline-form inline-form-tight">
+                    <input type="checkbox" id="cartoucheKindAsBackgroundToggle" />
+                    <label for="cartoucheKindAsBackgroundToggle" class="ml-1">Use kind colour as cartouche
+                        background</label>
+                </div>
+            </div>
+            <small class="settings-note">At least one of “name” or “ID” must remain visible. When background colour is
+                enabled, the kind marker is hidden.</small>
+
             <div id="vontologyPerformanceStatus" class="status-message hidden" role="alert"></div>
         </section>
 

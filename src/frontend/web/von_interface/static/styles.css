@@ -4437,6 +4437,26 @@ footer {
     opacity: 0.85;
 }
 
+
+.vontology-cartouche.vontology-cartouche-missing {
+    background: #ffffff;
+    border-color: #ef4444;
+    color: #991b1b;
+}
+
+.vontology-cartouche.vontology-cartouche-missing:hover {
+    background: #ffffff;
+}
+
+.vontology-cartouche.vontology-cartouche-missing .vontology-cartouche-name,
+.vontology-cartouche.vontology-cartouche-missing .vontology-cartouche-kind {
+    display: none;
+}
+
+.vontology-cartouche.vontology-cartouche-missing .vontology-cartouche-id {
+    color: #991b1b;
+}
+
 /* Prompt overlay needs pointer events enabled for cartouches */
 button.prompt-vontology-cartouche {
     pointer-events: auto;
@@ -4535,6 +4555,21 @@ button.prompt-vontology-cartouche {
 .vontology-cartouche.vontology-cartouche-inline-code .vontology-cartouche-id {
     font-weight: 700;
     color: #334155;
+}
+
+.cartouche-appearance-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 8px 0 6px;
+}
+
+.cartouche-appearance-settings .inline-form {
+    margin-bottom: 0;
+}
+
+.cartouche-appearance-settings .inline-form-tight {
+    gap: 6px;
 }
 
 .prompt-vontology-cartouche-remove {
