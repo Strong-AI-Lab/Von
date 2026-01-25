@@ -565,9 +565,12 @@ export async function setModelInfoFooterText() {
     scheduleLatency();
     // Clear timer if badge removed
     const observer = new MutationObserver(() => {
+      if (!document?.body) { if (latencyTimer) clearTimeout(latencyTimer); observer.disconnect(); return; }
       if (!document.body.contains(badge)) { if (latencyTimer) clearTimeout(latencyTimer); observer.disconnect(); }
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    if (document?.body) {
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
     const status = pingOk ? 'Connected' : 'Unavailable';
     const err = dbInfo.error ? `\nError: ${String(dbInfo.error).slice(0, 300)}` : '';
     let tooltip = `Database: ${dbName}\nEffective URI: ${sanitized || 'Unknown'}\nClassification: ${classification}\nStatus: ${status}`;
