@@ -88,6 +88,129 @@ def get_setting(setting_name: str) -> Any:
         return None
 
 
+def get_settings_batch(setting_names: List[str]) -> Dict[str, Any]:
+    """
+    Retrieves multiple settings from the database in a single query.
+
+    Args:
+        setting_names: List of setting names to retrieve.
+
+    Returns:
+        Dictionary mapping setting names to their values. Missing settings are not included.
+    """
+    if not setting_names:
+        return {}
+
+    settings_coll = get_application_settings_collection()
+    if settings_coll is None:
+        logger.error(
+            f"Could not access the '{APPLICATION_SETTINGS_COLLECTION_NAME}' collection for batch fetch."
+        )
+        return {}
+
+    try:
+        cursor = settings_coll.find({"setting_name": {"$in": setting_names}})
+        result = {}
+        for doc in cursor:
+            name = doc.get("setting_name")
+            if name:
+                result[name] = doc.get("value")
+        logger.info(f"Batch fetched {len(result)} of {len(setting_names)} settings")
+        return result
+    except OperationFailure as e:
+        logger.error(f"MongoDB operation failed during batch fetch: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Unexpected error during batch fetch: {e}")
+        return {}
+
+
+def _coerce_bool(val: Any, default: bool) -> bool:
+    """Coerce a value to bool with common truthy/falsy string handling."""
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("1", "true", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "no", "n", "off"):
+            return False
+    if isinstance(val, (int, float)):
+        return val != 0
+    return default
+
+
+def _coerce_int(val: Any, default: int) -> int:
+    """Coerce a value to int with fallback."""
+    if isinstance(val, int):
+        return val
+    if isinstance(val, str):
+        try:
+            return int(val.strip())
+        except ValueError:
+            pass
+    if isinstance(val, float):
+        return int(val)
+    return default
+
+
+def get_all_settings_batch() -> Dict[str, Any]:
+    """Fetch all application settings in a single DB query (optimised for /api/settings/).
+
+    Returns a dict with processed/coerced values matching what the individual getters return.
+    """
+    # List of all setting names we need from the DB
+    setting_names = [
+        ACTIVE_LLM_SETTING_NAME,
+        OPENAI_ENV_VAR_SETTING_NAME,
+        FETCH_COUNTS_ON_LOAD_SETTING_NAME,
+        PRELOAD_VONTOLOGY_TREE_SETTING_NAME,
+        DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME,
+        SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME,
+        BUTTONIFY_MODEL_ENABLED_SETTING_NAME,
+        INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME,
+        INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME,
+        DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME,
+    ]
+
+    raw = get_settings_batch(setting_names)
+
+    # Process values with same defaults as individual getters
+    active_llm_raw = raw.get(ACTIVE_LLM_SETTING_NAME)
+    if active_llm_raw is not None and not isinstance(active_llm_raw, dict):
+        logger.warning("Active LLM setting malformed (not dict); ignoring")
+        active_llm_raw = None
+
+    return {
+        "active_llm": active_llm_raw,
+        "openai_api_key_env_var": raw.get(OPENAI_ENV_VAR_SETTING_NAME),
+        "fetch_counts_on_load": _coerce_bool(
+            raw.get(FETCH_COUNTS_ON_LOAD_SETTING_NAME), default=True
+        ),
+        "preload_vontology_tree": _coerce_bool(
+            raw.get(PRELOAD_VONTOLOGY_TREE_SETTING_NAME), default=False
+        ),
+        "disable_remote_ollama_scan": _coerce_bool(
+            raw.get(DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME), default=False
+        ),
+        "show_tool_use_during_thinking": _coerce_bool(
+            raw.get(SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME), default=True
+        ),
+        "buttonify_model_enabled": _coerce_bool(
+            raw.get(BUTTONIFY_MODEL_ENABLED_SETTING_NAME), default=True
+        ),
+        "internal_mcp_max_tool_invocations": _coerce_int(
+            raw.get(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME), default=8
+        ),
+        "internal_mcp_tool_batch_cap": _coerce_int(
+            raw.get(INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME), default=3
+        ),
+        "disable_write_tool_conservatism": _coerce_bool(
+            raw.get(DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME), default=False
+        ),
+    }
+
+
 def update_setting(setting_name: str, setting_value: Any) -> bool:
     """
     Updates or creates a setting in the application_settings collection.

@@ -921,14 +921,19 @@ def add_message_to_history(
             message_with_timestamp["llm_debug_data"] = llm_debug_data
 
         set_fields: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
-        if isinstance(ns, str) and ns.strip():
-            set_fields["namespace"] = ns.strip()
+        # NOTE: namespace is intentionally NOT in $set - it should only be set
+        # on document creation via $setOnInsert. Otherwise, when a shared
+        # conversation participant adds a message, their namespace would
+        # overwrite the owner's namespace and cause the conversation to
+        # disappear from the owner's session list. (JVNAUTOSCI-1004)
 
         session_name = None
         if message.get("role") == "user":
             session_name = _session_name_from_message(message.get("content"))
 
         set_on_insert: Dict[str, Any] = {"created_at": datetime.now(timezone.utc)}
+        if isinstance(ns, str) and ns.strip():
+            set_on_insert["namespace"] = ns.strip()
         if session_name:
             set_on_insert["session_name"] = session_name
         org_concept_id = session_context.get("organisation_concept_id")

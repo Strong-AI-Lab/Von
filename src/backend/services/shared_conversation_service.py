@@ -251,6 +251,21 @@ def list_accepted_invites_for_user(*, user_concept_id: str) -> List[Dict[str, An
     )
 
 
+def list_outgoing_accepted_invites_for_user(
+    *, user_concept_id: str
+) -> List[Dict[str, Any]]:
+    """Return accepted invites where the user is the inviter (owner).
+
+    This is used to identify sessions that the owner has shared with others,
+    so the owner can subscribe to SSE updates from participants.
+    """
+    return list_invites_for_user(
+        user_concept_id=user_concept_id,
+        status="accepted",
+        direction="outgoing",
+    )
+
+
 def get_invite_status_map(*, session_id: str, invitee_ids: List[str]) -> Dict[str, str]:
     coll = _get_collection()
     if coll is None:
