@@ -4978,6 +4978,17 @@ def history_sessions():
             session.get("organisation_concept_id")
         )
         namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+
+        # Fallback: extract org from namespace if not in session (JVNAUTOSCI-1004)
+        # Namespace format: #V#user@org or user@org
+        if (
+            not organisation_concept_id
+            and isinstance(namespace, str)
+            and "@" in namespace
+        ):
+            ns_org_part = namespace.split("@", 1)[-1]
+            organisation_concept_id = _normalise_concept_id(ns_org_part)
+
         include_legacy = True
         sessions = chat_history_service.get_chat_history_session_summaries(
             user_concept_id,

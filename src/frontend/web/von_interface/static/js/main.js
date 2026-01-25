@@ -219,13 +219,54 @@ function setupSettingsFrameResizing() {
 }
 
 /**
+ * Sync the Flask session's organisation_concept_id from localStorage.
+ * This avoids race conditions where /history/sessions is called before org context is set.
+ */
+async function syncFlaskSessionOrg() {
+  try {
+    const storedOrg = localStorage.getItem('von_current_org');
+    if (!storedOrg) {
+      console.log('[main] No org in localStorage, skipping Flask session sync');
+      return;
+    }
+    const org = JSON.parse(storedOrg);
+    const orgConceptId = org?.concept_id;
+    if (!orgConceptId) {
+      console.log('[main] No org concept_id in localStorage, skipping Flask session sync');
+      return;
+    }
+    console.log('[main] Syncing organisation to Flask session from localStorage:', orgConceptId);
+    const syncRes = await fetch('/von/api/session/set_organisation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ organisation_concept_id: orgConceptId })
+    });
+    if (syncRes.ok) {
+      const syncData = await syncRes.json();
+      console.log('[main] Flask session org synced:', syncData);
+      if (syncData.namespace) {
+        localStorage.setItem('current_user_namespace', syncData.namespace);
+      }
+    } else {
+      console.warn('[main] Failed to sync org to Flask session:', syncRes.status);
+    }
+  } catch (err) {
+    console.warn('[main] Error syncing org to Flask session:', err);
+  }
+}
+
+/**
  * Ensure user context is available in localStorage before app initialization.
  * Fetches settings if localStorage is empty.
+ * ALWAYS syncs Flask session org to avoid race conditions with session fetch.
  */
 async function ensureUserContext() {
   try {
-    // If we already have user context, we don't need to block
+    // If we already have user context, still sync Flask session org but skip settings fetch
     if (localStorage.getItem('von_current_user')) {
+      // CRITICAL: Even with localStorage data, we must sync Flask session org
+      // to avoid race condition where /history/sessions is called before org context is set.
+      await syncFlaskSessionOrg();
       return;
     }
 
@@ -278,6 +319,32 @@ async function ensureUserContext() {
       };
       localStorage.setItem('von_current_org', JSON.stringify(org));
       console.log('[main] Populated von_current_org from settings');
+    }
+
+    // CRITICAL: Sync the Flask session's organisation_concept_id to avoid race condition
+    // where /history/sessions is called before the org context is set in the server session.
+    // This ensures shared conversation filtering works correctly on initial page load.
+    if (settings.current_organisation_concept_id) {
+      try {
+        console.log('[main] Syncing organisation to Flask session:', settings.current_organisation_concept_id);
+        const syncRes = await fetch('/von/api/session/set_organisation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ organisation_concept_id: settings.current_organisation_concept_id })
+        });
+        if (syncRes.ok) {
+          const syncData = await syncRes.json();
+          console.log('[main] Flask session org synced:', syncData);
+          // Update namespace if returned
+          if (syncData.namespace) {
+            localStorage.setItem('current_user_namespace', syncData.namespace);
+          }
+        } else {
+          console.warn('[main] Failed to sync org to Flask session:', syncRes.status);
+        }
+      } catch (syncErr) {
+        console.warn('[main] Error syncing org to Flask session:', syncErr);
+      }
     }
   } catch (e) {
     console.warn('[main] Failed to ensure user context:', e);
