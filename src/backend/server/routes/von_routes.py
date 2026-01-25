@@ -4999,6 +4999,7 @@ def history_sessions():
         )
 
         shared_invites = list_accepted_invites_for_user(user_concept_id=user_concept_id)
+        # JVNAUTOSCI-1004: Filter shared invites by current organisation
         if organisation_concept_id:
             shared_invites = [
                 invite
@@ -5424,6 +5425,8 @@ def set_organisation():
             namespace = derive_namespace(user_slug)
             session.pop("organisation_concept_id", None)
             session.pop("role_in_org", None)
+            # JVNAUTOSCI-1004: Clear chat session_id when org changes
+            session.pop("session_id", None)
             session["namespace"] = namespace
             session.modified = True
             return (
@@ -5465,6 +5468,9 @@ def set_organisation():
         session["organisation_concept_id"] = org_slug
         session["role_in_org"] = role_in_org
         session["namespace"] = namespace
+        # JVNAUTOSCI-1004: Clear chat session_id when org changes to avoid
+        # showing conversation from previous org context
+        session.pop("session_id", None)
         session.modified = True
 
         # Return concept ID form in API response (with #V# prefix)
@@ -6476,6 +6482,21 @@ def list_shared_conversation_invites():
             direction="incoming",
             session_id=session_id,
         )
+
+        # JVNAUTOSCI-1004: Filter invites by current organisation
+        organisation_concept_id = _normalise_concept_id(
+            session.get("organisation_concept_id")
+        )
+        if organisation_concept_id:
+            invites = [
+                invite
+                for invite in invites
+                if (
+                    _normalise_concept_id(invite.get("organisation_concept_id"))
+                    in (None, organisation_concept_id)
+                )
+            ]
+
         return jsonify({"invites": invites, "total_count": len(invites)}), 200
     except Exception as e:
         print(f"Error listing invites: {e}")
