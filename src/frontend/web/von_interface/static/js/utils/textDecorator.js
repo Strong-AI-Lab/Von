@@ -125,6 +125,7 @@ export function getCartoucheAppearanceSettings() {
 
 export function applyCartoucheAppearance(cartoucheEl, prefs = getCartoucheAppearanceSettings()) {
 	if (!cartoucheEl) return;
+	if (cartoucheEl.classList.contains('vontology-cartouche-missing')) return;
 	const showName = prefs?.showName !== false;
 	const showId = prefs?.showId !== false;
 	const showKind = prefs?.showKind !== false;
@@ -138,11 +139,19 @@ export function applyCartoucheAppearance(cartoucheEl, prefs = getCartoucheAppear
 		const kindValue = cartoucheEl.dataset?.kind || '';
 		const kindClass = normaliseKindClass(kindValue);
 		cartoucheEl.classList.remove('type', 'individual', 'predicate');
-		if (kindClass) {
+		if (kindAsBackground && kindClass) {
 			cartoucheEl.classList.add(kindClass);
 		}
 	} catch (_) {
 		// ignore
+	}
+}
+
+function applyCartoucheAppearanceToAll() {
+	const settings = getCartoucheAppearanceSettings();
+	const cartouches = Array.from(document.querySelectorAll('.vontology-cartouche'));
+	for (const el of cartouches) {
+		applyCartoucheAppearance(el, settings);
 	}
 }
 
@@ -585,5 +594,22 @@ export function cartouchifyElementText(container, text) {
 	if (!container) return;
 	while (container.firstChild) container.removeChild(container.firstChild);
 	container.appendChild(createCartoucheFragment(text ?? ''));
+}
+
+try {
+	window.addEventListener('von-preferences-changed', (event) => {
+		const key = event?.detail?.key;
+		if (
+			key === LS_CARTOUCHE_SHOW_NAME ||
+			key === LS_CARTOUCHE_SHORTEST_NAME ||
+			key === LS_CARTOUCHE_SHOW_ID ||
+			key === LS_CARTOUCHE_SHOW_KIND ||
+			key === LS_CARTOUCHE_KIND_AS_BG
+		) {
+			applyCartoucheAppearanceToAll();
+		}
+	});
+} catch (_) {
+	// Ignore missing window in tests.
 }
 

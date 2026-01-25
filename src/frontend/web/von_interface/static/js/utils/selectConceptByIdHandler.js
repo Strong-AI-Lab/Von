@@ -140,15 +140,17 @@ async function fetchConceptMetadata(conceptId, fetchFn) {
     try {
         const json = await res.json();
         const preferredLanguage = getPreferredLanguage();
-        const bestName = selectBestNameForContext(json?.raw_doc?.names, preferredLanguage);
-        const shortestName = selectShortestNameForContext(json?.raw_doc?.names, preferredLanguage);
+        const names = json?.raw_doc?.names;
+        const bestName = selectBestNameForContext(names, preferredLanguage);
+        const shortestName = selectShortestNameForContext(names, preferredLanguage);
         const prefs = getCartoucheAppearanceSettings();
         const displayName = (prefs?.useShortestName ? (shortestName || bestName) : (bestName || shortestName)) || json?.display_name || null;
         return {
             displayName,
             bestName: bestName ? String(bestName) : null,
             shortestName: shortestName ? String(shortestName) : null,
-            kind: json?.kind || json?.computed_kind || null
+            kind: json?.kind || json?.computed_kind || null,
+            names: names || null
         };
     } catch (_) {
         return null;
@@ -171,6 +173,8 @@ function updateCartouchesForConcept(conceptId, metadata) {
             const nameEl = el.querySelector('.vontology-cartouche-name');
             if (nameEl) nameEl.textContent = displayName;
 
+            el.classList.remove('vontology-cartouche-missing');
+
             const kind = metadata.kind || '';
             const kindEl = el.querySelector('.vontology-cartouche-kind');
             if (kindEl) {
@@ -180,6 +184,32 @@ function updateCartouchesForConcept(conceptId, metadata) {
             }
             el.dataset.kind = kind;
             applyCartoucheAppearance(el, prefs);
+        } catch (_) {
+            // Ignore per-cartouche update failures.
+        }
+    }
+}
+
+function updateCartouchesForMissingConcept(conceptId) {
+    const id = normaliseVontologyId(conceptId);
+    if (!id) return;
+
+    const cartouches = Array.from(document.querySelectorAll('.vontology-cartouche'));
+    for (const el of cartouches) {
+        try {
+            if (el?.dataset?.fullConceptId !== id) continue;
+
+            el.classList.add('vontology-cartouche-missing');
+            el.dataset.kind = '';
+
+            const nameEl = el.querySelector('.vontology-cartouche-name');
+            if (nameEl) nameEl.textContent = '';
+
+            const kindEl = el.querySelector('.vontology-cartouche-kind');
+            if (kindEl) {
+                kindEl.className = 'vontology-cartouche-kind';
+                kindEl.textContent = '';
+            }
         } catch (_) {
             // Ignore per-cartouche update failures.
         }
@@ -420,6 +450,8 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
         deps.createOrActivateConceptTab(id, metadata?.displayName || id, shouldActivate);
         return;
     }
+
+    updateCartouchesForMissingConcept(id);
 
     // Concept does not exist: remove the optimistic tab rather than leaving a
     // dead "Loading…" tab around.

@@ -2130,7 +2130,8 @@ async function fetchConceptMetaForChat(fullId) {
                 bestName: bestName ? String(bestName) : null,
                 shortestName: shortestName ? String(shortestName) : null,
                 kind: String(kind),
-                source: 'node_content'
+                source: 'node_content',
+                names: rawNames || null
             };
         }
 
@@ -2196,13 +2197,13 @@ async function fetchConceptMetaForChatNodeOnly(fullId) {
             node?.node?.name ||
             fullId;
         const kind = node?.kind || node?.node?.kind || 'type';
-
         return {
             name: String(name),
             bestName: bestName ? String(bestName) : null,
             shortestName: shortestName ? String(shortestName) : null,
             kind: String(kind),
-            source: 'node_content'
+            source: 'node_content',
+            names: rawNames || null
         };
     } catch (err) {
         console.debug('[chatTab] fetchConceptMetaForChatNodeOnly failed', err);
@@ -2283,7 +2284,6 @@ function updateCartoucheElement(cartoucheEl, meta) {
         cartoucheEl.classList.add('unresolved');
         return;
     }
-
     const prefs = getCartoucheAppearanceSettings();
 
     const nameEl = cartoucheEl.querySelector('.vontology-cartouche-name');
@@ -2300,7 +2300,6 @@ function updateCartoucheElement(cartoucheEl, meta) {
         kindEl.className = `vontology-cartouche-kind ${kindClass}`;
         kindEl.textContent = formatKindLabel(meta.kind);
     }
-
     try {
         cartoucheEl.dataset.kind = meta.kind || '';
     } catch (_) { }
@@ -2419,6 +2418,18 @@ export function __testOnly_resetChatConceptMetaCaches() {
 // Export for testing.
 export function __testOnly_hydrateChatConceptCartouches(root) {
     hydrateChatConceptCartouches(root);
+}
+
+try {
+    window.addEventListener('von-preferences-changed', (event) => {
+        const key = event?.detail?.key;
+        if (!key || !key.startsWith('von_cartouche_')) return;
+        const root = document?.body;
+        if (!root) return;
+        hydrateChatConceptCartouches(root);
+    });
+} catch (_) {
+    // Ignore missing window in tests.
 }
 
 // Export for testing.

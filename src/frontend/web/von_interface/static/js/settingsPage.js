@@ -350,13 +350,7 @@ function notifyPreferenceChanged(key, value) {
 
 function setShowCodeNamesSetting(value) {
   safeLocalStorageSet(LS_SHOW_CODE_NAMES, value ? 'true' : 'false');
-  try {
-    window.dispatchEvent(new CustomEvent('von-preferences-changed', {
-      detail: { key: LS_SHOW_CODE_NAMES, value: !!value }
-    }));
-  } catch (_) {
-    // ignore
-  }
+  notifyPreferenceChanged(LS_SHOW_CODE_NAMES, !!value);
 }
 
 function getShowCodeNamesSetting() {
@@ -434,13 +428,7 @@ function enforceCartoucheAppearanceConstraints(toggles = {}) {
 
 function setFilterNlNamesToPreferredLanguageSetting(value) {
   safeLocalStorageSet(LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE, value ? 'true' : 'false');
-  try {
-    window.dispatchEvent(new CustomEvent('von-preferences-changed', {
-      detail: { key: LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE, value: !!value }
-    }));
-  } catch (_) {
-    // ignore
-  }
+  notifyPreferenceChanged(LS_FILTER_NL_NAMES_TO_PREFERRED_LANGUAGE, !!value);
 }
 
 function getFilterNlNamesToPreferredLanguageSetting() {
@@ -799,12 +787,15 @@ function setupConceptUiSettings() {
   if (langLabel) {
     langLabel.textContent = getPreferredLanguage();
   }
+  setupCartoucheAppearanceSettings();
+}
 
-  const showNameToggle = document.getElementById('settingsCartoucheShowNameToggle');
-  const shortestToggle = document.getElementById('settingsCartoucheShortestNameToggle');
-  const showIdToggle = document.getElementById('settingsCartoucheShowIdToggle');
-  const showKindToggle = document.getElementById('settingsCartoucheShowKindToggle');
-  const kindBgToggle = document.getElementById('settingsCartoucheKindAsBackgroundToggle');
+function setupCartoucheAppearanceSettings() {
+  const showNameToggle = document.getElementById('cartoucheShowNameToggle');
+  const shortestToggle = document.getElementById('cartoucheShortestNameToggle');
+  const showIdToggle = document.getElementById('cartoucheShowIdToggle');
+  const showKindToggle = document.getElementById('cartoucheShowKindToggle');
+  const kindBgToggle = document.getElementById('cartoucheKindAsBackgroundToggle');
 
   if (showNameToggle) {
     showNameToggle.checked = getCartoucheShowNameSetting();
@@ -846,30 +837,6 @@ function setupConceptUiSettings() {
   }
 
   enforceCartoucheAppearanceConstraints({ showNameToggle, showIdToggle, showKindToggle, kindBgToggle });
-
-  const shortestToggle = document.getElementById('settingsCartoucheShortestNameToggle');
-  if (shortestToggle) {
-    shortestToggle.checked = getCartoucheShortestNameSetting();
-    shortestToggle.addEventListener('change', () => {
-      setCartoucheShortestNameSetting(!!shortestToggle.checked);
-    });
-  }
-
-  const showIdToggle = document.getElementById('settingsCartoucheShowIdToggle');
-  if (showIdToggle) {
-    showIdToggle.checked = getCartoucheShowIdSetting();
-    showIdToggle.addEventListener('change', () => {
-      setCartoucheShowIdSetting(!!showIdToggle.checked);
-    });
-  }
-
-  const showKindToggle = document.getElementById('settingsCartoucheShowKindToggle');
-  if (showKindToggle) {
-    showKindToggle.checked = getCartoucheShowKindSetting();
-    showKindToggle.addEventListener('change', () => {
-      setCartoucheShowKindSetting(!!showKindToggle.checked);
-    });
-  }
 }
 
 function renderRagSummary(ragData, pendingFallback) {
@@ -1439,19 +1406,19 @@ document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () =
     setFilterNlNamesToPreferredLanguageSetting(false);
     const langLabel = document.getElementById('settingsPreferredLanguageForNlFilter');
     if (langLabel) langLabel.textContent = getPreferredLanguage();
-    const shortestToggle = document.getElementById('settingsCartoucheShortestNameToggle');
+    const shortestToggle = document.getElementById('cartoucheShortestNameToggle');
     if (shortestToggle) shortestToggle.checked = false;
     setCartoucheShortestNameSetting(false);
-    const showNameToggle = document.getElementById('settingsCartoucheShowNameToggle');
+    const showNameToggle = document.getElementById('cartoucheShowNameToggle');
     if (showNameToggle) showNameToggle.checked = true;
     setCartoucheShowNameSetting(true);
-    const showIdToggle = document.getElementById('settingsCartoucheShowIdToggle');
+    const showIdToggle = document.getElementById('cartoucheShowIdToggle');
     if (showIdToggle) showIdToggle.checked = false;
     setCartoucheShowIdSetting(false);
-    const showKindToggle = document.getElementById('settingsCartoucheShowKindToggle');
+    const showKindToggle = document.getElementById('cartoucheShowKindToggle');
     if (showKindToggle) showKindToggle.checked = true;
     setCartoucheShowKindSetting(true);
-    const kindBgToggle = document.getElementById('settingsCartoucheKindAsBackgroundToggle');
+    const kindBgToggle = document.getElementById('cartoucheKindAsBackgroundToggle');
     if (kindBgToggle) kindBgToggle.checked = false;
     setCartoucheKindAsBackgroundSetting(false);
     if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
