@@ -62,7 +62,7 @@ venv.bak/
 
 # VS Code (ignore all, then allowlist specific config & scripts)
 .vscode/*
-!.vscode/mcp.json
+
 !.vscode/launch.json
 !.vscode/settings.json
 !.vscode/.env.tests
