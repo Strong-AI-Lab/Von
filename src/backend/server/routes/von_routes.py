@@ -4586,9 +4586,13 @@ def history_debug():
         owner_user_id = user_concept_id
         shared_invite = None
 
-        if not chat_history_service.has_chat_history_session(
+        has_session = chat_history_service.has_chat_history_session(
             user_concept_id, session_id, namespace=namespace
-        ):
+        )
+        print(
+            f"[history/debug] user={user_concept_id}, session={session_id}, namespace={namespace}, has_session={has_session}, history_index={history_index}"
+        )
+        if not has_session:
             owner_user_id, shared_invite = _resolve_shared_conversation_owner(
                 user_concept_id=user_concept_id, session_id=session_id
             )
@@ -4599,12 +4603,26 @@ def history_debug():
             owner_user_id,
             shared_invite.get("organisation_concept_id") if shared_invite else None,
         ) or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+        print(
+            f"[history/debug] owner_user_id={owner_user_id}, owner_namespace={owner_namespace}"
+        )
         debug_data = chat_history_service.get_chat_history_debug_entry(
             user_id=owner_user_id,
             session_id=session_id,
             history_index=history_index,
             namespace=owner_namespace,
         )
+        # Fallback: if namespace mismatch (e.g. org session accessed without org context),
+        # retry without namespace restriction since we've already verified access above.
+        if not debug_data:
+            print(f"[history/debug] Retrying without namespace restriction")
+            debug_data = chat_history_service.get_chat_history_debug_entry(
+                user_id=owner_user_id,
+                session_id=session_id,
+                history_index=history_index,
+                namespace=None,
+            )
+        print(f"[history/debug] debug_data={bool(debug_data)}")
         if not debug_data:
             return jsonify(
                 {

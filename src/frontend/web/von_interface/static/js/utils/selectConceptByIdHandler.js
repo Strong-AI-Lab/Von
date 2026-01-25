@@ -204,6 +204,7 @@ function updateCartouchesForMissingConcept(conceptId) {
             // The ID must be visible; CSS hides name and kind for missing cartouches.
             el.classList.remove('cartouche-hide-id', 'cartouche-hide-name', 'cartouche-hide-kind', 'cartouche-kind-as-bg');
             el.dataset.kind = '';
+            el.title = "This concept doesn't exist yet — click to create";
 
             const nameEl = el.querySelector('.vontology-cartouche-name');
             if (nameEl) nameEl.textContent = '';

@@ -2280,11 +2280,15 @@ function scheduleChatConceptMetaRetry(fullId) {
 
 function updateCartoucheElement(cartoucheEl, meta) {
     if (!cartoucheEl) return;
+    const fullId = cartoucheEl?.dataset?.fullConceptId;
+    console.log('[chatTab] updateCartoucheElement', { fullId, hasMeta: !!meta, meta });
     if (!meta) {
         // Concept not found: mark as missing and show only the concept ID.
+        console.log('[chatTab] Marking cartouche as missing:', fullId);
         cartoucheEl.classList.add('vontology-cartouche-missing');
         cartoucheEl.classList.remove('unresolved', 'cartouche-hide-id', 'cartouche-hide-name', 'cartouche-hide-kind', 'cartouche-kind-as-bg');
         cartoucheEl.dataset.kind = '';
+        cartoucheEl.title = "This concept doesn't exist yet — click to create";
         const nameEl = cartoucheEl.querySelector('.vontology-cartouche-name');
         if (nameEl) nameEl.textContent = '';
         const kindEl = cartoucheEl.querySelector('.vontology-cartouche-kind');
@@ -8553,6 +8557,7 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
                 session_id: historyLocation.session_id,
                 history_index: String(historyLocation.history_index)
             });
+            console.log('[chatTab] loadLlmDebugDataForTurn request:', { turnId, session_id: historyLocation.session_id, history_index: historyLocation.history_index });
             const response = await fetch(`/von/history/debug?${params.toString()}`, { cache: 'no-store' });
             let data = null;
             try {
@@ -8560,6 +8565,7 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
             } catch (_) {
                 data = null;
             }
+            console.log('[chatTab] loadLlmDebugDataForTurn response:', { status: response.status, ok: response.ok, success: data?.success, error: data?.error, hasLlmDebugData: !!data?.llm_debug_data });
             if (!response.ok) {
                 if (response.status === 404 && data?.error === 'debug_not_available') {
                     showToast('No LLM debug data stored for this turn.');
