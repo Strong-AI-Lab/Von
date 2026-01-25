@@ -2983,25 +2983,14 @@ def add_relationship_route():
             400,
         )
 
-    structural_aliases = {
-        "#V#is_a_type_of": "is_a_type_of",
-        "#V#has_subtype": "has_subtype",
-        "#V#is_an_instance_of": "is_an_instance_of",
-        "#V#has_instance": "has_instance",
-        "#V#related_to": "related_to",
-    }
-    if isinstance(kind, str) and kind in structural_aliases:
-        kind = structural_aliases[kind]
+    # Normalise structural predicates using the authoritative service (JVNAUTOSCI-986)
+    from ...services.relationship_write_service import (
+        normalise_structural_predicate,
+        is_structural_predicate,
+        RELATIONSHIP_KINDS,
+    )
 
-    structural_aliases = {
-        "#V#is_a_type_of": "is_a_type_of",
-        "#V#has_subtype": "has_subtype",
-        "#V#is_an_instance_of": "is_an_instance_of",
-        "#V#has_instance": "has_instance",
-        "#V#related_to": "related_to",
-    }
-    if isinstance(kind, str) and kind in structural_aliases:
-        kind = structural_aliases[kind]
+    kind = normalise_structural_predicate(kind)
 
     if source_id == target_id:
         return (
@@ -3011,15 +3000,9 @@ def add_relationship_route():
             400,
         )
 
-    allowed = {
-        "is_a_type_of",
-        "has_subtype",
-        "is_an_instance_of",
-        "has_instance",
-        "related_to",
-    }
+    # Use shared RELATIONSHIP_KINDS (JVNAUTOSCI-986: single authoritative pathway)
     is_dynamic_predicate = False
-    if kind not in allowed:
+    if kind not in RELATIONSHIP_KINDS:
         # Allow arbitrary predicate concept ids (starting with #V#) as dynamic, non-inverted edges
         if isinstance(kind, str) and kind.startswith("#V#"):
             is_dynamic_predicate = True
