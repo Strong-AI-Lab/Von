@@ -781,6 +781,9 @@ def _add_relationship(**kwargs):
                 "predicate": result.get("inverse_predicate"),
                 "added": result.get("inverse_modified"),
             }
+        # Propagate warning from service layer (e.g. vacuous typing, JVNAUTOSCI-1010)
+        if "warning" in result:
+            response["warning"] = result["warning"]
         return response
 
     except Exception as e:
