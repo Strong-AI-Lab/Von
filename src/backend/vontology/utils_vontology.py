@@ -1,5 +1,6 @@
 # --- Standard Library Imports ---
 import os
+import threading
 from pathlib import Path
 import hashlib
 import json
@@ -3766,7 +3767,12 @@ def ensure_thing_exists_and_link_orphans() -> Dict[str, Any]:
     }
 
 
-def ensure_conversation_modality_concepts() -> Dict[str, Any]:
+# Process-level cache: once modality concepts are verified, skip re-checking.
+_modality_concepts_ensured = False
+_modality_concepts_lock = threading.Lock()
+
+
+def ensure_conversation_modality_concepts(force: bool = False) -> Dict[str, Any]:
     """Ensure core meeting/conversation modality concepts exist.
 
     Creates (if missing):
@@ -3774,74 +3780,106 @@ def ensure_conversation_modality_concepts() -> Dict[str, Any]:
     - Instances: Zoom, Microsoft Teams, Google Meet
 
     Returns summary dict with created/exists counts.
+
+    Args:
+        force: If True, bypass the process-level cache and re-check DB.
     """
-    from ..services.concept_service import create_concept
-    from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+    global _modality_concepts_ensured
 
-    summary: Dict[str, Any] = {
-        "type_created": False,
-        "instances_created": [],
-        "instances_skipped": [],
-        "errors": [],
-    }
+    # Fast path (outside lock): already verified this process lifetime
+    if _modality_concepts_ensured and not force:
+        return {
+            "cached": True,
+            "type_created": False,
+            "instances_created": [],
+            "instances_skipped": [],
+            "errors": [],
+        }
 
-    try:
-        if not ConceptsRepository.find_one({"concept_id": THING_PRIMARY_ID}):
-            ensure_thing_exists_and_link_orphans()
-    except Exception:
-        pass
+    # Acquire lock to prevent race conditions - other threads wait here
+    with _modality_concepts_lock:
+        # Double-check inside lock (another thread might have completed while we waited)
+        if _modality_concepts_ensured and not force:
+            logger.info("[ensure_modality] Cache HIT (after lock) - skipping DB checks")
+            return {
+                "cached": True,
+                "type_created": False,
+                "instances_created": [],
+                "instances_skipped": [],
+                "errors": [],
+            }
 
-    modality_type_id = "#V#conversation_modality"
-    try:
-        if not ConceptsRepository.find_one({"concept_id": modality_type_id}):
-            created = create_vontology_concept(
-                parent_id=THING_PRIMARY_ID,
-                new_concept_name="Conversation Modality",
-                create_as_instance=False,
-                description=(
-                    "A conversation modality is the medium/platform through which a conversation or meeting occurs, "
-                    "such as Zoom, Microsoft Teams, or Google Meet."
-                ),
-                notes=(
-                    "Used to tag conversations/meetings with the platform they occurred on. "
-                    "This is a non-exclusive (many-to-many) categorisation; sessions may have multiple modalities."
-                ),
-            )
-            summary["type_created"] = bool(created.get("success"))
-    except Exception as exc:
-        summary["errors"].append(f"type_create_failed: {exc}")
+        logger.info("[ensure_modality] Cache MISS - proceeding with DB checks")
 
-    instances = [
-        ("Zoom", "Video meeting platform."),
-        ("Microsoft Teams", "Video meeting and collaboration platform."),
-        ("Google Meet", "Video meeting platform (Google)."),
-    ]
+        from ..services.concept_service import create_concept
+        from ..utils.concept_id_utils import canonicalise_vontology_concept_id
 
-    for display_name, description in instances:
+        summary: Dict[str, Any] = {
+            "type_created": False,
+            "instances_created": [],
+            "instances_skipped": [],
+            "errors": [],
+        }
+
         try:
-            concept_id = canonicalise_vontology_concept_id(display_name)
-            if not concept_id:
-                summary["errors"].append(f"invalid_name: {display_name}")
-                continue
+            if not ConceptsRepository.find_one({"concept_id": THING_PRIMARY_ID}):
+                ensure_thing_exists_and_link_orphans()
+        except Exception:
+            pass
 
-            if ConceptsRepository.find_one({"concept_id": concept_id}):
-                summary["instances_skipped"].append(concept_id)
-                continue
-
-            create_concept(
-                name=display_name,
-                concept_id=concept_id,
-                parent_concept_ids=[modality_type_id],
-                create_as_instance=True,
-                description=description,
-                notes="Created by Von to support conversation metadata.",
-                system_tags=["conversation", "modality", "meeting"],
-            )
-            summary["instances_created"].append(concept_id)
+        modality_type_id = "#V#conversation_modality"
+        try:
+            if not ConceptsRepository.find_one({"concept_id": modality_type_id}):
+                created = create_vontology_concept(
+                    parent_id=THING_PRIMARY_ID,
+                    new_concept_name="Conversation Modality",
+                    create_as_instance=False,
+                    description=(
+                        "A conversation modality is the medium/platform through which a conversation or meeting occurs, "
+                        "such as Zoom, Microsoft Teams, or Google Meet."
+                    ),
+                    notes=(
+                        "Used to tag conversations/meetings with the platform they occurred on. "
+                        "This is a non-exclusive (many-to-many) categorisation; sessions may have multiple modalities."
+                    ),
+                )
+                summary["type_created"] = bool(created.get("success"))
         except Exception as exc:
-            summary["errors"].append(f"instance_create_failed:{display_name}:{exc}")
+            summary["errors"].append(f"type_create_failed: {exc}")
 
-    return summary
+        instances = [
+            ("Zoom", "Video meeting platform."),
+            ("Microsoft Teams", "Video meeting and collaboration platform."),
+            ("Google Meet", "Video meeting platform (Google)."),
+        ]
+
+        for display_name, description in instances:
+            try:
+                concept_id = canonicalise_vontology_concept_id(display_name)
+                if not concept_id:
+                    summary["errors"].append(f"invalid_name: {display_name}")
+                    continue
+
+                if ConceptsRepository.find_one({"concept_id": concept_id}):
+                    summary["instances_skipped"].append(concept_id)
+                    continue
+
+                create_concept(
+                    name=display_name,
+                    concept_id=concept_id,
+                    parent_concept_ids=[modality_type_id],
+                    create_as_instance=True,
+                    description=description,
+                    notes="Created by Von to support conversation metadata.",
+                    system_tags=["conversation", "modality", "meeting"],
+                )
+                summary["instances_created"].append(concept_id)
+            except Exception as exc:
+                summary["errors"].append(f"instance_create_failed:{display_name}:{exc}")
+
+        # Mark as ensured for this process lifetime (skip future checks)
+        _modality_concepts_ensured = True
+        return summary
 
 
 # Note: add_upward_closure_nodes defined later (duplicate removed - keeping complete implementation at line 2949)

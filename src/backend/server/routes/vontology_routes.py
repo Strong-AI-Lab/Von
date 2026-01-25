@@ -4375,8 +4375,10 @@ def get_key_concepts():
         # Find all concepts that are instances of #V#vontologykeyconcept
         # Note: For now, we return all such concepts regardless of user
         # Future enhancement: Add user-specific filtering via a relationship
+        # Use projection to only fetch concept_id (avoids loading full documents)
         key_concepts = ConceptsRepository.find(
-            {"relationships.is_an_instance_of": "#V#vontologykeyconcept"}
+            {"relationships.is_an_instance_of": "#V#vontologykeyconcept"},
+            projection={"concept_id": 1, "_id": 0},
         )
 
         # Extract concept IDs
