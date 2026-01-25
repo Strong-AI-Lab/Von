@@ -2759,6 +2759,38 @@ footer {
     border: 1px solid rgba(0, 0, 0, 0.1);
 }
 
+/* LLM Status badge in footer (Model segment) */
+.llm-status-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 12px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 12px;
+    background: #444;
+    color: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.llm-status-badge.ready {
+    background: #d1fae5;
+    color: #065f46;
+    border-color: #6ee7b7;
+}
+
+.llm-status-badge.error,
+.llm-status-badge.fatal {
+    background: #fee2e2;
+    color: #991b1b;
+    border-color: #fca5a5;
+}
+
+.llm-status-badge.missing-key {
+    background: #fef3c7;
+    color: #92400e;
+    border-color: #fcd34d;
+}
+
 /* Admin override badge (write-tool conservatism disabled) */
 .write-policy-override-badge {
     display: inline-block;

@@ -242,13 +242,13 @@ export async function setModelInfoFooterText() {
   let llmTooltipSuffix = '';
 
   if (status === 'missing_key') {
-    llmClass = 'fatal';
+    llmClass = 'missing-key';
     llmTooltipSuffix = `\nStatus: Missing Key`;
   } else if (status === 'error') {
-    llmClass = 'fatal';
+    llmClass = 'error';
     llmTooltipSuffix = `\nStatus: Error\n${errorMsg}`;
   } else if (status === 'ready') {
-    llmClass = 'atlas';
+    llmClass = 'ready';
     llmTooltipSuffix = `\nStatus: Ready`;
   }
 
@@ -257,7 +257,7 @@ export async function setModelInfoFooterText() {
   if (resolvedModelConcept) {
     // Create a concept button for the model individual (label prefix 'Model')
     const seg = makeConceptButton('Model', activeLlm?.model || resolvedModelConcept.name, resolvedModelConcept.conceptId, resolvedModelConcept.name);
-    if (llmClass) seg.classList.add('db-conn-badge', llmClass);
+    if (llmClass) seg.classList.add('llm-status-badge', llmClass);
     if (llmTooltipSuffix) {
       const btn = seg.querySelector('button');
       if (btn) btn.title = (btn.title || '') + llmTooltipSuffix;
@@ -266,7 +266,7 @@ export async function setModelInfoFooterText() {
   } else {
     const span = document.createElement('span');
     span.className = 'footer-segment';
-    if (llmClass) span.classList.add('db-conn-badge', llmClass);
+    if (llmClass) span.classList.add('llm-status-badge', llmClass);
     const label = document.createElement('span');
     label.className = 'footer-label-inline';
     label.textContent = 'Model: ';

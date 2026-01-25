@@ -459,6 +459,41 @@ async function loadAndDisplayLanguageIndicator() {
 // Also listen for settings changes to update the language indicator
 document.addEventListener('von:settingsChanged', loadAndDisplayLanguageIndicator);
 
+// JVNAUTOSCI-1011: Listen for org switches (from settings iframe) and update parent's sessionStorage
+// This ensures the footer reads the correct org value immediately (not stale sessionStorage)
+document.addEventListener('orgSwitched', (event) => {
+  const detail = event.detail || {};
+  const orgId = detail.organisation_id;
+  const namespace = detail.namespace;
+  console.log('[main] orgSwitched event received, updating sessionStorage:', { orgId, namespace });
+
+  try {
+    if (orgId) {
+      // Sync org to parent's sessionStorage so footer reads correct value
+      const existing = sessionStorage.getItem('von_current_org');
+      const parsed = existing ? JSON.parse(existing) : {};
+      sessionStorage.setItem('von_current_org', JSON.stringify({
+        id: parsed.id || null,
+        concept_id: orgId,
+        name: parsed.name || null
+      }));
+    } else {
+      // Switching to personal (no org) - clear sessionStorage entry
+      sessionStorage.removeItem('von_current_org');
+    }
+    if (namespace) {
+      sessionStorage.setItem('current_user_namespace', namespace);
+    }
+  } catch (e) {
+    console.warn('[main] Error updating sessionStorage on orgSwitched:', e);
+  }
+
+  // Refresh footer immediately with updated storage values
+  if (typeof window.updateModelInfoFooterDisplay === 'function') {
+    window.updateModelInfoFooterDisplay();
+  }
+});
+
 /**
  * Dynamically calculate and set positions for tabs and content based on actual header height
  * JVNAUTOSCI-550: Replace hard-coded CSS positions with JavaScript calculation
