@@ -28,8 +28,10 @@ from flask import (
     redirect,
     url_for,
     request,
+    g,
 )  # Added request for shutdown endpoint
 import os
+import time
 
 # --- Updated Typing Imports ---
 from typing import Optional, List, Dict, Any, Callable  # Use List and Dict
@@ -156,6 +158,43 @@ def create_flask_app(
     app = Flask(
         __name__, static_folder=static_folder_path, template_folder=template_folder_path
     )  # Template folder set here is default, Blueprint can override
+
+    # --- Request Timing Middleware ---
+    # Log slow requests to help diagnose performance issues
+    SLOW_REQUEST_THRESHOLD_MS = float(
+        os.environ.get("VON_SLOW_REQUEST_THRESHOLD_MS", "1000")
+    )
+
+    @app.before_request
+    def _start_request_timer():
+        """Record request start time for timing middleware."""
+        g._request_start_time = time.perf_counter()
+
+    @app.after_request
+    def _log_slow_requests(response):
+        """Log requests that exceed the slow request threshold."""
+        start_time = getattr(g, "_request_start_time", None)
+        if start_time is not None:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            endpoint = request.endpoint or request.path
+            if elapsed_ms >= SLOW_REQUEST_THRESHOLD_MS:
+                app.logger.warning(
+                    "[slow_request] %s %s took %.1fms (threshold=%.0fms) status=%s",
+                    request.method,
+                    request.path,
+                    elapsed_ms,
+                    SLOW_REQUEST_THRESHOLD_MS,
+                    response.status_code,
+                )
+            elif elapsed_ms >= 200:  # Log moderate latency at INFO level
+                app.logger.info(
+                    "[request_timing] %s %s %.1fms status=%s",
+                    request.method,
+                    request.path,
+                    elapsed_ms,
+                    response.status_code,
+                )
+        return response
 
     # --- Configuration Setup ---
     # Set secret key for session management (required for Google OAuth)

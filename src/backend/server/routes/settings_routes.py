@@ -39,6 +39,7 @@ from ...services.settings_service import (
     set_disable_write_tool_conservatism,
     get_buttonify_model_enabled,
     set_buttonify_model_enabled,
+    get_all_settings_batch,
 )
 from ...services.feature_flags import (
     get_expert_footer_enabled,
@@ -525,8 +526,14 @@ def _get_entity_with_fallback(
 
 
 def get_all_settings_data():
-    """Get all settings (user/org/language now excluded - browser-local)."""
+    """Get all settings (user/org/language now excluded - browser-local).
+
+    Uses batch DB fetch to reduce ~10 individual queries to 1.
+    """
     try:
+        # Batch fetch all DB-stored settings in one query
+        db_settings = get_all_settings_batch()
+
         # Jira internal MCP guardrail environment settings (read-only; surfaced for visibility).
         jira_allow_list_raw = os.getenv("VON_JIRA_PROJECT_ALLOW_LIST") or os.getenv(
             "VON_JIRA_PROJECT_ALLOWLIST"
@@ -550,16 +557,9 @@ def get_all_settings_data():
         if gmail_default_profile and gmail_default_profile not in gmail_profiles:
             gmail_default_profile = None
 
+        # Merge DB settings with computed/env-var settings
         return {
-            "active_llm": get_active_llm_setting(),
-            "openai_api_key_env_var": get_openai_env_var(),
-            "fetch_counts_on_load": get_fetch_counts_on_load(),
-            "preload_vontology_tree": get_preload_vontology_tree(),
-            "disable_remote_ollama_scan": get_disable_remote_ollama_scan(),
-            "internal_mcp_max_tool_invocations": get_internal_mcp_max_tool_invocations(),
-            "internal_mcp_tool_batch_cap": get_internal_mcp_tool_batch_cap(),
-            "show_tool_use_during_thinking": get_show_tool_use_during_thinking(),
-            "buttonify_model_enabled": get_buttonify_model_enabled(),
+            **db_settings,  # active_llm, openai_api_key_env_var, fetch_counts_on_load, etc.
             "buttonify_prompt_ids": list(_BUTTONIFY_PROMPT_IDS),
             "buttonify_prompt_active": (
                 _BUTTONIFY_PROMPT_IDS[0] if _BUTTONIFY_PROMPT_IDS else None
