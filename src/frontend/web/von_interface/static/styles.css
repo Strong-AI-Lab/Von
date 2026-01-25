@@ -4440,12 +4440,41 @@ footer {
 
 .vontology-cartouche.vontology-cartouche-missing {
     background: #ffffff;
-    border-color: #ef4444;
+    border: 2px solid #fecaca !important;
     color: #991b1b;
+    position: relative;
 }
 
 .vontology-cartouche.vontology-cartouche-missing:hover {
-    background: #ffffff;
+    background: #fff5f5;
+    border-color: #ef4444 !important;
+}
+
+/* CSS tooltip for missing cartouches */
+.vontology-cartouche.vontology-cartouche-missing::after {
+    content: "This concept doesn't exist yet — click to create";
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 6px;
+    padding: 6px 10px;
+    background: #1e293b;
+    color: #f8fafc;
+    font-size: 12px;
+    font-weight: 400;
+    white-space: nowrap;
+    border-radius: 6px;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s ease, visibility 0.15s ease;
+    pointer-events: none;
+    z-index: 9999;
+}
+
+.vontology-cartouche.vontology-cartouche-missing:hover::after {
+    opacity: 1;
+    visibility: visible;
 }
 
 .vontology-cartouche.vontology-cartouche-missing .vontology-cartouche-name,
