@@ -2281,7 +2281,17 @@ function scheduleChatConceptMetaRetry(fullId) {
 function updateCartoucheElement(cartoucheEl, meta) {
     if (!cartoucheEl) return;
     if (!meta) {
-        cartoucheEl.classList.add('unresolved');
+        // Concept not found: mark as missing and show only the concept ID.
+        cartoucheEl.classList.add('vontology-cartouche-missing');
+        cartoucheEl.classList.remove('unresolved', 'cartouche-hide-id', 'cartouche-hide-name', 'cartouche-hide-kind', 'cartouche-kind-as-bg');
+        cartoucheEl.dataset.kind = '';
+        const nameEl = cartoucheEl.querySelector('.vontology-cartouche-name');
+        if (nameEl) nameEl.textContent = '';
+        const kindEl = cartoucheEl.querySelector('.vontology-cartouche-kind');
+        if (kindEl) {
+            kindEl.className = 'vontology-cartouche-kind';
+            kindEl.textContent = '';
+        }
         return;
     }
     const prefs = getCartoucheAppearanceSettings();
