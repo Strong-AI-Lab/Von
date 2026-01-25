@@ -200,6 +200,9 @@ function updateCartouchesForMissingConcept(conceptId) {
             if (el?.dataset?.fullConceptId !== id) continue;
 
             el.classList.add('vontology-cartouche-missing');
+            // Remove hide classes so CSS for missing cartouches can control visibility.
+            // The ID must be visible; CSS hides name and kind for missing cartouches.
+            el.classList.remove('cartouche-hide-id', 'cartouche-hide-name', 'cartouche-hide-kind', 'cartouche-kind-as-bg');
             el.dataset.kind = '';
 
             const nameEl = el.querySelector('.vontology-cartouche-name');
