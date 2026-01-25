@@ -106,7 +106,7 @@ def attempt_reconnect(
             _state["reconnect_attempts_total"] += 1
             _state["last_attempt_started_at"] = _now()
         try:
-            _mc.close_connection()
+            _mc.invalidate_connection()
             db = _mc.get_db()
             if db is None:
                 raise ConnectionFailure("get_db returned None")

@@ -427,6 +427,21 @@ def close_connection():
     _mongo_client_mock = None
 
 
+def invalidate_connection():
+    """Invalidate the MongoDB connection reference without calling close().
+
+    This allows get_db() to create a fresh client on next call while avoiding
+    a race condition where in-flight requests holding the old client reference
+    would fail with 'Cannot use MongoClient after close'.
+
+    PyMongo's connection pool handles stale connections gracefully, so we can
+    simply drop our reference and let GC clean up.
+    """
+    global _mongo_client_real, _mongo_client_mock
+    _mongo_client_real = None
+    _mongo_client_mock = None
+
+
 def test_connection(verbose: bool = False) -> bool:
     """Test MongoDB connection and return True if successful, False otherwise."""
     db = get_db()
