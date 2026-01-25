@@ -9,7 +9,7 @@ import asyncio
 import openai
 
 from ..types import ToolCall, ToolDefinition, LLMResponse, ToolCallError
-from ..client import LLMClient, LLMClientConfig
+from ..client import LLMClient, LLMClientConfig, model_supports_custom_temperature
 
 
 logger = logging.getLogger(__name__)
@@ -59,11 +59,19 @@ class OpenAIClient(LLMClient):
             request_kwargs = dict(kwargs)
             if self.config.max_tokens is not None:
                 request_kwargs["max_tokens"] = self.config.max_tokens
+
+            # Only pass temperature if the model supports it and a value is set
+            # Some models (e.g. gpt-5.2) only accept default temperature
+            if (
+                self.config.temperature is not None
+                and model_supports_custom_temperature(self.config.model)
+            ):
+                request_kwargs["temperature"] = self.config.temperature
+
             response = await self._client.chat.completions.create(
                 model=self.config.model,
                 messages=messages,  # type: ignore[arg-type]
                 tools=tools,  # type: ignore[arg-type]
-                temperature=self.config.temperature,
                 **request_kwargs,
             )
 

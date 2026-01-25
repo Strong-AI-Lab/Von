@@ -14,6 +14,34 @@ from .types import ToolDefinition, LLMResponse
 logger = logging.getLogger(__name__)
 
 
+# Models that only support default temperature (1.0) - JVNAUTOSCI-1010
+# See: OpenAI API error "temperature does not support X with this model"
+MODELS_REQUIRING_DEFAULT_TEMPERATURE = frozenset(
+    {
+        "gpt-5.2-chat-latest",
+        "gpt-5.2",
+    }
+)
+
+
+def model_supports_custom_temperature(model: str) -> bool:
+    """Check if a model supports custom temperature values.
+
+    Some newer OpenAI models (e.g. gpt-5.2) only accept temperature=1.
+    """
+    if not model:
+        return True
+    model_lower = model.lower()
+    # Check exact match first
+    if model_lower in MODELS_REQUIRING_DEFAULT_TEMPERATURE:
+        return False
+    # Check prefix match for version variants
+    for restricted in MODELS_REQUIRING_DEFAULT_TEMPERATURE:
+        if model_lower.startswith(restricted):
+            return False
+    return True
+
+
 @dataclass
 class LLMClientConfig:
     """Configuration for LLM client instantiation.
@@ -22,7 +50,7 @@ class LLMClientConfig:
         model: Model identifier (e.g., 'gpt-4', 'gemini-pro', 'llama2')
         api_key: Authentication token (if required)
         base_url: API endpoint URL (for self-hosted or proxy scenarios)
-        temperature: Sampling temperature (0-2 typical range)
+        temperature: Sampling temperature (0-2 typical range). None = use model default.
         max_tokens: Maximum tokens to generate
         enable_structured_calling: Use provider-native structured calling (default True)
         fallback_to_json_text: Allow JSON-in-text parsing if structured calling fails (default True)
@@ -31,7 +59,7 @@ class LLMClientConfig:
     model: str
     api_key: Optional[str] = None
     base_url: Optional[str] = None
-    temperature: float = 0.7
+    temperature: Optional[float] = 0.7
     max_tokens: Optional[int] = None
     enable_structured_calling: bool = True
     fallback_to_json_text: bool = True
