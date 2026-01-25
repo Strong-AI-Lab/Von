@@ -395,8 +395,14 @@ def main():
                 waitress_mod = importlib.import_module("waitress")  # type: ignore
                 serve = getattr(waitress_mod, "serve", None)
             if callable(serve):
-                logger.info("Running with Waitress production server.")
-                serve(app, host=args.host, port=args.port)
+                # Increase threads from default 4 to handle SSE connections
+                # Each SSE connection holds a thread; 16 allows for multiple
+                # concurrent shared conversations + regular requests
+                num_threads = int(os.environ.get("VON_WAITRESS_THREADS", "16"))
+                logger.info(
+                    "Running with Waitress production server (threads=%d).", num_threads
+                )
+                serve(app, host=args.host, port=args.port, threads=num_threads)
             else:
                 logger.warning(
                     "Waitress not found. Falling back to Flask development server (not recommended for production)."
