@@ -4450,14 +4450,18 @@ class InternalMCPChatOrchestrator:
 
     @staticmethod
     def _normalise_preflight_display_name(value: str | None) -> str | None:
+        """Normalise display names by stripping control characters.
+
+        NOTE: Previously used unicode_escape which converted backslash sequences
+        like \\f into control characters (form feed). This caused corrupted names
+        like "member O\f" in telemetry. Now we simply strip control chars instead.
+        """
         if not isinstance(value, str):
             return value
-        if "\\" not in value:
-            return value
-        try:
-            return value.encode("utf-8").decode("unicode_escape")
-        except Exception:
-            return value.replace("\\f", "f")
+        # Strip ASCII control characters (0x00-0x1F, 0x7F) that can corrupt display
+        import re
+
+        return re.sub(r"[\x00-\x1f\x7f]", "", value)
 
     @staticmethod
     def _extract_predicate_query_from_text(text: str) -> str | None:
