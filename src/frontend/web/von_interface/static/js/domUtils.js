@@ -116,6 +116,14 @@ async function getSettings() {
 
 // Helpers to access current user / organisation with both name and concept id
 function readStoredJson(key) { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; } }
+// JVNAUTOSCI-1011: For window-scoped values, check sessionStorage first (per-window), then localStorage (shared fallback)
+function readSessionScopedJson(key) {
+  try {
+    const sessionVal = sessionStorage.getItem(key);
+    if (sessionVal) return JSON.parse(sessionVal);
+    return JSON.parse(localStorage.getItem(key) || 'null');
+  } catch { return null; }
+}
 async function getCurrentUserInfo() {
   const stored = readStoredJson('von_current_user');
   if (stored) {
@@ -126,16 +134,17 @@ async function getCurrentUserInfo() {
 }
 
 async function getCurrentOrganisationInfo() {
-  const switching = readStoredJson('von_org_switching');
+  // JVNAUTOSCI-1011: Use session-scoped reads for org context (per-window isolation)
+  const switching = readSessionScopedJson('von_org_switching');
   if (switching) {
     const name = switching.name ? `${switching.name} (switching…)` : 'Switching…';
     return { id: null, conceptId: switching.concept_id || null, name };
   }
-  const stored = readStoredJson('von_current_org');
+  const stored = readSessionScopedJson('von_current_org');
   if (stored) {
     return { id: stored.id || null, conceptId: stored.concept_id || null, name: stored.name || null };
   }
-  const storedCtx = readStoredJson('von_org_context');
+  const storedCtx = readSessionScopedJson('von_org_context');
   if (storedCtx) {
     return { id: storedCtx.id || null, conceptId: storedCtx.concept_id || null, name: storedCtx.name || null };
   }

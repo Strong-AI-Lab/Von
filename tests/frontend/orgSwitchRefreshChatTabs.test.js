@@ -5,7 +5,8 @@ const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTa
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     annotateTurn: jest.fn(),
     getUserContext: jest.fn(() => ({ user_id: '#V#michael_witbrock', org_id: '#V#test_org' })),
-    postJson: jest.fn(async () => ({ status: 'updated', namespace: '#V#michael_witbrock@test_org' }))
+    postJson: jest.fn(async () => ({ status: 'updated', namespace: '#V#michael_witbrock@test_org' })),
+    getWindowSessionId: jest.fn(() => 'test-window-session-id')
 }));
 
 jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
@@ -51,9 +52,8 @@ describe('org switch chat session refresh', () => {
 
         expect(typeof window.refreshChatSessionTabsForOrgSwitch).toBe('function');
 
-        window.refreshChatSessionTabsForOrgSwitch();
-
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        // handleOrgSwitchForChatTab is now async - await the returned promise
+        await window.refreshChatSessionTabsForOrgSwitch();
 
         expect(global.fetch).toHaveBeenCalledWith(
             '/von/history/sessions?limit=50&summary=light',

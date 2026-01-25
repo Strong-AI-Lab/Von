@@ -1634,8 +1634,22 @@ def create_chat_session(
     user_id: str,
     session_id: str,
     session_name: Optional[str] = None,
+    namespace: Optional[str] = None,
+    organisation_concept_id: Optional[str] = None,
+    role_in_org: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Create a new chat session document if it does not already exist."""
+    """Create a new chat session document if it does not already exist.
+
+    Args:
+        user_id: The user concept ID
+        session_id: The session UUID
+        session_name: Optional display name for the session
+        namespace: Optional explicit namespace (e.g., from window session context)
+        organisation_concept_id: Optional explicit org ID (e.g., from window session context)
+        role_in_org: Optional explicit role (e.g., from window session context)
+
+    If namespace/org/role not provided, falls back to Flask session context.
+    """
     if not isinstance(user_id, str) or not user_id:
         raise ChatHistoryServiceError("user_id is required.")
     if not isinstance(session_id, str) or not session_id:
@@ -1646,8 +1660,21 @@ def create_chat_session(
         raise ChatHistoryServiceError("Could not connect to chat history collection.")
 
     now = datetime.now(timezone.utc)
+
+    # JVNAUTOSCI-1011: Prefer explicit context params, fall back to Flask session
     session_context = get_session_context()
-    ns = _derive_rag_namespace(session_context=session_context, user_id=user_id)
+    effective_namespace = namespace or session_context.get("namespace")
+    effective_org = organisation_concept_id or session_context.get(
+        "organisation_concept_id"
+    )
+    effective_role = role_in_org or session_context.get("role_in_org")
+
+    # Derive namespace from context if not explicitly provided
+    ns = effective_namespace
+    if not ns:
+        ns = _derive_rag_namespace(
+            session_context={"organisation_concept_id": effective_org}, user_id=user_id
+        )
     name = _normalise_session_name(session_name) or _default_session_name(now)
 
     set_on_insert: Dict[str, Any] = {
@@ -1657,12 +1684,10 @@ def create_chat_session(
     }
     if isinstance(ns, str) and ns.strip():
         set_on_insert["namespace"] = ns.strip()
-    org_concept_id = session_context.get("organisation_concept_id")
-    if isinstance(org_concept_id, str) and org_concept_id.strip():
-        set_on_insert["organisation_concept_id"] = org_concept_id.strip()
-    role_in_org = session_context.get("role_in_org")
-    if isinstance(role_in_org, str) and role_in_org.strip():
-        set_on_insert["role_in_org"] = role_in_org.strip()
+    if isinstance(effective_org, str) and effective_org.strip():
+        set_on_insert["organisation_concept_id"] = effective_org.strip()
+    if isinstance(effective_role, str) and effective_role.strip():
+        set_on_insert["role_in_org"] = effective_role.strip()
 
     try:
         chat_history_coll.update_one(

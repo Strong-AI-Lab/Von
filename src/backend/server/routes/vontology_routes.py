@@ -58,6 +58,7 @@ from ...services.concept_search_service import (
     search_concepts as search_concepts_service,
 )
 from ...security.access_control import cache_scope_key, bypass_access_control
+from ...services.window_session_context_service import get_effective_context
 from ...utilities.salient_recompute import recompute_salient_predicates
 
 vontology_bp = Blueprint("vontology", __name__)
@@ -3091,21 +3092,33 @@ def add_relationship_route():
 
                 namespace = None
                 try:
-                    session_namespace = session.get("namespace")
+                    window_session_id = request.headers.get("X-Von-Window-Session")
+                    user_concept_id = session.get("user_concept_id")
+                    effective = get_effective_context(
+                        window_session_id, dict(session), user_concept_id
+                    )
+                    effective_namespace = effective.get("namespace")
                     if (
-                        isinstance(session_namespace, str)
-                        and session_namespace.strip()
-                        and session_namespace.strip().startswith("#V#")
+                        isinstance(effective_namespace, str)
+                        and effective_namespace.strip()
+                        and effective_namespace.strip().startswith("#V#")
                     ):
-                        namespace = session_namespace.strip()
+                        namespace = effective_namespace.strip()
                     else:
-                        user_concept_id = session.get("user_concept_id")
+                        session_namespace = session.get("namespace")
                         if (
-                            isinstance(user_concept_id, str)
-                            and user_concept_id.strip()
-                            and user_concept_id.strip().startswith("#V#")
+                            isinstance(session_namespace, str)
+                            and session_namespace.strip()
+                            and session_namespace.strip().startswith("#V#")
                         ):
-                            namespace = user_concept_id.strip()
+                            namespace = session_namespace.strip()
+                        else:
+                            if (
+                                isinstance(user_concept_id, str)
+                                and user_concept_id.strip()
+                                and user_concept_id.strip().startswith("#V#")
+                            ):
+                                namespace = user_concept_id.strip()
                 except Exception:
                     namespace = None
 
@@ -3850,21 +3863,33 @@ def remove_relationship_route():
 
                 namespace = None
                 try:
-                    session_namespace = session.get("namespace")
+                    window_session_id = request.headers.get("X-Von-Window-Session")
+                    user_concept_id = session.get("user_concept_id")
+                    effective = get_effective_context(
+                        window_session_id, dict(session), user_concept_id
+                    )
+                    effective_namespace = effective.get("namespace")
                     if (
-                        isinstance(session_namespace, str)
-                        and session_namespace.strip()
-                        and session_namespace.strip().startswith("#V#")
+                        isinstance(effective_namespace, str)
+                        and effective_namespace.strip()
+                        and effective_namespace.strip().startswith("#V#")
                     ):
-                        namespace = session_namespace.strip()
+                        namespace = effective_namespace.strip()
                     else:
-                        user_concept_id = session.get("user_concept_id")
+                        session_namespace = session.get("namespace")
                         if (
-                            isinstance(user_concept_id, str)
-                            and user_concept_id.strip()
-                            and user_concept_id.strip().startswith("#V#")
+                            isinstance(session_namespace, str)
+                            and session_namespace.strip()
+                            and session_namespace.strip().startswith("#V#")
                         ):
-                            namespace = user_concept_id.strip()
+                            namespace = session_namespace.strip()
+                        else:
+                            if (
+                                isinstance(user_concept_id, str)
+                                and user_concept_id.strip()
+                                and user_concept_id.strip().startswith("#V#")
+                            ):
+                                namespace = user_concept_id.strip()
                 except Exception:
                     namespace = None
 

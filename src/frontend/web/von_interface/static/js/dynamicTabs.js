@@ -12,6 +12,7 @@ import { detectMarkdown, renderSmartTextAsync } from './markdownUtils.js';
 import { destroyPredicateView, initializePredicateView } from './predicateView.js';
 import { getConceptTypeDisplayNames, setCurrentConceptType, setCurrentlySelectedConceptId, setSelectedConceptOriginalName } from './state.js';
 import { activateTab } from './tabNavigation.js';
+import { getSessionScopedOrgId } from './utils/sessionScopedStorage.js';
 import { getKeyConceptIds, updateTabHeaderStarButtons, updateTreeKeyConceptBadge } from './vontology.js';
 
 // Track dynamically created concept tabs
@@ -6103,22 +6104,8 @@ async function toggleOrganizationRelation(conceptId, orgBtn) {
         const hasRelation = orgBtn.dataset.hasRelation === 'true';
         const action = hasRelation ? 'remove' : 'add';
         orgBtn.disabled = true;
-        // Derive current organisation concept id from localStorage (authoritative client context).
-        let orgId = (
-            window.localStorage.getItem('von_current_org') ||
-            window.localStorage.getItem('von_current_organisation') ||
-            window.localStorage.getItem('vonCurrentOrg') ||
-            null
-        );
-        // Extract concept_id if localStorage contains JSON object
-        if (orgId && typeof orgId === 'string' && orgId.startsWith('{')) {
-            try {
-                const orgObj = JSON.parse(orgId);
-                orgId = orgObj.concept_id || orgId;
-            } catch (e) {
-                // Keep original string if JSON parse fails
-            }
-        }
+        // JVNAUTOSCI-1011: Use central helper for session-scoped org context
+        const orgId = getSessionScopedOrgId();
         if (action === 'add' && !orgId) {
             showToast('Organisation context unavailable', 'error');
             return;

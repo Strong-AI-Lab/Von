@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 import datetime as dt
 from ...services import concept_service  # Import concept_service
+from ...services.window_session_context_service import get_effective_context
 from ...services.concept_service import (
     ConceptServiceError,
     InvalidConceptDataError,
@@ -35,6 +36,17 @@ concept_bp = Blueprint("concepts", __name__)  # Define blueprint
 
 
 def _get_request_namespace() -> str | None:
+    window_session_id = request.headers.get("X-Von-Window-Session")
+    user_concept_id = session.get("user_concept_id")
+    effective = get_effective_context(window_session_id, dict(session), user_concept_id)
+    effective_namespace = effective.get("namespace")
+    if (
+        isinstance(effective_namespace, str)
+        and effective_namespace.strip()
+        and effective_namespace.strip().startswith("#V#")
+    ):
+        return effective_namespace.strip()
+
     session_namespace = session.get("namespace")
     if (
         isinstance(session_namespace, str)

@@ -1,7 +1,53 @@
+// ============================================================================
+// Window Session Support (JVNAUTOSCI-1011)
+// ============================================================================
+// Each browser window/tab gets a unique session ID stored in sessionStorage.
+// This allows different windows to have different organisation contexts without
+// interfering with each other.
+
+const WINDOW_SESSION_KEY = 'von_window_session_id';
+const WINDOW_SESSION_HEADER = 'X-Von-Window-Session';
+
+import { getSessionScopedOrgId } from './utils/sessionScopedStorage.js';
+
+/**
+ * Get or generate a unique window session ID.
+ * This ID is stored in sessionStorage (window-scoped, not shared across tabs).
+ */
+function getWindowSessionId() {
+  let sessionId = sessionStorage.getItem(WINDOW_SESSION_KEY);
+  if (!sessionId) {
+    // Generate a new UUID-like session ID
+    sessionId = 'ws_' + crypto.randomUUID().replace(/-/g, '');
+    sessionStorage.setItem(WINDOW_SESSION_KEY, sessionId);
+    console.debug('[windowSession] Generated new window session:', sessionId);
+  }
+  return sessionId;
+}
+
+/**
+ * Builds the standard headers object for fetch requests.
+ * Includes Content-Type and the window session header.
+ */
+function buildHeaders(extraHeaders = {}) {
+  return {
+    'Content-Type': 'application/json',
+    [WINDOW_SESSION_HEADER]: getWindowSessionId(),
+    ...extraHeaders
+  };
+}
+
+// Expose for debugging/testing
+export { getWindowSessionId, WINDOW_SESSION_HEADER, WINDOW_SESSION_KEY };
+
+// ============================================================================
+// Standard HTTP Helpers with Window Session Support
+// ============================================================================
+
 export async function getJson(url) {
   const res = await fetch(url, {
     method: 'GET',
-    headers: { 'Content-Type': 'application/json' }
+    headers: buildHeaders()
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
@@ -10,7 +56,7 @@ export async function getJson(url) {
 export async function postJson(url, data) {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: buildHeaders(),
     body: data ? JSON.stringify(data) : '{}'
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -21,7 +67,7 @@ export async function putJson(url, data, opts = {}) {
   const extraHeaders = opts.headers || {};
   const res = await fetch(url, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', ...extraHeaders },
+    headers: buildHeaders(extraHeaders),
     body: JSON.stringify(data)
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -33,7 +79,7 @@ export async function patchJson(url, data, opts = {}) {
   const extraHeaders = opts.headers || {};
   const res = await fetch(url, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', ...extraHeaders },
+    headers: buildHeaders(extraHeaders),
     body: JSON.stringify(data || {})
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -43,15 +89,18 @@ export async function patchJson(url, data, opts = {}) {
 export async function deleteJson(url) {
   const res = await fetch(url, {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' }
+    headers: buildHeaders()
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 /**
- * Get current user context from localStorage for request-scoped identity.
+ * Get current user context from sessionStorage/localStorage for request-scoped identity.
  * Returns object with user_id, org_id, language fields (all optional).
+ *
+ * JVNAUTOSCI-1011: Now reads org context from sessionStorage first (window-scoped),
+ * falling back to localStorage for backward compatibility.
  *
  * Call this to attach context to annotation/elicitation requests so backend
  * can log identity per-request without session state conflicts between multiple clients.
@@ -70,25 +119,8 @@ export function getUserContext() {
     console.debug('[context] Failed to parse von_current_user', e);
   }
 
-  try {
-    const storedOrg = JSON.parse(localStorage.getItem('von_current_org') || 'null');
-    if (storedOrg) {
-      ctx.org_id = storedOrg.concept_id || storedOrg.id || null;
-    }
-  } catch (e) {
-    console.debug('[context] Failed to parse von_current_org', e);
-  }
-
-  if (!ctx.org_id) {
-    try {
-      const storedOrgCtx = JSON.parse(localStorage.getItem('von_org_context') || 'null');
-      if (storedOrgCtx) {
-        ctx.org_id = storedOrgCtx.concept_id || storedOrgCtx.id || null;
-      }
-    } catch (e) {
-      console.debug('[context] Failed to parse von_org_context', e);
-    }
-  }
+  // JVNAUTOSCI-1011: Use central helper for session-scoped org context
+  ctx.org_id = getSessionScopedOrgId();
 
   // Get language preference from localStorage or fallback
   try {
@@ -125,7 +157,7 @@ export async function annotateTurn(payload) {
     console.info('[annotations] annotateTurn request', payload);
     const res = await fetch('/api/annotations/turn', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: buildHeaders(),
       body: JSON.stringify(payload)
     });
     const text = await res.text();
@@ -156,7 +188,7 @@ export async function acceptAnnotation(payload) {
 
     const res = await fetch('/api/annotations/accept', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: buildHeaders(),
       body: JSON.stringify(payload)
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -172,7 +204,7 @@ export async function revokeAnnotation(payload) {
   try {
     const res = await fetch('/api/annotations/revoke', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: buildHeaders(),
       body: JSON.stringify(payload)
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

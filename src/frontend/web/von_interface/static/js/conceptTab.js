@@ -12,6 +12,7 @@ import {
   setCurrentlySelectedConceptId,
   setSelectedConceptOriginalName
 } from './state.js';
+import { getSessionScopedOrgId } from './utils/sessionScopedStorage.js';
 import { annotateElementText, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
 import { chooseBestTypeForIndividual, insertNodeIntoVontologyTree, selectVontologyNodeByIdentifier } from './vontology.js';
 
@@ -474,7 +475,8 @@ export async function fetchConceptList(conceptType) {
       let currentUserPersonId = null;
       let currentOrganisationId = null;
       try { const storedUser = JSON.parse(localStorage.getItem('von_current_user') || 'null'); currentUserPersonId = storedUser?.id || null; } catch { }
-      try { const storedOrg = JSON.parse(localStorage.getItem('von_current_org') || 'null'); currentOrganisationId = storedOrg?.id || null; } catch { }
+      // JVNAUTOSCI-1011: Use central helper for session-scoped org context
+      currentOrganisationId = getSessionScopedOrgId();
 
       conceptResponse.concepts.forEach(concept => {
         const li = document.createElement('li');
@@ -2395,7 +2397,8 @@ export async function fetchConceptListWithSuffix(conceptType, suffix) {
       let currentUserPersonId = null;
       let currentOrganisationId = null;
       try { const su = JSON.parse(localStorage.getItem('von_current_user') || 'null'); currentUserPersonId = su?.id || null; } catch { }
-      try { const so = JSON.parse(localStorage.getItem('von_current_org') || 'null'); currentOrganisationId = so?.id || null; } catch { }
+      // JVNAUTOSCI-1011: Use central helper for session-scoped org context
+      currentOrganisationId = getSessionScopedOrgId();
 
       conceptResponse.concepts.forEach((concept) => {
         if (directOnly) {

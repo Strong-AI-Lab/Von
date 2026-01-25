@@ -6,7 +6,11 @@ import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
+import { getSessionScopedNamespace, hasSessionOrgContext, syncNamespaceFromLocalStorage, syncOrgContextFromLocalStorage } from './utils/sessionScopedStorage.js';
 import { isVontologyBusy, loadKeyConceptsForUser, preloadVontologyData, selectVontologyNodeByIdentifier, setupVontologySearchUI } from './vontology.js';
+
+// JVNAUTOSCI-1011: getCurrentNamespace is now provided by sessionScopedStorage.js
+const getCurrentNamespace = getSessionScopedNamespace;
 
 document.addEventListener('DOMContentLoaded', async () => {
   console.log("DOM fully loaded and parsed.");
@@ -223,88 +227,138 @@ function setupSettingsFrameResizing() {
 }
 
 /**
+ * JVNAUTOSCI-1011: Initialise sessionStorage from localStorage on new window/tab.
+ * Now uses central helpers from sessionScopedStorage.js.
+ */
+function initSessionStorageFromLocalStorage() {
+  if (hasSessionOrgContext()) {
+    console.log('[main] sessionStorage already has org context, skipping localStorage copy');
+    return;
+  }
+  syncOrgContextFromLocalStorage();
+  syncNamespaceFromLocalStorage();
+}
+
+/**
  * Sync the Flask session's organisation_concept_id.
  * First checks if Flask session already has an org (from a previous request in this browser session).
- * If not, syncs from localStorage to Flask session.
+ * If not, syncs from sessionStorage/localStorage to Flask session.
  * This avoids race conditions where /history/sessions is called before org context is set.
+ *
+ * JVNAUTOSCI-1011: Now uses sessionStorage (window-scoped) instead of localStorage,
+ * enabling different organisation contexts in different browser windows.
+ * The X-Von-Window-Session header is automatically added by getJson/postJson.
  */
 async function syncFlaskSessionOrg() {
   try {
-    // First, check if Flask session already has an org
-    const contextRes = await fetch('/von/api/session/context');
-    if (contextRes.ok) {
-      const context = await contextRes.json();
-      if (context.organisation_id) {
-        console.log('[main] Flask session already has org:', context.organisation_id);
-        // Update localStorage to match Flask session (single source of truth)
-        const existingOrg = localStorage.getItem('von_current_org');
-        const parsed = existingOrg ? JSON.parse(existingOrg) : {};
-        if (parsed?.concept_id !== context.organisation_id) {
-          localStorage.setItem('von_current_org', JSON.stringify({
-            id: null,
-            concept_id: context.organisation_id,
-            name: parsed?.name || null
-          }));
-          console.log('[main] Updated localStorage org to match Flask session');
-        }
-        if (context.namespace) {
-          localStorage.setItem('current_user_namespace', context.namespace);
-        }
-        return;
+    // Import to ensure window session ID is generated
+    const { getJson, postJson, getWindowSessionId } = await import('./apiService.js');
+    // Ensure window session ID exists
+    getWindowSessionId();
+
+    // First, check if window session already has an org
+    const context = await getJson('/von/api/session/context');
+
+    // JVNAUTOSCI-1011 FIX: When context comes from flask_session fallback (server restarted,
+    // window session store empty), we MUST still sync from localStorage to window session.
+    // The Flask session cookie may have stale org data from before restart.
+    // Only trust window_session source as authoritative.
+    const isWindowSessionSource = context.context_source === 'window_session';
+
+    if (context.organisation_id && isWindowSessionSource) {
+      // Window session store already has org - trust it as source of truth
+      console.log('[main] Window session has org:', context.organisation_id);
+      const existingOrg = sessionStorage.getItem('von_current_org');
+      const parsed = existingOrg ? JSON.parse(existingOrg) : {};
+      if (parsed?.concept_id !== context.organisation_id) {
+        sessionStorage.setItem('von_current_org', JSON.stringify({
+          id: null,
+          concept_id: context.organisation_id,
+          name: parsed?.name || null
+        }));
+        console.log('[main] Updated sessionStorage org to match window session');
       }
+      if (context.namespace) {
+        sessionStorage.setItem('current_user_namespace', context.namespace);
+      }
+      return;
     }
 
-    // Flask session has no org - try to sync from localStorage
-    const storedOrg = localStorage.getItem('von_current_org');
+    // Window session store is empty (or context came from Flask session fallback).
+    // Sync from localStorage to window session store - this is the user's INTENDED org.
+    let storedOrg = sessionStorage.getItem('von_current_org');
     if (!storedOrg) {
-      console.log('[main] No org in localStorage or Flask session, proceeding without org');
+      // Fallback to localStorage for backward compatibility
+      storedOrg = localStorage.getItem('von_current_org');
+    }
+    if (!storedOrg) {
+      console.log('[main] No org in sessionStorage/localStorage, proceeding without org');
+      // If Flask session had an org but storage doesn't, clear window session to match
+      if (context.organisation_id && !isWindowSessionSource) {
+        console.log('[main] Clearing stale Flask session org - no org in storage');
+        await postJson('/von/api/session/set_organisation', {
+          organisation_concept_id: null
+        });
+      }
       return;
     }
     const org = JSON.parse(storedOrg);
     const orgConceptId = org?.concept_id;
     if (!orgConceptId) {
-      console.log('[main] No org concept_id in localStorage, proceeding without org');
+      console.log('[main] No org concept_id in storage, proceeding without org');
       return;
     }
-    console.log('[main] Syncing organisation to Flask session from localStorage:', orgConceptId);
-    const syncRes = await fetch('/von/api/session/set_organisation', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ organisation_concept_id: orgConceptId })
+
+    // Check if we need to sync (org mismatch or flask_session fallback)
+    const needsSync = !isWindowSessionSource || context.organisation_id !== orgConceptId;
+    if (!needsSync) {
+      console.log('[main] Org already synced:', orgConceptId);
+      return;
+    }
+
+    console.log('[main] Syncing organisation to window session from storage:', orgConceptId,
+      context.organisation_id ? `(was: ${context.organisation_id} from ${context.context_source})` : '(no previous org)');
+    const syncData = await postJson('/von/api/session/set_organisation', {
+      organisation_concept_id: orgConceptId
     });
-    if (syncRes.ok) {
-      const syncData = await syncRes.json();
-      console.log('[main] Flask session org synced:', syncData);
-      if (syncData.namespace) {
-        localStorage.setItem('current_user_namespace', syncData.namespace);
-      }
-    } else {
-      console.warn('[main] Failed to sync org to Flask session:', syncRes.status);
+    console.log('[main] Window session org synced:', syncData);
+    if (syncData.namespace) {
+      sessionStorage.setItem('current_user_namespace', syncData.namespace);
     }
   } catch (err) {
-    console.warn('[main] Error syncing org to Flask session:', err);
+    console.warn('[main] Error syncing org to session:', err);
   }
 }
 
 /**
- * Ensure user context is available in localStorage before app initialization.
+ * Ensure user context is available in storage before app initialization.
  * Fetches settings if localStorage is empty.
- * ALWAYS syncs Flask session org to avoid race conditions with session fetch.
+ * ALWAYS syncs session org to avoid race conditions with session fetch.
+ *
+ * JVNAUTOSCI-1011: Now uses sessionStorage for org context (window-scoped),
+ * while user info remains in localStorage (shared across windows).
  */
 async function ensureUserContext() {
   try {
-    // If we already have user context, still sync Flask session org but skip settings fetch
+    // JVNAUTOSCI-1011: On new window/restart, copy org preference from localStorage
+    // This ensures the user's last-used org is restored even in a new window
+    initSessionStorageFromLocalStorage();
+
+    // Import to ensure window session ID is generated
+    const { getJson, postJson, getWindowSessionId } = await import('./apiService.js');
+    // Ensure window session ID exists
+    getWindowSessionId();
+
+    // If we already have user context, still sync session org but skip settings fetch
     if (localStorage.getItem('von_current_user')) {
-      // CRITICAL: Even with localStorage data, we must sync Flask session org
+      // CRITICAL: Even with localStorage data, we must sync session org
       // to avoid race condition where /history/sessions is called before org context is set.
       await syncFlaskSessionOrg();
       return;
     }
 
     console.log('[main] Fetching settings to populate user context...');
-    const res = await fetch('/api/settings/');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const settings = await res.json();
+    const settings = await getJson('/api/settings/');
 
     if (settings.current_user_person_id) {
       const user = {
@@ -317,15 +371,15 @@ async function ensureUserContext() {
     }
 
     // When logged in, derive and persist the user/org namespace used by RAG status calls.
-    // Only set it if not already present (do not override manual/advanced workflows).
-    if (!localStorage.getItem('current_user_namespace') && settings.current_user_person_concept_id) {
+    // JVNAUTOSCI-1011: Use sessionStorage for namespace (window-scoped)
+    if (!sessionStorage.getItem('current_user_namespace') && settings.current_user_person_concept_id) {
       try {
         const userSlug = String(settings.current_user_person_concept_id).replace(/^#V#/, '');
         const orgSlug = settings.current_organisation_concept_id
           ? String(settings.current_organisation_concept_id).replace(/^#V#/, '')
           : null;
         const ns = orgSlug ? `#V#${userSlug}@${orgSlug}` : `#V#${userSlug}`;
-        localStorage.setItem('current_user_namespace', ns);
+        sessionStorage.setItem('current_user_namespace', ns);
         console.log('[main] Derived current_user_namespace from settings:', ns);
       } catch (e) {
         console.warn('[main] Failed to derive current_user_namespace from settings:', e);
@@ -335,46 +389,41 @@ async function ensureUserContext() {
     // Namespace fallback: if server does not provide user info, but a namespace is already
     // set locally (e.g., via manual selection), propagate it so downstream calls use it.
     if (!settings.current_user_person_id) {
-      const ns = localStorage.getItem('von_namespace');
-      if (ns && !localStorage.getItem('current_user_namespace')) {
-        localStorage.setItem('current_user_namespace', ns);
+      const ns = sessionStorage.getItem('von_namespace') || localStorage.getItem('von_namespace');
+      if (ns && !sessionStorage.getItem('current_user_namespace')) {
+        sessionStorage.setItem('current_user_namespace', ns);
         console.log('[main] Using existing von_namespace as current_user_namespace:', ns);
       }
     }
 
+    // JVNAUTOSCI-1011: Store org context in both sessionStorage (window-scoped) and localStorage (persistent)
     if (settings.current_organisation_id) {
       const org = {
         id: settings.current_organisation_id,
         concept_id: settings.current_organisation_concept_id,
         name: settings.current_organisation_name
       };
-      localStorage.setItem('von_current_org', JSON.stringify(org));
-      console.log('[main] Populated von_current_org from settings');
+      sessionStorage.setItem('von_current_org', JSON.stringify(org));
+      localStorage.setItem('von_current_org', JSON.stringify(org)); // Persist for restart
+      console.log('[main] Populated von_current_org in sessionStorage and localStorage from settings');
     }
 
-    // CRITICAL: Sync the Flask session's organisation_concept_id to avoid race condition
+    // CRITICAL: Sync the session's organisation_concept_id to avoid race condition
     // where /history/sessions is called before the org context is set in the server session.
     // This ensures shared conversation filtering works correctly on initial page load.
     if (settings.current_organisation_concept_id) {
       try {
-        console.log('[main] Syncing organisation to Flask session:', settings.current_organisation_concept_id);
-        const syncRes = await fetch('/von/api/session/set_organisation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ organisation_concept_id: settings.current_organisation_concept_id })
+        console.log('[main] Syncing organisation to session:', settings.current_organisation_concept_id);
+        const syncData = await postJson('/von/api/session/set_organisation', {
+          organisation_concept_id: settings.current_organisation_concept_id
         });
-        if (syncRes.ok) {
-          const syncData = await syncRes.json();
-          console.log('[main] Flask session org synced:', syncData);
-          // Update namespace if returned
-          if (syncData.namespace) {
-            localStorage.setItem('current_user_namespace', syncData.namespace);
-          }
-        } else {
-          console.warn('[main] Failed to sync org to Flask session:', syncRes.status);
+        console.log('[main] Session org synced:', syncData);
+        // Update namespace if returned
+        if (syncData.namespace) {
+          sessionStorage.setItem('current_user_namespace', syncData.namespace);
         }
       } catch (syncErr) {
-        console.warn('[main] Error syncing org to Flask session:', syncErr);
+        console.warn('[main] Error syncing org to session:', syncErr);
       }
     }
   } catch (e) {
@@ -631,7 +680,7 @@ function startHealthPolling() {
         try {
           const controller2 = new AbortController();
           const timeout2 = setTimeout(() => controller2.abort(), 5000);
-          const ns = (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
+          const ns = getCurrentNamespace();
           const res2 = await fetch(ns ? (`/admin/rag_status?namespace=${encodeURIComponent(ns)}`) : '/admin/rag_status', { cache: 'no-store', signal: controller2.signal });
           clearTimeout(timeout2);
           if (res2.ok) {
@@ -741,7 +790,7 @@ function startHealthPolling() {
                 try {
                   const controllerRt = new AbortController();
                   const timeoutRt = setTimeout(() => controllerRt.abort(), 8000);
-                  const nsRt = (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
+                  const nsRt = getCurrentNamespace();
                   const urlRt = nsRt
                     ? (`/admin/rag_runtime?namespace=${encodeURIComponent(nsRt)}`)
                     : '/admin/rag_runtime';
@@ -807,7 +856,7 @@ function startHealthPolling() {
               async function runChatHistoryReindex({ forcedSessionId = null, forcedChunkStart = 0, forceSkipConfirm = false } = {}) {
                 const modalActions = ragModal.querySelector('.modal-actions');
                 const activeNs = (modalActions && modalActions._ragActiveNamespace) ? modalActions._ragActiveNamespace : '';
-                const ns = activeNs || (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
+                const ns = activeNs || getCurrentNamespace();
 
                 const confirmMsg = forcedSessionId
                   ? `Resume conversation history reindex for namespace:\n\n${ns || '(no namespace)'}\n\nSession:\n${forcedSessionId}\n\nThis may take a few minutes.`
@@ -1157,7 +1206,7 @@ function startHealthPolling() {
                   const errObj = { type: 'exception', name, message: msg };
                   window.__vonLastRagReindexJson = {
                     status: 'error',
-                    namespace: (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || null,
+                    namespace: getCurrentNamespace() || null,
                     error: errObj
                   };
                   ragModalBody.innerHTML = ragModalBody.innerHTML + `<hr/><p><strong>Reindex error.</strong> ${escapeHtml(name)}${msg ? `: ${escapeHtml(msg)}` : ''}</p>${timedOutNote}<p><em>You can use “Copy JSON” to capture this failure.</em></p>`;
@@ -1223,7 +1272,7 @@ function startHealthPolling() {
 
             const controller3 = new AbortController();
             const timeout3 = setTimeout(() => controller3.abort(), 15000);
-            const ns2 = (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
+            const ns2 = getCurrentNamespace();
             const url3 = ns2
               ? (`/admin/rag_status?namespace=${encodeURIComponent(ns2)}&detail=1`)
               : '/admin/rag_status';
@@ -1474,7 +1523,7 @@ function startHealthPolling() {
           } catch (_) {
             const attempted = (() => {
               try {
-                const ns2 = (localStorage.getItem('von_namespace') || localStorage.getItem('current_user_namespace')) || '';
+                const ns2 = getCurrentNamespace();
                 return ns2 ? (`/admin/rag_status?namespace=${encodeURIComponent(ns2)}`) : '/admin/rag_status';
               } catch (_) {
                 return '/admin/rag_status';
@@ -1581,7 +1630,7 @@ function startHealthPolling() {
               ragModalCheck.disabled = true;
               const controller4 = new AbortController();
               const timeout4 = setTimeout(() => controller4.abort(), 15000);
-              const ns3 = (localStorage.getItem('current_user_namespace') || localStorage.getItem('von_namespace')) || '';
+              const ns3 = getCurrentNamespace();
               const url4 = ns3 ? (`/admin/rag_integrity?namespace=${encodeURIComponent(ns3)}`) : '/admin/rag_integrity';
               const res4 = await fetch(url4, { method: 'POST', cache: 'no-store', signal: controller4.signal });
               clearTimeout(timeout4);

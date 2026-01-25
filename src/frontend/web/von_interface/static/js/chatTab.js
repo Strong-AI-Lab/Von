@@ -1,5 +1,5 @@
 // Chat Tab Module
-import { annotateTurn, getUserContext, postJson } from './apiService.js';
+import { annotateTurn, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { elements, renderSpanSuggestions } from './domUtils.js';
@@ -14,8 +14,17 @@ import {
     stopSpeaking
 } from './speech.js';
 import { getPreferredLanguage, selectBestNameForContext, selectShortestNameForContext } from './utils/nameSelection.js';
+import { getSessionScopedNamespace, getSessionScopedOrgContext } from './utils/sessionScopedStorage.js';
 import { applyCartoucheAppearance, cartouchifyElementText, cartouchifyVontologyTokensInElement, getCartoucheAppearanceSettings, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
 import { showToast } from './utils/toast.js';
+
+// Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
+function buildChatFetchHeaders(extraHeaders = {}) {
+    return {
+        [WINDOW_SESSION_HEADER]: getWindowSessionId(),
+        ...extraHeaders
+    };
+}
 
 // Store LLM debug data for each turn
 const llmDebugData = new Map();
@@ -588,7 +597,7 @@ function startToolUseProgressPolling(request) {
 
         try {
             const resp = await fetch(`/von/progress/${encodeURIComponent(requestId)}`,
-                { method: 'GET', signal: abortController.signal });
+                { method: 'GET', signal: abortController.signal, headers: buildChatFetchHeaders() });
             if (!resp) {
                 scheduleNextPoll(Math.min(5000, poll.nextDelayMs * 1.7));
                 poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.7);
@@ -1122,6 +1131,7 @@ async function uploadSingleFileToVon(file) {
 
     const response = await fetch('/von/api/files/upload', {
         method: 'POST',
+        headers: buildChatFetchHeaders(), // Note: browser sets Content-Type with boundary for FormData
         body: formData
     });
 
@@ -3348,16 +3358,8 @@ function _deriveNameFromConceptId(conceptId) {
 }
 
 function _getStoredOrgContext() {
-    try {
-        const raw = localStorage.getItem('von_current_org');
-        if (raw) {
-            return JSON.parse(raw);
-        }
-        const alt = localStorage.getItem('von_org_context');
-        return alt ? JSON.parse(alt) : null;
-    } catch (_) {
-        return null;
-    }
+    // JVNAUTOSCI-1011: Delegate to central helper
+    return getSessionScopedOrgContext();
 }
 
 function _getSessionMetaById(sessionId) {
@@ -3381,15 +3383,8 @@ function _getOrgConceptIdFromNamespace(namespace) {
 }
 
 function _getStoredNamespace() {
-    try {
-        const ns = localStorage.getItem('current_user_namespace');
-        if (ns && typeof ns === 'string') return ns.trim();
-    } catch (_) { /* ignore */ }
-    try {
-        const ns = localStorage.getItem('von_namespace');
-        if (ns && typeof ns === 'string') return ns.trim();
-    } catch (_) { /* ignore */ }
-    return '';
+    // JVNAUTOSCI-1011: Delegate to central helper
+    return getSessionScopedNamespace();
 }
 
 async function assignChatSessionToCurrentOrg(sessionId) {
@@ -4171,7 +4166,7 @@ async function loadChatSessionLinks(sessionId, options = {}) {
     try {
         const resp = await fetch(`/von/api/session/chat_session_links?session_id=${encodeURIComponent(sid)}`, {
             method: 'GET',
-            headers: { 'Accept': 'application/json' },
+            headers: buildChatFetchHeaders({ 'Accept': 'application/json' }),
             cache: 'no-store',
             signal: abortController.signal
         });
@@ -4215,7 +4210,7 @@ async function saveChatSessionLinks(sessionId, links) {
     try {
         const resp = await fetch('/von/api/session/chat_session_links', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            headers: buildChatFetchHeaders({ 'Content-Type': 'application/json', 'Accept': 'application/json' }),
             body: JSON.stringify({ session_id: sid, session_links: payload }),
             signal: abortController.signal
         });
@@ -4655,7 +4650,10 @@ async function refreshChatSessionTabs() {
     lastSessionTabsRefreshMs = Date.now();
 
     try {
-        const response = await fetch('/von/history/sessions?limit=50&summary=light', { cache: 'no-store' });
+        const response = await fetch('/von/history/sessions?limit=50&summary=light', {
+            cache: 'no-store',
+            headers: buildChatFetchHeaders()
+        });
         const data = await response.json();
 
         if (data?.authenticated === false) {
@@ -4770,7 +4768,10 @@ async function refreshChatSessionTabs() {
             activeChatSessionOwnerId = activeSession?.shared_owner_user_id || null;
         }
 
-        if (activeSessionId) {
+        // Only adopt server's active_session_id if we don't already have a local selection.
+        // This prevents race conditions where the user clicks a tab but the server response
+        // from a concurrent refresh overwrites their selection.
+        if (activeSessionId && !activeChatSessionId) {
             const activeSession = sessions.find(
                 s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
             );
@@ -4824,20 +4825,18 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     setChatSessionCount(sessions.length);
 
     const fragment = document.createDocumentFragment();
-    const hasMultiple = sessions.length > 1;
 
-    if (hasMultiple) {
-        const newTab = document.createElement('button');
-        newTab.type = 'button';
-        newTab.className = 'chat-session-tab chat-session-tab-new';
-        newTab.title = 'New chat';
-        newTab.setAttribute('aria-label', 'New chat');
-        newTab.textContent = '+';
-        newTab.addEventListener('click', () => {
-            void promptAndCreateChatSession();
-        });
-        fragment.appendChild(newTab);
-    }
+    // Always show the "+" button to create new chats
+    const newTab = document.createElement('button');
+    newTab.type = 'button';
+    newTab.className = 'chat-session-tab chat-session-tab-new';
+    newTab.title = 'New chat';
+    newTab.setAttribute('aria-label', 'New chat');
+    newTab.textContent = '+';
+    newTab.addEventListener('click', () => {
+        void promptAndCreateChatSession();
+    });
+    fragment.appendChild(newTab);
 
     sessions.forEach((session) => {
         const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
@@ -5121,7 +5120,7 @@ async function createChatSession(sessionName) {
 
     const response = await fetch('/von/api/session/create_chat_session', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload)
     });
     const data = await response.json();
@@ -5207,7 +5206,7 @@ async function renameChatSession(sessionId, sessionName) {
 
     const response = await fetch('/von/api/session/rename_chat_session', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ session_id: sid, session_name: name })
     });
     const data = await response.json();
@@ -5303,7 +5302,7 @@ async function switchToChatSession(sessionId) {
         const setSessionStart = performance.now();
         const response = await fetch('/von/api/session/set_chat_session', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ session_id: sid, include_history: false })
         });
         const data = await response.json();
@@ -5544,7 +5543,9 @@ function deleteExchange(turnId, isUserMessage) {
 
 async function updateHistoryLength() {
     try {
-        const response = await fetch('/von/history/length');
+        const response = await fetch('/von/history/length', {
+            headers: buildChatFetchHeaders()
+        });
         const data = await response.json();
 
         if (response.ok) {
@@ -5596,7 +5597,10 @@ async function updateHistoryLength() {
                             let totalMessages = null;
                             let conversations = null;
                             try {
-                                const lenRes = await fetch('/von/history/length', { cache: 'no-store' });
+                                const lenRes = await fetch('/von/history/length', {
+                                    cache: 'no-store',
+                                    headers: buildChatFetchHeaders()
+                                });
                                 if (lenRes.ok) {
                                     const lenJs = await lenRes.json();
                                     totalMessages = (typeof lenJs?.history_length === 'number') ? lenJs.history_length : null;
@@ -5604,7 +5608,10 @@ async function updateHistoryLength() {
                                 }
                             } catch (_) { /* ignore */ }
 
-                            const res = await fetch('/von/history/sessions?limit=50', { cache: 'no-store' });
+                            const res = await fetch('/von/history/sessions?limit=50', {
+                                cache: 'no-store',
+                                headers: buildChatFetchHeaders()
+                            });
                             const js = await res.json();
                             if (!res.ok || js?.authenticated === false) {
                                 body.innerHTML = '<p>History unavailable (not logged in).</p>';
@@ -5805,7 +5812,8 @@ async function loadChatHistory(options = {}) {
             filter_recent_pair: !!filterRecentPair
         });
         const response = await fetch(`/von/history?${params.toString()}`, {
-            signal: abortController.signal
+            signal: abortController.signal,
+            headers: buildChatFetchHeaders()
         });
         const data = await response.json();
 
@@ -6089,7 +6097,10 @@ function setInvitePopupVisible(visible) {
 
 async function _fetchSessionContext() {
     try {
-        const resp = await fetch('/von/api/session/context', { cache: 'no-cache' });
+        const resp = await fetch('/von/api/session/context', {
+            cache: 'no-cache',
+            headers: buildChatFetchHeaders()
+        });
         if (!resp.ok) return null;
         return await resp.json();
     } catch (e) {
@@ -6185,7 +6196,7 @@ async function sendSharedConversationInvite(invitee) {
     try {
         const response = await fetch('/von/api/shared_conversations/invite', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({
                 session_id: activeChatSessionId,
                 invitee_concept_id: invitee.concept_id
@@ -6277,7 +6288,9 @@ async function loadInviteesForSession(sessionId) {
     await _ensureInviteSessionContext();
 
     try {
-        const resp = await fetch(`/von/api/shared_conversations/invitees?session_id=${encodeURIComponent(sessionId)}`);
+        const resp = await fetch(`/von/api/shared_conversations/invitees?session_id=${encodeURIComponent(sessionId)}`, {
+            headers: buildChatFetchHeaders()
+        });
         if (!resp.ok) {
             const data = await resp.json();
             setInviteStatus(data?.error || 'Unable to load invitees.');
@@ -6557,8 +6570,14 @@ async function loadIncomingInvites({ silent = false } = {}) {
     }
     try {
         const [pendingResp, acceptedResp] = await Promise.all([
-            fetch('/von/api/shared_conversations/invites?status=pending', { cache: 'no-store' }),
-            fetch('/von/api/shared_conversations/invites?status=accepted', { cache: 'no-store' })
+            fetch('/von/api/shared_conversations/invites?status=pending', {
+                cache: 'no-store',
+                headers: buildChatFetchHeaders()
+            }),
+            fetch('/von/api/shared_conversations/invites?status=accepted', {
+                cache: 'no-store',
+                headers: buildChatFetchHeaders()
+            })
         ]);
 
         const pendingData = await pendingResp.json();
@@ -6602,7 +6621,7 @@ async function respondToSharedConversationInvite(invite, action) {
     try {
         const response = await fetch('/von/api/shared_conversations/invites/respond', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ invite_id: inviteId, action })
         });
         const data = await response.json();
@@ -7114,12 +7133,25 @@ function startIncomingInvitePolling() {
     }, INCOMING_INVITE_POLL_INTERVAL_MS);
 }
 
-function handleOrgSwitchForChatTab(detail) {
+async function handleOrgSwitchForChatTab(detail) {
     const container = getChatSessionTabsContainer();
     sessionTabsCache = [];
     lastRenderedSessionCount = 0;
     chatSessionMetadataOpenKey = null;
     _clearChatSessionMetadata();
+
+    // JVNAUTOSCI-1011: Clear the active session and chat display on org switch
+    // to prevent showing data from the previous org
+    const previousSessionId = activeChatSessionId;
+    activeChatSessionId = null;
+    activeChatSessionName = null;
+    activeChatSessionOwnerId = null;
+
+    // Clear the chat display and show loading state
+    const scrollableField = document.getElementById('scrollableField');
+    if (scrollableField) {
+        scrollableField.innerHTML = '<div class="chat-session-loading">Loading conversations...</div>';
+    }
 
     closeSharedConversationStream();
 
@@ -7128,13 +7160,39 @@ function handleOrgSwitchForChatTab(detail) {
         container.hidden = false;
     }
 
-    scheduleChatSessionTabsRefresh(true);
+    // Wait for session tabs to refresh (loads sessions for new org)
+    await refreshChatSessionTabs();
+
+    // After refresh, if we have a new active session, load its history
+    if (activeChatSessionId && activeChatSessionId !== previousSessionId) {
+        console.log('[chatTab] Org switch: loading history for new session', {
+            new_session: activeChatSessionId,
+            previous_session: previousSessionId
+        });
+        void loadRecentChatPair({
+            scrollToBottom: true,
+            preserveScroll: false,
+            showResetNotice: false,
+            forceScrollToBottom: true
+        }).then(() => loadChatHistory({
+            segments: 1,
+            scrollToBottom: false,
+            preserveScroll: true,
+            showResetNotice: false
+        })).catch(() => { });
+    } else if (!activeChatSessionId) {
+        // No sessions in new org - clear the loading message
+        if (scrollableField) {
+            scrollableField.innerHTML = '';
+        }
+    }
+
     void loadIncomingInvites({ silent: true });
 }
 
 try {
     window.refreshChatSessionTabsForOrgSwitch = () => {
-        handleOrgSwitchForChatTab({});
+        return handleOrgSwitchForChatTab({});
     };
 } catch (_) {
     // ignore
@@ -7708,9 +7766,9 @@ async function handleSendPrompt() {
 
         const response = await fetch('/von/generate', {
             method: 'POST',
-            headers: {
+            headers: buildChatFetchHeaders({
                 'Content-Type': 'application/json',
-            },
+            }),
             signal: request.abortController.signal,
             body: JSON.stringify({
                 prompt: promptText,
@@ -7821,7 +7879,8 @@ async function handleSendPrompt() {
 async function handleResetContext() {
     try {
         const response = await fetch('/von/reset', {
-            method: 'POST'
+            method: 'POST',
+            headers: buildChatFetchHeaders()
         });
 
         const data = await response.json();
@@ -7953,7 +8012,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 try {
                     const resp = await fetch('/von/history/backfill_spoken', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
                         body: JSON.stringify({ history_location: historyLocation })
                     });
 
@@ -8617,7 +8676,10 @@ async function loadLlmDebugDataForTurn(turnId, options = {}) {
                 history_index: String(historyLocation.history_index)
             });
             console.log('[chatTab] loadLlmDebugDataForTurn request:', { turnId, session_id: historyLocation.session_id, history_index: historyLocation.history_index });
-            const response = await fetch(`/von/history/debug?${params.toString()}`, { cache: 'no-store' });
+            const response = await fetch(`/von/history/debug?${params.toString()}`, {
+                cache: 'no-store',
+                headers: buildChatFetchHeaders()
+            });
             let data = null;
             try {
                 data = await response.json();

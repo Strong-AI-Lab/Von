@@ -20,6 +20,8 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 14. When in doubt, run tests or re-run tests without requiring user confirmation.
 15. In the case that multiple tests are faiing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
 16. If you think you've finished implementing a JIRA task, read the task again and check.
+17. **DRY first**: When fixing a repeated pattern, create a central helper function FIRST, then replace all usages. Never fix instances one-by-one with inline code.
+18. **Search before you write**: Before implementing ANY helper, utility, or repeated logic, SEARCH the codebase for existing implementations. If similar code exists in 2+ places, refactor first.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
@@ -33,6 +35,19 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - Add a regression test for every state/format-loss bug (load -> edit -> save -> re-edit).
 - Prefer lightweight telemetry where practical (timings, counters, and error summaries) to support UX and future introspection.
 - When fixing reliability issues, prefer **systemic, general fixes** over point fixes: update shared pipelines, validators, and policies so that behaviour remains stable across model changes and configuration drift.
+- **DRY refactoring discipline** (CRITICAL — WET code is unacceptable):
+	1. **Search first, always**: Before writing ANY function that might exist elsewhere, run `grep_search` or `semantic_search`. This is not optional.
+	2. **3-strike rule**: If you're about to write similar code for the 3rd time, STOP. Do not proceed. Create a central helper first.
+	3. **Scope the problem first**: Before fixing ANY bug that appears in multiple places, grep/search to find ALL instances. Understand the full scope before touching code.
+	4. **Create the helper FIRST**: Write a single, well-named helper function in a central location (e.g., `utils/`, `helpers/`, `domUtils.js`, `apiService.js`).
+	5. **Then replace ALL usages**: In a single operation (multi_replace_string_in_file), replace every occurrence with calls to the helper.
+	6. **Never fix instances one-by-one**: Piecemeal inline fixes create maintenance burden, review noise, and guarantee future bugs.
+	7. **Central locations by domain**:
+		- Frontend JS utilities: `static/js/utils/` or `domUtils.js`
+		- API/fetch helpers: `apiService.js`
+		- Backend Python utilities: `src/backend/utils/` or domain-specific service modules
+		- Vontology operations: use existing service classes, never raw DB calls
+	8. **If you catch yourself copy-pasting**: You are doing it wrong. Stop and refactor.
 - Changes must be **modification-tolerant**: switching underlying models should not silently remove or change capabilities; differences must be explicit and detectable (telemetry, validation, or policy).
 - **Vontology-first prompt pattern**: any new or modified LLM prompt should be stored as Vontology text relations (hasContent/hasDescription, primary en-NZ), with a code fallback only when the concept is missing or tools are unavailable. Include prompt IDs in diagnostics for introspection and multilingual support.
 - For high-risk state changes (auth/org handling, DB writes, Vontology mutations), use a single authoritative pathway and reuse it consistently.

@@ -20,6 +20,12 @@ from ...languagemodels.llm_interface import get_llm_client, get_active_model_nam
 from .settings_routes import get_all_settings_data
 from ...integrations.internal_mcp import ToolCallParsingError
 from ...services import chat_history_service
+from ...services.window_session_context_service import (
+    get_or_create_window_context,
+    set_window_organisation,
+    clear_window_organisation,
+    get_effective_context,
+)
 from ...services.settings_service import (
     get_internal_mcp_max_tool_invocations,
     get_internal_mcp_tool_batch_cap,
@@ -2155,11 +2161,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 400,
             )
 
-    # Session management
-    if "session_id" not in session:
-        session["session_id"] = str(uuid.uuid4())
-    session_id = session["session_id"]
-
     user_concept_id = session.get("user_concept_id")
     context = current_app.config.get("CONTEXT", [])
 
@@ -2182,7 +2183,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 request_user_id or "(none)",
             )
 
-        org_concept_id = session.get("organisation_concept_id") if session else None
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        org_concept_id = effective.get("organisation_id")
 
         # Store user_concept_id in session for history tracking
         if user_concept_id:
@@ -2190,6 +2196,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     except Exception:
         user_concept_id = None
         org_concept_id = None
+        effective = {}
+
+    # JVNAUTOSCI-1011: Get session_id from window context (or flask session fallback).
+    # This ensures each browser window uses its own active chat session.
+    session_id = effective.get("chat_session_id")
+    if not session_id:
+        # Fallback to flask session for legacy clients
+        if "session_id" not in session:
+            session["session_id"] = str(uuid.uuid4())
+        session_id = session["session_id"]
 
     history_owner_user_id, shared_invite = _resolve_shared_conversation_owner(
         user_concept_id=user_concept_id, session_id=session_id
@@ -4463,7 +4479,13 @@ def history():
         history_tail_limit = segment_size * max(segment_count, 1)
 
     try:
-        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
         owner_user_id = user_concept_id
         shared_invite = None
 
@@ -4509,11 +4531,18 @@ def history():
             meta = {"history_truncated": history_truncated}
         else:
             if shared_invite:
-                owner_namespace = _derive_namespace_for_user_org(
-                    owner_user_id,
-                    shared_invite.get("organisation_concept_id"),
-                ) or chat_history_service.resolve_chat_history_namespace(owner_user_id)
+                owner_namespace = (
+                    _derive_namespace_for_user_org(
+                        owner_user_id,
+                        shared_invite.get("organisation_concept_id"),
+                    )
+                    or namespace
+                )
             else:
+                # JVNAUTOSCI-1011: Use window-context namespace, not flask session
+                owner_namespace = namespace
+            # Fallback if namespace is None (e.g. legacy sessions without org)
+            if not owner_namespace:
                 owner_namespace = chat_history_service.resolve_chat_history_namespace(
                     owner_user_id
                 )
@@ -4592,7 +4621,13 @@ def history_debug():
 
     try:
         session_id = session_id.strip()
-        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
         owner_user_id = user_concept_id
         shared_invite = None
 
@@ -4695,7 +4730,14 @@ def history_backfill_spoken():
     target_session_id = target_session_id.strip()
     owner_user_id = user_concept_id
     try:
-        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
         if not chat_history_service.has_chat_history_session(
             user_concept_id, target_session_id, namespace=namespace
         ):
@@ -4798,7 +4840,12 @@ def history_backfill_spoken():
 
     # Generate spoken talk track.
     try:
-        org_concept_id = session.get("organisation_concept_id") if session else None
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        org_concept_id = effective.get("organisation_id")
         llm_client = get_llm_client(
             user_concept_id=user_concept_id, org_concept_id=org_concept_id
         )
@@ -4936,13 +4983,24 @@ def history_backfill_spoken():
 @von_bp.route("/history/length", methods=["GET"])
 def history_length():
     """Retrieve the chat history length for the current user."""
-    user_concept_id = session.get("user_concept_id")
+    try:
+        from ...security.access_control import get_effective_user_concept_id
+
+        user_concept_id = get_effective_user_concept_id()
+    except Exception:
+        user_concept_id = session.get("user_concept_id")
 
     if not user_concept_id:
         return jsonify({"history_length": 0, "authenticated": False})
 
     try:
-        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
         length = chat_history_service.get_chat_history_length(
             user_concept_id, namespace=namespace
         )
@@ -4984,10 +5042,17 @@ def history_sessions():
             resolve_conversation_owner,
         )
 
-        organisation_concept_id = _normalise_concept_id(
-            session.get("organisation_concept_id")
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
         )
-        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        organisation_concept_id = _normalise_concept_id(
+            effective.get("organisation_id")
+        )
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
 
         # Fallback: extract org from namespace if not in session (JVNAUTOSCI-1004)
         # Namespace format: #V#user@org or user@org
@@ -5400,6 +5465,11 @@ def set_organisation():
     Request body: {organisation_concept_id: str} or empty dict to clear
     - organisation_concept_id can be a concept ID with or without #V# prefix
     - If organisation_concept_id is present but empty/null, treat as clear request
+
+    Supports window-scoped sessions via X-Von-Window-Session header (JVNAUTOSCI-1011).
+    If the header is present, org context is stored in per-window memory store
+    instead of the browser-wide Flask session.
+
     Returns: {user_id, organisation_id, role, namespace, status: 'updated'}
     """
     try:
@@ -5413,6 +5483,9 @@ def set_organisation():
         )
         if not user_id:
             return jsonify({"error": "Not authenticated"}), 401
+
+        # JVNAUTOSCI-1011: Check for window session header
+        window_session_id = request.headers.get("X-Von-Window-Session")
 
         data = request.get_json() or {}
         org_id = data.get("organisation_concept_id")
@@ -5433,12 +5506,19 @@ def set_organisation():
         # Handle clearing (personal context / no org)
         if is_clear_request:
             namespace = derive_namespace(user_slug)
-            session.pop("organisation_concept_id", None)
-            session.pop("role_in_org", None)
-            # JVNAUTOSCI-1004: Clear chat session_id when org changes
-            session.pop("session_id", None)
-            session["namespace"] = namespace
-            session.modified = True
+
+            # JVNAUTOSCI-1011: Use window session if header present
+            if window_session_id:
+                clear_window_organisation(window_session_id, namespace, user_id)
+            else:
+                # Fallback: update Flask session
+                session.pop("organisation_concept_id", None)
+                session.pop("role_in_org", None)
+                # JVNAUTOSCI-1004: Clear chat session_id when org changes
+                session.pop("session_id", None)
+                session["namespace"] = namespace
+                session.modified = True
+
             return (
                 jsonify(
                     {
@@ -5447,6 +5527,7 @@ def set_organisation():
                         "organisation_id": None,
                         "role": None,
                         "namespace": namespace,
+                        "window_session_id": window_session_id,
                     }
                 ),
                 200,
@@ -5474,14 +5555,24 @@ def set_organisation():
         # Derive composite namespace using slug values
         namespace = derive_namespace(user_slug, org_slug)
 
-        # Update session (store slug form for backward compatibility)
-        session["organisation_concept_id"] = org_slug
-        session["role_in_org"] = role_in_org
-        session["namespace"] = namespace
-        # JVNAUTOSCI-1004: Clear chat session_id when org changes to avoid
-        # showing conversation from previous org context
-        session.pop("session_id", None)
-        session.modified = True
+        # JVNAUTOSCI-1011: Use window session if header present
+        if window_session_id:
+            set_window_organisation(
+                window_session_id=window_session_id,
+                organisation_concept_id=org_slug,
+                role_in_org=role_in_org,
+                namespace=namespace,
+                user_id=user_id,
+            )
+        else:
+            # Fallback: update Flask session (for clients without window session support)
+            session["organisation_concept_id"] = org_slug
+            session["role_in_org"] = role_in_org
+            session["namespace"] = namespace
+            # JVNAUTOSCI-1004: Clear chat session_id when org changes to avoid
+            # showing conversation from previous org context
+            session.pop("session_id", None)
+            session.modified = True
 
         # Return concept ID form in API response (with #V# prefix)
         concept_id_response = (
@@ -5496,6 +5587,7 @@ def set_organisation():
                     "organisation_id": concept_id_response,
                     "role": role_in_org,
                     "namespace": namespace,
+                    "window_session_id": window_session_id,
                 }
             ),
             200,
@@ -5511,7 +5603,12 @@ def get_session_context():
     """
     Get current session context (user, organisation, role, namespace).
 
-    Returns: {user_id, organisation_id, role, namespace, authenticated}
+    Supports window-scoped sessions via X-Von-Window-Session header (JVNAUTOSCI-1011).
+    If the header is present, org context is read from per-window memory store
+    instead of the browser-wide Flask session, enabling different org contexts
+    in different browser windows.
+
+    Returns: {user_id, organisation_id, role, namespace, authenticated, window_session_id?}
     """
     try:
         from ...services.namespace_service import derive_namespace
@@ -5536,11 +5633,17 @@ def get_session_context():
                 200,
             )
 
-        org_id = session.get("organisation_concept_id")
-        role_in_org = session.get("role_in_org")
-        namespace = session.get("namespace")
+        # JVNAUTOSCI-1011: Check for window session header
+        window_session_id = request.headers.get("X-Von-Window-Session")
 
-        # If no namespace in session, derive it
+        # Get effective context from window session or Flask session
+        effective = get_effective_context(window_session_id, dict(session), user_id)
+
+        org_id = effective.get("organisation_id")
+        role_in_org = effective.get("role")
+        namespace = effective.get("namespace")
+
+        # If no namespace resolved, derive it
         if not namespace:
             user_slug = str(user_id)
             if user_slug.startswith("#V#"):
@@ -5567,18 +5670,20 @@ def get_session_context():
             if not organisation_id_response.startswith("#V#"):
                 organisation_id_response = f"#V#{organisation_id_response}"
 
-        return (
-            jsonify(
-                {
-                    "authenticated": True,
-                    "user_id": user_id,
-                    "organisation_id": organisation_id_response,
-                    "role": role_in_org,
-                    "namespace": namespace,
-                }
-            ),
-            200,
-        )
+        response_data = {
+            "authenticated": True,
+            "user_id": user_id,
+            "organisation_id": organisation_id_response,
+            "role": role_in_org,
+            "namespace": namespace,
+        }
+
+        # Include window_session_id in response so frontend can confirm which session is active
+        if window_session_id:
+            response_data["window_session_id"] = window_session_id
+            response_data["context_source"] = effective.get("source", "window_session")
+
+        return jsonify(response_data), 200
 
     except Exception as e:
         print(f"Error getting session context: {e}")
@@ -5625,7 +5730,14 @@ def set_chat_session():
         if coll is None:
             return jsonify({"error": "Chat history unavailable"}), 503
 
-        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
         query = chat_history_service.build_chat_history_query(
             user_id=user_concept_id,
             session_id=session_id,
@@ -5713,9 +5825,18 @@ def set_chat_session():
                     out["timestamp"] = _normalise_timestamp(out.get("timestamp"))
                 normalised_history.append(out)
 
-        # Switch active session.
-        session["session_id"] = session_id
-        session.modified = True
+        # Switch active session (window-scoped if window session is present).
+        # JVNAUTOSCI-1011: Store in window session context to avoid cross-window leaks.
+        if window_session_id:
+            from ...services.window_session_context_service import (
+                set_window_chat_session,
+            )
+
+            set_window_chat_session(window_session_id, session_id, user_concept_id)
+        else:
+            # Fallback for legacy clients without window session support
+            session["session_id"] = session_id
+            session.modified = True
 
         # Clear any non-persistent context cache.
         try:
@@ -5747,8 +5868,13 @@ def assign_chat_session_org():
         if not user_concept_id:
             return jsonify({"error": "Not authenticated"}), 401
 
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
         organisation_concept_id = _normalise_concept_id(
-            session.get("organisation_concept_id")
+            effective.get("organisation_id")
         )
         if not organisation_concept_id:
             return jsonify({"error": "No organisation context"}), 400
@@ -5849,10 +5975,19 @@ def create_chat_session():
 
         session_id = str(uuid.uuid4())
 
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+
         result = chat_history_service.create_chat_session(
             user_id=user_concept_id,
             session_id=session_id,
             session_name=session_name,
+            namespace=effective.get("namespace"),
+            organisation_concept_id=effective.get("organisation_id"),
+            role_in_org=effective.get("role"),
         )
 
         session["session_id"] = session_id
@@ -5912,7 +6047,14 @@ def rename_chat_session():
         if not isinstance(session_name, str) or not session_name.strip():
             return jsonify({"error": "session_name required"}), 400
 
-        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
         result = chat_history_service.rename_chat_session(
             user_id=user_concept_id,
             session_id=session_id,
@@ -5969,7 +6111,14 @@ def chat_session_links():
             return jsonify({"error": "session_id required"}), 400
         session_id = session_id.strip()
 
-        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
 
         # Best-effort: ensure modality concepts exist so the UI can attach them.
         try:
@@ -6297,8 +6446,14 @@ def get_shared_conversation_invitees():
             return jsonify({"error": "session_id required"}), 400
         session_id = session_id.strip()
 
-        organisation_concept_id = session.get("organisation_concept_id")
-        organisation_concept_id = _normalise_concept_id(organisation_concept_id)
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        organisation_concept_id = _normalise_concept_id(
+            effective.get("organisation_id")
+        )
         if not organisation_concept_id:
             return jsonify({"error": "No organisation context"}), 400
 
@@ -6309,7 +6464,9 @@ def get_shared_conversation_invitees():
         ):
             return jsonify({"error": "Not authorised for organisation"}), 403
 
-        namespace = chat_history_service.resolve_chat_history_namespace(user_concept_id)
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
         session_links = chat_history_service.get_chat_session_links(
             user_id=user_concept_id,
             session_id=session_id,
@@ -6425,8 +6582,13 @@ def invite_to_shared_conversation():
         if not invitee_concept_id:
             return jsonify({"error": "invitee_concept_id required"}), 400
 
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
         organisation_concept_id = _normalise_concept_id(
-            session.get("organisation_concept_id")
+            effective.get("organisation_id")
         )
         if not organisation_concept_id:
             return jsonify({"error": "No organisation context"}), 400
@@ -6493,9 +6655,13 @@ def list_shared_conversation_invites():
             session_id=session_id,
         )
 
-        # JVNAUTOSCI-1004: Filter invites by current organisation
+        # JVNAUTOSCI-1004/1011: Filter invites by current organisation using window session
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
         organisation_concept_id = _normalise_concept_id(
-            session.get("organisation_concept_id")
+            effective.get("organisation_id")
         )
         if organisation_concept_id:
             invites = [

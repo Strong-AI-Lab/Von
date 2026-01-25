@@ -1,4 +1,4 @@
-import { postJson } from './apiService.js';
+import { getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import { renderOrgSelector, setupOrgSwitchListener } from './components/orgSelector.js';
 import { populateLanguageSelect } from './languageConfig.js';
 import {
@@ -18,6 +18,14 @@ import {
   isTextToSpeechSupported,
   speakText
 } from './speech.js';
+
+// Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
+function buildSettingsFetchHeaders(extraHeaders = {}) {
+  return {
+    [WINDOW_SESSION_HEADER]: getWindowSessionId(),
+    ...extraHeaders
+  };
+}
 
 // LocalStorage keys for client-side persistence (no DB storage)
 const LS_USER_KEY = 'von_current_user';
@@ -103,7 +111,10 @@ function _setWriteConservatismOverrideBadgeEnabled(enabled) {
 
 async function _fetchSessionContextForRole() {
   try {
-    const resp = await fetch('/von/api/session/context', { cache: 'no-cache' });
+    const resp = await fetch('/von/api/session/context', {
+      cache: 'no-cache',
+      headers: buildSettingsFetchHeaders()
+    });
     if (!resp.ok) return null;
     return await resp.json();
   } catch {
@@ -1077,10 +1088,25 @@ window.addEventListener('beforeunload', () => {
 });
 
 function getStoredJson(key) {
-  try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; }
+  // JVNAUTOSCI-1011: sessionStorage (per-window) first, localStorage fallback
+  try {
+    const sessionVal = sessionStorage.getItem(key);
+    if (sessionVal) return JSON.parse(sessionVal);
+    return JSON.parse(localStorage.getItem(key) || 'null');
+  } catch { return null; }
 }
 function setStoredJson(key, value) {
-  try { if (value == null) localStorage.removeItem(key); else localStorage.setItem(key, JSON.stringify(value)); } catch { }
+  // JVNAUTOSCI-1011: Write to both sessionStorage (window-scoped) and localStorage (persistent)
+  try {
+    if (value == null) {
+      sessionStorage.removeItem(key);
+      localStorage.removeItem(key);
+    } else {
+      const json = JSON.stringify(value);
+      sessionStorage.setItem(key, json);
+      localStorage.setItem(key, json);
+    }
+  } catch { }
 }
 
 function normaliseOrgConceptId(value) {

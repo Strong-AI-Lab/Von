@@ -4,7 +4,8 @@ const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTa
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     annotateTurn: jest.fn(),
-    getUserContext: jest.fn()
+    getUserContext: jest.fn(),
+    getWindowSessionId: jest.fn(() => 'mock-window-session-id')
 }));
 
 jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
