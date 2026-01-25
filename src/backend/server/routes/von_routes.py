@@ -4952,6 +4952,7 @@ def history_sessions():
     try:
         from ...services.shared_conversation_service import (
             list_accepted_invites_for_user,
+            list_outgoing_accepted_invites_for_user,
             resolve_conversation_owner,
         )
 
@@ -5021,6 +5022,38 @@ def history_sessions():
                     or invite.get("created_at")
                 )
                 summary["shared_accepted_at"] = shared_timestamp
+
+        # Flag owner's sessions that have accepted participants (JVNAUTOSCI-1002)
+        # This enables the owner to subscribe to SSE updates from participants
+        outgoing_accepted = list_outgoing_accepted_invites_for_user(
+            user_concept_id=user_concept_id
+        )
+        if organisation_concept_id:
+            outgoing_accepted = [
+                invite
+                for invite in outgoing_accepted
+                if (
+                    _normalise_concept_id(invite.get("organisation_concept_id"))
+                    in (None, organisation_concept_id)
+                )
+            ]
+        outgoing_by_session: dict[str, list] = {}
+        for invite in outgoing_accepted:
+            if not isinstance(invite, dict):
+                continue
+            out_session_id = invite.get("session_id")
+            if isinstance(out_session_id, str) and out_session_id:
+                outgoing_by_session.setdefault(out_session_id, []).append(invite)
+        if outgoing_by_session:
+            for summary in sessions:
+                if not isinstance(summary, dict):
+                    continue
+                session_id = summary.get("session_id")
+                if not isinstance(session_id, str) or not session_id:
+                    continue
+                if session_id in outgoing_by_session:
+                    summary["has_shared_participants"] = True
+
         existing_session_ids = {
             s.get("session_id") for s in sessions if isinstance(s, dict)
         }

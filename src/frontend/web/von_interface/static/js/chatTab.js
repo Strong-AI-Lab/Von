@@ -6590,11 +6590,13 @@ function isSharedConversationSession(sessionId) {
     );
     if (isInvitee) return true;
 
-    // Check if this session has shared_owner_user_id set (indicates shared)
+    // Check if this session has shared_owner_user_id set (indicates shared as invitee)
+    // or has_shared_participants set (indicates shared as owner)
     const cachedSession = sessionTabsCache.find(
         s => String(s?.session_id || '') === sessionId
     );
     if (cachedSession?.shared_owner_user_id) return true;
+    if (cachedSession?.has_shared_participants) return true;
 
     return false;
 }
