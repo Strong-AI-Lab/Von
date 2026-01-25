@@ -1299,21 +1299,16 @@ def get_available_people():
             per_page=100,  # Get a reasonable number of users
         )
 
-        # Filter and format for dropdown - include all fields needed for filtering
+        # Filter and format for dropdown - use simple name extraction without per-concept DB calls
         people_options = []
         for concept in concepts:
-            from ...services.concept_service import enrich_concept_with_text_relations
+            # Use get_concept_display_name_with_names_fallback directly on existing data
+            # without expensive enrichment (avoids O(n) DB calls)
             from ...vontology.utils_vontology import (
                 get_concept_display_name_with_names_fallback,
             )
 
-            # Enrich concept with names from text relations before getting display name
-            enriched_concept = enrich_concept_with_text_relations(
-                concept, logger=current_app.logger
-            )
-            display_name = get_concept_display_name_with_names_fallback(
-                enriched_concept
-            )
+            display_name = get_concept_display_name_with_names_fallback(concept)
             people_options.append(
                 {
                     "id": concept.get("_id"),
@@ -1359,21 +1354,16 @@ def get_available_organisations():
         # Use the concepts directly since we're only querying one specific type
         unique_concepts = concepts
 
-        # Filter and format for dropdown - include all fields needed for filtering
+        # Filter and format for dropdown - use simple name extraction without per-concept DB calls
         organisation_options = []
         for concept in unique_concepts:
-            from ...services.concept_service import enrich_concept_with_text_relations
             from ...vontology.utils_vontology import (
                 get_concept_display_name_with_names_fallback,
             )
 
-            # Enrich concept with names from text relations before getting display name
-            enriched_concept = enrich_concept_with_text_relations(
-                concept, logger=current_app.logger
-            )
-            display_name = get_concept_display_name_with_names_fallback(
-                enriched_concept
-            )
+            # Use get_concept_display_name_with_names_fallback directly on existing data
+            # without expensive enrichment (avoids O(n) DB calls)
+            display_name = get_concept_display_name_with_names_fallback(concept)
             organisation_options.append(
                 {
                     "id": concept.get("_id"),
