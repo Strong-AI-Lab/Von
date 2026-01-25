@@ -662,11 +662,10 @@ def _add_relationship(**kwargs):
     try:
         repo = ConceptsRepository
 
-        from ...vontology.code_concepts_registry import (
-            build_virtual_concept_doc,
-            is_code_concept_id,
+        from ...services.relationship_write_service import (
+            add_relationship,
+            normalise_structural_predicate,
         )
-        from ...vontology.utils_vontology import is_predicate
 
         # Check if source exists
         src = repo.find_one({"concept_id": source_id})
@@ -683,11 +682,6 @@ def _add_relationship(**kwargs):
         predicate_str = (
             predicate.strip() if isinstance(predicate, str) else str(predicate)
         )
-        # Normalise structural predicates using the authoritative service (JVNAUTOSCI-986)
-        from ...services.relationship_write_service import (
-            normalise_structural_predicate,
-        )
-
         predicate_str = normalise_structural_predicate(predicate_str)
         predicate_normalised = (
             predicate_str[3:] if predicate_str.startswith("#V#") else predicate_str
@@ -746,239 +740,47 @@ def _add_relationship(**kwargs):
                 "relation_id": str(result.get("relation_id")),
             }
 
-        # Handle concept-to-concept relationships
-        # Check if target concept exists
-        tgt = repo.find_one({"concept_id": target})
-        if not tgt:
-            return _err(
-                "target_concept_not_found",
-                f"Target concept '{target}' not found",
-                details={"role": "target", "concept_id": target},
-            )
-
-        # Map common predicate names to database field names
-        predicate_map = {
-            "instance_of": "is_an_instance_of",
-            "instanceOf": "is_an_instance_of",
-            "type_of": "is_a_type_of",
-            "typeOf": "is_a_type_of",
-            "subtype": "has_subtype",
-            "instance": "has_instance",
-        }
-        rel_kind = predicate_map.get(predicate_str, predicate_str)
-
-        # Guardrail: concept-to-concept relationship predicates must be either:
-        # - one of the structural relationship kinds (is_a_type_of, has_subtype, ...), or
-        # - a Vontology predicate concept id (starts with #V# and exists as a predicate).
-        from ...db.repositories.concepts_repository import RELATIONSHIP_KINDS
-
-        if isinstance(rel_kind, str) and rel_kind in RELATIONSHIP_KINDS:
-            pass
-        elif isinstance(rel_kind, str) and rel_kind.startswith("#V#"):
-            pred_doc = repo.find_one(
-                {"concept_id": rel_kind}, {"concept_id": 1, "relationships": 1}
-            )
-            if pred_doc is None and is_code_concept_id(rel_kind):
-                pred_doc = build_virtual_concept_doc(rel_kind)
-            if pred_doc is None:
-                return _err(
-                    "predicate_concept_not_found",
-                    (
-                        f"Predicate concept '{rel_kind}' not found. "
-                        "Create it as a predicate in the Vontology (e.g. as an instance of #V#predicate) "
-                        "before using it as a relationship."
-                    ),
-                    details={
-                        "role": "predicate",
-                        "predicate": rel_kind,
-                        "predicate_input": predicate,
-                    },
-                )
-            if not is_predicate(pred_doc):
-                return _err(
-                    "predicate_concept_not_typed",
-                    (
-                        f"Concept '{rel_kind}' exists but is not typed as a predicate. "
-                        "Predicates must be instances of #V#predicate (or a predicate subtype)."
-                    ),
-                    details={
-                        "role": "predicate",
-                        "predicate": rel_kind,
-                        "predicate_input": predicate,
-                        "required_instance_of": "#V#predicate",
-                    },
-                )
-        else:
-            return _err(
-                "invalid_relationship_predicate",
-                (
-                    "Invalid relationship predicate. For concept-to-concept relationships, "
-                    "use a structural predicate (e.g. 'typeOf', 'instance_of') or a '#V#...' predicate concept id."
-                ),
-                details={"predicate_input": predicate, "predicate_canonical": rel_kind},
-            )
-
-        # For structural predicates, maintain inverse consistency like the HTTP API.
-        inverse_map = {
-            "is_a_type_of": ("has_subtype", target, source_id),
-            "has_subtype": ("is_a_type_of", target, source_id),
-            "is_an_instance_of": ("has_instance", target, source_id),
-            "has_instance": ("is_an_instance_of", target, source_id),
-            "related_to": ("related_to", target, source_id),
-        }
-        has_inverse = isinstance(rel_kind, str) and rel_kind in inverse_map
-
-        # Ensure relationship storage is list-typed for the forward predicate.
-        # This prevents $addToSet failures when legacy data stored a single string.
-        repo._ensure_relationship_array(source_id, rel_kind)
-
-        forward_exists_before = False
-        existing = (
-            repo.find_one({"concept_id": source_id}, {f"relationships.{rel_kind}": 1})
-            or {}
-        )
-        rels = existing.get("relationships") or {}
-        curr = rels.get(rel_kind)
-        if isinstance(curr, list):
-            forward_exists_before = target in curr
-        elif isinstance(curr, str):
-            forward_exists_before = target == curr
-
-        forward_update = repo.update_one(
-            {"concept_id": source_id},
-            {"$addToSet": {f"relationships.{rel_kind}": target}},
+        # Concept-to-concept relationships use the single authoritative pathway.
+        result = add_relationship(
+            source_id=source_id,
+            predicate=predicate_str,
+            target=target,
+            repo=repo,
         )
 
-        inverse_payload = None
-        inverse_failed = None
-        if has_inverse:
-            inv_kind, inv_src, inv_tgt = inverse_map[rel_kind]
-            try:
-                repo._ensure_relationship_array(inv_src, inv_kind)
-                inverse_update = repo.update_one(
-                    {"concept_id": inv_src},
-                    {"$addToSet": {f"relationships.{inv_kind}": inv_tgt}},
-                )
-                if (
-                    inverse_update.matched_count > 0
-                    and inverse_update.modified_count == 0
-                ):
-                    # Defensive verification: if we didn't modify anything, ensure the
-                    # inverse edge is actually present (it may have already existed or
-                    # been added concurrently).
-                    inv_existing = (
-                        repo.find_one(
-                            {"concept_id": inv_src},
-                            {f"relationships.{inv_kind}": 1},
-                        )
-                        or {}
-                    )
-                    inv_rels = inv_existing.get("relationships") or {}
-                    inv_curr = inv_rels.get(inv_kind)
-                    inverse_present_after = False
-                    if isinstance(inv_curr, list):
-                        inverse_present_after = inv_tgt in inv_curr
-                    elif isinstance(inv_curr, str):
-                        inverse_present_after = inv_tgt == inv_curr
-                    if not inverse_present_after:
-                        inverse_failed = {
-                            "predicate": inv_kind,
-                            "source_id": inv_src,
-                            "target": inv_tgt,
-                            "exception_type": "InverseNoOp",
-                            "error": "Inverse relationship update did not persist",
-                        }
-                inverse_payload = {
-                    "predicate": inv_kind,
-                    "source_id": inv_src,
-                    "target": inv_tgt,
-                    "added": inverse_update.modified_count > 0,
-                    "matched": inverse_update.matched_count > 0,
-                }
-            except Exception as exc:
-                inverse_failed = {
-                    "predicate": inv_kind,
-                    "source_id": inv_src,
-                    "target": inv_tgt,
-                    "exception_type": type(exc).__name__,
-                    "error": str(exc),
-                }
-
-        forward_ok = forward_update.matched_count > 0
-        forward_added = forward_update.modified_count > 0
-
-        if forward_ok and not forward_added and not forward_exists_before:
-            # Defensive verification: if we didn't modify anything and the edge did
-            # not appear to exist pre-write, confirm the edge exists post-write.
-            # This prevents returning success when the update is effectively a no-op.
-            verify = (
-                repo.find_one(
-                    {"concept_id": source_id},
-                    {f"relationships.{rel_kind}": 1},
-                )
-                or {}
-            )
-            verify_rels = verify.get("relationships") or {}
-            verify_curr = verify_rels.get(rel_kind)
-            present_after = False
-            if isinstance(verify_curr, list):
-                present_after = target in verify_curr
-            elif isinstance(verify_curr, str):
-                present_after = target == verify_curr
-            if present_after:
-                forward_exists_before = True
-            else:
-                return _err(
-                    "relationship_add_noop",
-                    "Relationship update did not persist",
-                    details={
-                        "source_id": source_id,
-                        "predicate": rel_kind,
-                        "target": target,
-                        "matched": forward_update.matched_count > 0,
-                        "modified": forward_update.modified_count > 0,
-                    },
-                )
-
-        if not forward_ok:
+        if not result.get("success"):
+            error_code = result.get("error") or "relationship_add_failed"
             return _err(
-                "relationship_add_failed",
-                "Failed to add relationship",
+                str(error_code),
+                str(error_code),
                 details={
                     "source_id": source_id,
-                    "predicate": rel_kind,
+                    "predicate": predicate_str,
                     "target": target,
+                    "details": result,
                 },
             )
 
-        if inverse_failed:
-            return _err(
-                "relationship_add_partial_failure",
-                "Relationship added, but inverse relationship update failed",
-                details={
-                    "forward": {
-                        "source_id": source_id,
-                        "predicate": rel_kind,
-                        "target": target,
-                        "added": forward_added,
-                        "already_existed": bool(
-                            forward_exists_before and not forward_added
-                        ),
-                    },
-                    "inverse_failed": inverse_failed,
-                },
-            )
-
+        predicate_out = result.get("predicate") or predicate_str
+        target_out = result.get("target_id") or target
         response: dict[str, Any] = {
             "success": True,
+            "relationship_type": "concept_relation",
             "source_id": source_id,
-            "predicate": rel_kind,
-            "target": target,
-            "added": forward_added,
-            "already_existed": bool(forward_exists_before and not forward_added),
+            "predicate": predicate_out,
+            "predicate_input": predicate,
+            "target": target_out,
+            "added": bool(
+                result.get("forward_modified")
+                if "forward_modified" in result
+                else result.get("modified")
+            ),
         }
-        if inverse_payload:
-            response["inverse"] = inverse_payload
+        if "inverse_predicate" in result or "inverse_modified" in result:
+            response["inverse"] = {
+                "predicate": result.get("inverse_predicate"),
+                "added": result.get("inverse_modified"),
+            }
         return response
 
     except Exception as e:
