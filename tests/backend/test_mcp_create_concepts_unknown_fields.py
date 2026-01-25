@@ -86,6 +86,45 @@ def test_create_concepts_accepts_multiple_unknown_fields():
     # Assert: should succeed
     assert result is not None
     assert result.get("total") == 1
+
+
+def test_create_concepts_predicate_kind_creates_predicate_instance():
+    """
+    Verify that predicate kind creates an instance of #V#predicate.
+
+    Context: JVNAUTOSCI-986 - ensure predicate concepts are instances of predicate
+    rather than being created as types.
+    """
+    import uuid
+
+    unique_name = f"test_predicate_{uuid.uuid4().hex[:8]}"
+    payload = {
+        "parent_id": "#V#thing",
+        "concepts": [
+            {
+                "name": unique_name,
+                "kind": "predicate",
+                "description": "Test predicate concept",
+            }
+        ],
+    }
+
+    result = _create_concepts(**payload)
+
+    assert result is not None
+    assert result.get("total") == 1
+
+    first_result = result["results"][0]
+    assert isinstance(first_result, dict)
+    assert first_result.get("success") is True
+
+    concept = first_result.get("concept") or {}
+    relationships = concept.get("relationships") or {}
+    instance_of = relationships.get("is_an_instance_of") or []
+    type_of = relationships.get("is_a_type_of") or []
+
+    assert "#V#predicate" in instance_of
+    assert type_of == []
     first_result = result["results"][0]
     assert isinstance(first_result, dict)
     assert first_result.get("success") is True or "concept_id" in first_result
