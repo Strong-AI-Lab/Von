@@ -198,6 +198,27 @@ class InternalMCPChatOrchestrator:
         "{raw_tool_call}\n"
     )
     _TOOL_CALL_REPAIR_PROMPTS = ("#V#tool_call_repair_prompt",)
+
+    # --- Tool-use progress phases (JVNAUTOSCI-984) ---
+    # Used to provide phase-aware status updates during tool execution.
+    PHASE_CONTEXT_BUILD = "context_build"
+    PHASE_TOOL_PLAN = "tool_plan"
+    PHASE_TOOL_EXECUTE = "tool_execute"
+    PHASE_SCREEN_BACKFILL = "screen_backfill"
+    PHASE_NARRATION = "narration"
+    PHASE_COMPLETED = "completed"
+    PHASE_ERROR = "error"
+
+    _PHASE_LABELS: Mapping[str, str] = {
+        PHASE_CONTEXT_BUILD: "Building context",
+        PHASE_TOOL_PLAN: "Planning tool calls",
+        PHASE_TOOL_EXECUTE: "Executing tools",
+        PHASE_SCREEN_BACKFILL: "Generating response",
+        PHASE_NARRATION: "Generating narration",
+        PHASE_COMPLETED: "Complete",
+        PHASE_ERROR: "Error",
+    }
+
     _FALLBACK_MISSING_TOOL_CALL_PROMPT = (
         "You are a strict classifier for an agent system that can call tools via JSON.\n"
         "Your job: decide whether the assistant response *promises* to call tools (or says it is about to do so) "
@@ -235,6 +256,12 @@ class InternalMCPChatOrchestrator:
         # Optional progress callback for UI telemetry (JVNAUTOSCI-942).
         # This must never be allowed to break tool execution.
         self._progress_callback: Callable[[Mapping[str, Any]], None] | None = None
+
+        # Phase tracking for tool-use progress (JVNAUTOSCI-984).
+        self._progress_start_time: float | None = None
+        self._progress_phase_start_time: float | None = None
+        self._progress_current_phase: str | None = None
+        self._progress_phase_history: list[dict[str, Any]] = []
 
         # Vontology-backed missing-tool-call detector (lazy loaded)
         self._missing_tool_call_detector: Optional[_MissingToolCallDetectorSpec] = None
@@ -332,16 +359,77 @@ class InternalMCPChatOrchestrator:
         self, callback: Callable[[Mapping[str, Any]], None] | None
     ) -> None:
         self._progress_callback = callback
+        # Reset phase tracking when a new callback is set (new request).
+        self._progress_start_time = time.perf_counter() if callback else None
+        self._progress_phase_start_time = None
+        self._progress_current_phase = None
+        self._progress_phase_history = []
 
     def _emit_progress(self, info: Mapping[str, Any]) -> None:
         callback = getattr(self, "_progress_callback", None)
         if callback is None:
             return
         try:
-            callback(info)
+            # Enrich progress with phase and timing info (JVNAUTOSCI-984).
+            enriched: dict[str, Any] = dict(info)
+            if self._progress_current_phase:
+                enriched.setdefault("phase", self._progress_current_phase)
+                enriched.setdefault(
+                    "phase_label",
+                    self._PHASE_LABELS.get(self._progress_current_phase, ""),
+                )
+            if self._progress_start_time is not None:
+                enriched["total_elapsed_ms"] = int(
+                    (time.perf_counter() - self._progress_start_time) * 1000
+                )
+            if self._progress_phase_start_time is not None:
+                enriched["phase_elapsed_ms"] = int(
+                    (time.perf_counter() - self._progress_phase_start_time) * 1000
+                )
+            callback(enriched)
         except Exception:
             # Progress is best-effort; never disrupt the main chat flow.
             return
+
+    def _emit_phase_transition(
+        self,
+        phase: str,
+        *,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Emit a phase transition event and update internal tracking.
+
+        Call this at the start of each major processing phase to provide
+        clear status updates to the UI (JVNAUTOSCI-984).
+        """
+        now = time.perf_counter()
+
+        # Record previous phase in history.
+        if self._progress_current_phase and self._progress_phase_start_time is not None:
+            self._progress_phase_history.append(
+                {
+                    "phase": self._progress_current_phase,
+                    "phase_label": self._PHASE_LABELS.get(
+                        self._progress_current_phase, ""
+                    ),
+                    "duration_ms": int((now - self._progress_phase_start_time) * 1000),
+                }
+            )
+
+        # Update current phase.
+        self._progress_current_phase = phase
+        self._progress_phase_start_time = now
+
+        # Emit the transition.
+        info: dict[str, Any] = {
+            "status": "phase_transition",
+            "phase": phase,
+            "phase_label": self._PHASE_LABELS.get(phase, ""),
+        }
+        if extra:
+            info.update(extra)
+
+        self._emit_progress(info)
 
     @staticmethod
     def _coerce_int(
@@ -5177,6 +5265,9 @@ class InternalMCPChatOrchestrator:
 
         response = ""
 
+        # JVNAUTOSCI-984: Emit tool_plan phase transition.
+        self._emit_phase_transition(self.PHASE_TOOL_PLAN)
+
         if use_structured:
             self._logger.debug("[mcp_orchestrator] Using structured tool calling path")
             try:
@@ -5415,6 +5506,15 @@ class InternalMCPChatOrchestrator:
         current_response = response
         # Track if we're in the first iteration with structured tool calls already extracted
         first_iteration_structured = use_structured and has_valid_tool_call
+
+        # JVNAUTOSCI-984: Emit tool_execute phase transition before the tool loop.
+        self._emit_phase_transition(
+            self.PHASE_TOOL_EXECUTE,
+            extra={
+                "tool_calls_cap": int(self._max_tool_invocations),
+                "tool_batch_cap": int(self._tool_batch_cap),
+            },
+        )
 
         while iteration_count < self._max_tool_invocations:
             remaining_tool_calls: list[_ToolCallRequest] = []
@@ -5857,10 +5957,28 @@ class InternalMCPChatOrchestrator:
                 "but LLM still wants to call tools. Returning current response.",
                 self._max_tool_invocations,
             )
+            # JVNAUTOSCI-984: Emit progress update for tool limit reached.
+            self._emit_progress(
+                {
+                    "status": "tool_limit_reached",
+                    "tool_calls_done": iteration_count,
+                    "tool_calls_cap": int(self._max_tool_invocations),
+                    "tool_calls_remaining": 0,
+                }
+            )
 
         final_response_text = _maybe_apply_narration_routing(current_response)
         final_response_text = _maybe_apply_critic(
             final_response_text, tool_messages_for_critic=tool_messages
+        )
+
+        # JVNAUTOSCI-984: Emit completed phase transition.
+        self._emit_phase_transition(
+            self.PHASE_COMPLETED,
+            extra={
+                "tool_calls_done": iteration_count,
+                "tool_calls_cap": int(self._max_tool_invocations),
+            },
         )
 
         result = OrchestratorResult(

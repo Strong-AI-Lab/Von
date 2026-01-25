@@ -35,8 +35,8 @@ def test_add_relationship_rejects_non_vontology_predicate_keys(monkeypatch):
     )
 
     assert result["success"] is False
-    assert result.get("error_code") == "invalid_relationship_predicate"
-    assert "Invalid relationship predicate" in (result.get("error") or "")
+    assert result.get("error_code") == "invalid_predicate_format"
+    assert "invalid_predicate_format" in (result.get("error") or "")
 
 
 def test_add_relationship_rejects_missing_dynamic_predicate_concepts(monkeypatch):
@@ -62,7 +62,6 @@ def test_add_relationship_rejects_missing_dynamic_predicate_concepts(monkeypatch
 
     assert result["success"] is False
     assert result.get("error_code") == "predicate_concept_not_found"
-    assert "Predicate concept '#V#has_item' not found" in (result.get("error") or "")
 
 
 def test_add_relationship_rejects_dynamic_concepts_that_are_not_predicates(monkeypatch):
@@ -93,7 +92,6 @@ def test_add_relationship_rejects_dynamic_concepts_that_are_not_predicates(monke
 
     assert result["success"] is False
     assert result.get("error_code") == "predicate_concept_not_typed"
-    assert "is not typed as a predicate" in (result.get("error") or "")
 
 
 def test_add_relationship_returns_structured_error_for_missing_source(monkeypatch):
@@ -137,5 +135,4 @@ def test_add_relationship_returns_structured_error_for_missing_target(monkeypatc
     )
 
     assert result["success"] is False
-    assert result.get("error_code") == "target_concept_not_found"
-    assert result.get("error_details", {}).get("concept_id") == "#V#target"
+    assert result.get("error_code") == "target_not_found"

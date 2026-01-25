@@ -3941,15 +3941,12 @@ footer {
 
 .loading-indicator-detail {
     display: none;
-    font-size: 0.85rem;
-    color: #475569;
-    padding: 6px 10px;
-    border-radius: 999px;
-    background: #f1f5f9;
-    border: 1px solid #e2e8f0;
+    font-size: 0.8rem;
+    color: #64748b;
+    padding: 4px 0;
     max-width: min(92vw, 720px);
-    text-align: center;
-    line-height: 1.4;
+    text-align: left;
+    line-height: 1.35;
     white-space: pre-line;
 }
 

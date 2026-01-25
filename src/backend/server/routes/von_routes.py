@@ -2236,6 +2236,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             request_id,
             {
                 "status": "thinking",
+                "phase": "context_build",
+                "phase_label": "Building context",
                 "request_id": request_id,
                 "tool": None,
                 "batch_size": None,
@@ -3241,6 +3243,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         request_id,
                         {
                             "status": "completed",
+                            "phase": "completed",
+                            "phase_label": "Complete",
                             "request_id": request_id,
                         },
                     )
@@ -3275,6 +3279,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         request_id,
                         {
                             "status": "error",
+                            "phase": "error",
+                            "phase_label": "Error",
                             "request_id": request_id,
                             "error": str(exc),
                         },
@@ -3351,7 +3357,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         progress_scope_key,
                         request_id,
                         {
-                            "status": "workflow",
+                            "status": "phase_transition",
+                            "phase": "screen_backfill",
+                            "phase_label": "Generating response",
                             "request_id": request_id,
                             "workflow_task": "screen_backfill",
                         },
@@ -3719,7 +3727,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         progress_scope_key,
                         request_id,
                         {
-                            "status": "workflow",
+                            "status": "phase_transition",
+                            "phase": "narration",
+                            "phase_label": "Generating narration",
                             "request_id": request_id,
                             "workflow_task": "narration_planning",
                         },

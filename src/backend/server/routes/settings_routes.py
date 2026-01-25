@@ -589,6 +589,9 @@ def get_all_settings():
             settings["disable_write_tool_conservatism"] = (
                 get_disable_write_tool_conservatism()
             )
+        else:
+            # Remove admin-only setting if it leaked via batch query
+            settings.pop("disable_write_tool_conservatism", None)
         # Optional resolution using query args
         user_concept_id = request.args.get("user_concept_id")
         org_concept_id = request.args.get(

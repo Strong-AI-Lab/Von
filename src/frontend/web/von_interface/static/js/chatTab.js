@@ -287,12 +287,25 @@ function formatToolUseProgressText(progress, request = null) {
     }
 
     const status = typeof progress.status === 'string' ? progress.status : 'thinking';
+    const phase = typeof progress.phase === 'string' ? progress.phase : null;
+    const phaseLabel = typeof progress.phase_label === 'string' ? progress.phase_label : null;
     const tool = typeof progress.tool === 'string' ? progress.tool : null;
     const workflowTask = typeof progress.workflow_task === 'string' ? progress.workflow_task : null;
     const batchSize = Number.isFinite(progress.batch_size) ? Number(progress.batch_size) : null;
     const done = Number.isFinite(progress.tool_calls_done) ? Number(progress.tool_calls_done) : null;
     const cap = Number.isFinite(progress.tool_calls_cap) ? Number(progress.tool_calls_cap) : null;
     const remaining = Number.isFinite(progress.tool_calls_remaining) ? Number(progress.tool_calls_remaining) : null;
+    const totalElapsedMs = Number.isFinite(progress.total_elapsed_ms) ? Number(progress.total_elapsed_ms) : null;
+
+    // JVNAUTOSCI-984: Use phase label as the primary indicator text when available.
+    let primaryText = DEFAULT_THINKING_TEXT;
+    if (phaseLabel) {
+        primaryText = phaseLabel;
+        // Add ellipsis for in-progress phases
+        if (phase && phase !== 'completed' && phase !== 'error') {
+            primaryText += '...';
+        }
+    }
 
     const bits = [];
 
@@ -301,43 +314,43 @@ function formatToolUseProgressText(progress, request = null) {
         : null;
     const elapsedMs = thinkingStartedAtMs === null ? null : Date.now() - thinkingStartedAtMs;
     if (elapsedMs !== null) {
-        bits.push(`for ${formatThinkingDuration(elapsedMs)}`);
+        bits.push(`${formatThinkingDuration(elapsedMs)}`);
     }
 
     if (tool) {
         bits.push(`tool: ${tool}`);
     }
 
-    if (workflowTask) {
+    if (workflowTask && !phaseLabel) {
+        // Only show workflow task if we don't already have a phase label
         bits.push(`task: ${workflowTask}`);
     }
 
-    if (batchSize !== null) {
-        bits.push(`batch ${batchSize}`);
+    if (done !== null && cap !== null && cap > 0) {
+        bits.push(`${done}/${cap} tools`);
     }
 
-    if (done !== null && cap !== null) {
-        bits.push(`${done}/${cap} used`);
-    }
-
-    if (remaining !== null) {
-        bits.push(`${remaining} remaining`);
+    // Show limit reached warning
+    if (status === 'tool_limit_reached') {
+        bits.push('limit reached');
     }
 
     if (status === 'tool_failed' || status === 'error') {
         const error = typeof progress.error === 'string' ? progress.error.trim() : '';
         if (error) {
-            bits.push(`error: ${error}`);
+            // Truncate error message for display
+            const shortError = error.length > 60 ? error.substring(0, 60) + '...' : error;
+            bits.push(`error: ${shortError}`);
         } else {
             bits.push('error');
         }
     }
 
     if (!bits.length) {
-        return DEFAULT_THINKING_TEXT;
+        return primaryText;
     }
 
-    return `${DEFAULT_THINKING_TEXT} (${bits.join(', ')})`;
+    return `${primaryText} (${bits.join(', ')})`;
 }
 
 function recordToolUseHistory(request, progress) {
@@ -347,15 +360,39 @@ function recordToolUseHistory(request, progress) {
 
     const tool = typeof progress.tool === 'string' ? progress.tool.trim() : '';
     const workflowTask = typeof progress.workflow_task === 'string' ? progress.workflow_task.trim() : '';
+    const phase = typeof progress.phase === 'string' ? progress.phase.trim() : '';
+    const phaseLabel = typeof progress.phase_label === 'string' ? progress.phase_label.trim() : '';
+    const status = typeof progress.status === 'string' ? progress.status.trim() : '';
+
+    // Track phase transitions in addition to tool use.
+    if (!Array.isArray(request.toolUseProgressHistory)) {
+        request.toolUseProgressHistory = [];
+    }
+
+    if (!Array.isArray(request.phaseHistory)) {
+        request.phaseHistory = [];
+    }
+
+    // Record phase transitions (JVNAUTOSCI-984).
+    if (phase && status === 'phase_transition') {
+        const lastPhase = request.phaseHistory.length
+            ? request.phaseHistory[request.phaseHistory.length - 1]
+            : null;
+        if (!lastPhase || lastPhase.phase !== phase) {
+            request.phaseHistory.push({
+                phase,
+                phaseLabel,
+                timestamp: Date.now(),
+            });
+        }
+    }
+
+    // Original tool/task tracking.
     if (!tool && !workflowTask) {
         return;
     }
 
     const batchSize = Number.isFinite(progress.batch_size) ? Number(progress.batch_size) : null;
-
-    if (!Array.isArray(request.toolUseProgressHistory)) {
-        request.toolUseProgressHistory = [];
-    }
 
     const history = request.toolUseProgressHistory;
     const last = history.length ? history[history.length - 1] : null;
@@ -367,7 +404,7 @@ function recordToolUseHistory(request, progress) {
         return;
     }
 
-    history.push({ tool, workflowTask, batchSize });
+    history.push({ tool, workflowTask, batchSize, phase });
 }
 
 function formatThinkingDuration(elapsedMs) {
@@ -392,38 +429,50 @@ function formatToolUseHistoryTooltip(request) {
         : null;
     const elapsedMs = thinkingStartedAtMs === null ? null : Date.now() - thinkingStartedAtMs;
 
-    const history = Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory : [];
-
-    if (!history.length) {
-        const lines = ['No tool use yet.'];
-        if (elapsedMs !== null) {
-            lines.push(`Thinking for ${formatThinkingDuration(elapsedMs)}.`);
-        }
-        return lines.join('\n');
-    }
+    const toolHistory = Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory : [];
+    const phaseHistory = Array.isArray(request.phaseHistory) ? request.phaseHistory : [];
 
     const lines = [];
-    if (elapsedMs !== null) {
-        lines.push(`Thinking for ${formatThinkingDuration(elapsedMs)}`);
-    }
-    lines.push('Tools this turn:');
-    for (const entry of history) {
-        const tool = entry && typeof entry.tool === 'string' ? entry.tool : '';
-        const workflowTask = entry && typeof entry.workflowTask === 'string' ? entry.workflowTask : '';
-        if (!tool) {
-            if (!workflowTask) {
-                continue;
-            }
-        }
-        const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
-        if (batchSize === null) {
-            lines.push(`- ${tool || workflowTask}`);
-        } else {
-            lines.push(`- ${tool || workflowTask} (batch ${batchSize})`);
+
+    // Phase history section (JVNAUTOSCI-984).
+    if (phaseHistory.length > 0) {
+        for (let i = 0; i < phaseHistory.length; i++) {
+            const entry = phaseHistory[i];
+            const label = entry.phaseLabel || entry.phase || 'Unknown';
+            const startTs = entry.timestamp;
+            const endTs = i + 1 < phaseHistory.length
+                ? phaseHistory[i + 1].timestamp
+                : Date.now();
+            const durationMs = endTs - startTs;
+            lines.push(`${label} (${formatThinkingDuration(durationMs)})`);
         }
     }
 
-    return lines.length > 1 ? lines.join('\n') : '';
+    // Tool history section.
+    if (toolHistory.length > 0) {
+        if (lines.length > 0) {
+            lines.push('');
+        }
+        for (const entry of toolHistory) {
+            const tool = entry && typeof entry.tool === 'string' ? entry.tool : '';
+            const workflowTask = entry && typeof entry.workflowTask === 'string' ? entry.workflowTask : '';
+            if (!tool && !workflowTask) {
+                continue;
+            }
+            const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
+            if (batchSize === null) {
+                lines.push(`${tool || workflowTask}`);
+            } else {
+                lines.push(`${tool || workflowTask} (batch ${batchSize})`);
+            }
+        }
+    }
+
+    if (lines.length === 0) {
+        return '';
+    }
+
+    return lines.join('\n');
 }
 
 function stopToolUseProgressPolling(request) {

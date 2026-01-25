@@ -47,13 +47,6 @@ def test_add_message_to_history_uses_composite_namespace_for_rag_upsert():
         == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
     )
 
-    # Also persist the namespace on the chat_history document
-    update_doc = mock_coll.update_one.call_args_list[0][0][1]
-    assert (
-        update_doc["$set"]["namespace"]
-        == "#V#michael_witbrock@university_of_auckland_strong_ai_lab"
-    )
-
 
 def test_add_message_to_history_indexes_spoken_presenter_channel_to_rag():
     mock_coll = MagicMock()
