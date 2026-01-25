@@ -38,13 +38,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }).catch(err => console.error('Error loading client capability reporter:', err));
 
-  // Initialize chat tab since it's embedded and active by default
+  // CRITICAL: Initialize chat tab AFTER ensureUserContext completes (must await)
+  // This ensures Flask session org is set before /history/sessions is called
   console.log("Initializing chat tab...");
-  import('./chatTab.js').then(module => {
-    if (module.initializeChatTab) {
-      module.initializeChatTab();
+  try {
+    const chatModule = await import('./chatTab.js');
+    if (chatModule.initializeChatTab) {
+      chatModule.initializeChatTab();
     }
-  }).catch(err => console.error('Error loading chat tab module:', err));
+  } catch (err) {
+    console.error('Error loading chat tab module:', err);
+  }
 
   // Start background preload of Vontology data while chat is active
   try {
@@ -219,20 +223,47 @@ function setupSettingsFrameResizing() {
 }
 
 /**
- * Sync the Flask session's organisation_concept_id from localStorage.
+ * Sync the Flask session's organisation_concept_id.
+ * First checks if Flask session already has an org (from a previous request in this browser session).
+ * If not, syncs from localStorage to Flask session.
  * This avoids race conditions where /history/sessions is called before org context is set.
  */
 async function syncFlaskSessionOrg() {
   try {
+    // First, check if Flask session already has an org
+    const contextRes = await fetch('/von/api/session/context');
+    if (contextRes.ok) {
+      const context = await contextRes.json();
+      if (context.organisation_id) {
+        console.log('[main] Flask session already has org:', context.organisation_id);
+        // Update localStorage to match Flask session (single source of truth)
+        const existingOrg = localStorage.getItem('von_current_org');
+        const parsed = existingOrg ? JSON.parse(existingOrg) : {};
+        if (parsed?.concept_id !== context.organisation_id) {
+          localStorage.setItem('von_current_org', JSON.stringify({
+            id: null,
+            concept_id: context.organisation_id,
+            name: parsed?.name || null
+          }));
+          console.log('[main] Updated localStorage org to match Flask session');
+        }
+        if (context.namespace) {
+          localStorage.setItem('current_user_namespace', context.namespace);
+        }
+        return;
+      }
+    }
+
+    // Flask session has no org - try to sync from localStorage
     const storedOrg = localStorage.getItem('von_current_org');
     if (!storedOrg) {
-      console.log('[main] No org in localStorage, skipping Flask session sync');
+      console.log('[main] No org in localStorage or Flask session, proceeding without org');
       return;
     }
     const org = JSON.parse(storedOrg);
     const orgConceptId = org?.concept_id;
     if (!orgConceptId) {
-      console.log('[main] No org concept_id in localStorage, skipping Flask session sync');
+      console.log('[main] No org concept_id in localStorage, proceeding without org');
       return;
     }
     console.log('[main] Syncing organisation to Flask session from localStorage:', orgConceptId);
