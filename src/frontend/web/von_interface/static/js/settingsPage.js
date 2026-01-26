@@ -799,60 +799,6 @@ function setupConceptUiSettings() {
     langLabel.textContent = getPreferredLanguage();
   }
   setupCartoucheAppearanceSettings();
-  setupSettingsCartoucheAppearanceToggles();
-}
-
-/**
- * Setup the settings-prefixed cartouche appearance toggles in the User Profile section.
- * These mirror the non-prefixed toggles but are in a different UI location.
- */
-function setupSettingsCartoucheAppearanceToggles() {
-  const showNameToggle = document.getElementById('settingsCartoucheShowNameToggle');
-  const shortestToggle = document.getElementById('settingsCartoucheShortestNameToggle');
-  const showIdToggle = document.getElementById('settingsCartoucheShowIdToggle');
-  const showKindToggle = document.getElementById('settingsCartoucheShowKindToggle');
-  const kindBgToggle = document.getElementById('settingsCartoucheKindAsBackgroundToggle');
-
-  if (showNameToggle) {
-    showNameToggle.checked = getCartoucheShowNameSetting();
-    showNameToggle.addEventListener('change', () => {
-      setCartoucheShowNameSetting(!!showNameToggle.checked);
-      enforceCartoucheAppearanceConstraints({ showNameToggle, showIdToggle, showKindToggle, kindBgToggle });
-    });
-  }
-
-  if (shortestToggle) {
-    shortestToggle.checked = getCartoucheShortestNameSetting();
-    shortestToggle.addEventListener('change', () => {
-      setCartoucheShortestNameSetting(!!shortestToggle.checked);
-    });
-  }
-
-  if (showIdToggle) {
-    showIdToggle.checked = getCartoucheShowIdSetting();
-    showIdToggle.addEventListener('change', () => {
-      setCartoucheShowIdSetting(!!showIdToggle.checked);
-      enforceCartoucheAppearanceConstraints({ showNameToggle, showIdToggle, showKindToggle, kindBgToggle });
-    });
-  }
-
-  if (showKindToggle) {
-    showKindToggle.checked = getCartoucheShowKindSetting();
-    showKindToggle.addEventListener('change', () => {
-      setCartoucheShowKindSetting(!!showKindToggle.checked);
-      enforceCartoucheAppearanceConstraints({ showNameToggle, showIdToggle, showKindToggle, kindBgToggle });
-    });
-  }
-
-  if (kindBgToggle) {
-    kindBgToggle.checked = getCartoucheKindAsBackgroundSetting();
-    kindBgToggle.addEventListener('change', () => {
-      setCartoucheKindAsBackgroundSetting(!!kindBgToggle.checked);
-      enforceCartoucheAppearanceConstraints({ showNameToggle, showIdToggle, showKindToggle, kindBgToggle });
-    });
-  }
-
-  enforceCartoucheAppearanceConstraints({ showNameToggle, showIdToggle, showKindToggle, kindBgToggle });
 }
 
 function setupCartoucheAppearanceSettings() {
@@ -1488,28 +1434,18 @@ document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () =
     if (langLabel) langLabel.textContent = getPreferredLanguage();
     const shortestToggle = document.getElementById('cartoucheShortestNameToggle');
     if (shortestToggle) shortestToggle.checked = false;
-    const settingsShortestToggle = document.getElementById('settingsCartoucheShortestNameToggle');
-    if (settingsShortestToggle) settingsShortestToggle.checked = false;
     setCartoucheShortestNameSetting(false);
     const showNameToggle = document.getElementById('cartoucheShowNameToggle');
     if (showNameToggle) showNameToggle.checked = true;
-    const settingsShowNameToggle = document.getElementById('settingsCartoucheShowNameToggle');
-    if (settingsShowNameToggle) settingsShowNameToggle.checked = true;
     setCartoucheShowNameSetting(true);
     const showIdToggle = document.getElementById('cartoucheShowIdToggle');
     if (showIdToggle) showIdToggle.checked = false;
-    const settingsShowIdToggle = document.getElementById('settingsCartoucheShowIdToggle');
-    if (settingsShowIdToggle) settingsShowIdToggle.checked = false;
     setCartoucheShowIdSetting(false);
     const showKindToggle = document.getElementById('cartoucheShowKindToggle');
     if (showKindToggle) showKindToggle.checked = true;
-    const settingsShowKindToggle = document.getElementById('settingsCartoucheShowKindToggle');
-    if (settingsShowKindToggle) settingsShowKindToggle.checked = true;
     setCartoucheShowKindSetting(true);
     const kindBgToggle = document.getElementById('cartoucheKindAsBackgroundToggle');
     if (kindBgToggle) kindBgToggle.checked = false;
-    const settingsKindBgToggle = document.getElementById('settingsCartoucheKindAsBackgroundToggle');
-    if (settingsKindBgToggle) settingsKindBgToggle.checked = false;
     setCartoucheKindAsBackgroundSetting(false);
     if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
     showStatusMessage('settingsStatusMessage', 'Local preferences cleared');
