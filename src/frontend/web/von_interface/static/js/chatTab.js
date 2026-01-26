@@ -5108,9 +5108,10 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             }
 
             // Delete option for short conversations (< MAX_DELETABLE_TURNS turns)
+            // Only show if this is the currently active conversation (so user can see what they're deleting)
             const msgCount = Number.isFinite(session?.message_count) ? Number(session.message_count) : 0;
             const turns = Math.max(0, Math.ceil(msgCount / 2));
-            if (turns < MAX_DELETABLE_TURNS) {
+            if (turns < MAX_DELETABLE_TURNS && sid === activeChatSessionId) {
                 menuItems.push({
                     label: 'Delete',
                     onClick: () => {
