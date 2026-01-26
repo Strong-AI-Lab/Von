@@ -1,15 +1,10 @@
 """Unit tests for the Markdown to ADF converter in mcp_server.py."""
 
-import sys
-from pathlib import Path
-
-# Allow importing the MCP server module
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src" / "backend"))
+from backend.mcp_server.mcp_server import _ensure_adf, _markdown_to_adf
 
 
 def test_markdown_to_adf_plain_text():
     """Plain text becomes a paragraph."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("Hello world")
     assert result["type"] == "doc"
@@ -21,7 +16,6 @@ def test_markdown_to_adf_plain_text():
 
 def test_markdown_to_adf_empty():
     """Empty string returns empty paragraph."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("")
     assert result["type"] == "doc"
@@ -31,7 +25,6 @@ def test_markdown_to_adf_empty():
 
 def test_markdown_to_adf_heading():
     """Headings are converted correctly."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("# Main Title\n\n## Subtitle")
     assert result["content"][0]["type"] == "heading"
@@ -43,7 +36,6 @@ def test_markdown_to_adf_heading():
 
 def test_markdown_to_adf_bullet_list():
     """Bullet lists are converted."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("- Item 1\n- Item 2\n- Item 3")
     assert result["content"][0]["type"] == "bulletList"
@@ -54,7 +46,6 @@ def test_markdown_to_adf_bullet_list():
 
 def test_markdown_to_adf_numbered_list():
     """Numbered lists are converted."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("1. First\n2. Second\n3. Third")
     assert result["content"][0]["type"] == "orderedList"
@@ -64,7 +55,6 @@ def test_markdown_to_adf_numbered_list():
 
 def test_markdown_to_adf_code_block():
     """Code blocks are converted."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("```python\ndef hello():\n    pass\n```")
     assert result["content"][0]["type"] == "codeBlock"
@@ -74,7 +64,6 @@ def test_markdown_to_adf_code_block():
 
 def test_markdown_to_adf_bold():
     """Bold text is marked."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("This is **bold** text")
     para = result["content"][0]
@@ -91,7 +80,6 @@ def test_markdown_to_adf_bold():
 
 def test_markdown_to_adf_italic():
     """Italic text is marked."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("This is *italic* text")
     para = result["content"][0]
@@ -106,7 +94,6 @@ def test_markdown_to_adf_italic():
 
 def test_markdown_to_adf_inline_code():
     """Inline code is marked."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("Use `print()` function")
     para = result["content"][0]
@@ -121,7 +108,6 @@ def test_markdown_to_adf_inline_code():
 
 def test_markdown_to_adf_link():
     """Links are converted."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("Visit [Google](https://google.com)")
     para = result["content"][0]
@@ -129,14 +115,16 @@ def test_markdown_to_adf_link():
     for item in para["content"]:
         if item.get("text") == "Google" and item.get("marks"):
             for mark in item["marks"]:
-                if mark["type"] == "link" and mark["attrs"]["href"] == "https://google.com":
+                if (
+                    mark["type"] == "link"
+                    and mark["attrs"]["href"] == "https://google.com"
+                ):
                     link_found = True
     assert link_found, "Link mark not found"
 
 
 def test_markdown_to_adf_multiline_paragraph():
     """Multiple lines without blank become single paragraph."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     result = _markdown_to_adf("Line one\nLine two\nLine three")
     assert len(result["content"]) == 1
@@ -147,7 +135,6 @@ def test_markdown_to_adf_multiline_paragraph():
 
 def test_markdown_to_adf_complex_document():
     """Complex document with mixed elements."""
-    from mcp_server.mcp_server import _markdown_to_adf
 
     md = """# Task Title
 
@@ -177,7 +164,6 @@ See [docs](https://example.com) for details.
 
 def test_ensure_adf_passthrough():
     """_ensure_adf passes through non-strings."""
-    from mcp_server.mcp_server import _ensure_adf
 
     # Already ADF dict - should pass through
     adf = {"type": "doc", "version": 1, "content": []}
@@ -192,7 +178,6 @@ def test_ensure_adf_passthrough():
 
 def test_ensure_adf_converts_string():
     """_ensure_adf converts strings to ADF."""
-    from mcp_server.mcp_server import _ensure_adf
 
     result = _ensure_adf("Hello")
     assert isinstance(result, dict)
