@@ -4213,11 +4213,12 @@ def toggle_user_relation():
             return jsonify({"success": False, "error": "Concept not found"}), 404
 
         relationships = concept.get("relationships") or {}
-        user_relations = relationships.get("specific_to_user") or []
-        if isinstance(user_relations, str):
-            user_relations = [user_relations]
-        elif not isinstance(user_relations, list):
-            user_relations = []
+        # Read from both legacy and predicate-style fields for current state
+        from ...security.access_control import _get_specific_to_user_values
+
+        user_relations = _get_specific_to_user_values(relationships)
+        if not isinstance(user_relations, list):
+            user_relations = list(user_relations) if user_relations else []
 
         changed = False
         if action == "add":

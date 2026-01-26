@@ -25,6 +25,9 @@ _EVALUATOR: ContextVar["AccessEvaluator | None"] = ContextVar(
 
 _REMOVE = object()
 
+# Both legacy and predicate-style specific_to_user fields should be checked
+_SPECIFIC_TO_USER_PREDICATES = ("specific_to_user", "#V#specific_to_user")
+
 
 def _normalise_concept_id(value: Any) -> Optional[str]:
     """Return a normalised concept id if the value resembles one."""
@@ -54,12 +57,29 @@ def _specific_allows_user(spec: Any, user_id: Optional[str]) -> bool:
     return True
 
 
+def _get_specific_to_user_values(relationships: Dict[str, Any]) -> List[Any]:
+    """Collect specific_to_user values from all predicate variants."""
+    values: List[Any] = []
+    for predicate in _SPECIFIC_TO_USER_PREDICATES:
+        val = relationships.get(predicate)
+        if val is None:
+            continue
+        if isinstance(val, list):
+            values.extend(val)
+        else:
+            values.append(val)
+    return values
+
+
 def _document_visible_to_user(doc: Dict[str, Any], user_id: Optional[str]) -> bool:
     relationships = doc.get("relationships") if isinstance(doc, dict) else None
     if not isinstance(relationships, dict):
         return True
-    spec = relationships.get("specific_to_user")
-    return _specific_allows_user(spec, user_id)
+    # Check all predicate variants for specific_to_user
+    combined_spec = _get_specific_to_user_values(relationships)
+    if not combined_spec:
+        return True  # No restriction
+    return _specific_allows_user(combined_spec, user_id)
 
 
 class AccessEvaluator:
@@ -108,10 +128,12 @@ class AccessEvaluator:
             allowed = True
         else:
             doc = coll.find_one(
-                {"concept_id": normalised}, {"relationships.specific_to_user": 1}
+                {"concept_id": normalised},
+                {f"relationships.{p}": 1 for p in _SPECIFIC_TO_USER_PREDICATES},
             )
             if doc:
-                user_specific = doc.get("relationships", {}).get("specific_to_user")
+                rels = doc.get("relationships", {})
+                user_specific = _get_specific_to_user_values(rels) if rels else None
                 if user_specific:
                     # Log user-specific concept access
                     _log.info(
@@ -276,15 +298,29 @@ def build_visibility_filter() -> Optional[Dict[str, Any]]:
         f"[access_filter] Building visibility filter - authenticated_user={user_id} org={user_org_id} email={user_email}"
     )
 
-    clauses: List[Dict[str, Any]] = [
-        {"relationships.specific_to_user": {"$exists": False}},
-        {"relationships.specific_to_user": {"$eq": None}},
-        {"relationships.specific_to_user": {"$size": 0}},
-    ]
+    # Concepts are visible if NONE of the specific_to_user predicates restrict them,
+    # OR if any of them includes the current user.
+    # Build "no restriction" clauses for ALL predicate variants
+    no_restriction_clauses: List[Dict[str, Any]] = []
+    for predicate in _SPECIFIC_TO_USER_PREDICATES:
+        field = f"relationships.{predicate}"
+        no_restriction_clauses.extend(
+            [
+                {field: {"$exists": False}},
+                {field: {"$eq": None}},
+                {field: {"$size": 0}},
+            ]
+        )
 
-    # User-specific visibility
+    # A concept with no restriction on ANY variant is visible
+    # This requires ALL variants to have no restriction (use $and for strictness)
+    # But for backwards compatibility, if EITHER field is empty, treat as no restriction
+    clauses: List[Dict[str, Any]] = no_restriction_clauses.copy()
+
+    # User-specific visibility: user appears in ANY of the predicate variants
     if user_id:
-        clauses.append({"relationships.specific_to_user": {"$in": [user_id]}})
+        for predicate in _SPECIFIC_TO_USER_PREDICATES:
+            clauses.append({f"relationships.{predicate}": {"$in": [user_id]}})
         _log.info(
             f"[access_filter] Including user-specific concepts for user={user_id}"
         )

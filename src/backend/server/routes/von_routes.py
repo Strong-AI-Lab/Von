@@ -508,12 +508,15 @@ def download_file_copy(file_copy_concept_id: str):
     relationships = (
         concept_doc.get("relationships") if isinstance(concept_doc, dict) else None
     )
+    # Check both legacy and predicate-style specific_to_user fields
+    from ...security.access_control import _get_specific_to_user_values
+
     specific = (
-        relationships.get("specific_to_user")
+        _get_specific_to_user_values(relationships)
         if isinstance(relationships, dict)
-        else None
+        else []
     )
-    if isinstance(specific, list) and user_concept_id.strip() not in {
+    if specific and user_concept_id.strip() not in {
         str(x).strip() for x in specific if x is not None
     }:
         # Avoid leaking which concept IDs exist.
