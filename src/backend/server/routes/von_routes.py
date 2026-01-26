@@ -6080,6 +6080,74 @@ def rename_chat_session():
         return jsonify({"error": str(e)}), 500
 
 
+@von_bp.route("/api/session/delete_chat_session", methods=["POST"])
+def delete_chat_session():
+    """Delete a chat session for the current user.
+
+    JVNAUTOSCI-1014: Only allows deletion of sessions with fewer than a threshold
+    number of turns (currently 4) to prevent accidental deletion of substantial
+    conversations.
+    """
+    MAX_DELETABLE_TURNS = 4
+    try:
+        user_concept_id = session.get("user_concept_id")
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return jsonify({"error": "session_id required"}), 400
+        session_id = session_id.strip()
+
+        # JVNAUTOSCI-1011: Use window session context if available
+        window_session_id = request.headers.get("X-Von-Window-Session")
+        effective = get_effective_context(
+            window_session_id, dict(session), user_concept_id
+        )
+        namespace = effective.get(
+            "namespace"
+        ) or chat_history_service.resolve_chat_history_namespace(user_concept_id)
+
+        # Verify session exists and check message count
+        session_doc = chat_history_service.get_chat_history_session_summary(
+            user_id=user_concept_id,
+            session_id=session_id,
+            namespace=namespace,
+            summary_mode="light",
+        )
+        if not session_doc:
+            return jsonify({"error": "Session not found"}), 404
+
+        message_count = session_doc.get("message_count", 0)
+        turn_count = max(0, (message_count + 1) // 2)
+        if turn_count >= MAX_DELETABLE_TURNS:
+            return (
+                jsonify(
+                    {
+                        "error": f"Cannot delete conversations with {MAX_DELETABLE_TURNS} or more turns",
+                        "turn_count": turn_count,
+                    }
+                ),
+                403,
+            )
+
+        chat_history_service.delete_chat_history(user_concept_id, session_id)
+
+        return (
+            jsonify(
+                {
+                    "status": "deleted",
+                    "session_id": session_id,
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error deleting chat session: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/api/session/chat_session_links", methods=["GET", "POST"])
 def chat_session_links():
     """Get or set concept links for a chat session.

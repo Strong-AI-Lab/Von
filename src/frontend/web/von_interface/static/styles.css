@@ -3477,6 +3477,23 @@ footer {
     box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.45), inset 0 -2px 0 #ca8a04;
 }
 
+/* JVNAUTOSCI-1014: Hidden conversation styling */
+.chat-session-tab.is-hidden {
+    opacity: 0.5;
+    background: #f1f5f9;
+    border-color: #cbd5e1;
+    color: #94a3b8;
+}
+
+.chat-session-tab.is-hidden:hover {
+    opacity: 0.7;
+    background: #e2e8f0;
+}
+
+.chat-session-tab.is-hidden .chat-session-tab-label {
+    font-style: italic;
+}
+
 .chat-session-tab.is-loading::after {
     content: '';
     position: absolute;
