@@ -13,6 +13,8 @@
     Flags:
         -Port <int>              Port (reserved for future multi-instance) [TODO multi-instance]
         -NoBrowser               Do not auto-open browser on start
+        -ForceBrowser            Force open browser even if already opened this session
+        -ChromeBeta              Use Chrome Beta only (for MCP DevTools debugging)
         -Tail <n>                When action=logs, number of lines (default 100)
         -Follow                  When action=logs, stream updates
         -LogRetention <n>        Keep last n log files (default 20)
@@ -27,6 +29,7 @@ param(
     [int]$Port = 5000,
     [switch]$NoBrowser,
     [switch]$ForceBrowser,
+    [switch]$ChromeBeta,
     [int]$Tail = 100,
     [switch]$Follow,
     [int]$LogRetention = 20,
@@ -1118,12 +1121,23 @@ function Start-VonServer {
                 if ($shouldOpen) {
                     try {
                         $url = "http://localhost:$Port/"
-                        # Try to open with Chrome specifically
-                        $chromePaths = @(
+                        # Try to open with Chrome (Beta first if -ChromeBeta, otherwise Beta has priority for MCP debugging)
+                        $chromeBetaPaths = @(
+                            "${env:ProgramFiles}\Google\Chrome Beta\Application\chrome.exe",
+                            "${env:ProgramFiles(x86)}\Google\Chrome Beta\Application\chrome.exe",
+                            "${env:LocalAppData}\Google\Chrome Beta\Application\chrome.exe"
+                        )
+                        $chromeStablePaths = @(
                             "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe",
                             "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
                             "${env:LocalAppData}\Google\Chrome\Application\chrome.exe"
                         )
+                        # If -ChromeBeta is set, only try Beta; otherwise try Beta first then stable
+                        if ($ChromeBeta) {
+                            $chromePaths = $chromeBetaPaths
+                        } else {
+                            $chromePaths = $chromeBetaPaths + $chromeStablePaths
+                        }
                         $chromeFound = $false
                         $browserUsed = "default browser"
                         foreach ($chromePath in $chromePaths) {
