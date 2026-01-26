@@ -182,6 +182,224 @@ def jira_put(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------
+# Markdown to Atlassian Document Format (ADF) converter
+# ---------------------------------------------------------
+import re
+from typing import Tuple
+
+
+def _markdown_to_adf(text: str) -> Dict[str, Any]:
+    """Convert Markdown/plain text to Atlassian Document Format (ADF).
+
+    Supports:
+    - Paragraphs (blank line separated)
+    - Headings (# to ######)
+    - Bullet lists (- or *)
+    - Numbered lists (1. 2. etc.)
+    - Code blocks (```)
+    - Inline formatting: **bold**, *italic*, `code`, [links](url)
+    """
+    if not text or not text.strip():
+        return {
+            "type": "doc",
+            "version": 1,
+            "content": [{"type": "paragraph", "content": []}],
+        }
+
+    lines = text.split("\n")
+    content: List[Dict[str, Any]] = []
+    i = 0
+
+    def parse_inline(line: str) -> List[Dict[str, Any]]:
+        """Parse inline formatting: bold, italic, code, links."""
+        result: List[Dict[str, Any]] = []
+        # Pattern to match inline elements
+        # Order matters: links first, then code, then bold, then italic
+        pattern = re.compile(
+            r'(\[([^\]]+)\]\(([^)]+)\))'  # [text](url)
+            r'|(`[^`]+`)'  # `code`
+            r'|(\*\*[^*]+\*\*)'  # **bold**
+            r'|(__[^_]+__)'  # __bold__
+            r'|(\*[^*]+\*)'  # *italic*
+            r'|(_[^_]+_)'  # _italic_
+        )
+        last_end = 0
+        for match in pattern.finditer(line):
+            # Add text before match
+            if match.start() > last_end:
+                before = line[last_end:match.start()]
+                if before:
+                    result.append({"type": "text", "text": before})
+            
+            full = match.group(0)
+            if full.startswith("[") and "](" in full:
+                # Link
+                link_match = re.match(r'\[([^\]]+)\]\(([^)]+)\)', full)
+                if link_match:
+                    result.append({
+                        "type": "text",
+                        "text": link_match.group(1),
+                        "marks": [{"type": "link", "attrs": {"href": link_match.group(2)}}],
+                    })
+            elif full.startswith("`") and full.endswith("`"):
+                # Inline code
+                result.append({
+                    "type": "text",
+                    "text": full[1:-1],
+                    "marks": [{"type": "code"}],
+                })
+            elif (full.startswith("**") and full.endswith("**")) or (full.startswith("__") and full.endswith("__")):
+                # Bold
+                result.append({
+                    "type": "text",
+                    "text": full[2:-2],
+                    "marks": [{"type": "strong"}],
+                })
+            elif (full.startswith("*") and full.endswith("*")) or (full.startswith("_") and full.endswith("_")):
+                # Italic
+                result.append({
+                    "type": "text",
+                    "text": full[1:-1],
+                    "marks": [{"type": "em"}],
+                })
+            last_end = match.end()
+        
+        # Add remaining text
+        if last_end < len(line):
+            remaining = line[last_end:]
+            if remaining:
+                result.append({"type": "text", "text": remaining})
+        
+        # If no matches, return entire line as text
+        if not result and line:
+            result.append({"type": "text", "text": line})
+        
+        return result
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Empty line - skip (paragraph breaks handled by grouping)
+        if not stripped:
+            i += 1
+            continue
+
+        # Code block
+        if stripped.startswith("```"):
+            lang = stripped[3:].strip() or None
+            code_lines = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            i += 1  # skip closing ```
+            code_block: Dict[str, Any] = {
+                "type": "codeBlock",
+                "content": [{"type": "text", "text": "\n".join(code_lines)}],
+            }
+            if lang:
+                code_block["attrs"] = {"language": lang}
+            content.append(code_block)
+            continue
+
+        # Heading
+        heading_match = re.match(r'^(#{1,6})\s+(.+)$', stripped)
+        if heading_match:
+            level = len(heading_match.group(1))
+            heading_text = heading_match.group(2)
+            content.append({
+                "type": "heading",
+                "attrs": {"level": level},
+                "content": parse_inline(heading_text),
+            })
+            i += 1
+            continue
+
+        # Bullet list
+        if re.match(r'^[-*]\s+', stripped):
+            list_items: List[Dict[str, Any]] = []
+            while i < len(lines):
+                item_line = lines[i].strip()
+                item_match = re.match(r'^[-*]\s+(.+)$', item_line)
+                if item_match:
+                    list_items.append({
+                        "type": "listItem",
+                        "content": [{
+                            "type": "paragraph",
+                            "content": parse_inline(item_match.group(1)),
+                        }],
+                    })
+                    i += 1
+                elif not item_line:
+                    # Empty line might end the list or be between items
+                    if i + 1 < len(lines) and re.match(r'^[-*]\s+', lines[i + 1].strip()):
+                        i += 1
+                        continue
+                    break
+                else:
+                    break
+            if list_items:
+                content.append({"type": "bulletList", "content": list_items})
+            continue
+
+        # Numbered list
+        if re.match(r'^\d+\.\s+', stripped):
+            list_items = []
+            while i < len(lines):
+                item_line = lines[i].strip()
+                item_match = re.match(r'^\d+\.\s+(.+)$', item_line)
+                if item_match:
+                    list_items.append({
+                        "type": "listItem",
+                        "content": [{
+                            "type": "paragraph",
+                            "content": parse_inline(item_match.group(1)),
+                        }],
+                    })
+                    i += 1
+                elif not item_line:
+                    if i + 1 < len(lines) and re.match(r'^\d+\.\s+', lines[i + 1].strip()):
+                        i += 1
+                        continue
+                    break
+                else:
+                    break
+            if list_items:
+                content.append({"type": "orderedList", "content": list_items})
+            continue
+
+        # Regular paragraph - collect consecutive non-empty lines
+        para_lines = []
+        while i < len(lines):
+            current = lines[i].strip()
+            if not current or current.startswith("#") or current.startswith("```") or re.match(r'^[-*]\s+', current) or re.match(r'^\d+\.\s+', current):
+                break
+            para_lines.append(current)
+            i += 1
+        if para_lines:
+            # Join lines with space and parse inline
+            para_text = " ".join(para_lines)
+            content.append({
+                "type": "paragraph",
+                "content": parse_inline(para_text),
+            })
+
+    # If no content was generated, add empty paragraph
+    if not content:
+        content.append({"type": "paragraph", "content": []})
+
+    return {"type": "doc", "version": 1, "content": content}
+
+
+def _ensure_adf(value: Any) -> Dict[str, Any] | Any:
+    """Convert a string to ADF if needed. Pass through if already ADF or not a string."""
+    if isinstance(value, str):
+        return _markdown_to_adf(value)
+    return value
+
+
+# ---------------------------------------------------------
 # MCP server
 # ---------------------------------------------------------
 
@@ -381,7 +599,8 @@ async def call_tool(
     elif name == "jira_add_comment":
         issue_key = arguments["issue_key"]
         comment = arguments["comment"]
-        payload = {"body": comment}
+        # Jira Cloud requires ADF for comment body
+        payload = {"body": _ensure_adf(comment)}
         result = jira_post(f"issue/{issue_key}/comment", payload)
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
@@ -407,6 +626,10 @@ async def call_tool(
                 "error": "payload must be an object",
             }
             return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+        # Convert description to ADF if present and is a string
+        if "fields" in payload and isinstance(payload["fields"], dict):
+            if "description" in payload["fields"]:
+                payload["fields"]["description"] = _ensure_adf(payload["fields"]["description"])
         result = jira_post("issue", payload)
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
@@ -420,6 +643,10 @@ async def call_tool(
                 "error": "payload must be an object",
             }
             return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+        # Convert description to ADF if present and is a string
+        if "fields" in payload and isinstance(payload["fields"], dict):
+            if "description" in payload["fields"]:
+                payload["fields"]["description"] = _ensure_adf(payload["fields"]["description"])
         result = jira_put(f"issue/{issue_key}", payload)
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
