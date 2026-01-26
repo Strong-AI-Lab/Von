@@ -254,7 +254,7 @@ def clear_window_organisation(
 def get_effective_context(
     window_session_id: Optional[str],
     flask_session: dict,
-    user_id: str,
+    user_id: Optional[str],
 ) -> Dict[str, Any]:
     """
     Get the effective context combining window session (if present) and Flask session.
