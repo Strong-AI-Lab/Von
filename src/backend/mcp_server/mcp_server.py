@@ -216,64 +216,78 @@ def _markdown_to_adf(text: str) -> Dict[str, Any]:
         # Pattern to match inline elements
         # Order matters: links first, then code, then bold, then italic
         pattern = re.compile(
-            r'(\[([^\]]+)\]\(([^)]+)\))'  # [text](url)
-            r'|(`[^`]+`)'  # `code`
-            r'|(\*\*[^*]+\*\*)'  # **bold**
-            r'|(__[^_]+__)'  # __bold__
-            r'|(\*[^*]+\*)'  # *italic*
-            r'|(_[^_]+_)'  # _italic_
+            r"(\[([^\]]+)\]\(([^)]+)\))"  # [text](url)
+            r"|(`[^`]+`)"  # `code`
+            r"|(\*\*[^*]+\*\*)"  # **bold**
+            r"|(__[^_]+__)"  # __bold__
+            r"|(\*[^*]+\*)"  # *italic*
+            r"|(_[^_]+_)"  # _italic_
         )
         last_end = 0
         for match in pattern.finditer(line):
             # Add text before match
             if match.start() > last_end:
-                before = line[last_end:match.start()]
+                before = line[last_end : match.start()]
                 if before:
                     result.append({"type": "text", "text": before})
-            
+
             full = match.group(0)
             if full.startswith("[") and "](" in full:
                 # Link
-                link_match = re.match(r'\[([^\]]+)\]\(([^)]+)\)', full)
+                link_match = re.match(r"\[([^\]]+)\]\(([^)]+)\)", full)
                 if link_match:
-                    result.append({
-                        "type": "text",
-                        "text": link_match.group(1),
-                        "marks": [{"type": "link", "attrs": {"href": link_match.group(2)}}],
-                    })
+                    result.append(
+                        {
+                            "type": "text",
+                            "text": link_match.group(1),
+                            "marks": [
+                                {"type": "link", "attrs": {"href": link_match.group(2)}}
+                            ],
+                        }
+                    )
             elif full.startswith("`") and full.endswith("`"):
                 # Inline code
-                result.append({
-                    "type": "text",
-                    "text": full[1:-1],
-                    "marks": [{"type": "code"}],
-                })
-            elif (full.startswith("**") and full.endswith("**")) or (full.startswith("__") and full.endswith("__")):
+                result.append(
+                    {
+                        "type": "text",
+                        "text": full[1:-1],
+                        "marks": [{"type": "code"}],
+                    }
+                )
+            elif (full.startswith("**") and full.endswith("**")) or (
+                full.startswith("__") and full.endswith("__")
+            ):
                 # Bold
-                result.append({
-                    "type": "text",
-                    "text": full[2:-2],
-                    "marks": [{"type": "strong"}],
-                })
-            elif (full.startswith("*") and full.endswith("*")) or (full.startswith("_") and full.endswith("_")):
+                result.append(
+                    {
+                        "type": "text",
+                        "text": full[2:-2],
+                        "marks": [{"type": "strong"}],
+                    }
+                )
+            elif (full.startswith("*") and full.endswith("*")) or (
+                full.startswith("_") and full.endswith("_")
+            ):
                 # Italic
-                result.append({
-                    "type": "text",
-                    "text": full[1:-1],
-                    "marks": [{"type": "em"}],
-                })
+                result.append(
+                    {
+                        "type": "text",
+                        "text": full[1:-1],
+                        "marks": [{"type": "em"}],
+                    }
+                )
             last_end = match.end()
-        
+
         # Add remaining text
         if last_end < len(line):
             remaining = line[last_end:]
             if remaining:
                 result.append({"type": "text", "text": remaining})
-        
+
         # If no matches, return entire line as text
         if not result and line:
             result.append({"type": "text", "text": line})
-        
+
         return result
 
     while i < len(lines):
@@ -304,36 +318,44 @@ def _markdown_to_adf(text: str) -> Dict[str, Any]:
             continue
 
         # Heading
-        heading_match = re.match(r'^(#{1,6})\s+(.+)$', stripped)
+        heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
         if heading_match:
             level = len(heading_match.group(1))
             heading_text = heading_match.group(2)
-            content.append({
-                "type": "heading",
-                "attrs": {"level": level},
-                "content": parse_inline(heading_text),
-            })
+            content.append(
+                {
+                    "type": "heading",
+                    "attrs": {"level": level},
+                    "content": parse_inline(heading_text),
+                }
+            )
             i += 1
             continue
 
         # Bullet list
-        if re.match(r'^[-*]\s+', stripped):
+        if re.match(r"^[-*]\s+", stripped):
             list_items: List[Dict[str, Any]] = []
             while i < len(lines):
                 item_line = lines[i].strip()
-                item_match = re.match(r'^[-*]\s+(.+)$', item_line)
+                item_match = re.match(r"^[-*]\s+(.+)$", item_line)
                 if item_match:
-                    list_items.append({
-                        "type": "listItem",
-                        "content": [{
-                            "type": "paragraph",
-                            "content": parse_inline(item_match.group(1)),
-                        }],
-                    })
+                    list_items.append(
+                        {
+                            "type": "listItem",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": parse_inline(item_match.group(1)),
+                                }
+                            ],
+                        }
+                    )
                     i += 1
                 elif not item_line:
                     # Empty line might end the list or be between items
-                    if i + 1 < len(lines) and re.match(r'^[-*]\s+', lines[i + 1].strip()):
+                    if i + 1 < len(lines) and re.match(
+                        r"^[-*]\s+", lines[i + 1].strip()
+                    ):
                         i += 1
                         continue
                     break
@@ -344,22 +366,28 @@ def _markdown_to_adf(text: str) -> Dict[str, Any]:
             continue
 
         # Numbered list
-        if re.match(r'^\d+\.\s+', stripped):
+        if re.match(r"^\d+\.\s+", stripped):
             list_items = []
             while i < len(lines):
                 item_line = lines[i].strip()
-                item_match = re.match(r'^\d+\.\s+(.+)$', item_line)
+                item_match = re.match(r"^\d+\.\s+(.+)$", item_line)
                 if item_match:
-                    list_items.append({
-                        "type": "listItem",
-                        "content": [{
-                            "type": "paragraph",
-                            "content": parse_inline(item_match.group(1)),
-                        }],
-                    })
+                    list_items.append(
+                        {
+                            "type": "listItem",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": parse_inline(item_match.group(1)),
+                                }
+                            ],
+                        }
+                    )
                     i += 1
                 elif not item_line:
-                    if i + 1 < len(lines) and re.match(r'^\d+\.\s+', lines[i + 1].strip()):
+                    if i + 1 < len(lines) and re.match(
+                        r"^\d+\.\s+", lines[i + 1].strip()
+                    ):
                         i += 1
                         continue
                     break
@@ -373,17 +401,25 @@ def _markdown_to_adf(text: str) -> Dict[str, Any]:
         para_lines = []
         while i < len(lines):
             current = lines[i].strip()
-            if not current or current.startswith("#") or current.startswith("```") or re.match(r'^[-*]\s+', current) or re.match(r'^\d+\.\s+', current):
+            if (
+                not current
+                or current.startswith("#")
+                or current.startswith("```")
+                or re.match(r"^[-*]\s+", current)
+                or re.match(r"^\d+\.\s+", current)
+            ):
                 break
             para_lines.append(current)
             i += 1
         if para_lines:
             # Join lines with space and parse inline
             para_text = " ".join(para_lines)
-            content.append({
-                "type": "paragraph",
-                "content": parse_inline(para_text),
-            })
+            content.append(
+                {
+                    "type": "paragraph",
+                    "content": parse_inline(para_text),
+                }
+            )
 
     # If no content was generated, add empty paragraph
     if not content:
@@ -629,7 +665,9 @@ async def call_tool(
         # Convert description to ADF if present and is a string
         if "fields" in payload and isinstance(payload["fields"], dict):
             if "description" in payload["fields"]:
-                payload["fields"]["description"] = _ensure_adf(payload["fields"]["description"])
+                payload["fields"]["description"] = _ensure_adf(
+                    payload["fields"]["description"]
+                )
         result = jira_post("issue", payload)
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]
@@ -646,7 +684,9 @@ async def call_tool(
         # Convert description to ADF if present and is a string
         if "fields" in payload and isinstance(payload["fields"], dict):
             if "description" in payload["fields"]:
-                payload["fields"]["description"] = _ensure_adf(payload["fields"]["description"])
+                payload["fields"]["description"] = _ensure_adf(
+                    payload["fields"]["description"]
+                )
         result = jira_put(f"issue/{issue_key}", payload)
         text = json.dumps(result, indent=2)
         return [types.TextContent(type="text", text=text)]

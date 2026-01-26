@@ -183,7 +183,9 @@ def coerce_payload_types(
                 try:
                     parsed = json.loads(raw)
                     if isinstance(parsed, dict):
-                        warnings.append(f"Coerced field '{key}' from JSON string to dict.")
+                        warnings.append(
+                            f"Coerced field '{key}' from JSON string to dict."
+                        )
                         return parsed
                 except json.JSONDecodeError:
                     pass  # Fall through to return original value
