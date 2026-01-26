@@ -3305,6 +3305,17 @@ footer {
     margin-right: 20px;
 }
 
+/* Info popup loading state */
+.info-loading {
+    color: #666;
+    font-style: italic;
+}
+
+#infoPopupContent p {
+    margin: 0;
+    line-height: 1.5;
+}
+
 /* Removed overflow override to preserve scroll area behavior and footer spacing */
 
 .content-wrapper {

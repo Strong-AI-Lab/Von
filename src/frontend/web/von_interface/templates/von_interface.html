@@ -13,7 +13,7 @@
   <script>
     window.__VON_FEATURE_FLAGS__ = {
       expertTabsEnabled: {{ 'true' if expert_tabs_enabled else 'false' }},
-      expertFooterEnabled: {{ 'true' if expert_footer_enabled else 'false' }}
+    expertFooterEnabled: { { 'true' if expert_footer_enabled else 'false' } }
     };
   </script>
 
@@ -23,19 +23,16 @@
   <!-- Fixed Global Header (title + search above tabs) JVNAUTOSCI-550 -->
   <div class="global-header" id="globalHeader">
     <div class="main-container">
-      <!-- Popup for info -->
+      <!-- Popup for info (dynamically loaded from Vontology) -->
       <div class="popup popup-container" id="infoPopup">
-        <p><strong>What you can do with Von:</strong></p>
-        <ul>
-          <li>Enter a prompt to interact with AI models.</li>
-          <li>Select different models from the dropdown menu.</li>
-          <li>Reset the conversation context using the "Reset Context" button.</li>
-        </ul>
+        <div id="infoPopupContent">
+          <p class="info-loading">Loading...</p>
+        </div>
       </div>
-      <!-- Header with info icon -->
+      <!-- Header with info icon and dynamic organisation name -->
       <h1>
         <span class="info-icon" id="infoIcon" title="Click for more info">ℹ️</span>
-        Strong AI Lab Assistant - Von
+        Von: <span id="headerOrgName">...</span>
       </h1>
     </div>
     <!-- Global Concept Search -->

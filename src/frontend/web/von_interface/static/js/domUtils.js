@@ -66,12 +66,151 @@ export function initializeDomElements() {
   elements.modelInfoFooter = document.getElementById('modelInfoFooter');
 }
 
+// Cache for organisation description to avoid repeated fetches
+let _orgDescriptionCache = null;
+let _orgDescriptionCacheId = null;
+
+// Default fallback description concept ID (Von system description)
+const VON_SYSTEM_CONCEPT_ID = '#V#von_system';
+
+/**
+ * Fetch organisation description from Vontology text relations.
+ * Falls back to a generic system description if no org-specific one exists.
+ * @param {string|null} orgConceptId - Organisation concept ID or null for default
+ * @returns {Promise<string>} Description text
+ */
+async function fetchOrganisationDescription(orgConceptId) {
+  // Use cache if available for same concept
+  if (_orgDescriptionCache !== null && _orgDescriptionCacheId === orgConceptId) {
+    return _orgDescriptionCache;
+  }
+
+  const tryFetchDescription = async (conceptId) => {
+    if (!conceptId) return null;
+    try {
+      const encoded = encodeURIComponent(conceptId);
+      const response = await fetch(`/api/concepts/${encoded}/texts?predicate=hasDescription&limit=1`);
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data.texts) && data.texts.length > 0 && data.texts[0].text) {
+          return data.texts[0].text;
+        }
+      }
+    } catch (e) {
+      console.warn('[domUtils] Error fetching description for', conceptId, e);
+    }
+    return null;
+  };
+
+  // Try org-specific description first
+  let description = await tryFetchDescription(orgConceptId);
+
+  // Fallback to generic Von system description
+  if (!description) {
+    description = await tryFetchDescription(VON_SYSTEM_CONCEPT_ID);
+  }
+
+  // Ultimate fallback (hardcoded)
+  if (!description) {
+    description = 'Welcome to Von, your AI assistant. Select an organisation to see more information.';
+  }
+
+  // Cache the result
+  _orgDescriptionCache = description;
+  _orgDescriptionCacheId = orgConceptId;
+
+  return description;
+}
+
+/**
+ * Update the header organisation name display.
+ */
+export function updateHeaderOrgName() {
+  const headerOrgNameEl = document.getElementById('headerOrgName');
+  if (!headerOrgNameEl) return;
+
+  // Read current org from session-scoped storage
+  let orgName = null;
+  try {
+    const sessionOrg = sessionStorage.getItem('von_current_org');
+    if (sessionOrg) {
+      const parsed = JSON.parse(sessionOrg);
+      orgName = parsed?.name || null;
+    }
+    if (!orgName) {
+      const localOrg = localStorage.getItem('von_current_org');
+      if (localOrg) {
+        const parsed = JSON.parse(localOrg);
+        orgName = parsed?.name || null;
+      }
+    }
+  } catch { /* ignore */ }
+
+  headerOrgNameEl.textContent = orgName || 'Personal';
+}
+
+/**
+ * Load and display the info popup content from Vontology.
+ */
+async function loadInfoPopupContent() {
+  const contentEl = document.getElementById('infoPopupContent');
+  if (!contentEl) return;
+
+  // Get current org concept ID
+  let orgConceptId = null;
+  try {
+    const sessionOrg = sessionStorage.getItem('von_current_org');
+    if (sessionOrg) {
+      const parsed = JSON.parse(sessionOrg);
+      orgConceptId = parsed?.concept_id || null;
+    }
+    if (!orgConceptId) {
+      const localOrg = localStorage.getItem('von_current_org');
+      if (localOrg) {
+        const parsed = JSON.parse(localOrg);
+        orgConceptId = parsed?.concept_id || null;
+      }
+    }
+  } catch { /* ignore */ }
+
+  // Clear cache when loading new org
+  if (orgConceptId !== _orgDescriptionCacheId) {
+    _orgDescriptionCache = null;
+    _orgDescriptionCacheId = null;
+  }
+
+  contentEl.innerHTML = '<p class="info-loading">Loading...</p>';
+
+  try {
+    const description = await fetchOrganisationDescription(orgConceptId);
+    // Render as simple HTML (escape for safety, preserve newlines)
+    const escaped = description
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\n/g, '<br>');
+    contentEl.innerHTML = `<p>${escaped}</p>`;
+  } catch (e) {
+    console.warn('[domUtils] Failed to load info popup content:', e);
+    contentEl.innerHTML = '<p>Unable to load organisation information.</p>';
+  }
+}
+
 export function initializeInfoPopup() {
   const infoIcon = document.getElementById('infoIcon');
   const infoPopup = document.getElementById('infoPopup');
+
+  // Initial header org name update
+  updateHeaderOrgName();
+
   if (infoIcon && infoPopup) {
     infoIcon.addEventListener('click', () => {
-      infoPopup.style.display = infoPopup.style.display === 'block' ? 'none' : 'block';
+      const isVisible = infoPopup.style.display === 'block';
+      if (!isVisible) {
+        // Load content when opening popup
+        loadInfoPopupContent();
+      }
+      infoPopup.style.display = isVisible ? 'none' : 'block';
     });
     document.addEventListener('click', (event) => {
       if (!infoIcon.contains(event.target) && !infoPopup.contains(event.target)) {
@@ -79,6 +218,22 @@ export function initializeInfoPopup() {
       }
     });
   }
+
+  // Listen for organisation switches to update header and clear description cache
+  document.addEventListener('orgSwitched', (event) => {
+    const detail = event.detail || {};
+    console.log('[domUtils] orgSwitched event - updating header', detail);
+
+    // Clear description cache so next popup open fetches fresh content
+    _orgDescriptionCache = null;
+    _orgDescriptionCacheId = null;
+
+    // Update header - use micro-delay to allow storage to be updated by other handlers
+    // (the name is set AFTER switchOrganisation returns, which is after the event)
+    setTimeout(() => {
+      updateHeaderOrgName();
+    }, 50);
+  });
 }
 
 export function clearContainer(container) {
