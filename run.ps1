@@ -1135,7 +1135,8 @@ function Start-VonServer {
                         # If -ChromeBeta is set, only try Beta; otherwise try Beta first then stable
                         if ($ChromeBeta) {
                             $chromePaths = $chromeBetaPaths
-                        } else {
+                        }
+                        else {
                             $chromePaths = $chromeBetaPaths + $chromeStablePaths
                         }
                         $chromeFound = $false
