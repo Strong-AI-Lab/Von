@@ -5092,8 +5092,10 @@ async function promptAndCreateChatSession() {
 }
 
 async function promptRenameChatSession(sessionId, currentName) {
+    console.log('[chatTab] promptRenameChatSession called', { sessionId, currentName });
     const proposed = window.prompt('Rename chat', currentName || '');
     if (proposed === null) {
+        console.log('[chatTab] promptRenameChatSession: user cancelled');
         return;
     }
     const trimmed = String(proposed || '').trim();
@@ -5103,8 +5105,10 @@ async function promptRenameChatSession(sessionId, currentName) {
     }
     try {
         await renameChatSession(sessionId, trimmed);
-        scheduleChatSessionTabsRefresh(true);
+        console.log('[chatTab] promptRenameChatSession: rename succeeded');
+        // Local cache is already updated in renameChatSession - no need for immediate refresh
     } catch (err) {
+        console.error('[chatTab] promptRenameChatSession: rename failed', err);
         const msg = err?.message ? String(err.message) : 'Unable to rename chat.';
         alert(msg);
     }
@@ -5204,15 +5208,18 @@ async function renameChatSession(sessionId, sessionName) {
         throw new Error('session_name required');
     }
 
+    console.log('[chatTab] renameChatSession request', { session_id: sid, session_name: name });
     const response = await fetch('/von/api/session/rename_chat_session', {
         method: 'POST',
         headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ session_id: sid, session_name: name })
     });
     const data = await response.json();
+    console.log('[chatTab] renameChatSession response', { ok: response.ok, status: response.status, data });
 
     if (!response.ok) {
         const msg = data?.error ? String(data.error) : 'Unable to rename chat session.';
+        console.error('[chatTab] renameChatSession error', msg);
         throw new Error(msg);
     }
 
@@ -5236,7 +5243,8 @@ async function renameChatSession(sessionId, sessionName) {
         renderChatSessionTabs(sessionTabsCache, activeChatSessionId || sid);
     }
 
-    scheduleChatSessionTabsRefresh(true);
+    // Skip immediate refresh - the local cache update above is sufficient.
+    // An immediate refresh can race with MongoDB and overwrite the new name with stale data.
     return data;
 }
 
