@@ -107,6 +107,110 @@ let historyRequestCounter = 0;
 const HISTORY_SEGMENT_SIZE = 200;
 const HISTORY_TAIL_SEGMENT_SIZE = 30;
 
+// JVNAUTOSCI-1014: Hidden conversations (localStorage per user)
+const LS_HIDDEN_CHAT_SESSIONS = 'von:hiddenChatSessionIds';
+const MAX_DELETABLE_TURNS = 4;
+let hiddenChatSessionIds = new Set();
+let showHiddenSessions = false;
+
+function loadHiddenChatSessionIds() {
+    try {
+        const stored = localStorage.getItem(LS_HIDDEN_CHAT_SESSIONS);
+        if (stored) {
+            const parsed = JSON.parse(stored);
+            if (Array.isArray(parsed)) {
+                hiddenChatSessionIds = new Set(parsed.filter(id => typeof id === 'string'));
+                return;
+            }
+        }
+    } catch (e) {
+        console.warn('[chatTab] Failed to load hidden session IDs from localStorage:', e);
+    }
+    hiddenChatSessionIds = new Set();
+}
+
+function saveHiddenChatSessionIds() {
+    try {
+        localStorage.setItem(LS_HIDDEN_CHAT_SESSIONS, JSON.stringify([...hiddenChatSessionIds]));
+    } catch (e) {
+        console.warn('[chatTab] Failed to save hidden session IDs to localStorage:', e);
+    }
+}
+
+function hideConversation(sessionId) {
+    if (!sessionId) return;
+    hiddenChatSessionIds.add(sessionId);
+    saveHiddenChatSessionIds();
+    // Re-render tabs to apply filter
+    if (Array.isArray(sessionTabsCache)) {
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+    }
+}
+
+function unhideConversation(sessionId) {
+    if (!sessionId) return;
+    hiddenChatSessionIds.delete(sessionId);
+    saveHiddenChatSessionIds();
+    // Re-render tabs to update styling
+    if (Array.isArray(sessionTabsCache)) {
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+    }
+}
+
+function isConversationHidden(sessionId) {
+    return hiddenChatSessionIds.has(sessionId);
+}
+
+function toggleShowHiddenSessions() {
+    showHiddenSessions = !showHiddenSessions;
+    // Re-render tabs to show/hide hidden conversations
+    if (Array.isArray(sessionTabsCache)) {
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+    }
+}
+
+async function deleteConversation(sessionId) {
+    if (!sessionId) return;
+    try {
+        const resp = await fetch('/api/session/delete_chat_session', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...buildChatFetchHeaders()
+            },
+            body: JSON.stringify({ session_id: sessionId })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            const errorMsg = data?.error || 'Failed to delete conversation';
+            showToast(errorMsg, 'error');
+            return false;
+        }
+        // Remove from cache and re-render
+        sessionTabsCache = sessionTabsCache.filter(s => s?.session_id !== sessionId);
+        // Also remove from hidden set if present
+        hiddenChatSessionIds.delete(sessionId);
+        saveHiddenChatSessionIds();
+        // If deleted the active session, switch to first available or null
+        if (activeChatSessionId === sessionId) {
+            const nextSession = sessionTabsCache.find(s => s?.session_id);
+            if (nextSession) {
+                await switchToChatSession(nextSession.session_id);
+            } else {
+                activeChatSessionId = null;
+                activeChatSessionName = null;
+            }
+        }
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+        showToast('Conversation deleted', 'success');
+        return true;
+    } catch (e) {
+        console.error('[chatTab] deleteConversation error:', e);
+        showToast('Failed to delete conversation', 'error');
+        return false;
+    }
+}
+
 let orgSwitchListenerBound = false;
 let authStatusListenerBound = false;
 
@@ -4819,10 +4923,17 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         return;
     }
 
+    // JVNAUTOSCI-1014: Filter hidden sessions unless showHiddenSessions is enabled
+    const visibleSessions = showHiddenSessions
+        ? sessions
+        : sessions.filter(s => !isConversationHidden(s?.session_id));
+
     container.hidden = false;
     container.innerHTML = '';
-    lastRenderedSessionCount = sessions.length;
-    setChatSessionCount(sessions.length);
+    lastRenderedSessionCount = visibleSessions.length;
+    // Count excludes hidden sessions
+    const nonHiddenCount = sessions.filter(s => !isConversationHidden(s?.session_id)).length;
+    setChatSessionCount(nonHiddenCount);
 
     const fragment = document.createDocumentFragment();
 
@@ -4838,7 +4949,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     });
     fragment.appendChild(newTab);
 
-    sessions.forEach((session) => {
+    visibleSessions.forEach((session) => {
         const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
         if (!sid) {
             return;
@@ -4871,6 +4982,12 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         if (session?.shared_with_me || session?.shared_from_user_id || session?.invite_id) {
             tab.classList.add('is-shared');
+        }
+
+        // JVNAUTOSCI-1014: Mark hidden conversations with visual styling
+        const isHidden = isConversationHidden(sid);
+        if (isHidden) {
+            tab.classList.add('is-hidden');
         }
 
         if (session?.is_completed === true) {
@@ -4963,20 +5080,89 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         });
         tab.addEventListener('contextmenu', (event) => {
             event.preventDefault();
-            openChatSessionMenu(event.clientX, event.clientY, [
+            // JVNAUTOSCI-1014: Build context menu with hide/unhide and optional delete
+            const menuItems = [
                 {
                     label: 'Rename',
                     onClick: () => {
                         void promptRenameChatSession(sid, session?.session_name || displayName);
                     }
                 }
-            ]);
+            ];
+
+            // Hide/Unhide option
+            if (isHidden) {
+                menuItems.push({
+                    label: 'Unhide conversation',
+                    onClick: () => {
+                        unhideConversation(sid);
+                    }
+                });
+            } else {
+                menuItems.push({
+                    label: 'Hide conversation',
+                    onClick: () => {
+                        hideConversation(sid);
+                    }
+                });
+            }
+
+            // Delete option for short conversations (< MAX_DELETABLE_TURNS turns)
+            const msgCount = Number.isFinite(session?.message_count) ? Number(session.message_count) : 0;
+            const turns = Math.max(0, Math.ceil(msgCount / 2));
+            if (turns < MAX_DELETABLE_TURNS) {
+                menuItems.push({
+                    label: 'Delete',
+                    onClick: () => {
+                        if (window.confirm(`Delete this conversation? This cannot be undone.`)) {
+                            void deleteConversation(sid);
+                        }
+                    }
+                });
+            }
+
+            openChatSessionMenu(event.clientX, event.clientY, menuItems);
         });
 
         fragment.appendChild(tab);
     });
 
     container.appendChild(fragment);
+
+    // JVNAUTOSCI-1014: Context menu on container for showing/hiding hidden sessions
+    // Remove any existing listener to avoid duplicates
+    container.removeEventListener('contextmenu', handleContainerContextMenu);
+    container.addEventListener('contextmenu', handleContainerContextMenu);
+}
+
+function handleContainerContextMenu(event) {
+    // Only show menu if clicking on the container itself or whitespace (not on a tab)
+    if (event.target.closest('.chat-session-tab')) {
+        return;
+    }
+    event.preventDefault();
+    const hiddenCount = hiddenChatSessionIds.size;
+    const menuItems = [];
+
+    if (hiddenCount > 0) {
+        menuItems.push({
+            label: showHiddenSessions ? `Hide hidden (${hiddenCount})` : `Show hidden (${hiddenCount})`,
+            onClick: () => {
+                toggleShowHiddenSessions();
+            }
+        });
+    }
+
+    menuItems.push({
+        label: 'New chat',
+        onClick: () => {
+            void promptAndCreateChatSession();
+        }
+    });
+
+    if (menuItems.length > 0) {
+        openChatSessionMenu(event.clientX, event.clientY, menuItems);
+    }
 }
 
 function shouldShowChatTabMenu() {
@@ -7224,6 +7410,9 @@ function handleAuthStatusChangeForChatTab(detail) {
 
 export function initializeChatTab() {
     console.log("Initializing chat tab...");
+
+    // JVNAUTOSCI-1014: Load hidden session IDs from localStorage
+    loadHiddenChatSessionIds();
 
     const sendButton = document.getElementById('sendButton');
     const resetButton = document.getElementById('resetButton');
