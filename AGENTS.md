@@ -123,6 +123,32 @@ Do not "hack around" MCP failures with ad-hoc scripts or direct REST calls. Fix 
 - Authoritative script: `scripts/set_vscode_copilot_selected_tools.ps1`.
 - If you rely on a tool, ensure it stays enabled by updating that script.
 
+## Reporting VS Code Copilot Issues
+When encountering Copilot bugs or limitations, the agent can draft an issue for https://github.com/microsoft/vscode-copilot-release/issues using this template:
+
+```
+- Copilot Chat Extension Version: (run `code-insiders --list-extensions --show-versions | Select-String copilot`)
+- VS Code Version: (run `code-insiders --version`)
+- OS Version: Windows
+- Feature (e.g. agent/edit/ask mode):
+- Selected model (e.g. GPT 4.1, Claude Opus 4.5):
+- Logs: (if applicable)
+
+Steps to Reproduce:
+1.
+2.
+
+Expected Behaviour:
+
+Actual Behaviour:
+
+Impact:
+
+Suggested Fix:
+```
+
+This keeps overhead low while providing actionable reports.
+
 ## Research Prototype Engineering Philosophy
 - Build research-appropriate quality: modular, extensible, and understandable.
 - Avoid enterprise-scale over-engineering; keep abstractions just deep enough for near-term change.
