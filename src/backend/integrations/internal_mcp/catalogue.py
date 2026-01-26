@@ -1690,19 +1690,216 @@ def _read_file_copy(**kwargs):
                 try:
                     content_type = getattr(info, "content_type", None)
                     original_name = getattr(info, "original_filename", None)
+
+                    # Detect Office document types
+                    is_docx = False
+                    is_pptx = False
+                    is_xlsx = False
                     is_image = False
-                    if isinstance(
-                        content_type, str
-                    ) and content_type.lower().startswith("image/"):
+
+                    ct_lower = (
+                        content_type.lower() if isinstance(content_type, str) else ""
+                    )
+                    name_lower = (
+                        original_name.lower() if isinstance(original_name, str) else ""
+                    )
+
+                    # DOCX detection
+                    if (
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml"
+                        in ct_lower
+                    ):
+                        is_docx = True
+                    elif name_lower.endswith(".docx"):
+                        is_docx = True
+
+                    # PPTX detection
+                    if (
+                        "application/vnd.openxmlformats-officedocument.presentationml"
+                        in ct_lower
+                    ):
+                        is_pptx = True
+                    elif name_lower.endswith(".pptx"):
+                        is_pptx = True
+
+                    # XLSX detection
+                    if (
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml"
+                        in ct_lower
+                    ):
+                        is_xlsx = True
+                    elif name_lower.endswith(".xlsx"):
+                        is_xlsx = True
+
+                    # Image detection
+                    if ct_lower.startswith("image/"):
                         is_image = True
-                    elif isinstance(
-                        original_name, str
-                    ) and original_name.lower().endswith(
+                    elif name_lower.endswith(
                         (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif")
                     ):
                         is_image = True
 
-                    if is_image:
+                    # DOCX extraction
+                    if is_docx:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            import io
+                            from docx import Document  # type: ignore[import-not-found]
+
+                            doc = Document(io.BytesIO(bytes(data_bytes)))
+                            paragraphs: list[str] = []
+                            for para in doc.paragraphs:
+                                if para.text.strip():
+                                    paragraphs.append(para.text)
+                            # Also extract text from tables
+                            for table in doc.tables:
+                                for row in table.rows:
+                                    row_text = "\t".join(
+                                        cell.text.strip() for cell in row.cells
+                                    )
+                                    if row_text.strip():
+                                        paragraphs.append(row_text)
+                            text = "\n".join(paragraphs).strip()
+                            extraction_method = "python_docx"
+                        except ModuleNotFoundError as exc:
+                            extraction_method = "python_docx_missing"
+                            extraction_error = str(exc)
+                        except Exception as exc:
+                            extraction_method = "python_docx_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # PPTX extraction
+                    elif is_pptx:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            import io
+                            from pptx import Presentation  # type: ignore[import-not-found]
+
+                            prs = Presentation(io.BytesIO(bytes(data_bytes)))
+                            slides_text: list[str] = []
+                            for slide_num, slide in enumerate(prs.slides, 1):
+                                slide_parts: list[str] = [f"--- Slide {slide_num} ---"]
+                                for shape in slide.shapes:
+                                    if hasattr(shape, "text") and shape.text.strip():
+                                        slide_parts.append(shape.text)
+                                    # Extract text from tables in slides
+                                    if hasattr(shape, "table"):
+                                        for row in shape.table.rows:
+                                            row_text = "\t".join(
+                                                cell.text.strip() for cell in row.cells
+                                            )
+                                            if row_text.strip():
+                                                slide_parts.append(row_text)
+                                # Extract speaker notes
+                                if (
+                                    slide.has_notes_slide
+                                    and slide.notes_slide.notes_text_frame
+                                ):
+                                    notes = (
+                                        slide.notes_slide.notes_text_frame.text.strip()
+                                    )
+                                    if notes:
+                                        slide_parts.append(f"[Speaker Notes: {notes}]")
+                                slides_text.append("\n".join(slide_parts))
+                            text = "\n\n".join(slides_text).strip()
+                            extraction_method = "python_pptx"
+                        except ModuleNotFoundError as exc:
+                            extraction_method = "python_pptx_missing"
+                            extraction_error = str(exc)
+                        except Exception as exc:
+                            extraction_method = "python_pptx_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # XLSX extraction
+                    elif is_xlsx:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            import io
+                            from openpyxl import load_workbook  # type: ignore[import-not-found]
+
+                            wb = load_workbook(
+                                io.BytesIO(bytes(data_bytes)),
+                                read_only=True,
+                                data_only=True,
+                            )
+                            sheets_text: list[str] = []
+                            for sheet_name in wb.sheetnames:
+                                sheet = wb[sheet_name]
+                                sheet_parts: list[str] = [
+                                    f"--- Sheet: {sheet_name} ---"
+                                ]
+                                for row in sheet.iter_rows(values_only=True):
+                                    row_values = [
+                                        str(cell) if cell is not None else ""
+                                        for cell in row
+                                    ]
+                                    if any(v.strip() for v in row_values):
+                                        sheet_parts.append("\t".join(row_values))
+                                if len(sheet_parts) > 1:  # Has data beyond header
+                                    sheets_text.append("\n".join(sheet_parts))
+                            wb.close()
+                            text = "\n\n".join(sheets_text).strip()
+                            extraction_method = "openpyxl"
+                        except ModuleNotFoundError as exc:
+                            extraction_method = "openpyxl_missing"
+                            extraction_error = str(exc)
+                        except Exception as exc:
+                            extraction_method = "openpyxl_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # Image OCR extraction
+                    elif is_image:
                         try:
                             import pytesseract  # type: ignore[import-not-found]
                             from PIL import Image  # type: ignore[import-not-found]
@@ -1720,6 +1917,8 @@ def _read_file_copy(**kwargs):
                             )
                             payload["text"] = text
                             payload["encoding"] = str(encoding)
+
+                    # Fallback: generic text decoding
                     else:
                         text = bytes(data_bytes).decode(str(encoding), errors="replace")
                         payload["text"] = text
