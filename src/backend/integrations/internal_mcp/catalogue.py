@@ -1695,6 +1695,16 @@ def _read_file_copy(**kwargs):
                     is_docx = False
                     is_pptx = False
                     is_xlsx = False
+                    is_odt = False
+                    is_ods = False
+                    is_odp = False
+                    is_rtf = False
+                    is_eml = False
+                    is_msg = False
+                    is_html = False
+                    is_markdown = False
+                    is_csv = False
+                    is_latex = False
                     is_image = False
 
                     ct_lower = (
@@ -1730,6 +1740,66 @@ def _read_file_copy(**kwargs):
                         is_xlsx = True
                     elif name_lower.endswith(".xlsx"):
                         is_xlsx = True
+
+                    # ODT detection (OpenDocument Text)
+                    if "application/vnd.oasis.opendocument.text" in ct_lower:
+                        is_odt = True
+                    elif name_lower.endswith(".odt"):
+                        is_odt = True
+
+                    # ODS detection (OpenDocument Spreadsheet)
+                    if "application/vnd.oasis.opendocument.spreadsheet" in ct_lower:
+                        is_ods = True
+                    elif name_lower.endswith(".ods"):
+                        is_ods = True
+
+                    # ODP detection (OpenDocument Presentation)
+                    if "application/vnd.oasis.opendocument.presentation" in ct_lower:
+                        is_odp = True
+                    elif name_lower.endswith(".odp"):
+                        is_odp = True
+
+                    # RTF detection
+                    if ct_lower in ("application/rtf", "text/rtf"):
+                        is_rtf = True
+                    elif name_lower.endswith(".rtf"):
+                        is_rtf = True
+
+                    # EML detection (email)
+                    if ct_lower == "message/rfc822":
+                        is_eml = True
+                    elif name_lower.endswith(".eml"):
+                        is_eml = True
+
+                    # MSG detection (Outlook email)
+                    if ct_lower == "application/vnd.ms-outlook":
+                        is_msg = True
+                    elif name_lower.endswith(".msg"):
+                        is_msg = True
+
+                    # HTML detection
+                    if ct_lower in ("text/html", "application/xhtml+xml"):
+                        is_html = True
+                    elif name_lower.endswith((".html", ".htm", ".xhtml")):
+                        is_html = True
+
+                    # Markdown detection
+                    if ct_lower in ("text/markdown", "text/x-markdown"):
+                        is_markdown = True
+                    elif name_lower.endswith((".md", ".markdown")):
+                        is_markdown = True
+
+                    # CSV/TSV detection
+                    if ct_lower in ("text/csv", "text/tab-separated-values"):
+                        is_csv = True
+                    elif name_lower.endswith((".csv", ".tsv")):
+                        is_csv = True
+
+                    # LaTeX detection
+                    if ct_lower in ("application/x-latex", "application/x-tex"):
+                        is_latex = True
+                    elif name_lower.endswith((".tex", ".latex")):
+                        is_latex = True
 
                     # Image detection
                     if ct_lower.startswith("image/"):
@@ -1897,6 +1967,390 @@ def _read_file_copy(**kwargs):
                             )
                             payload["text"] = text
                             payload["encoding"] = str(encoding)
+
+                    # ODT extraction (OpenDocument Text)
+                    elif is_odt:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            import io
+                            from odf import text as odf_text  # type: ignore[import-not-found]
+                            from odf.opendocument import load as odf_load  # type: ignore[import-not-found]
+
+                            doc = odf_load(io.BytesIO(bytes(data_bytes)))
+                            paragraphs: list[str] = []
+                            for para in doc.getElementsByType(odf_text.P):
+                                p_text = "".join(
+                                    node.data
+                                    for node in para.childNodes
+                                    if hasattr(node, "data")
+                                )
+                                if p_text.strip():
+                                    paragraphs.append(p_text)
+                            text = "\n".join(paragraphs).strip()
+                            extraction_method = "odfpy"
+                        except ModuleNotFoundError as exc:
+                            extraction_method = "odfpy_missing"
+                            extraction_error = str(exc)
+                        except Exception as exc:
+                            extraction_method = "odfpy_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # ODS extraction (OpenDocument Spreadsheet)
+                    elif is_ods:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            import io
+                            from odf.opendocument import load as odf_load  # type: ignore[import-not-found]
+                            from odf import table as odf_table  # type: ignore[import-not-found]
+
+                            doc = odf_load(io.BytesIO(bytes(data_bytes)))
+                            sheets_text: list[str] = []
+                            for sheet in doc.getElementsByType(odf_table.Table):
+                                sheet_name = sheet.getAttribute("name") or "Sheet"
+                                sheet_parts: list[str] = [
+                                    f"--- Sheet: {sheet_name} ---"
+                                ]
+                                for row in sheet.getElementsByType(odf_table.TableRow):
+                                    row_values: list[str] = []
+                                    for cell in row.getElementsByType(
+                                        odf_table.TableCell
+                                    ):
+                                        cell_text = "".join(
+                                            node.data
+                                            for p in cell.childNodes
+                                            if hasattr(p, "childNodes")
+                                            for node in p.childNodes
+                                            if hasattr(node, "data")
+                                        )
+                                        row_values.append(cell_text)
+                                    if any(v.strip() for v in row_values):
+                                        sheet_parts.append("\t".join(row_values))
+                                if len(sheet_parts) > 1:
+                                    sheets_text.append("\n".join(sheet_parts))
+                            text = "\n\n".join(sheets_text).strip()
+                            extraction_method = "odfpy"
+                        except ModuleNotFoundError as exc:
+                            extraction_method = "odfpy_missing"
+                            extraction_error = str(exc)
+                        except Exception as exc:
+                            extraction_method = "odfpy_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # ODP extraction (OpenDocument Presentation)
+                    elif is_odp:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            import io
+                            from odf.opendocument import load as odf_load  # type: ignore[import-not-found]
+                            from odf import draw as odf_draw  # type: ignore[import-not-found]
+                            from odf import text as odf_text  # type: ignore[import-not-found]
+
+                            doc = odf_load(io.BytesIO(bytes(data_bytes)))
+                            slides_text: list[str] = []
+                            for slide_num, page in enumerate(
+                                doc.getElementsByType(odf_draw.Page), 1
+                            ):
+                                slide_parts: list[str] = [f"--- Slide {slide_num} ---"]
+                                for frame in page.getElementsByType(odf_draw.Frame):
+                                    for textbox in frame.getElementsByType(
+                                        odf_draw.TextBox
+                                    ):
+                                        for para in textbox.getElementsByType(
+                                            odf_text.P
+                                        ):
+                                            p_text = "".join(
+                                                node.data
+                                                for node in para.childNodes
+                                                if hasattr(node, "data")
+                                            )
+                                            if p_text.strip():
+                                                slide_parts.append(p_text)
+                                slides_text.append("\n".join(slide_parts))
+                            text = "\n\n".join(slides_text).strip()
+                            extraction_method = "odfpy"
+                        except ModuleNotFoundError as exc:
+                            extraction_method = "odfpy_missing"
+                            extraction_error = str(exc)
+                        except Exception as exc:
+                            extraction_method = "odfpy_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # RTF extraction
+                    elif is_rtf:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            from striprtf.striprtf import rtf_to_text  # type: ignore[import-not-found]
+
+                            rtf_content = bytes(data_bytes).decode(
+                                "utf-8", errors="replace"
+                            )
+                            text = rtf_to_text(rtf_content).strip()
+                            extraction_method = "striprtf"
+                        except ModuleNotFoundError as exc:
+                            extraction_method = "striprtf_missing"
+                            extraction_error = str(exc)
+                        except Exception as exc:
+                            extraction_method = "striprtf_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # EML extraction (email)
+                    elif is_eml:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            import email
+                            from email.policy import default as email_policy
+
+                            msg = email.message_from_bytes(
+                                bytes(data_bytes), policy=email_policy
+                            )
+                            parts: list[str] = []
+                            # Headers
+                            for header in ("From", "To", "Subject", "Date"):
+                                val = msg.get(header)
+                                if val:
+                                    parts.append(f"{header}: {val}")
+                            parts.append("")  # Blank line after headers
+                            # Body
+                            if msg.is_multipart():
+                                for part in msg.walk():
+                                    ctype = part.get_content_type()
+                                    if ctype == "text/plain":
+                                        body = part.get_content()
+                                        if isinstance(body, str):
+                                            parts.append(body)
+                            else:
+                                body = msg.get_content()
+                                if isinstance(body, str):
+                                    parts.append(body)
+                            text = "\n".join(parts).strip()
+                            extraction_method = "email_stdlib"
+                        except Exception as exc:
+                            extraction_method = "email_stdlib_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # MSG extraction (Outlook email)
+                    elif is_msg:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            import io
+                            import extract_msg  # type: ignore[import-not-found]
+
+                            msg = extract_msg.Message(io.BytesIO(bytes(data_bytes)))
+                            parts: list[str] = []
+                            if msg.sender:
+                                parts.append(f"From: {msg.sender}")
+                            if msg.to:
+                                parts.append(f"To: {msg.to}")
+                            if msg.subject:
+                                parts.append(f"Subject: {msg.subject}")
+                            if msg.date:
+                                parts.append(f"Date: {msg.date}")
+                            parts.append("")
+                            if msg.body:
+                                parts.append(msg.body)
+                            text = "\n".join(parts).strip()
+                            extraction_method = "extract_msg"
+                            msg.close()
+                        except ModuleNotFoundError as exc:
+                            extraction_method = "extract_msg_missing"
+                            extraction_error = str(exc)
+                        except Exception as exc:
+                            extraction_method = "extract_msg_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # HTML extraction
+                    elif is_html:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            from bs4 import BeautifulSoup  # type: ignore[import-not-found]
+
+                            html_content = bytes(data_bytes).decode(
+                                "utf-8", errors="replace"
+                            )
+                            soup = BeautifulSoup(html_content, "html.parser")
+                            # Remove script and style elements
+                            for script in soup(["script", "style"]):
+                                script.decompose()
+                            text = soup.get_text(separator="\n", strip=True)
+                            extraction_method = "beautifulsoup"
+                        except ModuleNotFoundError as exc:
+                            extraction_method = "beautifulsoup_missing"
+                            extraction_error = str(exc)
+                        except Exception as exc:
+                            extraction_method = "beautifulsoup_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # Markdown extraction (pass through as text)
+                    elif is_markdown:
+                        text = bytes(data_bytes).decode("utf-8", errors="replace")
+                        payload["text"] = text
+                        payload["encoding"] = "utf-8"
+                        payload["text_extraction"] = "markdown_passthrough"
+
+                    # CSV/TSV extraction
+                    elif is_csv:
+                        text = None
+                        extraction_method = None
+                        extraction_error = None
+                        try:
+                            import csv
+                            import io
+
+                            csv_content = bytes(data_bytes).decode(
+                                "utf-8", errors="replace"
+                            )
+                            # Detect delimiter
+                            dialect = csv.Sniffer().sniff(csv_content[:4096])
+                            reader = csv.reader(io.StringIO(csv_content), dialect)
+                            rows: list[str] = []
+                            for row in reader:
+                                rows.append("\t".join(row))
+                            text = "\n".join(rows).strip()
+                            extraction_method = "csv_stdlib"
+                        except Exception as exc:
+                            extraction_method = "csv_stdlib_failed"
+                            extraction_error = str(exc)
+
+                        if text:
+                            payload["text"] = text
+                            payload["encoding"] = "utf-8"
+                            payload["text_extraction"] = extraction_method
+                        else:
+                            if extraction_method:
+                                payload["text_extraction"] = extraction_method
+                            if extraction_error:
+                                payload["text_extraction_error"] = extraction_error
+                            text = bytes(data_bytes).decode(
+                                str(encoding), errors="replace"
+                            )
+                            payload["text"] = text
+                            payload["encoding"] = str(encoding)
+
+                    # LaTeX extraction (pass through as text)
+                    elif is_latex:
+                        text = bytes(data_bytes).decode("utf-8", errors="replace")
+                        payload["text"] = text
+                        payload["encoding"] = "utf-8"
+                        payload["text_extraction"] = "latex_passthrough"
 
                     # Image OCR extraction
                     elif is_image:
