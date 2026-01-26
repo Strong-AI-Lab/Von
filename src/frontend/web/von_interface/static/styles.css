@@ -6336,9 +6336,14 @@ body.settings-body {
 }
 
 .settings-note {
-    font-size: 0.9em;
+    font-size: 0.85em;
     color: #666;
-    margin-bottom: 10px;
+    margin-top: 0;
+    margin-bottom: 4px;
+}
+
+.settings-subsection-compact {
+    margin-top: 0.75rem;
 }
 
 /* Tool Execution Caps inputs (settings_tab) */
@@ -6365,13 +6370,15 @@ body.settings-body {
 
 .inline-form {
     display: flex;
-    gap: 10px;
-    margin-bottom: 10px;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
 }
 
 /* Variant: tighter spacing & top margin used in settings_tab reset prefs row */
 .inline-form-tight {
-    gap: 8px;
+    gap: 4px;
+    margin-bottom: 2px;
 }
 
 .mt-8-align-center {
