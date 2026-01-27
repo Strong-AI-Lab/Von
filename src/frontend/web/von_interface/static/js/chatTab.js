@@ -2,7 +2,7 @@
 import { annotateTurn, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
-import { elements, renderSpanSuggestions } from './domUtils.js';
+import { elements, getCurrentUserConceptId, renderSpanSuggestions } from './domUtils.js';
 import { isAnnotationEnabled } from './featureFlags.js';
 import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
 import {
@@ -108,18 +108,37 @@ const HISTORY_SEGMENT_SIZE = 200;
 const HISTORY_TAIL_SEGMENT_SIZE = 30;
 
 // JVNAUTOSCI-1014: Hidden conversations (localStorage per user)
-const LS_HIDDEN_CHAT_SESSIONS = 'von:hiddenChatSessionIds';
+const LS_HIDDEN_CHAT_SESSIONS_PREFIX = 'von:hiddenChatSessionIds';
 const MAX_DELETABLE_TURNS = 4;
 let hiddenChatSessionIds = new Set();
 let showHiddenSessions = false;
+let _hiddenSessionsUserKey = null; // Track current user's localStorage key
+
+/**
+ * Get the user-scoped localStorage key for hidden sessions.
+ * Falls back to global key if no user is logged in.
+ */
+function getHiddenSessionsStorageKey() {
+    const userConceptId = getCurrentUserConceptId();
+    if (userConceptId) {
+        // Sanitise concept_id to be safe for localStorage key
+        const sanitised = String(userConceptId).replace(/[^a-zA-Z0-9_#-]/g, '_');
+        return `${LS_HIDDEN_CHAT_SESSIONS_PREFIX}:${sanitised}`;
+    }
+    // Fallback to global key when not logged in
+    return LS_HIDDEN_CHAT_SESSIONS_PREFIX;
+}
 
 function loadHiddenChatSessionIds() {
+    const storageKey = getHiddenSessionsStorageKey();
+    _hiddenSessionsUserKey = storageKey;
     try {
-        const stored = localStorage.getItem(LS_HIDDEN_CHAT_SESSIONS);
+        const stored = localStorage.getItem(storageKey);
         if (stored) {
             const parsed = JSON.parse(stored);
             if (Array.isArray(parsed)) {
                 hiddenChatSessionIds = new Set(parsed.filter(id => typeof id === 'string'));
+                console.log(`[chatTab] Loaded ${hiddenChatSessionIds.size} hidden sessions for key: ${storageKey}`);
                 return;
             }
         }
@@ -130,8 +149,10 @@ function loadHiddenChatSessionIds() {
 }
 
 function saveHiddenChatSessionIds() {
+    // Use the key we loaded with, or get current key
+    const storageKey = _hiddenSessionsUserKey || getHiddenSessionsStorageKey();
     try {
-        localStorage.setItem(LS_HIDDEN_CHAT_SESSIONS, JSON.stringify([...hiddenChatSessionIds]));
+        localStorage.setItem(storageKey, JSON.stringify([...hiddenChatSessionIds]));
     } catch (e) {
         console.warn('[chatTab] Failed to save hidden session IDs to localStorage:', e);
     }
@@ -7412,8 +7433,25 @@ function handleAuthStatusChangeForChatTab(detail) {
 export function initializeChatTab() {
     console.log("Initializing chat tab...");
 
-    // JVNAUTOSCI-1014: Load hidden session IDs from localStorage
+    // JVNAUTOSCI-1014: Load hidden session IDs from localStorage (user-scoped)
     loadHiddenChatSessionIds();
+
+    // Reload hidden sessions when user changes (settings change event)
+    try {
+        document.addEventListener('von:settingsChanged', () => {
+            const newKey = getHiddenSessionsStorageKey();
+            if (newKey !== _hiddenSessionsUserKey) {
+                console.log(`[chatTab] User changed, reloading hidden sessions (${_hiddenSessionsUserKey} -> ${newKey})`);
+                loadHiddenChatSessionIds();
+                // Re-render tabs to apply new hidden set
+                if (Array.isArray(sessionTabsCache)) {
+                    renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+                }
+            }
+        });
+    } catch (_) {
+        // Ignore in test environments
+    }
 
     const sendButton = document.getElementById('sendButton');
     const resetButton = document.getElementById('resetButton');

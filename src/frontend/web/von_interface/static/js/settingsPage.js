@@ -1,5 +1,5 @@
 import { getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
-import { renderOrgSelector, setupOrgSwitchListener } from './components/orgSelector.js';
+import { renderOrgSelector, setupOrgSwitchListener, switchOrganisation } from './components/orgSelector.js';
 import { populateLanguageSelect } from './languageConfig.js';
 import {
   loadAndRenderOllamaHosts,
@@ -1137,6 +1137,11 @@ function applyStoredSelection(selectId, stored, fallbackSelected = true) {
       if (opt.dataset) {
         if ((stored.id && opt.dataset.id === String(stored.id)) || (stored.concept_id && opt.dataset.conceptId === stored.concept_id)) {
           opt.selected = true;
+          // Backfill concept_id if missing (required for per-user model saves)
+          if (!stored.concept_id && opt.dataset.conceptId) {
+            stored.concept_id = opt.dataset.conceptId;
+            setStoredJson(selectId === 'currentUserSelect' ? LS_USER_KEY : LS_ORG_KEY, stored);
+          }
           return stored;
         }
       }
@@ -1219,11 +1224,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     } else { setStoredJson(LS_USER_KEY, null); }
   });
-  document.getElementById('currentOrganisationSelect')?.addEventListener('change', () => {
+  document.getElementById('currentOrganisationSelect')?.addEventListener('change', async () => {
     const sel = document.getElementById('currentOrganisationSelect');
     const opt = sel?.selectedOptions?.[0];
-    if (opt && (opt.dataset?.id || opt.dataset?.conceptId)) {
-      setStoredJson(LS_ORG_KEY, { id: opt.dataset.id || null, concept_id: opt.dataset.conceptId || null, name: opt.textContent || null });
+    const conceptId = opt?.dataset?.conceptId || null;
+
+    // Call backend to update session namespace (mirrors Phase 2 org selector behaviour)
+    try {
+      await switchOrganisation(conceptId);
+      // switchOrganisation dispatches 'orgSwitched' event which updates namespace display
+    } catch (e) {
+      console.warn('Failed to switch organisation via backend:', e);
+    }
+
+    if (opt && (opt.dataset?.id || conceptId)) {
+      setStoredJson(LS_ORG_KEY, { id: opt.dataset.id || null, concept_id: conceptId, name: opt.textContent || null });
       if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
       // Persist organisation preference (and language if set)
       persistCurrentUserPreferences();
@@ -1457,7 +1472,15 @@ document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () =
 
 async function loadAndDisplaySettings() {
   try {
-    const response = await fetch('/api/settings/');
+    // Pass user context to get properly resolved LLM setting (user > org > global precedence)
+    const storedUser = getStoredJson(LS_USER_KEY);
+    const storedOrg = getStoredJson(LS_ORG_KEY);
+    const params = new URLSearchParams();
+    if (storedUser?.concept_id) params.set('user_concept_id', storedUser.concept_id);
+    if (storedOrg?.concept_id) params.set('organisation_concept_id', storedOrg.concept_id);
+    const settingsUrl = '/api/settings/' + (params.toString() ? '?' + params.toString() : '');
+
+    const response = await fetch(settingsUrl);
     if (!response.ok) throw new Error(`Failed to fetch settings: ${response.statusText}`);
     const settings = await response.json();
 
@@ -1472,15 +1495,17 @@ async function loadAndDisplaySettings() {
       }
     } catch { __vonIsAdminOrOwner = false; }
 
-    // Extract current model information from active_llm setting
+    // Extract current model information from resolved_llm (respects user > org > global precedence)
+    // Falls back to active_llm for backwards compatibility
+    const effectiveLlm = settings.resolved_llm || settings.active_llm;
     let currentOllamaModel = null;
     let currentOpenAIModel = null;
 
-    if (settings.active_llm) {
-      if (settings.active_llm.provider === 'ollama') {
-        currentOllamaModel = settings.active_llm.model;
-      } else if (settings.active_llm.provider === 'openai') {
-        currentOpenAIModel = settings.active_llm.model;
+    if (effectiveLlm) {
+      if (effectiveLlm.provider === 'ollama') {
+        currentOllamaModel = effectiveLlm.model;
+      } else if (effectiveLlm.provider === 'openai') {
+        currentOpenAIModel = effectiveLlm.model;
       }
     }
 
@@ -1903,6 +1928,10 @@ async function saveAllSettings(changedProvider = null) {
   const ollamaModelSelect = document.getElementById('globalModelSelect');
   const openaiModelSelect = document.getElementById('openaiModelSelect');
 
+  // Get current user concept ID for user-scoped LLM setting
+  const storedUser = getStoredJson(LS_USER_KEY);
+  const userConceptId = storedUser?.concept_id || null;
+
   let activeLlm = null;
 
   if (changedProvider === 'openai') {
@@ -1930,6 +1959,12 @@ async function saveAllSettings(changedProvider = null) {
       const hostUrl = selectedOption ? selectedOption.dataset.hostUrl : null;
       activeLlm = { provider: 'ollama', model: modelName, host: hostUrl };
     }
+  }
+
+  // Add user scope to activeLlm if a user is selected (for per-user model persistence)
+  if (activeLlm && userConceptId) {
+    activeLlm.scope = 'user';
+    activeLlm.concept_id = userConceptId;
   }
 
   // We now persist user/org/language only in localStorage; do not send to backend

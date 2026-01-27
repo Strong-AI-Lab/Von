@@ -83,7 +83,7 @@ from src.backend.services.rag_text_relation_change_hook_service import (
 from src.backend.services.annotation_extraction_service import extract_annotations
 from src.backend.services.concept_merge_service import merge_concepts
 from src.backend.services.settings_service import (
-    get_active_llm_setting,
+    resolve_llm_setting,
     get_preferred_language,
     get_setting,
 )
@@ -1333,12 +1333,18 @@ def _json_error(message: str) -> TextContent:
 
 
 async def _handle_get_context(arguments: dict[str, Any]) -> list[TextContent]:
-    model_setting = get_active_llm_setting()
+    # Get user/org context from arguments (stdio server has no session)
+    user_concept_id = arguments.get("user_concept_id")
+    org_concept_id = arguments.get("organisation_concept_id") or arguments.get(
+        "organization_concept_id"
+    )
+
+    model_setting = resolve_llm_setting(
+        user_concept_id=user_concept_id, org_concept_id=org_concept_id
+    )
     context = {
         "llm_model": (
-            model_setting.get("model")
-            if isinstance(model_setting, dict)
-            else model_setting
+            model_setting.get("model") if isinstance(model_setting, dict) else None
         ),
         "llm_provider": (
             model_setting.get("provider") if isinstance(model_setting, dict) else None

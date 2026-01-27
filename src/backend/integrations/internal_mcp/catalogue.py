@@ -84,22 +84,34 @@ def _get_concept_by_concept_id(**kwargs):
 
 def _get_context(**kwargs):
     from ...services.settings_service import (
-        get_active_llm_setting,
+        resolve_llm_setting,
         get_preferred_language,
         get_setting,
     )
     from datetime import datetime, timezone
 
-    # Get active model setting (returns dict with model name and provider)
-    model_setting = get_active_llm_setting()
+    # Get user/org context from session for resolved LLM setting
+    user_concept_id = None
+    org_concept_id = None
+    try:
+        from flask import session, has_request_context
+
+        if has_request_context():
+            user_concept_id = session.get("user_concept_id")
+            org_concept_id = session.get("organisation_concept_id")
+    except Exception:
+        pass
+
+    # Get resolved LLM setting (user > org precedence, no global fallback)
+    model_setting = resolve_llm_setting(
+        user_concept_id=user_concept_id, org_concept_id=org_concept_id
+    )
 
     context = {
         "user": None,
         "organisation": None,
         "llm_model": (
-            model_setting.get("model")
-            if isinstance(model_setting, dict)
-            else model_setting
+            model_setting.get("model") if isinstance(model_setting, dict) else None
         ),
         "llm_provider": (
             model_setting.get("provider") if isinstance(model_setting, dict) else None
@@ -1869,11 +1881,13 @@ def _read_file_copy(**kwargs):
                             for slide_num, slide in enumerate(prs.slides, 1):
                                 slide_parts: list[str] = [f"--- Slide {slide_num} ---"]
                                 for shape in slide.shapes:
-                                    if hasattr(shape, "text") and shape.text.strip():
-                                        slide_parts.append(shape.text)
+                                    shape_text = getattr(shape, "text", None)  # type: ignore[attr-defined]
+                                    if shape_text and shape_text.strip():
+                                        slide_parts.append(shape_text)
                                     # Extract text from tables in slides
-                                    if hasattr(shape, "table"):
-                                        for row in shape.table.rows:
+                                    shape_table = getattr(shape, "table", None)  # type: ignore[attr-defined]
+                                    if shape_table is not None:
+                                        for row in shape_table.rows:
                                             row_text = "\t".join(
                                                 cell.text.strip() for cell in row.cells
                                             )
@@ -6064,7 +6078,6 @@ def _chat_introspect(
     )
     from src.backend.languagemodels.llm_interface import get_active_model_name
     from src.backend.services.settings_service import (
-        get_active_llm_setting,
         resolve_llm_setting,
     )
 
@@ -6152,11 +6165,6 @@ def _chat_introspect(
         active_model_name = None
 
     try:
-        active_llm = get_active_llm_setting()
-    except Exception:
-        active_llm = None
-
-    try:
         resolved_llm = resolve_llm_setting(
             user_concept_id=namespace, org_concept_id=organisation_concept_id
         )
@@ -6231,7 +6239,7 @@ def _chat_introspect(
         "namespace": namespace,
         "organisation_concept_id": organisation_concept_id,
         "active_model_name": active_model_name,
-        "active_llm": active_llm,
+        "active_llm": resolved_llm,  # Now uses resolved_llm (user > org precedence, no global)
         "resolved_llm": resolved_llm,
         # Backwards-compatible fields.
         "prompt_concept_ids": list(behaviour_prompt_concept_ids),

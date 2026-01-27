@@ -160,12 +160,169 @@ class _ModelCandidate:
     host: str | None = None
 
 
+class ProgressTracker:
+    """Request-scoped progress tracking for the orchestrator.
+
+    JVNAUTOSCI-1038: This class isolates progress state per-request to avoid
+    race conditions when multiple requests run concurrently (e.g., multiple
+    browser windows generating responses simultaneously).
+
+    Usage:
+        tracker = ProgressTracker(callback=my_progress_callback)
+        result = orchestrator.run(..., progress_tracker=tracker)
+
+    For background tasks with cancellation support:
+        tracker = ProgressTracker(
+            callback=my_progress_callback,
+            cancellation_checker=lambda: registry.is_cancellation_requested(task_id),
+            task_id=task_id,
+        )
+    """
+
+    # Phase labels mirrored from orchestrator for convenience.
+    _PHASE_LABELS: Mapping[str, str] = {
+        "context_build": "Building context",
+        "tool_plan": "Planning tool calls",
+        "tool_execute": "Executing tools",
+        "screen_backfill": "Generating response",
+        "narration": "Generating narration",
+        "completed": "Complete",
+        "error": "Error",
+        "cancelled": "Cancelled",
+    }
+
+    def __init__(
+        self,
+        callback: Callable[[Mapping[str, Any]], None] | None = None,
+        *,
+        cancellation_checker: Callable[[], bool] | None = None,
+        task_id: str | None = None,
+    ) -> None:
+        self._callback = callback
+        self._cancellation_checker = cancellation_checker
+        self._task_id = task_id
+        self._start_time: float | None = time.perf_counter() if callback else None
+        self._phase_start_time: float | None = None
+        self._current_phase: str | None = None
+        self._phase_history: list[dict[str, Any]] = []
+
+    @property
+    def callback(self) -> Callable[[Mapping[str, Any]], None] | None:
+        return self._callback
+
+    @property
+    def current_phase(self) -> str | None:
+        return self._current_phase
+
+    @property
+    def phase_history(self) -> list[dict[str, Any]]:
+        return list(self._phase_history)
+
+    @property
+    def task_id(self) -> str | None:
+        return self._task_id
+
+    def is_cancellation_requested(self) -> bool:
+        """Check if cancellation was requested (non-raising)."""
+        if self._cancellation_checker is None:
+            return False
+        try:
+            return self._cancellation_checker()
+        except Exception:
+            return False
+
+    def check_cancellation(self) -> None:
+        """Check for cancellation and raise CancellationRequested if requested.
+
+        Call this at safe points in long-running operations to allow graceful
+        termination when a user cancels a background task.
+
+        Raises:
+            CancellationRequested: If cancellation has been requested.
+        """
+        if self.is_cancellation_requested():
+            self.transition_phase("cancelled")
+            raise CancellationRequested(task_id=self._task_id)
+
+    def emit(self, info: Mapping[str, Any]) -> None:
+        """Emit a progress event to the callback (if set)."""
+        if self._callback is None:
+            return
+        try:
+            enriched: dict[str, Any] = dict(info)
+            if self._current_phase:
+                enriched.setdefault("phase", self._current_phase)
+                enriched.setdefault(
+                    "phase_label",
+                    self._PHASE_LABELS.get(self._current_phase, ""),
+                )
+            if self._start_time is not None:
+                enriched["total_elapsed_ms"] = int(
+                    (time.perf_counter() - self._start_time) * 1000
+                )
+            if self._phase_start_time is not None:
+                enriched["phase_elapsed_ms"] = int(
+                    (time.perf_counter() - self._phase_start_time) * 1000
+                )
+            self._callback(enriched)
+        except Exception:
+            # Progress is best-effort; never disrupt the main chat flow.
+            pass
+
+    def transition_phase(
+        self,
+        phase: str,
+        *,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Transition to a new phase and emit the transition event."""
+        now = time.perf_counter()
+
+        # Record previous phase in history.
+        if self._current_phase and self._phase_start_time is not None:
+            self._phase_history.append(
+                {
+                    "phase": self._current_phase,
+                    "phase_label": self._PHASE_LABELS.get(self._current_phase, ""),
+                    "duration_ms": int((now - self._phase_start_time) * 1000),
+                }
+            )
+
+        # Update current phase.
+        self._current_phase = phase
+        self._phase_start_time = now
+
+        # Emit the transition.
+        info: dict[str, Any] = {
+            "status": "phase_transition",
+            "phase": phase,
+            "phase_label": self._PHASE_LABELS.get(phase, ""),
+        }
+        if extra:
+            info.update(extra)
+
+        self.emit(info)
+
+
 class ToolCallParsingError(Exception):
     """Raised when a model returns an invalid tool call payload."""
 
     def __init__(self, message: str, *, raw_response: str | None = None) -> None:
         super().__init__(message)
         self.raw_response = raw_response
+
+
+class CancellationRequested(Exception):
+    """Raised when a background task cancellation is requested.
+
+    JVNAUTOSCI-1038: This exception is raised by ProgressTracker.check_cancellation()
+    when the associated background task has been flagged for cancellation.
+    The orchestrator catches this to gracefully terminate long-running operations.
+    """
+
+    def __init__(self, task_id: str | None = None) -> None:
+        self.task_id = task_id
+        super().__init__(f"Cancellation requested for task {task_id or 'unknown'}")
 
 
 class InternalMCPChatOrchestrator:
@@ -358,6 +515,12 @@ class InternalMCPChatOrchestrator:
     def set_progress_callback(
         self, callback: Callable[[Mapping[str, Any]], None] | None
     ) -> None:
+        """Set or clear the instance-level progress callback.
+
+        .. deprecated:: JVNAUTOSCI-1038
+            Use ``progress_tracker`` parameter in ``run()`` instead to avoid
+            race conditions with concurrent requests.
+        """
         self._progress_callback = callback
         # Reset phase tracking when a new callback is set (new request).
         self._progress_start_time = time.perf_counter() if callback else None
@@ -4674,11 +4837,37 @@ class InternalMCPChatOrchestrator:
         gmail_profile: Optional[str] = None,
         auxiliary_system_prompt: str | None = None,
         preferred_language: str | None = None,
+        progress_tracker: ProgressTracker | None = None,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
         orchestrator_start = time.perf_counter()
         recent_user_prompts = self._extract_recent_user_prompts(context, max_count=5)
+
+        # JVNAUTOSCI-1038: Request-scoped progress helpers
+        def _emit_progress_local(info: Mapping[str, Any]) -> None:
+            """Route progress to tracker or fallback to instance method."""
+            if progress_tracker is not None:
+                progress_tracker.emit(info)
+            else:
+                self._emit_progress(info)
+
+        def _emit_phase_transition_local(
+            phase: str, *, extra: Mapping[str, Any] | None = None
+        ) -> None:
+            """Route phase transition to tracker or fallback to instance method."""
+            if progress_tracker is not None:
+                progress_tracker.transition_phase(phase, extra=extra)
+            else:
+                self._emit_phase_transition(phase, extra=extra)
+
+        def _check_cancellation_local() -> None:
+            """Check for cancellation and raise if requested.
+
+            JVNAUTOSCI-1038: For background tasks, this allows graceful termination.
+            """
+            if progress_tracker is not None:
+                progress_tracker.check_cancellation()
 
         def _infer_provider(model_id: str | None) -> str | None:
             if not isinstance(model_id, str):
@@ -5270,7 +5459,7 @@ class InternalMCPChatOrchestrator:
         response = ""
 
         # JVNAUTOSCI-984: Emit tool_plan phase transition.
-        self._emit_phase_transition(self.PHASE_TOOL_PLAN)
+        _emit_phase_transition_local(self.PHASE_TOOL_PLAN)
 
         if use_structured:
             self._logger.debug("[mcp_orchestrator] Using structured tool calling path")
@@ -5512,7 +5701,7 @@ class InternalMCPChatOrchestrator:
         first_iteration_structured = use_structured and has_valid_tool_call
 
         # JVNAUTOSCI-984: Emit tool_execute phase transition before the tool loop.
-        self._emit_phase_transition(
+        _emit_phase_transition_local(
             self.PHASE_TOOL_EXECUTE,
             extra={
                 "tool_calls_cap": int(self._max_tool_invocations),
@@ -5521,6 +5710,9 @@ class InternalMCPChatOrchestrator:
         )
 
         while iteration_count < self._max_tool_invocations:
+            # JVNAUTOSCI-1038: Check for cancellation at start of each tool iteration
+            _check_cancellation_local()
+
             remaining_tool_calls: list[_ToolCallRequest] = []
 
             # Skip extraction on first iteration if structured calling already did it
@@ -5775,7 +5967,7 @@ class InternalMCPChatOrchestrator:
                         except Exception:
                             pass
 
-                    self._emit_progress(
+                    _emit_progress_local(
                         {
                             "status": "tool_blocked",
                             "tool": tool_name,
@@ -5840,7 +6032,7 @@ class InternalMCPChatOrchestrator:
                         invocation_record["call_id"] = call_id
                     invocations.append(invocation_record)
 
-                    self._emit_progress(
+                    _emit_progress_local(
                         {
                             "status": "tool_invoked",
                             "tool": tool_name,
@@ -5890,7 +6082,7 @@ class InternalMCPChatOrchestrator:
                         error_record["call_id"] = call_id
                     invocations.append(error_record)
 
-                    self._emit_progress(
+                    _emit_progress_local(
                         {
                             "status": "tool_failed",
                             "tool": tool_name,
@@ -5962,7 +6154,7 @@ class InternalMCPChatOrchestrator:
                 self._max_tool_invocations,
             )
             # JVNAUTOSCI-984: Emit progress update for tool limit reached.
-            self._emit_progress(
+            _emit_progress_local(
                 {
                     "status": "tool_limit_reached",
                     "tool_calls_done": iteration_count,
@@ -5977,7 +6169,7 @@ class InternalMCPChatOrchestrator:
         )
 
         # JVNAUTOSCI-984: Emit completed phase transition.
-        self._emit_phase_transition(
+        _emit_phase_transition_local(
             self.PHASE_COMPLETED,
             extra={
                 "tool_calls_done": iteration_count,

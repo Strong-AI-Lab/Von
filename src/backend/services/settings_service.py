@@ -158,10 +158,10 @@ def get_all_settings_batch() -> Dict[str, Any]:
     """Fetch all application settings in a single DB query (optimised for /api/settings/).
 
     Returns a dict with processed/coerced values matching what the individual getters return.
+    Note: Does NOT include active_llm - use resolve_llm_setting() with user context instead.
     """
     # List of all setting names we need from the DB
     setting_names = [
-        ACTIVE_LLM_SETTING_NAME,
         OPENAI_ENV_VAR_SETTING_NAME,
         FETCH_COUNTS_ON_LOAD_SETTING_NAME,
         PRELOAD_VONTOLOGY_TREE_SETTING_NAME,
@@ -175,14 +175,9 @@ def get_all_settings_batch() -> Dict[str, Any]:
 
     raw = get_settings_batch(setting_names)
 
-    # Process values with same defaults as individual getters
-    active_llm_raw = raw.get(ACTIVE_LLM_SETTING_NAME)
-    if active_llm_raw is not None and not isinstance(active_llm_raw, dict):
-        logger.warning("Active LLM setting malformed (not dict); ignoring")
-        active_llm_raw = None
-
     return {
-        "active_llm": active_llm_raw,
+        # NOTE: active_llm is intentionally NOT included here.
+        # Use resolve_llm_setting() with user_concept_id instead.
         "openai_api_key_env_var": raw.get(OPENAI_ENV_VAR_SETTING_NAME),
         "fetch_counts_on_load": _coerce_bool(
             raw.get(FETCH_COUNTS_ON_LOAD_SETTING_NAME), default=True
@@ -282,9 +277,14 @@ def update_setting(setting_name: str, setting_value: Any) -> bool:
 
 def get_active_llm_setting() -> Optional[Dict[str, str]]:
     """
-    Convenience function to get the active LLM setting.
-    The setting is expected to be a dict: {"provider": "ollama|openai", "model": "model_name"}
+    DEPRECATED: Use resolve_llm_setting() with user/org context instead.
+
+    This function returns the global LLM setting, which should not be used
+    in multi-user environments. Model settings are now per-user.
     """
+    logger.warning(
+        "get_active_llm_setting() is deprecated. Use resolve_llm_setting() with user_concept_id."
+    )
     setting = get_setting(ACTIVE_LLM_SETTING_NAME)
     if setting is not None and not isinstance(setting, dict):
         logger.warning(
@@ -295,7 +295,15 @@ def get_active_llm_setting() -> Optional[Dict[str, str]]:
 
 
 def set_active_llm_setting(provider: str, model_name: str) -> bool:
-    """Convenience function to set the active LLM setting."""
+    """
+    DEPRECATED: Use set_user_llm_setting() or set_org_llm_setting() instead.
+
+    This function sets the global LLM setting, which should not be used
+    in multi-user environments. Model settings are now per-user.
+    """
+    logger.warning(
+        "set_active_llm_setting() is deprecated. Use set_user_llm_setting() with user_concept_id."
+    )
     if not isinstance(provider, str) or not isinstance(model_name, str):
         logger.error(
             f"Provider and model_name must be strings. Got: {type(provider)}, {type(model_name)}"
@@ -367,8 +375,9 @@ def get_org_llm_setting(org_concept_id: str):
 def resolve_llm_setting(
     user_concept_id: str | None = None, org_concept_id: str | None = None
 ):
-    """Resolve effective LLM setting with precedence user > org > global.
+    """Resolve effective LLM setting with precedence user > org.
 
+    No global fallback - model must be set per-user or per-organisation.
     Returns dict or None.
     """
     if user_concept_id:
@@ -383,9 +392,6 @@ def resolve_llm_setting(
                 "scope": "organisation",
                 "organisation_concept_id": org_concept_id,
             }
-    global_val = get_active_llm_setting()
-    if global_val:
-        return {**global_val, "scope": "global"}
     return None
 
 
@@ -1384,16 +1390,18 @@ def set_preferred_language(lang_code: str) -> bool:
 
 
 # --- COMPATIBILITY FUNCTIONS ---
-# These functions provide backward compatibility for code that hasn't been updated yet.
+# These functions are DEPRECATED in favor of per-user settings.
 
 
 def get_global_ollama_model() -> Optional[str]:
     """
-    Get the global Ollama model name if Ollama is the active provider.
+    DEPRECATED: Use resolve_llm_setting() with user/org context instead.
 
-    Returns:
-        The model name if the active LLM provider is 'ollama', otherwise None.
+    Get the global Ollama model name if Ollama is the active provider.
     """
+    logger.warning(
+        "get_global_ollama_model() is deprecated. Use resolve_llm_setting() with user_concept_id."
+    )
     active_llm = get_active_llm_setting()
     if active_llm and active_llm.get("provider") == "ollama":
         return active_llm.get("model")
@@ -1402,14 +1410,13 @@ def get_global_ollama_model() -> Optional[str]:
 
 def set_global_ollama_model(model_name: str) -> bool:
     """
+    DEPRECATED: Use set_user_llm_setting() with user_concept_id instead.
+
     Set the global Ollama model by updating the active LLM setting.
-
-    Args:
-        model_name: The name of the Ollama model to set.
-
-    Returns:
-        True if the setting was updated successfully, False otherwise.
     """
+    logger.warning(
+        "set_global_ollama_model() is deprecated. Use set_user_llm_setting() with user_concept_id."
+    )
     if not isinstance(model_name, str):
         logger.error(f"Model name must be a string. Got: {type(model_name)}")
         return False

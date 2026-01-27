@@ -259,9 +259,23 @@ export function getCurrentUserConceptId() {
 
 async function getSettings() {
   try {
-    const response = await fetch('/api/settings/');
+    // Pass user context to get properly resolved LLM setting (user > org precedence, no global)
+    const storedUser = readStoredJson('von_current_user');
+    const storedOrg = readSessionScopedJson('von_current_org');
+    const userConceptId = storedUser?.concept_id;
+    const orgConceptId = storedOrg?.concept_id;
+
+    const params = new URLSearchParams();
+    if (userConceptId) params.set('user_concept_id', userConceptId);
+    if (orgConceptId) params.set('organisation_concept_id', orgConceptId);
+
+    const url = '/api/settings/' + (params.toString() ? '?' + params.toString() : '');
+    const response = await fetch(url);
     if (response.ok) {
-      return await response.json();
+      const settings = await response.json();
+      // Use resolved_llm as the active_llm (no global fallback)
+      settings.active_llm = settings.resolved_llm || null;
+      return settings;
     }
   } catch (err) {
     console.warn('Error loading settings:', err);
@@ -317,9 +331,14 @@ export async function setModelInfoFooterText() {
   const orgInfo = await getCurrentOrganisationInfo();
 
   // Fetch LLM connection info early for merging into Model segment
+  // Pass user context for proper per-user resolution
   let llmInfo = null;
   try {
-    const res = await fetch('/api/settings/llm/info');
+    const llmParams = new URLSearchParams();
+    if (userInfo.conceptId) llmParams.set('user_concept_id', userInfo.conceptId);
+    if (orgInfo.conceptId) llmParams.set('organisation_concept_id', orgInfo.conceptId);
+    const llmUrl = '/api/settings/llm/info' + (llmParams.toString() ? '?' + llmParams.toString() : '');
+    const res = await fetch(llmUrl);
     if (res?.ok) {
       llmInfo = await res.json();
     }

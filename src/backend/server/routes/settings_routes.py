@@ -404,9 +404,20 @@ def get_db_location_info():
 def get_llm_info():
     """API endpoint to report the LLM status."""
     try:
-        active_llm = get_active_llm_setting() or {}
-        provider = active_llm.get("provider", "openai")
-        model = active_llm.get("model", "gpt-4o")
+        # Get user/org context from query params or session
+        user_concept_id = request.args.get("user_concept_id") or session.get(
+            "user_concept_id"
+        )
+        org_concept_id = request.args.get(
+            "organisation_concept_id"
+        ) or request.args.get("organization_concept_id")
+
+        resolved = resolve_llm_setting(
+            user_concept_id=user_concept_id, org_concept_id=org_concept_id
+        )
+        active_llm = resolved or {}
+        provider = active_llm.get("provider")
+        model = active_llm.get("model")
 
         status = "unknown"
         error_message = None
@@ -646,7 +657,7 @@ def save_all_settings():
             llm_data = data["active_llm"]
             provider = llm_data.get("provider")
             model = llm_data.get("model")
-            scope = llm_data.get("scope")  # optional: user/organisation override
+            scope = llm_data.get("scope")  # required: user or organisation
             concept_id = llm_data.get("concept_id")
             if scope in ("user", "organisation") and concept_id and provider and model:
                 ok = (
@@ -656,12 +667,12 @@ def save_all_settings():
                 )
                 if ok:
                     current_app.logger.info(
-                        f"Scoped LLM override set scope={scope} concept={concept_id} provider={provider} model={model}"
+                        f"Scoped LLM set scope={scope} concept={concept_id} provider={provider} model={model}"
                     )
             elif provider and model:
-                set_active_llm_setting(provider, model)
-                current_app.logger.info(
-                    f"Active LLM set to: Provider={provider}, Model={model}"
+                # No global setting allowed - require user context
+                current_app.logger.warning(
+                    f"LLM setting rejected: no user/org scope provided. provider={provider} model={model}"
                 )
 
         if "openai_api_key_env_var" in data and data["openai_api_key_env_var"]:

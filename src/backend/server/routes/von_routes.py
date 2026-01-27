@@ -18,7 +18,7 @@ from typing import Any
 from src.workflows.onboarding_workflow import run_onboarding_workflow
 from ...languagemodels.llm_interface import get_llm_client, get_active_model_name
 from .settings_routes import get_all_settings_data
-from ...integrations.internal_mcp import ToolCallParsingError
+from ...integrations.internal_mcp import ProgressTracker, ToolCallParsingError
 from ...services import chat_history_service
 from ...services.window_session_context_service import (
     get_or_create_window_context,
@@ -636,6 +636,165 @@ def get_generation_progress(request_id: str):
     # Do not leak internal epoch detail to the UI.
     state.pop("updated_at_epoch", None)
     return jsonify(state), 200
+
+
+# ----------------- Background Tasks (JVNAUTOSCI-1038) -----------------
+
+from ...services.background_task_service import background_task_registry
+
+
+@von_bp.route("/api/task/status/<task_id>", methods=["GET"])
+def get_task_status(task_id: str):
+    """Get the status of a background task.
+
+    Returns:
+        200: Task status dict
+        400: Invalid task_id
+        404: Task not found
+    """
+    if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200:
+        return jsonify({"error": "Invalid task_id"}), 400
+
+    status = background_task_registry.get_task_status(task_id.strip())
+    if status is None:
+        return jsonify({"error": "Task not found", "task_id": task_id}), 404
+
+    return jsonify(status.to_dict()), 200
+
+
+@von_bp.route("/api/task/result/<task_id>", methods=["GET"])
+def get_task_result(task_id: str):
+    """Get the result of a completed background task.
+
+    Returns:
+        200: Task result (serialised OrchestratorResult or error)
+        400: Invalid task_id
+        404: Task not found
+        409: Task not yet completed or failed
+    """
+    if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200:
+        return jsonify({"error": "Invalid task_id"}), 400
+
+    status = background_task_registry.get_task_status(task_id.strip())
+    if status is None:
+        return jsonify({"error": "Task not found", "task_id": task_id}), 404
+
+    if status.status == "failed":
+        return (
+            jsonify(
+                {
+                    "error": "Task failed",
+                    "task_id": task_id,
+                    "detail": status.error,
+                }
+            ),
+            409,
+        )
+
+    if status.status not in ("completed",):
+        return (
+            jsonify(
+                {
+                    "error": "Task not completed",
+                    "task_id": task_id,
+                    "status": status.status,
+                }
+            ),
+            409,
+        )
+
+    # Serialise OrchestratorResult if that's what we have
+    result = status.result
+    if hasattr(result, "response_text"):
+        # It's an OrchestratorResult
+        serialised = {
+            "response_text": result.response_text,
+            "extra_messages": (
+                list(result.extra_messages) if result.extra_messages else []
+            ),
+            "tool_invocations": (
+                list(result.tool_invocations) if result.tool_invocations else []
+            ),
+        }
+        if hasattr(result, "llm_calls"):
+            serialised["llm_calls"] = list(result.llm_calls)
+        if hasattr(result, "llm_usage"):
+            serialised["llm_usage"] = result.llm_usage
+        return jsonify({"task_id": task_id, "result": serialised}), 200
+
+    # Generic result
+    return jsonify({"task_id": task_id, "result": result}), 200
+
+
+@von_bp.route("/api/task/cancel/<task_id>", methods=["POST"])
+def cancel_task(task_id: str):
+    """Request cancellation of a running background task.
+
+    Note: Actual cancellation depends on the task implementation cooperating.
+
+    Returns:
+        200: Cancellation requested
+        400: Invalid task_id
+        404: Task not found or already completed
+    """
+    if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 200:
+        return jsonify({"error": "Invalid task_id"}), 400
+
+    success = background_task_registry.request_cancellation(task_id.strip())
+    if not success:
+        return (
+            jsonify(
+                {
+                    "error": "Cannot cancel task",
+                    "task_id": task_id,
+                    "detail": "Task not found or already completed",
+                }
+            ),
+            404,
+        )
+
+    return (
+        jsonify(
+            {"success": True, "task_id": task_id, "message": "Cancellation requested"}
+        ),
+        200,
+    )
+
+
+@von_bp.route("/api/tasks", methods=["GET"])
+def list_tasks():
+    """List background tasks.
+
+    Query params:
+        status: Filter by status (pending, running, completed, failed, cancelled)
+        session_id: Filter by session ID (Phase 4)
+        user_id: Filter by user ID (Phase 4)
+
+    Returns:
+        200: List of task status dicts
+    """
+    status_filter = request.args.get("status")
+    if status_filter and status_filter not in (
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+    ):
+        return jsonify({"error": "Invalid status filter"}), 400
+
+    session_id = request.args.get("session_id")
+    user_id = request.args.get("user_id")
+
+    tasks = background_task_registry.list_tasks(
+        status_filter=status_filter,
+        session_id=session_id,
+        user_id=user_id,
+    )
+    return jsonify({"tasks": tasks}), 200
+
+
+# ----------------- End Background Tasks -----------------
 
 
 def _truncate_large_tool_results(
@@ -2111,6 +2270,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     else:
         request_id = str(uuid.uuid4())
 
+    # JVNAUTOSCI-1038: Background execution mode
+    background_mode = bool(data.get("background", False))
+
     presenter_mode_requested = bool(data.get("presenter_mode"))
 
     request_start_perf = time.perf_counter()
@@ -3179,6 +3341,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     # Defensive: never fail the request due to settings refresh.
                     pass
 
+                # JVNAUTOSCI-1038: Create request-scoped progress tracker
+                progress_tracker = None
                 if show_tool_use_progress:
 
                     def _progress_update(info: dict[str, Any]) -> None:
@@ -3190,29 +3354,130 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         payload.setdefault("request_id", request_id)
                         _set_tool_progress(progress_scope_key, request_id, payload)
 
-                    try:
-                        orchestrator.set_progress_callback(_progress_update)
-                    except Exception:
-                        pass
+                    progress_tracker = ProgressTracker(callback=_progress_update)
+
+                # JVNAUTOSCI-1038: Background execution mode
+                if background_mode:
+                    # Capture app context for background thread
+                    app = current_app._get_current_object()
+
+                    # Create progress tracker with cancellation support
+                    def _cancellation_checker() -> bool:
+                        return background_task_registry.is_cancellation_requested(
+                            request_id
+                        )
+
+                    # Override progress_tracker with cancellation-aware version
+                    progress_tracker = ProgressTracker(
+                        callback=_progress_update if show_tool_use_progress else None,
+                        cancellation_checker=_cancellation_checker,
+                        task_id=request_id,
+                    )
+
+                    # JVNAUTOSCI-1038 Phase 4: Capture history context for persistence
+                    bg_history_user_id = history_user_id
+                    bg_session_id = session_id
+                    bg_user_concept_id = user_concept_id
+
+                    def _run_in_background() -> Any:
+                        """Execute orchestrator.run() in background with app context.
+
+                        Phase 4: Also persists results to chat history on completion.
+                        """
+                        with app.app_context():
+                            result = orchestrator.run(
+                                prompt=prompt_text,
+                                context=enhanced_context,
+                                llm_client=llm_client,
+                                model=model_name,
+                                user_namespace=user_namespace,
+                                gmail_profile=request_gmail_profile,
+                                auxiliary_system_prompt=auxiliary_system_prompt,
+                                preferred_language=request_language,
+                                progress_tracker=progress_tracker,
+                            )
+
+                            # Phase 4: Persist to chat history
+                            if bg_history_user_id:
+                                try:
+                                    # Store user message
+                                    chat_history_service.add_message_to_history(
+                                        bg_history_user_id,
+                                        bg_session_id,
+                                        {
+                                            "role": "user",
+                                            "content": prompt_text,
+                                            "author_user_id": bg_user_concept_id,
+                                            "background_task_id": request_id,
+                                        },
+                                    )
+                                    # Store tool messages
+                                    tool_messages = [
+                                        dict(msg) for msg in result.extra_messages
+                                    ]
+                                    for tool_msg in _truncate_large_tool_results(
+                                        tool_messages, max_tool_content_chars=5000
+                                    ):
+                                        chat_history_service.add_message_to_history(
+                                            bg_history_user_id,
+                                            bg_session_id,
+                                            tool_msg,
+                                        )
+                                    # Store assistant response
+                                    chat_history_service.add_message_to_history(
+                                        bg_history_user_id,
+                                        bg_session_id,
+                                        {
+                                            "role": "assistant",
+                                            "content": result.response_text,
+                                            "background_task_id": request_id,
+                                        },
+                                    )
+                                except Exception as hist_exc:
+                                    _logger.warning(
+                                        "[background] Failed to persist history: %s",
+                                        hist_exc,
+                                    )
+
+                            return result
+
+                    # Submit to background registry with session context (Phase 4)
+                    task_status = background_task_registry.submit_task(
+                        task_id=request_id,
+                        callable=_run_in_background,
+                        progress_callback=(
+                            _progress_update if show_tool_use_progress else None
+                        ),
+                        session_id=bg_session_id,
+                        user_id=bg_history_user_id,
+                    )
+
+                    return (
+                        jsonify(
+                            {
+                                "background": True,
+                                "task_id": request_id,
+                                "status": task_status.status,
+                                "message": "Task submitted for background execution",
+                                "status_url": f"/von/api/task/status/{request_id}",
+                                "result_url": f"/von/api/task/result/{request_id}",
+                            }
+                        ),
+                        202,
+                    )
 
                 orchestrator_start_perf = time.perf_counter()
-                try:
-                    orchestrator_result = orchestrator.run(
-                        prompt=prompt_text,
-                        context=enhanced_context,
-                        llm_client=llm_client,
-                        model=model_name,
-                        user_namespace=user_namespace,
-                        gmail_profile=request_gmail_profile,
-                        auxiliary_system_prompt=auxiliary_system_prompt,
-                        preferred_language=request_language,
-                    )
-                finally:
-                    if show_tool_use_progress:
-                        try:
-                            orchestrator.set_progress_callback(None)
-                        except Exception:
-                            pass
+                orchestrator_result = orchestrator.run(
+                    prompt=prompt_text,
+                    context=enhanced_context,
+                    llm_client=llm_client,
+                    model=model_name,
+                    user_namespace=user_namespace,
+                    gmail_profile=request_gmail_profile,
+                    auxiliary_system_prompt=auxiliary_system_prompt,
+                    preferred_language=request_language,
+                    progress_tracker=progress_tracker,
+                )
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf
                 ) * 1000.0

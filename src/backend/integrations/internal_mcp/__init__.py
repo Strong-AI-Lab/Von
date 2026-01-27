@@ -15,8 +15,10 @@ from .catalogue import build_default_catalogue
 from .transport import InternalMCPTransport
 from .schemas import Schema, SchemaValidationError, validate_payload
 from .orchestrator import (
+    CancellationRequested,
     InternalMCPChatOrchestrator,
     OrchestratorResult,
+    ProgressTracker,
     ToolCallParsingError,
 )
 
@@ -30,7 +32,9 @@ __all__ = [
     "validate_payload",
     "build_default_catalogue",
     "InternalMCPTransport",
+    "CancellationRequested",
     "InternalMCPChatOrchestrator",
     "OrchestratorResult",
+    "ProgressTracker",
     "ToolCallParsingError",
 ]

@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any, Mapping, Optional
 
-from .settings_service import get_active_llm_setting
+from .settings_service import resolve_llm_setting
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,24 @@ def _load_registry_from_vontology(
 
 
 def _build_registry_from_settings() -> Mapping[str, Any]:
-    active = get_active_llm_setting() or {}
+    # Get user/org context from session for resolved LLM setting
+    user_concept_id = None
+    org_concept_id = None
+    try:
+        from flask import session, has_request_context
+
+        if has_request_context():
+            user_concept_id = session.get("user_concept_id")
+            org_concept_id = session.get("organisation_concept_id")
+    except Exception:
+        pass
+
+    active = (
+        resolve_llm_setting(
+            user_concept_id=user_concept_id, org_concept_id=org_concept_id
+        )
+        or {}
+    )
     provider = active.get("provider") if isinstance(active, dict) else None
     model = active.get("model") if isinstance(active, dict) else None
     locality = "external"

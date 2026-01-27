@@ -38,7 +38,7 @@ except ImportError:  # pragma: no cover - optional dependency
 if genai is not None:
     # Cast to Any so Pyright doesn't complain about dynamic attrs
     genai = cast(Any, genai)
-from ..services.settings_service import get_active_llm_setting, get_openai_env_var
+from ..services.settings_service import resolve_llm_setting, get_openai_env_var
 import time
 from collections import defaultdict
 
@@ -368,8 +368,20 @@ def initialize_clients(force: bool = False):
     if _openai_client is None or openai_settings_changed:
         try:
             if current_env_var and current_key:
-                # Get current model from settings for validation
-                active_llm = get_active_llm_setting()
+                # Get current model from settings for validation (try session context first)
+                user_concept_id = None
+                org_concept_id = None
+                try:
+                    from flask import session, has_request_context
+
+                    if has_request_context():
+                        user_concept_id = session.get("user_concept_id")
+                        org_concept_id = session.get("organisation_concept_id")
+                except Exception:
+                    pass
+                active_llm = resolve_llm_setting(
+                    user_concept_id=user_concept_id, org_concept_id=org_concept_id
+                )
                 current_model = active_llm.get("model", "") if active_llm else ""
                 resolved_model = resolve_openai_model_name(current_model)
 
@@ -1619,29 +1631,22 @@ def validate_openai_config(
 
 def get_active_model_name() -> Optional[str]:
     """Helper function to get the model name from the active LLM setting."""
-    # Try to get user/org context from session if available
+    # Get user/org context from session if available
+    user_concept_id = None
+    org_concept_id = None
     try:
         from flask import session, has_request_context
         from ..security.access_control import get_effective_user_concept_id
-        from ..services.settings_service import resolve_llm_setting
 
         if has_request_context():
             user_concept_id = get_effective_user_concept_id()
             org_concept_id = session.get("organisation_concept_id")
-            active_llm = resolve_llm_setting(
-                user_concept_id=user_concept_id, org_concept_id=org_concept_id
-            )
-            if active_llm:
-                provider = active_llm.get("provider")
-                model = active_llm.get("model")
-                if provider == "openai":
-                    return resolve_openai_model_name(model)
-                return model
     except Exception:
         pass
 
-    # Fallback to global setting
-    active_llm = get_active_llm_setting()
+    active_llm = resolve_llm_setting(
+        user_concept_id=user_concept_id, org_concept_id=org_concept_id
+    )
     if active_llm:
         provider = active_llm.get("provider")
         model = active_llm.get("model")

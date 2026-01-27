@@ -103,12 +103,17 @@ def sanitise_rendered_html(html: str) -> str:
     of tags/attributes required for chat and concept notes rendering.
     """
 
+    from bs4 import Tag
+
     soup = BeautifulSoup(html or "", "html.parser")
 
     for bad in soup.find_all(list(_DISALLOWED_TAGS)):
         bad.decompose()
 
-    for tag in soup.find_all(True):
+    for element in soup.find_all(True):
+        if not isinstance(element, Tag):
+            continue
+        tag: Tag = element
         if tag.name not in _ALLOWED_TAGS:
             tag.unwrap()
             continue

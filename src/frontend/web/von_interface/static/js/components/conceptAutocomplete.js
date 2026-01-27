@@ -25,15 +25,25 @@ const MAX_QUERY_CHARS = 80;
 const INCLUDE_INDIVIDUALS = true;
 const FALLBACK_SUBSTRING = true;
 
-let autocompleteState = {
-    isOpen: false,
-    selectedIndex: -1,
-    results: [],
-    triggerPos: null,
-    textarea: null,
-    searchTimeout: null,
-    dropdownPointerDown: false,
-};
+// Per-textarea state to avoid race conditions when multiple textareas exist (e.g. multiple chat tabs)
+const textareaStates = new WeakMap();
+
+function getOrCreateState(textarea) {
+    if (!textareaStates.has(textarea)) {
+        textareaStates.set(textarea, {
+            isOpen: false,
+            selectedIndex: -1,
+            results: [],
+            triggerPos: null,
+            searchTimeout: null,
+            dropdownPointerDown: false,
+        });
+    }
+    return textareaStates.get(textarea);
+}
+
+// Track the currently active textarea for the dropdown
+let activeTextarea = null;
 
 /**
  * Create autocomplete dropdown element
@@ -54,12 +64,18 @@ function createDropdown() {
 
     // Track pointer state so blur on the textarea does not close before click handlers run
     dropdown.addEventListener('pointerdown', () => {
-        autocompleteState.dropdownPointerDown = true;
+        if (activeTextarea) {
+            const state = getOrCreateState(activeTextarea);
+            state.dropdownPointerDown = true;
+        }
     });
     dropdown.addEventListener('pointerup', () => {
         // Release after click dispatches
         setTimeout(() => {
-            autocompleteState.dropdownPointerDown = false;
+            if (activeTextarea) {
+                const state = getOrCreateState(activeTextarea);
+                state.dropdownPointerDown = false;
+            }
         }, 0);
     });
     return dropdown;
@@ -73,9 +89,12 @@ export function closeAutocomplete() {
     if (dropdown) {
         dropdown.style.display = 'none';
     }
-    autocompleteState.isOpen = false;
-    autocompleteState.selectedIndex = -1;
-    autocompleteState.results = [];
+    if (activeTextarea) {
+        const state = getOrCreateState(activeTextarea);
+        state.isOpen = false;
+        state.selectedIndex = -1;
+        state.results = [];
+    }
 }
 
 // Export for testing
@@ -91,8 +110,10 @@ export function buildConceptSearchUrl(query) {
 
 /**
  * Search for concepts matching the query
+ * @param {string} query - Search query
+ * @param {HTMLElement} originTextarea - The textarea that initiated the search (for race condition protection)
  */
-async function searchConcepts(query) {
+async function searchConcepts(query, originTextarea) {
     try {
         if (!query || (typeof query === 'string' && query.length < 1)) {
             closeAutocomplete();
@@ -100,6 +121,12 @@ async function searchConcepts(query) {
         }
 
         const response = await fetch(buildConceptSearchUrl(query));
+
+        // Race condition guard: if the active textarea changed while we were fetching, abort
+        if (activeTextarea !== originTextarea) {
+            console.log('[conceptAutocomplete] Discarding stale search results (textarea changed)');
+            return;
+        }
 
         if (!response.ok) {
             console.warn('Concept search failed:', response.status);
@@ -110,9 +137,16 @@ async function searchConcepts(query) {
         const data = await response.json();
         const results = Array.isArray(data.results) ? data.results : [];
 
-        // Update state
-        autocompleteState.results = results;
-        autocompleteState.selectedIndex = -1;
+        // Race condition guard again after parsing
+        if (activeTextarea !== originTextarea) {
+            console.log('[conceptAutocomplete] Discarding stale search results (textarea changed)');
+            return;
+        }
+
+        // Update state for this textarea
+        const state = getOrCreateState(originTextarea);
+        state.results = results;
+        state.selectedIndex = -1;
 
         if (results.length === 0) {
             closeAutocomplete();
@@ -170,6 +204,9 @@ function renderDropdown(results) {
     // Clear previous items
     dropdown.innerHTML = '';
 
+    // Get state for active textarea
+    const state = activeTextarea ? getOrCreateState(activeTextarea) : null;
+
     // Create result items
     results.forEach((result, index) => {
         const item = document.createElement('div');
@@ -222,7 +259,7 @@ function renderDropdown(results) {
         // Hover effect
         item.addEventListener('mouseenter', () => {
             item.style.backgroundColor = '#f5f5f5';
-            autocompleteState.selectedIndex = index;
+            if (state) state.selectedIndex = index;
             updateItemSelection();
         });
 
@@ -243,24 +280,26 @@ function renderDropdown(results) {
     });
 
     // Position dropdown below the textarea
-    if (autocompleteState.textarea) {
-        const rect = autocompleteState.textarea.getBoundingClientRect();
+    if (activeTextarea) {
+        const rect = activeTextarea.getBoundingClientRect();
         dropdown.style.top = `${rect.bottom + window.scrollY}px`;
         dropdown.style.left = `${rect.left + window.scrollX}px`;
         dropdown.style.width = `${Math.max(rect.width, 250)}px`;
     }
 
     dropdown.style.display = 'block';
-    autocompleteState.isOpen = true;
+    if (state) state.isOpen = true;
 }
 
 /**
  * Update visual selection of items
  */
 function updateItemSelection() {
+    const state = activeTextarea ? getOrCreateState(activeTextarea) : null;
+    const selectedIndex = state ? state.selectedIndex : -1;
     const items = document.querySelectorAll('.concept-autocomplete-item');
     items.forEach((item, index) => {
-        if (index === autocompleteState.selectedIndex) {
+        if (index === selectedIndex) {
             item.style.backgroundColor = '#e3f2fd';
             item.style.fontWeight = '600';
         } else {
@@ -274,7 +313,7 @@ function updateItemSelection() {
  * Insert selected concept ID into textarea
  */
 function insertConcept(conceptId) {
-    const ta = autocompleteState.textarea;
+    const ta = activeTextarea;
     if (!ta || !ta.value) {
         console.warn('[conceptAutocomplete] insertConcept called with invalid textarea');
         return;
@@ -339,17 +378,20 @@ function insertConcept(conceptId) {
  * Handle keyboard navigation in dropdown
  */
 function handleKeydown(event) {
-    if (!autocompleteState.isOpen || autocompleteState.results.length === 0) {
+    const ta = event.target;
+    const state = getOrCreateState(ta);
+
+    if (!state.isOpen || state.results.length === 0) {
         return;
     }
 
-    const itemCount = autocompleteState.results.length;
+    const itemCount = state.results.length;
 
     switch (event.key) {
         case 'ArrowDown':
             event.preventDefault();
-            autocompleteState.selectedIndex = Math.min(
-                autocompleteState.selectedIndex + 1,
+            state.selectedIndex = Math.min(
+                state.selectedIndex + 1,
                 itemCount - 1
             );
             updateItemSelection();
@@ -357,8 +399,8 @@ function handleKeydown(event) {
 
         case 'ArrowUp':
             event.preventDefault();
-            autocompleteState.selectedIndex = Math.max(
-                autocompleteState.selectedIndex - 1,
+            state.selectedIndex = Math.max(
+                state.selectedIndex - 1,
                 0
             );
             updateItemSelection();
@@ -366,8 +408,8 @@ function handleKeydown(event) {
 
         case 'Enter':
             event.preventDefault();
-            if (autocompleteState.selectedIndex >= 0) {
-                const result = autocompleteState.results[autocompleteState.selectedIndex];
+            if (state.selectedIndex >= 0) {
+                const result = state.results[state.selectedIndex];
                 insertConcept(result.id);
                 closeAutocomplete();
             }
@@ -387,6 +429,10 @@ function handleInput(event) {
     const ta = event.target;
     const text = ta.value;
     const cursorPos = ta.selectionStart;
+
+    // Set this textarea as the active one for autocomplete
+    activeTextarea = ta;
+    const state = getOrCreateState(ta);
 
     const trigger = getTriggerSearchText(text, cursorPos);
     if (!trigger) {
@@ -411,10 +457,11 @@ function handleInput(event) {
         return;
     }
 
-    // Debounce search
-    clearTimeout(autocompleteState.searchTimeout);
-    autocompleteState.searchTimeout = setTimeout(() => {
-        searchConcepts(searchText);
+    // Debounce search - capture the textarea for race condition protection
+    clearTimeout(state.searchTimeout);
+    const originTextarea = ta;
+    state.searchTimeout = setTimeout(() => {
+        searchConcepts(searchText, originTextarea);
     }, DEBOUNCE_MS);
 }
 
@@ -424,18 +471,24 @@ function handleInput(event) {
 export function initializeConceptAutocomplete(textareaElement) {
     if (!textareaElement) return;
 
-    // Store reference
-    autocompleteState.textarea = textareaElement;
+    // Create per-textarea state (will be retrieved by handlers via getOrCreateState)
+    getOrCreateState(textareaElement);
 
     // Attach event listeners
     textareaElement.addEventListener('input', handleInput);
     textareaElement.addEventListener('keydown', handleKeydown);
 
+    // Set as active on focus to handle tab switches
+    textareaElement.addEventListener('focus', () => {
+        activeTextarea = textareaElement;
+    });
+
     // Close on blur
     textareaElement.addEventListener('blur', () => {
+        const state = getOrCreateState(textareaElement);
         // Delay to allow click on dropdown items
         setTimeout(() => {
-            if (!autocompleteState.dropdownPointerDown) {
+            if (!state.dropdownPointerDown) {
                 closeAutocomplete();
             }
         }, 150);
@@ -462,5 +515,8 @@ export function initializeConceptAutocompleteOnAll(selector) {
  */
 export function cleanupConceptAutocomplete() {
     closeAutocomplete();
-    clearTimeout(autocompleteState.searchTimeout);
+    if (activeTextarea) {
+        const state = getOrCreateState(activeTextarea);
+        clearTimeout(state.searchTimeout);
+    }
 }
