@@ -327,3 +327,103 @@ def respond_to_invite(
         {"_id": 0},
     )
     return updated if isinstance(updated, dict) else None
+
+
+def revoke_invites_for_session(
+    *,
+    session_id: str,
+    exclude_user_ids: Optional[List[str]] = None,
+    reason: str = "conversation_moved",
+) -> Dict[str, Any]:
+    """Revoke pending and accepted invites for a session.
+
+    Used when moving a conversation to a new organisation to invalidate
+    invites for users who are not members of the target organisation.
+
+    Args:
+        session_id: The conversation session ID
+        exclude_user_ids: Users to keep invites for (e.g., members of new org)
+        reason: Reason for revocation (stored in invite document)
+
+    Returns:
+        Dictionary with revoked count and affected invitee IDs
+    """
+    coll = _get_collection()
+    if coll is None:
+        return {"revoked_count": 0, "invitee_ids": [], "error": "Database unavailable"}
+
+    if not isinstance(session_id, str) or not session_id.strip():
+        return {"revoked_count": 0, "invitee_ids": [], "error": "session_id required"}
+
+    session_id = session_id.strip()
+    exclude_set = set()
+    if exclude_user_ids:
+        for uid in exclude_user_ids:
+            if isinstance(uid, str) and uid.strip():
+                exclude_set.add(uid.strip())
+
+    now = _utcnow()
+
+    # Find active invites (pending or accepted) for this session
+    query: Dict[str, Any] = {
+        "session_id": session_id,
+        "status": {"$in": ["pending", "accepted"]},
+    }
+    if exclude_set:
+        query["invitee_user_id"] = {"$nin": list(exclude_set)}
+
+    # Get the invitees being revoked before updating
+    cursor = coll.find(query, {"_id": 0, "invitee_user_id": 1, "invite_id": 1})
+    affected = [(doc.get("invitee_user_id"), doc.get("invite_id")) for doc in cursor]
+    invitee_ids = [uid for uid, _ in affected if uid]
+    invite_ids = [iid for _, iid in affected if iid]
+
+    if not invite_ids:
+        return {"revoked_count": 0, "invitee_ids": []}
+
+    result = coll.update_many(
+        {"invite_id": {"$in": invite_ids}},
+        {
+            "$set": {
+                "status": "revoked",
+                "revoked_at": now,
+                "revoke_reason": reason,
+                "updated_at": now,
+            }
+        },
+    )
+
+    return {
+        "revoked_count": getattr(result, "modified_count", 0),
+        "invitee_ids": invitee_ids,
+        "invite_ids": invite_ids,
+    }
+
+
+def list_active_invites_for_session(*, session_id: str) -> List[Dict[str, Any]]:
+    """List all pending or accepted invites for a session.
+
+    Used to check what shared access exists before moving a conversation.
+
+    Args:
+        session_id: The conversation session ID
+
+    Returns:
+        List of invite documents (excluding _id)
+    """
+    coll = _get_collection()
+    if coll is None:
+        return []
+
+    if not isinstance(session_id, str) or not session_id.strip():
+        return []
+
+    cursor = coll.find(
+        {
+            "session_id": session_id.strip(),
+            "status": {"$in": ["pending", "accepted"]},
+        },
+        {"_id": 0},
+    ).sort("updated_at", DESCENDING)
+
+    return [doc for doc in cursor if isinstance(doc, dict)]

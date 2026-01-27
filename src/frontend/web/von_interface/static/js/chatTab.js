@@ -1,6 +1,7 @@
 // Chat Tab Module
 import { annotateTurn, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
+import { loadMyOrganisations } from './components/orgSelector.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { elements, getCurrentUserConceptId, renderSpanSuggestions } from './domUtils.js';
 import { isAnnotationEnabled } from './featureFlags.js';
@@ -3550,6 +3551,143 @@ async function assignChatSessionToCurrentOrg(sessionId) {
     }
 }
 
+/**
+ * JVNAUTOSCI-1039: Move a conversation to a different organisation.
+ * Shows a simple selection interface for the user's other organisations.
+ */
+async function promptMoveToOrganisation(sessionId) {
+    const sid = String(sessionId || '').trim();
+    if (!sid) return;
+
+    const session = _getSessionMetaById(sid);
+    const currentOrgId = _getOrgConceptIdFromNamespace(session?.namespace);
+
+    // Load user's organisations
+    let organisations;
+    try {
+        organisations = await loadMyOrganisations();
+    } catch (e) {
+        console.error('Error loading organisations:', e);
+        showToast('Unable to load organisations.', 'error');
+        return;
+    }
+
+    if (!organisations || organisations.length === 0) {
+        showToast('You are not a member of any organisations.', 'info');
+        return;
+    }
+
+    // Filter out current org
+    const otherOrgs = organisations.filter((org) => {
+        const orgId = org.concept_id || org.id;
+        const normOrg = orgId?.startsWith('#V#') ? orgId : `#V#${orgId}`;
+        return normOrg !== currentOrgId;
+    });
+
+    if (otherOrgs.length === 0) {
+        showToast('No other organisations available to move to.', 'info');
+        return;
+    }
+
+    // Build a simple select element for organisation choice
+    const selectId = `move-org-select-${Date.now()}`;
+    const optionsHtml = otherOrgs.map((org) => {
+        const id = org.concept_id || org.id;
+        const name = org.name || id;
+        const role = org.role || '';
+        return `<option value="${id}">${name}${role ? ` (${role})` : ''}</option>`;
+    }).join('');
+
+    const confirmed = await new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.className = 'move-org-modal-overlay';
+        modal.innerHTML = `
+            <div class="move-org-modal">
+                <h3>Move Conversation</h3>
+                <p>Select the organisation to move this conversation to:</p>
+                <select id="${selectId}" class="move-org-select">
+                    ${optionsHtml}
+                </select>
+                <p class="move-org-warning">Note: Shared access may be revoked for users not in the target organisation.</p>
+                <div class="move-org-buttons">
+                    <button type="button" class="btn-cancel">Cancel</button>
+                    <button type="button" class="btn-move">Move</button>
+                </div>
+            </div>
+        `;
+
+        const cleanup = () => {
+            modal.remove();
+        };
+
+        modal.querySelector('.btn-cancel').addEventListener('click', () => {
+            cleanup();
+            resolve(null);
+        });
+
+        modal.querySelector('.btn-move').addEventListener('click', () => {
+            const select = document.getElementById(selectId);
+            const targetOrgId = select?.value;
+            cleanup();
+            resolve(targetOrgId);
+        });
+
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                cleanup();
+                resolve(null);
+            }
+        });
+
+        document.body.appendChild(modal);
+    });
+
+    if (!confirmed) return;
+
+    // Call the move API
+    try {
+        const resp = await postJson('/von/api/session/move_chat_session_org', {
+            session_id: sid,
+            target_organisation_id: confirmed
+        });
+
+        if (resp?.status === 'moved') {
+            const revokedCount = resp.invites_revoked || 0;
+
+            // Remove conversation from current view since it now belongs to a different namespace
+            sessionTabsCache = sessionTabsCache.filter((s) => String(s?.session_id || '') !== sid);
+
+            // If moved the active session, switch to first available or null
+            if (activeChatSessionId === sid) {
+                const nextSession = sessionTabsCache.find(s => s?.session_id);
+                if (nextSession) {
+                    await switchToChatSession(nextSession.session_id);
+                } else {
+                    activeChatSessionId = null;
+                    activeChatSessionName = null;
+                    _clearChatSessionMetadata();
+                }
+            }
+
+            let msg = 'Conversation moved successfully.';
+            if (revokedCount > 0) {
+                msg += ` ${revokedCount} shared invite(s) revoked.`;
+            }
+            showToast(msg, 'success');
+
+            renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+        } else if (resp?.status === 'ok') {
+            showToast(resp.message || 'Conversation already in target organisation.', 'info');
+        } else {
+            throw new Error(resp?.error || 'Unknown error');
+        }
+    } catch (e) {
+        console.error('Move conversation error:', e);
+        const errorMsg = e?.message || 'Unable to move conversation.';
+        showToast(errorMsg, 'error');
+    }
+}
+
 async function _getConceptMetaForChatSession(conceptId) {
     const id = String(conceptId || '').trim();
     if (!id || !id.startsWith('#V#')) return null;
@@ -5139,6 +5277,18 @@ function renderChatSessionTabs(sessions, activeSessionId) {
                         if (window.confirm(`Delete this conversation? This cannot be undone.`)) {
                             void deleteConversation(sid);
                         }
+                    }
+                });
+            }
+
+            // JVNAUTOSCI-1039: Move to Organisation option for owned conversations
+            // Only show for non-shared conversations (user owns this conversation)
+            const isSharedConversation = !!(session?.shared_with_me || session?.shared_from_user_id || session?.invite_id);
+            if (!isSharedConversation) {
+                menuItems.push({
+                    label: 'Move to Organisation…',
+                    onClick: () => {
+                        void promptMoveToOrganisation(sid);
                     }
                 });
             }

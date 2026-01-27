@@ -6228,6 +6228,204 @@ def assign_chat_session_org():
         return jsonify({"error": str(e)}), 500
 
 
+@von_bp.route("/api/session/move_chat_session_org", methods=["POST"])
+def move_chat_session_org():
+    """Move a conversation the user owns to a different organisation.
+
+    JVNAUTOSCI-1039: Allows users who are members of multiple organisations
+    to move a conversation from one organisation context to another.
+
+    Request body:
+        session_id: The conversation to move
+        target_organisation_id: The organisation to move to
+
+    Security:
+        - User must be authenticated
+        - User must own the conversation
+        - User must be a member of both the current and target organisations
+        - Shared invites for users not in target org are revoked
+    """
+    try:
+        from ...services.organisation_membership_service import (
+            get_organisation_members,
+            get_user_memberships,
+        )
+        from ...services.shared_conversation_service import (
+            list_active_invites_for_session,
+            revoke_invites_for_session,
+        )
+        from ...services.episode_logging_service import log_episode
+
+        user_concept_id = session.get("user_concept_id")
+        if not user_concept_id:
+            return jsonify({"error": "Not authenticated"}), 401
+
+        data = request.get_json(silent=True) or {}
+        session_id = data.get("session_id")
+        target_org_id = _normalise_concept_id(
+            data.get("target_organisation_id") or data.get("organisation_id")
+        )
+
+        if not isinstance(session_id, str) or not session_id.strip():
+            return jsonify({"error": "session_id required"}), 400
+        session_id = session_id.strip()
+
+        if not target_org_id:
+            return jsonify({"error": "target_organisation_id required"}), 400
+
+        # Verify user is a member of the target organisation
+        memberships = get_user_memberships(user_concept_id)
+        user_org_ids = {
+            m.get("organisation_concept_id")
+            for m in memberships.get("memberships", [])
+            if m.get("organisation_concept_id")
+        }
+        if target_org_id not in user_org_ids:
+            return (
+                jsonify({"error": "Not a member of target organisation"}),
+                403,
+            )
+
+        coll = chat_history_service.get_chat_history_collection_service()
+        if coll is None:
+            return jsonify({"error": "Chat history unavailable"}), 503
+
+        # Find the conversation - must belong to this user
+        query = chat_history_service.build_chat_history_query(
+            user_id=user_concept_id,
+            session_id=session_id,
+            namespace=None,
+            include_legacy=True,
+        )
+        doc = coll.find_one(
+            query,
+            {
+                "namespace": 1,
+                "organisation_concept_id": 1,
+                "user_id": 1,
+                "session_id": 1,
+            },
+        )
+        if not isinstance(doc, dict):
+            return jsonify({"error": "Conversation not found"}), 404
+
+        # Verify ownership
+        doc_user_id = _normalise_concept_id(doc.get("user_id"))
+        if doc_user_id != user_concept_id:
+            return jsonify({"error": "Not the owner of this conversation"}), 403
+
+        # Check current organisation
+        current_org_id = _normalise_concept_id(doc.get("organisation_concept_id"))
+        current_namespace = doc.get("namespace")
+
+        if current_org_id == target_org_id:
+            return (
+                jsonify(
+                    {
+                        "status": "ok",
+                        "message": "Conversation already in target organisation",
+                        "namespace": current_namespace,
+                    }
+                ),
+                200,
+            )
+
+        # Derive new namespace for target organisation
+        target_namespace = _derive_namespace_for_user_org(
+            user_concept_id, target_org_id
+        )
+        if not target_namespace:
+            return jsonify({"error": "Unable to derive namespace for target org"}), 500
+
+        # Handle shared conversation invites
+        # Get members of the target org to determine which invites to keep
+        target_org_members = get_organisation_members(target_org_id)
+        target_member_ids = {
+            _normalise_concept_id(m.get("user_concept_id"))
+            for m in target_org_members.get("members", [])
+            if m.get("user_concept_id")
+        }
+
+        # Check existing invites
+        active_invites = list_active_invites_for_session(session_id=session_id)
+        invites_to_revoke = [
+            inv
+            for inv in active_invites
+            if _normalise_concept_id(inv.get("invitee_user_id"))
+            not in target_member_ids
+        ]
+
+        revoke_result = {"revoked_count": 0, "invitee_ids": []}
+        if invites_to_revoke:
+            # Filter out None values for type safety
+            valid_member_ids = [m for m in target_member_ids if m is not None]
+            revoke_result = revoke_invites_for_session(
+                session_id=session_id,
+                exclude_user_ids=valid_member_ids,
+                reason=f"conversation_moved_to_{target_org_id}",
+            )
+
+        # Update the conversation
+        update_fields = {
+            "namespace": target_namespace,
+            "organisation_concept_id": target_org_id,
+            "previous_namespace": current_namespace,
+            "previous_organisation_concept_id": current_org_id,
+            "moved_at": datetime.now(timezone.utc),
+            "moved_by": user_concept_id,
+        }
+
+        # Clear RAG indexed status so conversation will be re-indexed for new namespace
+        unset_fields = {
+            "rag_indexed_success": "",
+            "rag_indexed_failed": "",
+            "rag_indexed_at": "",
+        }
+
+        result = coll.update_one(
+            {"_id": doc.get("_id")},
+            {"$set": update_fields, "$unset": unset_fields},
+        )
+
+        # Log the move operation
+        log_episode(
+            episode_type="conversation_moved",
+            actor_user_id=user_concept_id,
+            organisation_concept_id=target_org_id,
+            session_id=session_id,
+            payload={
+                "from_organisation": current_org_id,
+                "to_organisation": target_org_id,
+                "from_namespace": current_namespace,
+                "to_namespace": target_namespace,
+                "invites_revoked": revoke_result.get("revoked_count", 0),
+                "revoked_invitee_ids": revoke_result.get("invitee_ids", []),
+            },
+            status="moved",
+        )
+
+        return (
+            jsonify(
+                {
+                    "status": "moved",
+                    "session_id": session_id,
+                    "namespace": target_namespace,
+                    "organisation_concept_id": target_org_id,
+                    "previous_namespace": current_namespace,
+                    "previous_organisation_concept_id": current_org_id,
+                    "matched": bool(getattr(result, "matched_count", 0) > 0),
+                    "updated": bool(getattr(result, "modified_count", 0) > 0),
+                    "invites_revoked": revoke_result.get("revoked_count", 0),
+                    "revoked_invitee_ids": revoke_result.get("invitee_ids", []),
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        print(f"Error moving chat session org: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @von_bp.route("/api/session/create_chat_session", methods=["POST"])
 def create_chat_session():
     """Create and switch to a new named chat session for the current user."""
