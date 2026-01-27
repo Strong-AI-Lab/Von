@@ -6,7 +6,12 @@
 
 const DEFAULT_CANCEL_SETTLE_MS = 120;
 
+// Chrome's Web Speech API has a bug where long utterances silently stop after ~15 seconds.
+// Workaround: periodically call pause()/resume() to keep the speech alive.
+const KEEPALIVE_INTERVAL_MS = 10000;
+
 let pendingSpeakTimerId = null;
+let keepaliveIntervalId = null;
 
 function clearPendingSpeakTimer(root) {
     if (!pendingSpeakTimerId) {
@@ -20,6 +25,40 @@ function clearPendingSpeakTimer(root) {
     }
 
     pendingSpeakTimerId = null;
+}
+
+function clearKeepaliveInterval(root) {
+    if (!keepaliveIntervalId) {
+        return;
+    }
+
+    try {
+        root?.clearInterval?.(keepaliveIntervalId);
+    } catch (_) {
+        // Ignore.
+    }
+
+    keepaliveIntervalId = null;
+}
+
+function startKeepaliveInterval(root) {
+    clearKeepaliveInterval(root);
+
+    if (!root || typeof root.setInterval !== 'function') {
+        return;
+    }
+
+    keepaliveIntervalId = root.setInterval(() => {
+        try {
+            // Chrome workaround: pause/resume to keep long utterances alive.
+            if (root.speechSynthesis && root.speechSynthesis.speaking && !root.speechSynthesis.paused) {
+                root.speechSynthesis.pause();
+                root.speechSynthesis.resume();
+            }
+        } catch (_) {
+            // Ignore errors during keepalive.
+        }
+    }, KEEPALIVE_INTERVAL_MS);
 }
 
 function getSpeechRecognitionCtor() {
@@ -159,6 +198,7 @@ export function stopSpeaking() {
     }
 
     clearPendingSpeakTimer(root);
+    clearKeepaliveInterval(root);
 
     try {
         root.speechSynthesis.cancel();
@@ -174,6 +214,7 @@ export function speakText(text, options = {}) {
     }
 
     clearPendingSpeakTimer(root);
+    clearKeepaliveInterval(root);
 
     // Prompt browsers (notably Chrome) to load voices early.
     try {
@@ -208,6 +249,11 @@ export function speakText(text, options = {}) {
         utterance.volume = options.volume;
     }
 
+    // Attach event listeners to clear keepalive when speech ends or errors.
+    const cleanupKeepalive = () => clearKeepaliveInterval(root);
+    utterance.onend = cleanupKeepalive;
+    utterance.onerror = cleanupKeepalive;
+
     // Prefer immediate playback (and avoid queueing multiple long utterances).
     try {
         root.speechSynthesis.cancel();
@@ -226,6 +272,8 @@ export function speakText(text, options = {}) {
         pendingSpeakTimerId = null;
         try {
             root.speechSynthesis.speak(utterance);
+            // Start the Chrome keepalive workaround after speech begins.
+            startKeepaliveInterval(root);
         } catch (_) {
             // Ignore.
         }

@@ -4343,6 +4343,9 @@ footer {
     width: 100%;
     background-color: #fff;
     border-radius: 6px;
+    /* Collapse any extra space from textarea margins */
+    display: flex;
+    flex-direction: column;
 }
 
 .prompt-input-wrapper.has-loading-detail {
@@ -4355,6 +4358,7 @@ footer {
     background: transparent;
     color: transparent;
     caret-color: #0f172a;
+    margin-bottom: 0;
 }
 
 .prompt-input-wrapper.has-overlay-caret .prompt-input {
