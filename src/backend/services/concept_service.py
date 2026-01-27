@@ -511,10 +511,11 @@ def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
             try:
                 from ..vontology.utils_vontology import is_type, is_predicate
 
-                if is_type(concept_doc):
-                    concept_doc["kind"] = "type"
-                elif is_predicate(concept_doc):
+                # Check predicate FIRST: predicates can have is_a_type_of relationships
+                if is_predicate(concept_doc):
                     concept_doc["kind"] = "predicate"
+                elif is_type(concept_doc):
+                    concept_doc["kind"] = "type"
                 else:
                     concept_doc["kind"] = "individual"
             except Exception:

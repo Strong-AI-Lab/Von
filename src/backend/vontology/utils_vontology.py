@@ -1483,10 +1483,12 @@ def get_vontology_node_content(identifier: str, *, reconstruct_md: bool = True) 
         pass
 
     # Compute kind using three-way classification: type, predicate, or individual
-    if is_type(doc):
-        computed_kind = "type"
-    elif is_predicate(doc):
+    # Check predicate FIRST: predicates can have is_a_type_of relationships
+    # (e.g., a predicate subtype), which would incorrectly match is_type().
+    if is_predicate(doc):
         computed_kind = "predicate"
+    elif is_type(doc):
+        computed_kind = "type"
     else:
         computed_kind = "individual"
 

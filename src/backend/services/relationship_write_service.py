@@ -137,10 +137,12 @@ def compute_kind_from_relationships(
     """
     node = {"relationships": dict(relationships) if relationships else {}}
 
-    if is_type(node):
-        return "type"
-    elif is_predicate(node):
+    # Check predicate FIRST: predicates can have is_a_type_of relationships
+    # (e.g., a predicate subtype), which would incorrectly match is_type().
+    if is_predicate(node):
         return "predicate"
+    elif is_type(node):
+        return "type"
     else:
         return "individual"
 

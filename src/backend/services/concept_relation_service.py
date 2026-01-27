@@ -392,10 +392,11 @@ def _resolve_concept_preview(
     kind = doc.get("kind")
     if not kind:
         try:
-            if is_type(doc):
-                kind = "type"
-            elif is_predicate(doc):
+            # Check predicate FIRST: predicates can have is_a_type_of relationships
+            if is_predicate(doc):
                 kind = "predicate"
+            elif is_type(doc):
+                kind = "type"
             else:
                 kind = "individual"
         except Exception:  # pragma: no cover

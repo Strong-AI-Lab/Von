@@ -71,10 +71,12 @@ def _determine_concept_kind(concept_doc: Dict[str, Any]) -> str:
         One of: "type", "predicate", "individual"
     """
     try:
-        if is_type(concept_doc):
-            return "type"
-        elif is_predicate(concept_doc):
+        # Check predicate FIRST: predicates can have is_a_type_of relationships
+        # (e.g., a predicate subtype), which would incorrectly match is_type().
+        if is_predicate(concept_doc):
             return "predicate"
+        elif is_type(concept_doc):
+            return "type"
         else:
             return "individual"
     except Exception as e:
