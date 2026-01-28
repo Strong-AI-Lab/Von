@@ -3440,6 +3440,7 @@ class InternalMCPChatOrchestrator:
         *,
         user_namespace: str | None,
         selected_gmail_profile: str | None,
+        conversation_session_id: str | None = None,
     ) -> _ToolCallPreflightResult:
         errors: list[str] = []
         warnings: list[str] = []
@@ -3476,6 +3477,7 @@ class InternalMCPChatOrchestrator:
                 schema=schema,
                 user_namespace=user_namespace,
                 selected_gmail_profile=selected_gmail_profile,
+                conversation_session_id=conversation_session_id,
             )
             if schema is None:
                 continue
@@ -3509,6 +3511,7 @@ class InternalMCPChatOrchestrator:
         schema: McpSchema | None,
         user_namespace: str | None,
         selected_gmail_profile: str | None,
+        conversation_session_id: str | None = None,
     ) -> None:
         if tool_name.startswith("gmail_"):
             if not payload.get("profile") and selected_gmail_profile:
@@ -3519,6 +3522,11 @@ class InternalMCPChatOrchestrator:
 
         if user_namespace and "namespace" not in payload:
             payload["namespace"] = user_namespace
+
+        # JVNAUTOSCI-1040: Inject conversation session ID for task_create
+        if tool_name == "task_create" and conversation_session_id:
+            if "originating_session_id" not in payload and "session_id" not in payload:
+                payload["originating_session_id"] = conversation_session_id
 
     def _tool_call_repair_enabled(self) -> bool:
         return os.getenv("VON_TOOL_CALL_REPAIR_ENABLE", "1").lower() in {
@@ -4838,6 +4846,7 @@ class InternalMCPChatOrchestrator:
         auxiliary_system_prompt: str | None = None,
         preferred_language: str | None = None,
         progress_tracker: ProgressTracker | None = None,
+        conversation_session_id: Optional[str] = None,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
@@ -5790,6 +5799,7 @@ class InternalMCPChatOrchestrator:
                 method_catalogue,
                 user_namespace=user_namespace,
                 selected_gmail_profile=selected_gmail_profile,
+                conversation_session_id=conversation_session_id,
             )
             if preflight.warnings:
                 try:
@@ -5829,6 +5839,7 @@ class InternalMCPChatOrchestrator:
                         method_catalogue,
                         user_namespace=user_namespace,
                         selected_gmail_profile=selected_gmail_profile,
+                        conversation_session_id=conversation_session_id,
                     )
                     if not preflight.errors:
                         tool_calls = repaired_calls
@@ -5994,6 +6005,7 @@ class InternalMCPChatOrchestrator:
                         schema=schema,
                         user_namespace=user_namespace,
                         selected_gmail_profile=selected_gmail_profile,
+                        conversation_session_id=conversation_session_id,
                     )
 
                     if tool_name.startswith("gmail_"):

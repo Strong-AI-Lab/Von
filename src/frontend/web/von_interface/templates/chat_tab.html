@@ -5,6 +5,11 @@
     <div class="chat-header">
       <h2 class="main-title">Talk to Von Neumarkt</h2>
       <div class="chat-header-controls" role="group" aria-label="Conversation tools">
+        <button id="taskPanelToggleBtn" class="chat-export-btn" type="button"
+          title="View and manage tasks" aria-label="Tasks">
+          <span class="btn-icon">📋</span>
+          <span id="taskCountBadge" class="task-count-badge hidden" aria-hidden="true"></span>
+        </button>
         <button id="inviteConversationBtn" class="chat-export-btn" type="button"
           title="Invite someone to this conversation" aria-label="Invite to conversation">
           <span class="btn-icon">👥</span>
@@ -164,6 +169,59 @@
     <div class="llm-popup-body">
       <div id="incomingInvitesList" class="invite-list" role="list"></div>
       <div id="incomingInvitesStatus" class="invite-status" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <!-- Task Panel (JVNAUTOSCI-1040) -->
+  <div id="taskPanel" class="llm-popup hidden task-panel" aria-hidden="true">
+    <div class="llm-popup-header">
+      <span>Tasks</span>
+      <div class="task-panel-header-actions">
+        <button id="refreshTasksBtn" class="btn-mini" title="Refresh tasks">🔄</button>
+        <button id="closeTaskPanel" class="btn-mini" title="Close">✕</button>
+      </div>
+    </div>
+    <div class="llm-popup-body">
+      <!-- Create task form -->
+      <div class="task-create-form">
+        <input id="newTaskTitle" type="text" class="task-input" placeholder="Task title…"
+          aria-label="Task title" maxlength="200" />
+        <textarea id="newTaskDescription" class="task-textarea" rows="2"
+          placeholder="Task description…" aria-label="Task description" maxlength="2000"></textarea>
+        <div class="task-create-row">
+          <select id="newTaskPriority" class="task-select" aria-label="Priority">
+            <option value="low">🟢 Low</option>
+            <option value="medium" selected>🟡 Medium</option>
+            <option value="high">🟠 High</option>
+            <option value="critical">🔴 Critical</option>
+          </select>
+          <button id="createTaskBtn" class="btn btn-primary task-create-btn" type="button">
+            Create Task
+          </button>
+        </div>
+      </div>
+
+      <!-- Filter controls -->
+      <div class="task-filter-row">
+        <label for="taskStatusFilter" class="task-filter-label">Filter:</label>
+        <select id="taskStatusFilter" class="task-select" aria-label="Filter by status">
+          <option value="all">All tasks</option>
+          <option value="pending">⏳ Pending</option>
+          <option value="in_progress">🔄 In Progress</option>
+          <option value="completed">✅ Completed</option>
+          <option value="cancelled">❌ Cancelled</option>
+          <option value="blocked">🚫 Blocked</option>
+        </select>
+      </div>
+
+      <!-- Task list -->
+      <div id="taskList" class="task-list" role="list" aria-label="Task list">
+        <div class="task-empty-state">
+          <span class="task-empty-icon">📋</span>
+          <p>No tasks yet</p>
+          <p class="task-empty-hint">Create a task using the form above</p>
+        </div>
+      </div>
     </div>
   </div>
 </div>

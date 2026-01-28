@@ -6257,6 +6257,205 @@ def _chat_introspect(
     }
 
 
+# --------------------------------------------------------------------------- #
+# Task management MCP handlers (JVNAUTOSCI-1040)
+# --------------------------------------------------------------------------- #
+
+
+def _task_create(**kwargs):
+    """Create a new task via the task management service."""
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskManagementError,
+        create_task,
+    )
+    from datetime import datetime
+
+    title = kwargs.get("title")
+    description = kwargs.get("description")
+    if not title or not isinstance(title, str) or not title.strip():
+        return {"success": False, "error": "Missing required parameter: title"}
+    if not description or not isinstance(description, str) or not description.strip():
+        return {"success": False, "error": "Missing required parameter: description"}
+
+    assignee_id = kwargs.get("assignee_id") or kwargs.get("assignee_concept_id")
+    session_id = kwargs.get("originating_session_id") or kwargs.get("session_id")
+    created_by = kwargs.get("created_by_concept_id") or kwargs.get("namespace")
+    priority = kwargs.get("priority", "medium")
+    org_id = kwargs.get("organisation_concept_id")
+
+    due_date = None
+    due_str = kwargs.get("due_date")
+    if due_str and isinstance(due_str, str):
+        try:
+            due_date = datetime.fromisoformat(due_str.replace("Z", "+00:00"))
+        except ValueError:
+            return {"success": False, "error": f"Invalid due_date format: {due_str}"}
+
+    try:
+        result = create_task(
+            title=title.strip(),
+            description=description.strip(),
+            assignee_concept_id=assignee_id,
+            originating_session_id=session_id,
+            created_by_concept_id=created_by,
+            due_date=due_date,
+            priority=priority,
+            organisation_concept_id=org_id,
+        )
+        result["success"] = True
+        return result
+    except InvalidTaskDataError as exc:
+        return {"success": False, "error": str(exc), "error_type": "invalid_data"}
+    except TaskManagementError as exc:
+        return {"success": False, "error": str(exc), "error_type": "task_error"}
+    except Exception as exc:
+        return {"success": False, "error": f"Unexpected error: {exc}"}
+
+
+def _task_get(**kwargs):
+    """Get a task by concept_id."""
+    from ...services.task_management_service import TaskNotFoundError, get_task
+
+    task_id = kwargs.get("task_concept_id") or kwargs.get("task_id")
+    if not task_id or not isinstance(task_id, str) or not task_id.strip():
+        return {
+            "success": False,
+            "error": "Missing required parameter: task_concept_id",
+        }
+
+    try:
+        result = get_task(task_id.strip())
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return {"success": False, "error": str(exc), "error_type": "not_found"}
+    except Exception as exc:
+        return {"success": False, "error": f"Unexpected error: {exc}"}
+
+
+def _task_list(**kwargs):
+    """List tasks with optional filters."""
+    from ...services.task_management_service import list_tasks, get_tasks_for_user
+
+    user_id = kwargs.get("user_concept_id") or kwargs.get("assignee_id")
+    status = kwargs.get("status_filter") or kwargs.get("status")
+    priority = kwargs.get("priority_filter") or kwargs.get("priority")
+    org_id = kwargs.get("organisation_concept_id")
+    limit = kwargs.get("limit", 50)
+
+    try:
+        limit = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        limit = 50
+
+    try:
+        if user_id and isinstance(user_id, str) and user_id.strip():
+            # Get tasks for a specific user
+            tasks = get_tasks_for_user(
+                user_id.strip(),
+                status_filter=status if isinstance(status, str) else None,
+                include_created=bool(kwargs.get("include_created", True)),
+            )
+        else:
+            # List tasks with filters
+            tasks = list_tasks(
+                organisation_concept_id=org_id,
+                status_filter=status if isinstance(status, str) else None,
+                priority_filter=priority if isinstance(priority, str) else None,
+                limit=limit,
+            )
+        return {"success": True, "tasks": tasks, "count": len(tasks)}
+    except Exception as exc:
+        return {"success": False, "error": f"Unexpected error: {exc}"}
+
+
+def _task_update_status(**kwargs):
+    """Update a task's status."""
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        update_task_status,
+    )
+
+    task_id = kwargs.get("task_concept_id") or kwargs.get("task_id")
+    status = kwargs.get("status")
+
+    if not task_id or not isinstance(task_id, str) or not task_id.strip():
+        return {
+            "success": False,
+            "error": "Missing required parameter: task_concept_id",
+        }
+    if not status or not isinstance(status, str) or not status.strip():
+        return {"success": False, "error": "Missing required parameter: status"}
+
+    try:
+        result = update_task_status(task_id.strip(), status.strip())
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return {"success": False, "error": str(exc), "error_type": "not_found"}
+    except InvalidTaskDataError as exc:
+        return {"success": False, "error": str(exc), "error_type": "invalid_data"}
+    except Exception as exc:
+        return {"success": False, "error": f"Unexpected error: {exc}"}
+
+
+def _task_assign(**kwargs):
+    """Assign a task to a user."""
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        assign_task,
+    )
+
+    task_id = kwargs.get("task_concept_id") or kwargs.get("task_id")
+    assignee_id = kwargs.get("assignee_concept_id") or kwargs.get("assignee_id")
+
+    if not task_id or not isinstance(task_id, str) or not task_id.strip():
+        return {
+            "success": False,
+            "error": "Missing required parameter: task_concept_id",
+        }
+    if not assignee_id or not isinstance(assignee_id, str) or not assignee_id.strip():
+        return {
+            "success": False,
+            "error": "Missing required parameter: assignee_concept_id",
+        }
+
+    try:
+        result = assign_task(task_id.strip(), assignee_id.strip())
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return {"success": False, "error": str(exc), "error_type": "not_found"}
+    except InvalidTaskDataError as exc:
+        return {"success": False, "error": str(exc), "error_type": "invalid_data"}
+    except Exception as exc:
+        return {"success": False, "error": f"Unexpected error: {exc}"}
+
+
+def _task_delete(**kwargs):
+    """Delete (cancel) a task."""
+    from ...services.task_management_service import TaskNotFoundError, delete_task
+
+    task_id = kwargs.get("task_concept_id") or kwargs.get("task_id")
+
+    if not task_id or not isinstance(task_id, str) or not task_id.strip():
+        return {
+            "success": False,
+            "error": "Missing required parameter: task_concept_id",
+        }
+
+    try:
+        deleted = delete_task(task_id.strip())
+        return {"success": True, "deleted": deleted, "task_concept_id": task_id.strip()}
+    except TaskNotFoundError as exc:
+        return {"success": False, "error": str(exc), "error_type": "not_found"}
+    except Exception as exc:
+        return {"success": False, "error": f"Unexpected error: {exc}"}
+
+
 def build_default_catalogue() -> MethodCatalogue:
     """Return a catalogue pre-populated with the baseline method set."""
 
@@ -7083,6 +7282,139 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Upsert Vontology text relations into the RAG vector-store so they are discoverable via search_knowledge_base. "
                 "Requires an explicit namespace."
+            ),
+        ),
+        # Task management MCP tools (JVNAUTOSCI-1040)
+        MethodDefinition(
+            name="task_create",
+            handler=_task_create,
+            input_schema=Schema(
+                required={"title": str, "description": str},
+                optional={
+                    "assignee_id": (str, type(None)),
+                    "assignee_concept_id": (str, type(None)),
+                    "originating_session_id": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "created_by_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "priority": (str,),
+                    "due_date": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Create a new task in Vontology.",
+            ),
+            output_schema=None,
+            category="write",
+            description=(
+                "Create a Von task (stored as a Vontology concept). Use this to track work items, "
+                "action items, or to-dos. Tasks can be assigned to users and linked to conversations. "
+                "Priority: low, medium, high, critical. Tasks start in 'pending' status."
+            ),
+        ),
+        MethodDefinition(
+            name="task_get",
+            handler=_task_get,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                },
+                allow_unknown=True,
+                description="Get a task by its concept_id.",
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Retrieve a Von task by its concept_id. Returns title, description, status, "
+                "priority, assignee, and other metadata."
+            ),
+        ),
+        MethodDefinition(
+            name="task_list",
+            handler=_task_list,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "user_concept_id": (str, type(None)),
+                    "assignee_id": (str, type(None)),
+                    "status_filter": (str, type(None)),
+                    "status": (str, type(None)),
+                    "priority_filter": (str, type(None)),
+                    "priority": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "limit": (int,),
+                    "include_created": (bool,),
+                },
+                allow_unknown=True,
+                description="List tasks with optional filters.",
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "List Von tasks. Filter by user (assignee), status, priority, or organisation. "
+                "If user_concept_id is provided, returns tasks assigned to that user. "
+                "Valid statuses: pending, in_progress, completed, cancelled, blocked."
+            ),
+        ),
+        MethodDefinition(
+            name="task_update_status",
+            handler=_task_update_status,
+            input_schema=Schema(
+                required={"status": str},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                },
+                allow_unknown=True,
+                description="Update a task's status.",
+            ),
+            output_schema=None,
+            category="write",
+            description=(
+                "Update the status of a Von task. Valid statuses: pending, in_progress, "
+                "completed, cancelled, blocked. Use this to track task progress."
+            ),
+        ),
+        MethodDefinition(
+            name="task_assign",
+            handler=_task_assign,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "assignee_concept_id": (str,),
+                    "assignee_id": (str,),
+                },
+                allow_unknown=True,
+                description="Assign a task to a user.",
+            ),
+            output_schema=None,
+            category="write",
+            description=(
+                "Assign or reassign a Von task to a user. The assignee_concept_id should be "
+                "a person or agent concept_id (e.g., #V#michael_witbrock)."
+            ),
+        ),
+        MethodDefinition(
+            name="task_delete",
+            handler=_task_delete,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                },
+                allow_unknown=True,
+                description="Delete (cancel) a task.",
+            ),
+            output_schema=None,
+            category="write",
+            description=(
+                "Delete a Von task by marking it as cancelled. The task remains in the system "
+                "but is no longer active."
             ),
         ),
     ]

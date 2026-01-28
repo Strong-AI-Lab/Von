@@ -1307,6 +1307,138 @@ async def list_tools() -> list[Tool]:
                 "required": ["prompt"],
             },
         ),
+        # Task management tools (JVNAUTOSCI-1040)
+        Tool(
+            name="create_task",
+            description="Create a task from a conversation. Tasks are stored as Vontology concepts with rich metadata. Optionally links to the originating conversation.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Brief task title (required)",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Detailed task description",
+                    },
+                    "assignee_concept_id": {
+                        "type": "string",
+                        "description": "Assignee's concept ID (e.g., '#V#user_abc')",
+                    },
+                    "creator_concept_id": {
+                        "type": "string",
+                        "description": "Creator's concept ID (e.g., '#V#user_abc')",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Chat session_id to link task to conversation",
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "ISO 8601 date string for due date",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "critical"],
+                        "default": "medium",
+                        "description": "Task priority level",
+                    },
+                    "organisation_concept_id": {
+                        "type": "string",
+                        "description": "Organisation context for the task",
+                    },
+                },
+                "required": ["title", "description"],
+            },
+        ),
+        Tool(
+            name="get_task",
+            description="Get details of a specific task by its concept ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string",
+                        "description": "The task's concept ID (e.g., '#V#task_abc123')",
+                    },
+                },
+                "required": ["task_concept_id"],
+            },
+        ),
+        Tool(
+            name="list_my_tasks",
+            description="List tasks assigned to a user, optionally filtered by status.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_concept_id": {
+                        "type": "string",
+                        "description": "User's concept ID to get tasks for",
+                    },
+                    "status_filter": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "in_progress",
+                            "completed",
+                            "cancelled",
+                            "blocked",
+                        ],
+                        "description": "Optional status filter",
+                    },
+                    "include_created": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "If true, also include tasks created by the user (not just assigned)",
+                    },
+                },
+                "required": ["user_concept_id"],
+            },
+        ),
+        Tool(
+            name="update_task_status",
+            description="Update the status of a task.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string",
+                        "description": "The task's concept ID",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "in_progress",
+                            "completed",
+                            "cancelled",
+                            "blocked",
+                        ],
+                        "description": "New task status",
+                    },
+                },
+                "required": ["task_concept_id", "status"],
+            },
+        ),
+        Tool(
+            name="assign_task",
+            description="Assign or reassign a task to a user.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string",
+                        "description": "The task's concept ID",
+                    },
+                    "assignee_concept_id": {
+                        "type": "string",
+                        "description": "The assignee's concept ID",
+                    },
+                },
+                "required": ["task_concept_id", "assignee_concept_id"],
+            },
+        ),
     ]
 
 
@@ -2508,6 +2640,97 @@ async def _handle_search_knowledge_base(arguments: dict[str, Any]) -> list[TextC
         return [_json_text({"error": f"Unexpected error: {exc}", "success": False})]
 
 
+# Task management handlers (JVNAUTOSCI-1040)
+async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
+    title = arguments.get("title")
+    description = arguments.get("description")
+    if not title or not description:
+        return [_json_error("Missing required parameters: title and description")]
+
+    try:
+        from src.backend.services.task_management_service import create_task
+
+        result = create_task(
+            title=title,
+            description=description,
+            assignee_concept_id=arguments.get("assignee_concept_id"),
+            created_by_concept_id=arguments.get("creator_concept_id"),
+            originating_session_id=arguments.get("session_id"),
+            due_date=arguments.get("due_date"),
+            priority=arguments.get("priority", "medium"),
+            organisation_concept_id=arguments.get("organisation_concept_id"),
+        )
+        return [_json_text({"success": True, **result})]
+    except Exception as exc:
+        return [_json_text({"error": str(exc), "success": False})]
+
+
+async def _handle_get_task(arguments: dict[str, Any]) -> list[TextContent]:
+    task_concept_id = arguments.get("task_concept_id")
+    if not task_concept_id:
+        return [_json_error("Missing required parameter: task_concept_id")]
+
+    try:
+        from src.backend.services.task_management_service import get_task
+
+        result = get_task(task_concept_id)
+        return [_json_text({"success": True, **result})]
+    except Exception as exc:
+        return [_json_text({"error": str(exc), "success": False})]
+
+
+async def _handle_list_my_tasks(arguments: dict[str, Any]) -> list[TextContent]:
+    user_concept_id = arguments.get("user_concept_id")
+    if not user_concept_id:
+        return [_json_error("Missing required parameter: user_concept_id")]
+
+    try:
+        from src.backend.services.task_management_service import get_tasks_for_user
+
+        tasks = get_tasks_for_user(
+            user_concept_id=user_concept_id,
+            status_filter=arguments.get("status_filter"),
+            include_created=arguments.get("include_created", False),
+        )
+        return [_json_text({"success": True, "tasks": tasks, "count": len(tasks)})]
+    except Exception as exc:
+        return [_json_text({"error": str(exc), "success": False})]
+
+
+async def _handle_update_task_status(arguments: dict[str, Any]) -> list[TextContent]:
+    task_concept_id = arguments.get("task_concept_id")
+    status = arguments.get("status")
+    if not task_concept_id or not status:
+        return [_json_error("Missing required parameters: task_concept_id and status")]
+
+    try:
+        from src.backend.services.task_management_service import update_task_status
+
+        result = update_task_status(task_concept_id, status)
+        return [_json_text({"success": True, **result})]
+    except Exception as exc:
+        return [_json_text({"error": str(exc), "success": False})]
+
+
+async def _handle_assign_task(arguments: dict[str, Any]) -> list[TextContent]:
+    task_concept_id = arguments.get("task_concept_id")
+    assignee_concept_id = arguments.get("assignee_concept_id")
+    if not task_concept_id or not assignee_concept_id:
+        return [
+            _json_error(
+                "Missing required parameters: task_concept_id and assignee_concept_id"
+            )
+        ]
+
+    try:
+        from src.backend.services.task_management_service import assign_task
+
+        result = assign_task(task_concept_id, assignee_concept_id)
+        return [_json_text({"success": True, **result})]
+    except Exception as exc:
+        return [_json_text({"error": str(exc), "success": False})]
+
+
 _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]]]] = {
     "get_context": _handle_get_context,
     "create_concepts": _handle_create_concepts,
@@ -2548,6 +2771,12 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "merge_concepts": _handle_merge_concepts,
     "update_concept": _handle_update_concept,
     "search_knowledge_base": _handle_search_knowledge_base,
+    # Task management handlers (JVNAUTOSCI-1040)
+    "create_task": _handle_create_task,
+    "get_task": _handle_get_task,
+    "list_my_tasks": _handle_list_my_tasks,
+    "update_task_status": _handle_update_task_status,
+    "assign_task": _handle_assign_task,
 }
 
 

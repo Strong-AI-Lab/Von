@@ -3,6 +3,7 @@ import { annotateTurn, getUserContext, getWindowSessionId, postJson, WINDOW_SESS
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { loadMyOrganisations } from './components/orgSelector.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
+import { initializeTaskPanel, isTaskPanelVisible, loadTasks, setCurrentSession as setTaskPanelSession, toggleTaskPanel } from './components/taskPanel.js';
 import { elements, getCurrentUserConceptId, renderSpanSuggestions } from './domUtils.js';
 import { isAnnotationEnabled } from './featureFlags.js';
 import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
@@ -3406,6 +3407,9 @@ function setActiveChatSession(sessionId, sessionName) {
             activeChatSessionOwnerId = String(cachedSession.shared_owner_user_id || '').trim() || null;
         }
     }
+
+    // JVNAUTOSCI-1040: Update task panel with new session
+    setTaskPanelSession(activeChatSessionId);
 }
 
 function getChatSessionTabsContainer() {
@@ -7799,6 +7803,20 @@ export function initializeChatTab() {
     void loadIncomingInvites({ silent: true });
     startIncomingInvitePolling();
 
+    // JVNAUTOSCI-1040: Initialize task panel
+    initializeTaskPanel();
+    const taskPanelToggleBtn = document.getElementById('taskPanelToggleBtn');
+    if (taskPanelToggleBtn) {
+        taskPanelToggleBtn.addEventListener('click', () => {
+            toggleTaskPanel();
+            // Load tasks when panel is opened
+            if (isTaskPanelVisible()) {
+                setTaskPanelSession(activeChatSessionId);
+                loadTasks(activeChatSessionId);
+            }
+        });
+    }
+
     // Load annotation toggle state from localStorage (default: false)
     const savedState = localStorage.getItem('annotationToggleEnabled');
     if (annotationToggle) {
@@ -9505,7 +9523,7 @@ export function __testOnly_resetChatTtsState() {
         // Ignore.
     }
 }
-export { formatChatTimestamp, showLlmDebugPopup, updateHistoryLength };
+export { formatChatTimestamp, showLlmDebugPopup, switchToChatSession, updateHistoryLength };
 
 
 

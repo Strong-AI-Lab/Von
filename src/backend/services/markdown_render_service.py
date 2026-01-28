@@ -104,6 +104,7 @@ def sanitise_rendered_html(html: str) -> str:
     """
 
     from bs4 import Tag
+    from typing import cast, Any
 
     soup = BeautifulSoup(html or "", "html.parser")
 
@@ -113,7 +114,7 @@ def sanitise_rendered_html(html: str) -> str:
     for element in soup.find_all(True):
         if not isinstance(element, Tag):
             continue
-        tag: Tag = element
+        tag = cast(Any, element)  # bs4 Tag - type checker doesn't handle find_all well
         if tag.name not in _ALLOWED_TAGS:
             tag.unwrap()
             continue

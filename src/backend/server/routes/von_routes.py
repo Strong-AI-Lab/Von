@@ -3395,6 +3395,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 auxiliary_system_prompt=auxiliary_system_prompt,
                                 preferred_language=request_language,
                                 progress_tracker=progress_tracker,
+                                conversation_session_id=bg_session_id,
                             )
 
                             # Phase 4: Persist to chat history
@@ -3477,6 +3478,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     auxiliary_system_prompt=auxiliary_system_prompt,
                     preferred_language=request_language,
                     progress_tracker=progress_tracker,
+                    conversation_session_id=session_id,
                 )
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf

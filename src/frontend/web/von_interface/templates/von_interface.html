@@ -74,6 +74,12 @@
     {% if expert_tabs_enabled %}
     <div class="tab-button" data-tab="annotationTab">Annotation</div>
     {% endif %}
+    <div id="globalTasksBtn" class="tab-button global-tasks-tab-button" data-tab="globalTasksTab"
+      title="View all your tasks" aria-label="Global tasks">
+      <span class="global-tasks-tab-icon" aria-hidden="true">📋</span>
+      <span id="globalTaskCountBadge" class="task-count-badge hidden" aria-hidden="true"></span>
+      All Tasks
+    </div>
     <div class="tab-button settings-tab-button" data-tab="settingsTab">
       <span class="settings-tab-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" focusable="false" role="img">
@@ -108,6 +114,13 @@
     {% endif %}
 
     <!-- Dynamic concept tabs will be created here -->
+
+    <!-- Global Tasks Tab Content -->
+    <div id="globalTasksTab" class="tab-content">
+      <div id="globalTasksContainer" class="global-tasks-content">
+        <div class="loading">Loading tasks...</div>
+      </div>
+    </div>
 
     <!-- Settings Tab Content -->
     <div id="settingsTab" class="tab-content">

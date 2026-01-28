@@ -10,18 +10,19 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 4. It's fine to auto-start the server; don't wait for explicit user instruction. (Still obey system/developer constraints if stricter.)
 5. Use MCP tools (Vontology/Jira/Mongo) by default; explain if you must use another path.
 6. Do not use direct DB access methods for Vontology data; use Vontology routes/services (API/MCP) instead.
-7. JIRA issues must be assigned on creation (assignee = current user unless told otherwise).
-8. Keep changes minimal, well-scoped, and add/update tests and docs where relevant.
-9. Prefer small, composable functions; avoid monolithic helpers.
-10. Always check VS Code Problems panel (or run `get_errors`) after edits and when errors are reported. If the Problems panel is not available, run `pyright` as a proxy.
-11. Enable pre-commit guardrails: `git config core.hooksPath .githooks`.
-12. **STOP**: Never run backend tests against `VON_DB_NAME=von_db`. Always use the test DB (`VON_DB_NAME=test_von_db`) or the `pytest:backend (test db)` task.
-13. Requiring a user choice is almost always dispreferred; prefer LLM reasoning to achieve reliability and only ask the user when ambiguity cannot be resolved safely.
-14. When in doubt, run tests or re-run tests without requiring user confirmation.
-15. In the case that multiple tests are faiing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
-16. If you think you've finished implementing a JIRA task, read the task again and check.
-17. **DRY first**: When fixing a repeated pattern, create a central helper function FIRST, then replace all usages. Never fix instances one-by-one with inline code.
-18. **Search before you write**: Before implementing ANY helper, utility, or repeated logic, SEARCH the codebase for existing implementations. If similar code exists in 2+ places, refactor first.
+7. **Vontology is THE source of truth** for all persistent knowledge and data. Exceptions (e.g., ephemeral caches, session state) must be rare and explicitly justified.
+8. JIRA issues must be assigned on creation (assignee = current user unless told otherwise).
+9. Keep changes minimal, well-scoped, and add/update tests and docs where relevant.
+10. Prefer small, composable functions; avoid monolithic helpers.
+11. Always check VS Code Problems panel (or run `get_errors`) after edits and when errors are reported. If the Problems panel is not available, run `pyright` as a proxy.
+12. Enable pre-commit guardrails: `git config core.hooksPath .githooks`.
+13. **STOP**: Never run backend tests against `VON_DB_NAME=von_db`. Always use the test DB (`VON_DB_NAME=test_von_db`) or the `pytest:backend (test db)` task.
+14. Requiring a user choice is almost always dispreferred; prefer LLM reasoning to achieve reliability and only ask the user when ambiguity cannot be resolved safely.
+15. When in doubt, run tests or re-run tests without requiring user confirmation.
+16. In the case that multiple tests are faiing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
+17. If you think you've finished implementing a JIRA task, read the task again and check.
+18. **DRY first**: When fixing a repeated pattern, create a central helper function FIRST, then replace all usages. Never fix instances one-by-one with inline code.
+19. **Search before you write**: Before implementing ANY helper, utility, or repeated logic, SEARCH the codebase for existing implementations. If similar code exists in 2+ places, refactor first.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.

@@ -116,6 +116,34 @@ _OTHER_PREDICATE_IDS = [
     "#V#has_occupation",
 ]
 
+# Task management predicates (JVNAUTOSCI-1040)
+_TASK_PREDICATE_IDS = [
+    "#V#hasAssignee",
+    "#V#hasCreatedBy",
+    "#V#hasOriginatingConversation",
+    "#V#hasDueDate",
+    "#V#hasPriority",
+    "#V#hasTaskStatus",
+    "#V#hasTaskItem",
+    "#V#executesTask",
+    "#V#hasExecutor",
+    "#V#hasExecutionStatus",
+    "#V#hasStartTime",
+    "#V#hasEndTime",
+    "#V#hasResult",
+    "#V#hasProgressNote",
+]
+
+# Conversation predicates (JVNAUTOSCI-1040)
+_CONVERSATION_PREDICATE_IDS = [
+    "#V#hasSessionId",
+    "#V#hasParticipant",
+    "#V#hasOwner",
+    "#V#hasOrganisation",
+    "#V#hasNamespace",
+    "#V#hasTopic",
+]
+
 # These are the canonical predicate concepts that we treat as built-in and
 # surfaced in the UI even when no Mongo concept document exists.
 _CODE_PREDICATE_IDS = _unique_ids(
@@ -126,6 +154,8 @@ _CODE_PREDICATE_IDS = _unique_ids(
         *_RELATION_META_PREDICATE_IDS,
         *_STRUCTURAL_PREDICATE_IDS,
         *_OTHER_PREDICATE_IDS,
+        *_TASK_PREDICATE_IDS,
+        *_CONVERSATION_PREDICATE_IDS,
     ]
 )
 

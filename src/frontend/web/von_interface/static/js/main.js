@@ -54,6 +54,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.error('Error loading chat tab module:', err);
   }
 
+  // JVNAUTOSCI-1040: Initialize global tasks button (shows all user's tasks)
+  try {
+    const taskPanelModule = await import('./components/taskPanel.js');
+    const globalTasksBtn = document.getElementById('globalTasksBtn');
+    if (globalTasksBtn && taskPanelModule.showGlobalTasks) {
+      globalTasksBtn.addEventListener('click', () => {
+        taskPanelModule.showGlobalTasks();
+      });
+      console.log('[main] Global tasks button initialized');
+    }
+  } catch (err) {
+    console.warn('[main] Failed to initialize global tasks button:', err);
+  }
+
   // Start background preload of Vontology data while chat is active
   try {
     preloadVontologyData();
