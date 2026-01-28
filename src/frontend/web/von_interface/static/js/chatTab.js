@@ -33,6 +33,9 @@ const llmDebugData = new Map();
 const llmDebugFetchInFlight = new Map();
 // Track conversation turns for Markdown export and state resets
 const transcriptTurns = [];
+// JVNAUTOSCI-1043: Track user edits to assistant messages
+// Key: turnId, Value: { originalText, editedText, editedAt, editCount }
+const turnEditHistory = new Map();
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 let activeChatSessionId = null;
@@ -2218,6 +2221,315 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
             messageTextEl.textContent = raw;
         }
     });
+}
+
+// =============================================================================
+// JVNAUTOSCI-1043: User editing of AI outputs
+// =============================================================================
+
+/**
+ * Enter edit mode for an assistant message.
+ * Replaces rendered content with a plain-text textarea for editing.
+ * @param {HTMLElement} messageTextEl - The message text container
+ * @param {HTMLElement} messageContainer - The parent message container
+ * @param {string} turnId - The turn ID for this message
+ * @param {HTMLElement} editButton - The edit button that triggered this
+ */
+function enterEditMode(messageTextEl, messageContainer, turnId, editButton) {
+    if (!messageTextEl || !turnId) {
+        console.warn('[chatTab] enterEditMode: missing required elements');
+        return;
+    }
+
+    // Check if already in edit mode
+    if (messageTextEl.dataset.editMode === 'true') {
+        return;
+    }
+
+    // Get the current text (edited version if exists, otherwise original)
+    const existingEdit = turnEditHistory.get(turnId);
+    const currentText = existingEdit?.editedText || messageTextEl.dataset.originalText || messageTextEl.textContent || '';
+
+    // Store the pre-edit state
+    messageTextEl.dataset.editMode = 'true';
+    messageTextEl.dataset.preEditHtml = messageTextEl.innerHTML;
+
+    // Create the edit container
+    const editContainer = document.createElement('div');
+    editContainer.className = 'chat-edit-container';
+
+    // Create textarea for editing
+    const textarea = document.createElement('textarea');
+    textarea.className = 'chat-edit-textarea';
+    textarea.value = currentText;
+    textarea.placeholder = 'Edit the response...';
+    textarea.rows = Math.max(5, Math.min(20, currentText.split('\n').length + 2));
+
+    // Create button row
+    const buttonRow = document.createElement('div');
+    buttonRow.className = 'chat-edit-button-row';
+
+    const saveButton = document.createElement('button');
+    saveButton.className = 'btn-mini chat-edit-save';
+    saveButton.textContent = 'Save';
+    saveButton.title = 'Save changes (Ctrl+Enter)';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.className = 'btn-mini chat-edit-cancel';
+    cancelButton.textContent = 'Cancel';
+    cancelButton.title = 'Discard changes (Escape)';
+
+    const revertButton = document.createElement('button');
+    revertButton.className = 'btn-mini chat-edit-revert';
+    revertButton.textContent = 'Revert to original';
+    revertButton.title = 'Restore the original AI response';
+    revertButton.style.display = existingEdit?.editedText ? 'inline-block' : 'none';
+
+    buttonRow.appendChild(saveButton);
+    buttonRow.appendChild(cancelButton);
+    buttonRow.appendChild(revertButton);
+    editContainer.appendChild(textarea);
+    editContainer.appendChild(buttonRow);
+
+    // Replace content with edit container
+    messageTextEl.innerHTML = '';
+    messageTextEl.appendChild(editContainer);
+    messageTextEl.classList.add('chat-message-editing');
+
+    // Update edit button appearance
+    if (editButton) {
+        editButton.textContent = '✎';
+        editButton.title = 'Currently editing';
+        editButton.classList.add('active');
+    }
+
+    // Focus the textarea
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+    // Event handlers
+    const handleSave = () => {
+        const newText = textarea.value;
+        exitEditMode(messageTextEl, messageContainer, turnId, editButton, newText, true);
+    };
+
+    const handleCancel = () => {
+        exitEditMode(messageTextEl, messageContainer, turnId, editButton, null, false);
+    };
+
+    const handleRevert = () => {
+        const originalText = messageTextEl.dataset.originalText || '';
+        textarea.value = originalText;
+        // Clear edit history for this turn
+        turnEditHistory.delete(turnId);
+        exitEditMode(messageTextEl, messageContainer, turnId, editButton, originalText, true);
+    };
+
+    saveButton.addEventListener('click', handleSave);
+    cancelButton.addEventListener('click', handleCancel);
+    revertButton.addEventListener('click', handleRevert);
+
+    // Keyboard shortcuts
+    textarea.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            handleCancel();
+        } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            handleSave();
+        }
+    });
+}
+
+/**
+ * Exit edit mode for an assistant message.
+ * @param {HTMLElement} messageTextEl - The message text container
+ * @param {HTMLElement} messageContainer - The parent message container
+ * @param {string} turnId - The turn ID for this message
+ * @param {HTMLElement} editButton - The edit button
+ * @param {string|null} newText - The new text to save, or null to cancel
+ * @param {boolean} shouldSave - Whether to save the changes
+ */
+function exitEditMode(messageTextEl, messageContainer, turnId, editButton, newText, shouldSave) {
+    if (!messageTextEl) {
+        return;
+    }
+
+    messageTextEl.dataset.editMode = 'false';
+    messageTextEl.classList.remove('chat-message-editing');
+
+    // Restore edit button
+    if (editButton) {
+        editButton.textContent = '✎';
+        editButton.title = 'Edit this response';
+        editButton.classList.remove('active');
+    }
+
+    const originalText = messageTextEl.dataset.originalText || '';
+
+    if (shouldSave && newText !== null) {
+        const trimmedNew = newText.trim();
+        const trimmedOriginal = originalText.trim();
+
+        if (trimmedNew !== trimmedOriginal) {
+            // Store the edit in history
+            const existingEdit = turnEditHistory.get(turnId) || { originalText, editCount: 0 };
+            turnEditHistory.set(turnId, {
+                originalText: existingEdit.originalText || originalText,
+                editedText: newText,
+                editedAt: new Date().toISOString(),
+                editCount: (existingEdit.editCount || 0) + 1
+            });
+
+            // Update the transcript turn record
+            updateTranscriptTurnText(turnId, newText);
+
+            // Update debug data to include edit information
+            const debugData = llmDebugData.get(turnId);
+            if (debugData) {
+                llmDebugData.set(turnId, {
+                    ...debugData,
+                    user_edit: {
+                        original_text: existingEdit.originalText || originalText,
+                        edited_text: newText,
+                        edited_at: new Date().toISOString(),
+                        edit_count: (existingEdit.editCount || 0) + 1
+                    }
+                });
+            }
+
+            // Add/update edited badge in the header
+            addOrUpdateEditedBadge(messageContainer, turnId);
+
+            // Re-render the message with new content
+            messageTextEl.dataset.originalText = newText;
+            delete messageTextEl.dataset.renderedHtml;
+            const debugDataForRender = turnId ? llmDebugData.get(turnId) : null;
+            renderAssistantMessageContent(messageTextEl, newText, debugDataForRender);
+
+            console.log('[chatTab] Message edited:', { turnId, originalLength: originalText.length, newLength: newText.length });
+        } else {
+            // No changes - restore previous view
+            restorePreEditView(messageTextEl);
+        }
+    } else {
+        // Cancelled - restore previous view
+        restorePreEditView(messageTextEl);
+    }
+}
+
+/**
+ * Restore the pre-edit view of a message.
+ * @param {HTMLElement} messageTextEl - The message text container
+ */
+function restorePreEditView(messageTextEl) {
+    const preEditHtml = messageTextEl.dataset.preEditHtml;
+    if (preEditHtml) {
+        messageTextEl.innerHTML = preEditHtml;
+        delete messageTextEl.dataset.preEditHtml;
+    } else {
+        // Fallback: re-render from original text
+        const originalText = messageTextEl.dataset.originalText || '';
+        messageTextEl.textContent = originalText;
+    }
+}
+
+/**
+ * Update the transcript turn record with edited text.
+ * @param {string} turnId - The turn ID
+ * @param {string} newText - The new text
+ */
+function updateTranscriptTurnText(turnId, newText) {
+    const turnIndex = transcriptTurns.findIndex(t => t.turnId === turnId);
+    if (turnIndex >= 0) {
+        transcriptTurns[turnIndex] = {
+            ...transcriptTurns[turnIndex],
+            message: newText,
+            edited: true,
+            editedAt: new Date().toISOString()
+        };
+    }
+}
+
+/**
+ * Add or update the "edited" badge in the message header.
+ * @param {HTMLElement} messageContainer - The message container
+ * @param {string} turnId - The turn ID
+ */
+function addOrUpdateEditedBadge(messageContainer, turnId) {
+    if (!messageContainer) {
+        return;
+    }
+
+    const messageHeader = messageContainer.querySelector('.message-container > div > div:first-child') ||
+        messageContainer.querySelector('[style*="font-weight: bold"]');
+    if (!messageHeader) {
+        return;
+    }
+
+    // Remove existing badge if present
+    const existingBadge = messageHeader.querySelector('.chat-edited-badge');
+    if (existingBadge) {
+        existingBadge.remove();
+    }
+
+    const editData = turnEditHistory.get(turnId);
+    if (!editData || !editData.editedText) {
+        return;
+    }
+
+    const editedBadge = document.createElement('span');
+    editedBadge.className = 'chat-edited-badge';
+    editedBadge.textContent = 'edited';
+    editedBadge.title = `Edited ${editData.editCount || 1} time(s) — last at ${new Date(editData.editedAt).toLocaleString()}`;
+
+    // Insert after the edit button
+    const editButton = messageHeader.querySelector('.chat-edit-button');
+    if (editButton && editButton.nextSibling) {
+        messageHeader.insertBefore(editedBadge, editButton.nextSibling);
+    } else {
+        messageHeader.appendChild(editedBadge);
+    }
+}
+
+/**
+ * Handle click on an edit button.
+ * @param {Event} event - The click event
+ */
+function handleEditButtonClick(event) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const editButton = event.currentTarget;
+    const turnId = editButton.dataset.turnId;
+    if (!turnId) {
+        return;
+    }
+
+    // Find the message container and text element
+    const messageContainer = editButton.closest('.message-container');
+    if (!messageContainer) {
+        return;
+    }
+
+    // The message text is in the second child of messageContent (first is header)
+    const messageContent = messageContainer.querySelector('div[style*="flex: 1"]');
+    if (!messageContent) {
+        return;
+    }
+
+    const messageTextEl = messageContent.children[1];
+    if (!messageTextEl) {
+        return;
+    }
+
+    // Toggle edit mode
+    if (messageTextEl.dataset.editMode === 'true') {
+        // Already in edit mode - do nothing (use save/cancel buttons)
+        return;
+    }
+
+    enterEditMode(messageTextEl, messageContainer, turnId, editButton);
 }
 
 function renderAssistantMessageContent(container, message, debugData) {
@@ -8557,6 +8869,25 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             }
             if (!copyButtonAppended) {
                 messageHeader.appendChild(copyMarkdownButton);
+            }
+
+            // JVNAUTOSCI-1043: Add Edit button for user editing of AI outputs
+            const editButton = document.createElement('button');
+            editButton.className = 'btn-mini chat-edit-button';
+            editButton.textContent = '✎';
+            editButton.title = 'Edit this response';
+            editButton.dataset.turnId = turnId;
+            editButton.addEventListener('click', handleEditButtonClick);
+            messageHeader.appendChild(editButton);
+
+            // Show "edited" indicator if this turn was previously edited
+            const existingEdit = turnId ? turnEditHistory.get(turnId) : null;
+            if (existingEdit && existingEdit.editedText) {
+                const editedBadge = document.createElement('span');
+                editedBadge.className = 'chat-edited-badge';
+                editedBadge.textContent = 'edited';
+                editedBadge.title = `Edited ${existingEdit.editCount || 1} time(s) — last at ${new Date(existingEdit.editedAt).toLocaleString()}`;
+                messageHeader.appendChild(editedBadge);
             }
 
             const rightControls = document.createElement('span');

@@ -4855,6 +4855,124 @@ footer {
     color: #065f46;
 }
 
+/* =============================================================================
+   JVNAUTOSCI-1043: User editing of AI outputs
+   ============================================================================= */
+
+/* Edit button in chat message header */
+.chat-edit-button {
+    font-size: 0.85em;
+    padding: 2px 6px;
+    background: transparent;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    color: #6b7280;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.chat-edit-button:hover {
+    background: #f3f4f6;
+    border-color: #9ca3af;
+    color: #374151;
+}
+
+.chat-edit-button.active {
+    background: #dbeafe;
+    border-color: #3b82f6;
+    color: #1d4ed8;
+}
+
+/* Edited badge indicator */
+.chat-edited-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 0.75em;
+    font-style: italic;
+    background: #fef3c7;
+    border: 1px solid #fcd34d;
+    color: #92400e;
+    white-space: nowrap;
+}
+
+/* Edit mode container */
+.chat-edit-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+}
+
+/* Edit textarea */
+.chat-edit-textarea {
+    width: 100%;
+    min-height: 100px;
+    max-height: 400px;
+    padding: 10px 12px;
+    border: 2px solid #3b82f6;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    resize: vertical;
+    background: #ffffff;
+    color: #1f2937;
+}
+
+.chat-edit-textarea:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+/* Edit button row */
+.chat-edit-button-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.chat-edit-save {
+    background: #10b981;
+    color: #ffffff;
+    border: 1px solid #059669;
+    font-weight: 500;
+}
+
+.chat-edit-save:hover {
+    background: #059669;
+}
+
+.chat-edit-cancel {
+    background: #f3f4f6;
+    color: #374151;
+    border: 1px solid #d1d5db;
+}
+
+.chat-edit-cancel:hover {
+    background: #e5e7eb;
+}
+
+.chat-edit-revert {
+    background: #fef3c7;
+    color: #92400e;
+    border: 1px solid #fcd34d;
+    margin-left: auto;
+}
+
+.chat-edit-revert:hover {
+    background: #fde68a;
+}
+
+/* Message container in edit mode */
+.chat-message-editing {
+    background: #f0f9ff;
+    border-radius: 6px;
+    padding: 8px;
+}
+
 .prompt-input-overlay-inner {
     position: relative;
     white-space: pre-wrap;
