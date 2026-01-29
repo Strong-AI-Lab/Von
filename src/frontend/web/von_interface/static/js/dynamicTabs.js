@@ -94,7 +94,8 @@ const ICON_SVGS = {
     delete: '<svg aria-hidden="true" class="icon icon-delete" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg>',
     expand: '<svg aria-hidden="true" class="icon icon-expand" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>',
     copy: '<svg aria-hidden="true" class="icon icon-copy" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>',
-    refresh: '<svg aria-hidden="true" class="icon icon-refresh" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>'
+    refresh: '<svg aria-hidden="true" class="icon icon-refresh" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>',
+    wand: '<svg aria-hidden="true" class="icon icon-wand" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 4-9 9 5 5 9-9-5-5z"/><path d="m18 7-2-2"/><path d="M4 20 2 22"/><path d="m9 5-1.5-1.5"/><path d="m5 9-1.5-1.5"/><path d="m11 3 0-2"/><path d="m3 11-2 0"/></svg>'
 };
 
 function injectIconContent(el, key, label) {
@@ -3313,6 +3314,7 @@ async function populateTypeDescription(conceptId, suffix) {
             };
             mk(`typeCopyDescription_${suffix}`, 'copy', 'Copy description to clipboard');
             mk(`typeAnnotateDescription_${suffix}`, 'annotate', 'Annotate description');
+            mk(`typeGenerateDescription_${suffix}`, 'wand', 'Generate description with AI');
             mk(`typeEditDescriptionButton_${suffix}`, 'edit', 'Edit description');
             mk(`typeDeleteDescriptionButton_${suffix}`, 'delete', 'Delete description');
             try { upgradeActionButtonIcons(actionsContainer); } catch (_) { /* ignore */ }
@@ -3362,6 +3364,7 @@ async function populateTypeDescription(conceptId, suffix) {
                                                     <div class="desc-actions text-block-actions">
                                                         <button id="typeCopyDescription_${suffix}" class="round-icon-button" data-icon="copy"></button>
                                                         ${annotationEnabled ? `<button id="typeAnnotateDescription_${suffix}" class="round-icon-button" data-icon="annotate"></button>` : ''}
+                                                        <button id="typeGenerateDescription_${suffix}" class="round-icon-button" data-icon="wand" title="Generate description with AI"></button>
                                                         <button id="typeEditDescriptionButton_${suffix}" class="round-icon-button" data-icon="edit"></button>
                                                         <button id="typeDeleteDescriptionButton_${suffix}" class="round-icon-button" data-icon="delete"></button>
                                                     </div>
@@ -3515,6 +3518,13 @@ async function populateTypeDescription(conceptId, suffix) {
             // Mark as having a direct handler so delegated global listener skips it
             newAnnotate.dataset.descAnnotateDirect = '1';
         }
+        // Clone generate button for AI description generation (JVNAUTOSCI-1044)
+        const generateBtn = document.getElementById(`typeGenerateDescription_${suffix}`);
+        let newGenerate = null;
+        if (generateBtn) {
+            newGenerate = generateBtn.cloneNode(true);
+            generateBtn.parentNode.replaceChild(newGenerate, generateBtn);
+        }
 
         newEdit.addEventListener('click', () => {
             // Store original content for cancel functionality
@@ -3641,6 +3651,43 @@ async function populateTypeDescription(conceptId, suffix) {
                 }
                 newDel.disabled = false;
                 reset();
+            });
+        }
+        // Generate description button handler (JVNAUTOSCI-1044)
+        if (newGenerate) {
+            newGenerate.addEventListener('click', async () => {
+                statusEl.textContent = 'Generating description...';
+                newGenerate.disabled = true;
+                try {
+                    const resp = await conceptApiFetch('/api/mcp/call', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            method: 'generate_concept_description',
+                            params: {
+                                concept_id: conceptId,
+                                force: !!(textarea.value && textarea.value.trim()),
+                                store: true
+                            }
+                        })
+                    });
+                    const data = await resp.json().catch(() => ({}));
+                    if (!resp.ok || !data.success) {
+                        throw new Error(data.error || data.message || `HTTP ${resp.status}`);
+                    }
+                    if (data.description) {
+                        applyRawDescription(data.description);
+                        textarea.value = data.description;
+                        relationId = null; // Relation ID will be updated on next load
+                        statusEl.textContent = data.was_generated ? 'Description generated!' : 'Description loaded';
+                    } else {
+                        statusEl.textContent = 'No description generated';
+                    }
+                } catch (err) {
+                    statusEl.textContent = `Error: ${err.message}`;
+                    console.error('[dynamicTabs] Generate description failed', err);
+                }
+                newGenerate.disabled = false;
             });
         }
         try { if (display) display.dataset.descEvents = '1'; } catch (_) { }

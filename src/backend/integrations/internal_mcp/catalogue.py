@@ -4196,6 +4196,102 @@ def _index_concept_text_output_schema() -> Schema:
     )
 
 
+# Description generation (JVNAUTOSCI-1044)
+def _generate_concept_description(**kwargs):
+    """Generate a description for a concept using LLM.
+
+    Uses the DescriptionGenerationService to create meaningful descriptions
+    for concepts that lack proper hasDescription text relations.
+    """
+    concept_id = kwargs.get("concept_id")
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return {"success": False, "error": "Missing required parameter: concept_id"}
+
+    force = bool(kwargs.get("force", False))
+    store = bool(kwargs.get("store", True))
+
+    from ...services.description_generation_service import (
+        generate_concept_description,
+        is_placeholder_description,
+    )
+
+    result = generate_concept_description(
+        concept_id=concept_id.strip(),
+        force=force,
+        store=store,
+    )
+
+    return result
+
+
+def _generate_concept_description_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={
+            "force": (bool,),
+            "store": (bool,),
+        },
+        allow_unknown=False,
+        description=(
+            "generate_concept_description input: concept_id (str, required), "
+            "force (bool, default false - regenerate even if description exists), "
+            "store (bool, default true - persist the generated description)"
+        ),
+    )
+
+
+def _generate_concept_description_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "concept_id": str,
+        },
+        optional={
+            "description": (str, type(None)),
+            "was_generated": (bool, type(None)),
+            "error": (str, type(None)),
+        },
+        allow_unknown=False,
+        description="generate_concept_description output: success, description text, was_generated flag",
+    )
+
+
+def _check_placeholder_description(**kwargs):
+    """Check if a description text appears to be an auto-generated placeholder."""
+    text = kwargs.get("text")
+
+    from ...services.description_generation_service import is_placeholder_description
+
+    return {
+        "success": True,
+        "is_placeholder": is_placeholder_description(text),
+        "text_preview": (text[:100] + "...") if text and len(text) > 100 else text,
+    }
+
+
+def _check_placeholder_description_input_schema() -> Schema:
+    return Schema(
+        required={"text": (str, type(None))},
+        optional={},
+        allow_unknown=False,
+        description="check_placeholder_description input: text (str or null) to check",
+    )
+
+
+def _check_placeholder_description_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+            "is_placeholder": bool,
+        },
+        optional={
+            "text_preview": (str, type(None)),
+        },
+        allow_unknown=False,
+        description="check_placeholder_description output: whether the text is a placeholder",
+    )
+
+
 def _get_related_concepts(**kwargs):
     """Find concepts with similar descriptions (vector similarity)."""
 
@@ -7415,6 +7511,32 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Delete a Von task by marking it as cancelled. The task remains in the system "
                 "but is no longer active."
+            ),
+        ),
+        # Description generation tools (JVNAUTOSCI-1044)
+        MethodDefinition(
+            name="generate_concept_description",
+            handler=_generate_concept_description,
+            input_schema=_generate_concept_description_input_schema(),
+            output_schema=_generate_concept_description_output_schema(),
+            category="write",
+            description=(
+                "Generate a description for a concept using LLM. Use this when a concept lacks "
+                "a proper description or has an ugly auto-generated placeholder. The generated "
+                "description uses the concept's name, type hierarchy, and relationships as context. "
+                "Set force=true to regenerate even if a description exists."
+            ),
+        ),
+        MethodDefinition(
+            name="check_placeholder_description",
+            handler=_check_placeholder_description,
+            input_schema=_check_placeholder_description_input_schema(),
+            output_schema=_check_placeholder_description_output_schema(),
+            category="read",
+            description=(
+                "Check if a description text appears to be an auto-generated placeholder "
+                "(e.g., derived from concept ID, timestamp-based, or too short). "
+                "Use this to identify concepts that need proper descriptions."
             ),
         ),
     ]
