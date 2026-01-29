@@ -251,7 +251,9 @@ def create_flask_app(
     app.register_blueprint(client_capabilities_bp)
     app.register_blueprint(speech_bp)
     app.register_blueprint(admin_bp, url_prefix="/admin")
-    app.register_blueprint(task_bp, url_prefix="/api/tasks")  # Task management (JVNAUTOSCI-1040)
+    app.register_blueprint(
+        task_bp, url_prefix="/api/tasks"
+    )  # Task management (JVNAUTOSCI-1040)
     app.register_blueprint(
         auth_bp, url_prefix="/von"
     )  # Register the new auth blueprint with /von prefix to match Google OAuth config

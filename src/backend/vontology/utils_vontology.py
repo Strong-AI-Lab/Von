@@ -776,18 +776,29 @@ def generate_concept_id_from_name(pascal_case_name_str: str) -> str | None:
     e.g., "ScholarlyContribution" -> "#V#scholarly_contribution"
           "MyHTMLPage" -> "#V#my_html_page"
           "LLM" -> "#V#llm"
+          "Sorbonne Université" -> "#V#sorbonne_universite" (accents normalized)
     """
+    import unicodedata
+
     if not pascal_case_name_str:
         logger.error(
             "generate_concept_id_from_name called with empty input! Returning None."
         )
         return None
 
+    # JVNAUTOSCI-944: Transliterate accented characters to ASCII before processing
+    # NFKD decomposition splits characters like "é" into "e" + combining accent
+    normalized_input = unicodedata.normalize("NFKD", pascal_case_name_str)
+    # Filter out combining characters (category starts with 'M' for Mark)
+    ascii_name = "".join(
+        c for c in normalized_input if not unicodedata.category(c).startswith("M")
+    )
+
     # Convert PascalCase to snake_case.
     # Insert underscore before uppercase letters, except at the start.
     # Handles sequences of uppercase letters (acronyms) correctly.
     s1 = re.sub(
-        r"([A-Z]+)([A-Z][a-z])", r"\1_\2", pascal_case_name_str
+        r"([A-Z]+)([A-Z][a-z])", r"\1_\2", ascii_name
     )  # Corrected: r'\\1_\\2' -> r'\1_\2'
     s2 = re.sub(r"([a-z\d])([A-Z])", r"\1_\2", s1).lower()  # Corrected regex string
 
@@ -795,9 +806,7 @@ def generate_concept_id_from_name(pascal_case_name_str: str) -> str | None:
     normalized_name = re.sub(r"[^a-z0-9_]+", "", s2).strip("_")
 
     if not normalized_name:  # Handle cases where name becomes empty after normalization
-        fallback_name = re.sub(
-            r"[^a-zA-Z0-9]+", "_", pascal_case_name_str.lower()
-        ).strip("_")
+        fallback_name = re.sub(r"[^a-zA-Z0-9]+", "_", ascii_name.lower()).strip("_")
         if not fallback_name:
             logger.error(
                 f"generate_concept_id_from_name: Could not generate fallback for '{pascal_case_name_str}'. Returning hash-based ID."

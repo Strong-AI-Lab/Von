@@ -52,6 +52,7 @@ from ...services.concept_service import (
     get_concept_by_concept_id,
     ConceptNotFoundError,
     update_concept_description,
+    enrich_concept_with_text_relations,
 )
 from ...services.text_value_service import get_texts_for_concept
 from ...services.concept_search_service import (
@@ -673,6 +674,53 @@ def get_node_content_route():
             # Preserve description only if it exists inside preserved_fields but not elsewhere
             if "description" in data:
                 trimmed["description"] = data["description"]
+            # JVNAUTOSCI-944: Enrich raw_doc.names with text relations so cartouches display proper NL names
+            concept_id = data.get("concept_id")
+            raw_doc = trimmed.get("raw_doc")
+            if concept_id and raw_doc is not None and isinstance(raw_doc, dict):
+                try:
+                    names_from_relations = get_texts_for_concept(
+                        subject_concept_id=concept_id, predicate="hasName", limit=100
+                    )
+                    enriched_names = [
+                        {
+                            "name": item.get("text", ""),
+                            "language": item.get("lang", "en-NZ"),
+                            "type": item.get("context", {}).get("name_type", "NL"),
+                            "relation_id": item.get("relation_id"),
+                        }
+                        for item in names_from_relations
+                    ]
+                    raw_doc["names"] = enriched_names
+                    # Also update display_name if we found NL names (prefer en-NZ)
+                    if enriched_names:
+                        # Priority: NL names in en-NZ, then any NL, then ABBR, then first available
+                        nl_names_en = [
+                            n
+                            for n in enriched_names
+                            if n.get("type") == "NL" and n.get("language") == "en-NZ"
+                        ]
+                        nl_names_any = [
+                            n for n in enriched_names if n.get("type") == "NL"
+                        ]
+                        abbr_names = [
+                            n for n in enriched_names if n.get("type") == "ABBR"
+                        ]
+                        best_name = None
+                        if nl_names_en:
+                            best_name = nl_names_en[0].get("name")
+                        elif nl_names_any:
+                            best_name = nl_names_any[0].get("name")
+                        elif abbr_names:
+                            best_name = abbr_names[0].get("name")
+                        elif enriched_names:
+                            best_name = enriched_names[0].get("name")
+                        if best_name:
+                            trimmed["display_name"] = best_name
+                except Exception as e:
+                    current_app.logger.warning(
+                        f"Failed to enrich names for {concept_id}: {e}"
+                    )
             return jsonify(trimmed), 200
         return jsonify(data), 200
     except Exception as e:  # pragma: no cover

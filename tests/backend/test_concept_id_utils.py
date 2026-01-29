@@ -47,3 +47,17 @@ def test_canonicalise_vontology_concept_id_handles_blanks() -> None:
     assert canonicalise_vontology_concept_id(123) is None
     assert canonicalise_vontology_concept_id("") is None
     assert canonicalise_vontology_concept_id("   ") is None
+
+
+def test_canonicalise_vontology_concept_id_transliterates_accents() -> None:
+    """JVNAUTOSCI-944: Accented characters should be transliterated to ASCII."""
+    assert canonicalise_vontology_concept_id("#V#café") == "#V#cafe"
+    assert canonicalise_vontology_concept_id("#V#naïve") == "#V#naive"
+    assert (
+        canonicalise_vontology_concept_id("#V#Sorbonne_Université")
+        == "#V#sorbonne_universite"
+    )
+    assert canonicalise_vontology_concept_id("#V#señor") == "#V#senor"
+    assert canonicalise_vontology_concept_id("#V#über") == "#V#uber"
+    # Multi-character accents
+    assert canonicalise_vontology_concept_id("#V#Ñoño") == "#V#nono"

@@ -11,7 +11,26 @@ security-sensitive pathways (e.g. permission checks) and easily unit tested.
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Optional
+
+
+def _transliterate_to_ascii(text: str) -> str:
+    """Transliterate accented characters to their ASCII equivalents.
+
+    Uses Unicode NFKD normalization to decompose accented characters,
+    then filters out combining marks (diacritics).
+
+    Examples:
+        - "café" -> "cafe"
+        - "Ñoño" -> "Nono"
+        - "Sorbonne Université" -> "Sorbonne Universite"
+        - "naïve" -> "naive"
+    """
+    # NFKD decomposition splits characters like "é" into "e" + combining accent
+    normalized = unicodedata.normalize("NFKD", text)
+    # Filter out combining characters (category starts with 'M' for Mark)
+    return "".join(c for c in normalized if not unicodedata.category(c).startswith("M"))
 
 
 def normalise_concept_id_for_compare(value: object) -> Optional[str]:
@@ -64,6 +83,7 @@ def canonicalise_vontology_concept_id(value: object) -> Optional[str]:
     Canonical form:
     - Always `#V#<slug>`
     - Slug lowercased
+    - Accented characters transliterated to ASCII equivalents (JVNAUTOSCI-944)
     - Each maximal span of non-alphanumeric characters becomes a single underscore
     - Leading/trailing underscores are trimmed
 
@@ -71,6 +91,8 @@ def canonicalise_vontology_concept_id(value: object) -> Optional[str]:
     - `#V#foo-bar` -> `#V#foo_bar`
     - `#V#Foo  Bar` -> `#V#foo_bar`
     - `#v#foo...bar` -> `#V#foo_bar`
+    - `#V#café` -> `#V#cafe`
+    - `#V#Sorbonne_Université` -> `#V#sorbonne_universite`
     """
 
     if not isinstance(value, str):
@@ -92,6 +114,9 @@ def canonicalise_vontology_concept_id(value: object) -> Optional[str]:
     slug = slug.strip().lower()
     if not slug:
         return None
+
+    # JVNAUTOSCI-944: Transliterate accented characters to ASCII before canonicalisation
+    slug = _transliterate_to_ascii(slug)
 
     slug = _NON_ALNUM_RUN_RE.sub("_", slug).strip("_")
     if not slug:
