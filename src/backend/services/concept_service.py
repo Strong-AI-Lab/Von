@@ -523,6 +523,17 @@ def get_concept_by_concept_id(concept_id: str) -> Optional[Dict[str, Any]]:
 
             return concept_doc
 
+        # JVNAUTOSCI-945: Try alias resolution for renamed concepts
+        try:
+            from .concept_rename_service import resolve_concept_by_alias
+
+            resolved_id = resolve_concept_by_alias(concept_id)
+            if resolved_id and resolved_id != concept_id:
+                # Recursively fetch using the resolved (current) ID
+                return get_concept_by_concept_id(resolved_id)
+        except Exception as alias_err:
+            logger.debug("Alias resolution for '%s' failed: %s", concept_id, alias_err)
+
         # Virtual fallback for code-handled concepts (read-only).
         try:
             if isinstance(concept_id, str) and concept_id.startswith("#V#"):

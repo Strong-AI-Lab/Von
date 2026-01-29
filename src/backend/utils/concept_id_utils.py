@@ -6,13 +6,35 @@ the `#V#` prefix.
 
 These helpers are intentionally tiny and dependency-free so they can be used in
 security-sensitive pathways (e.g. permission checks) and easily unit tested.
+
+Unicode Strategy (JVNAUTOSCI-945):
+----------------------------------
+Concept IDs use ASCII-only slugs for maximum compatibility and predictability:
+
+1. **Diacritic transliteration**: Accented Latin characters are transliterated
+   to ASCII equivalents (café→cafe, Ñoño→Nono). This uses NFKD decomposition
+   followed by combining-mark removal.
+
+2. **Non-Latin scripts**: CJK and other scripts are not currently supported in
+   IDs. Concepts with non-Latin names should use a transliterated or English ID,
+   with the native-script name stored as a text relation (hasName).
+
+3. **Lookup normalization**: When looking up concepts by name, inputs are
+   normalized via NFKC before comparison to handle equivalent encodings.
+
+4. **Human-readable IDs are editable**: Since concepts have stable GUIDs, the
+   `#V#...` ID can be renamed. Old IDs are preserved as CODE-type aliases for
+   backwards compatibility.
+
+Future consideration: full Unicode IDs with NFC normalization could be supported
+if there's demand, but ASCII-only avoids comparison pitfalls across platforms.
 """
 
 from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Optional
+from typing import Optional, Tuple
 
 
 def _transliterate_to_ascii(text: str) -> str:
@@ -123,3 +145,55 @@ def canonicalise_vontology_concept_id(value: object) -> Optional[str]:
         return None
 
     return f"#V#{slug}"
+
+
+def normalise_for_lookup(value: str) -> str:
+    """Normalise a string for concept lookup comparison.
+
+    Uses NFKC normalization to handle equivalent Unicode representations,
+    then lowercases. This handles cases like:
+    - Composed vs decomposed accents (é vs e + combining acute)
+    - Compatibility characters (ﬁ vs fi)
+    - Different width forms (ａ vs a)
+
+    Args:
+        value: The string to normalise.
+
+    Returns:
+        NFKC-normalised lowercase string.
+    """
+    return unicodedata.normalize("NFKC", value).lower()
+
+
+def validate_concept_id_for_rename(
+    old_id: str, new_id: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """Validate a concept ID rename request.
+
+    Args:
+        old_id: The current concept_id.
+        new_id: The proposed new concept_id.
+
+    Returns:
+        Tuple of (canonical_old_id, canonical_new_id) if valid,
+        or (None, error_message) if invalid.
+    """
+    canonical_old = canonicalise_vontology_concept_id(old_id)
+    if not canonical_old:
+        return None, "Invalid current concept_id format"
+
+    canonical_new = canonicalise_vontology_concept_id(new_id)
+    if not canonical_new:
+        return None, "Invalid new concept_id format"
+
+    if canonical_old == canonical_new:
+        return None, "New concept_id is the same as current (after canonicalisation)"
+
+    # Ensure new ID has reasonable length
+    slug = canonical_new[3:]  # Strip #V#
+    if len(slug) < 1:
+        return None, "Concept ID slug cannot be empty"
+    if len(slug) > 200:
+        return None, "Concept ID slug exceeds maximum length (200 characters)"
+
+    return canonical_new, None

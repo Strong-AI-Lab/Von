@@ -773,6 +773,65 @@ def update_concept_description_route(concept_id: str):
         return jsonify(error="An unexpected error occurred"), 500
 
 
+@concept_bp.route("/<string:concept_id>/rename", methods=["POST"])
+def rename_concept_route(concept_id: str):
+    """API endpoint to rename a concept's ID (JVNAUTOSCI-945).
+
+    Request body:
+        {
+            "new_id": "#V#new_concept_name",
+            "simulate": true/false (optional, default false),
+            "preserve_alias": true/false (optional, default true)
+        }
+
+    The concept's GUID remains unchanged, ensuring stable references.
+    The old concept_id is preserved as a CODE alias for backwards compatibility.
+    All relationship references are automatically updated.
+    """
+    from ...services.concept_rename_service import rename_concept
+
+    data = request.get_json() or {}
+    new_id = data.get("new_id")
+    if not new_id or not isinstance(new_id, str):
+        return (
+            jsonify(error="Request body must include 'new_id' field (string)"),
+            400,
+        )
+
+    simulate = data.get("simulate", False)
+    preserve_alias = data.get("preserve_alias", True)
+
+    try:
+        result = rename_concept(
+            old_id=concept_id,
+            new_id=new_id,
+            simulate=simulate,
+            preserve_alias=preserve_alias,
+        )
+
+        if not result.get("success"):
+            errors = result.get("errors", [])
+            error_msg = errors[0] if errors else "Rename operation failed"
+            # Determine appropriate status code
+            if "not found" in error_msg.lower():
+                return jsonify(error=error_msg, details=result), 404
+            if (
+                "protected" in error_msg.lower()
+                or "already exists" in error_msg.lower()
+            ):
+                return jsonify(error=error_msg, details=result), 409
+            return jsonify(error=error_msg, details=result), 400
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        current_app.logger.error(
+            f"Unexpected error renaming concept {concept_id}: {e}",
+            exc_info=True,
+        )
+        return jsonify(error="An unexpected error occurred"), 500
+
+
 @concept_bp.route("/<string:concept_id>/submit_answer", methods=["POST"])
 def submit_concept_answer_route(concept_id: str):
     """

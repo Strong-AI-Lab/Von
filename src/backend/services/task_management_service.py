@@ -361,16 +361,17 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         # Fallback: get session name from chat_history if not in conversation concept
         if conversation_session_id and not conversation_name:
             try:
-                from ..db.mongo import get_chat_history_collection
+                from .chat_history_service import get_chat_history_collection_service
 
-                chat_history_coll = get_chat_history_collection()
-                # Query by session_id (any user's session with that ID)
-                session_doc = chat_history_coll.find_one(
-                    {"session_id": conversation_session_id},
-                    {"session_name": 1},
-                )
-                if session_doc and session_doc.get("session_name"):
-                    conversation_name = session_doc["session_name"]
+                chat_history_coll = get_chat_history_collection_service()
+                if chat_history_coll is not None:
+                    # Query by session_id (any user's session with that ID)
+                    session_doc = chat_history_coll.find_one(
+                        {"session_id": conversation_session_id},
+                        {"session_name": 1},
+                    )
+                    if session_doc and session_doc.get("session_name"):
+                        conversation_name = session_doc["session_name"]
             except Exception:
                 pass
 

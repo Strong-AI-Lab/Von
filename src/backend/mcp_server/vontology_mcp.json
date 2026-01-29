@@ -1207,6 +1207,154 @@
                     "prompt"
                 ]
             }
+        },
+        {
+            "name": "create_task",
+            "description": "Create a task from a conversation. Tasks are stored as Vontology concepts with rich metadata. Optionally links to the originating conversation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Brief task title (required)"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Detailed task description"
+                    },
+                    "assignee_concept_id": {
+                        "type": "string",
+                        "description": "Assignee's concept ID (e.g., '#V#user_abc')"
+                    },
+                    "creator_concept_id": {
+                        "type": "string",
+                        "description": "Creator's concept ID (e.g., '#V#user_abc')"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Chat session_id to link task to conversation"
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "ISO 8601 date string for due date"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "critical"
+                        ],
+                        "default": "medium",
+                        "description": "Task priority level"
+                    },
+                    "organisation_concept_id": {
+                        "type": "string",
+                        "description": "Organisation context for the task"
+                    }
+                },
+                "required": [
+                    "title"
+                ]
+            }
+        },
+        {
+            "name": "get_task",
+            "description": "Get task details by concept_id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string",
+                        "description": "The task's concept ID (e.g., '#V#task_abc123')"
+                    }
+                },
+                "required": [
+                    "task_concept_id"
+                ]
+            }
+        },
+        {
+            "name": "list_my_tasks",
+            "description": "List tasks assigned to a user, optionally filtered by status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "user_concept_id": {
+                        "type": "string",
+                        "description": "User's concept ID to get tasks for"
+                    },
+                    "status_filter": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "in_progress",
+                            "completed",
+                            "cancelled",
+                            "blocked"
+                        ],
+                        "description": "Optional status filter"
+                    },
+                    "include_created": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "If true, also include tasks created by the user (not just assigned)"
+                    }
+                },
+                "required": [
+                    "user_concept_id"
+                ]
+            }
+        },
+        {
+            "name": "update_task_status",
+            "description": "Update the status of a task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string",
+                        "description": "The task's concept ID"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "in_progress",
+                            "completed",
+                            "cancelled",
+                            "blocked"
+                        ],
+                        "description": "New task status"
+                    }
+                },
+                "required": [
+                    "task_concept_id",
+                    "status"
+                ]
+            }
+        },
+        {
+            "name": "assign_task",
+            "description": "Assign or reassign a task to a user.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string",
+                        "description": "The task's concept ID"
+                    },
+                    "assignee_concept_id": {
+                        "type": "string",
+                        "description": "The assignee's concept ID"
+                    }
+                },
+                "required": [
+                    "task_concept_id",
+                    "assignee_concept_id"
+                ]
+            }
         }
     ]
 }

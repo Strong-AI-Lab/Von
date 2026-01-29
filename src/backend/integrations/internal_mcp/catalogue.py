@@ -2802,6 +2802,33 @@ def _merge_concepts(**kwargs):
     return merge_concepts(source_id, target_id, simulate=simulate)
 
 
+def _rename_concept(**kwargs):
+    """Rename a concept's ID while preserving its GUID (JVNAUTOSCI-945).
+
+    The concept's GUID remains unchanged, ensuring stable references.
+    The old concept_id is preserved as a CODE alias for backwards compatibility.
+    All relationship references are automatically updated.
+    """
+    from ...services.concept_rename_service import rename_concept
+
+    old_id = kwargs.get("old_id") or kwargs.get("concept_id")
+    new_id = kwargs.get("new_id")
+    simulate = kwargs.get("simulate", True)
+    preserve_alias = kwargs.get("preserve_alias", True)
+
+    if not old_id:
+        return {"error": "Missing old_id (or concept_id) parameter"}
+    if not new_id:
+        return {"error": "Missing new_id parameter"}
+
+    return rename_concept(
+        old_id=old_id,
+        new_id=new_id,
+        simulate=simulate,
+        preserve_alias=preserve_alias,
+    )
+
+
 def _update_concept(**kwargs):
     from ...services.concept_service import update_concept
 
@@ -3864,6 +3891,41 @@ def _merge_concepts_output_schema() -> Schema:
         },
         allow_unknown=True,
         description="merge_concepts output",
+    )
+
+
+def _rename_concept_input_schema() -> Schema:
+    return Schema(
+        required={"new_id": str},
+        optional={
+            "old_id": (str,),
+            "concept_id": (str,),
+            "simulate": (bool,),
+            "preserve_alias": (bool,),
+        },
+        allow_unknown=True,
+        description=(
+            "rename_concept input: new_id (required, new #V#... concept_id), "
+            "old_id or concept_id (current concept_id), simulate (bool, default true), "
+            "preserve_alias (bool, default true - register old ID as CODE alias)"
+        ),
+    )
+
+
+def _rename_concept_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "simulate": (bool,),
+            "old_id": (str,),
+            "new_id": (str,),
+            "operations": (list,),
+            "warnings": (list,),
+            "errors": (list,),
+            "executed": (bool,),
+        },
+        allow_unknown=True,
+        description="rename_concept output: reports planned or executed operations",
     )
 
 
@@ -6952,6 +7014,21 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=_merge_concepts_output_schema(),
             category="write",
             description="Merges a source concept into a target concept. Moves relationships, names, and text values, then deletes the source. Can simulate first. Use when you have duplicate concepts and want to consolidate them into one.",
+        ),
+        MethodDefinition(
+            name="rename_concept",
+            handler=_rename_concept,
+            input_schema=_rename_concept_input_schema(),
+            output_schema=_rename_concept_output_schema(),
+            category="write",
+            description=(
+                "Rename a concept's human-readable ID (JVNAUTOSCI-945). "
+                "The concept's GUID remains unchanged for stable references. "
+                "All relationship references are automatically updated. "
+                "The old ID is preserved as a CODE alias for backwards compatibility. "
+                "Can simulate first to preview changes. Use when a concept_id needs "
+                "correction (e.g., typo, better naming) without losing data or breaking links."
+            ),
         ),
         MethodDefinition(
             name="update_concept",
