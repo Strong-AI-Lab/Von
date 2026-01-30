@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, List
 
 from .gateway import MethodCatalogue, MethodDefinition
-from .schemas import Schema
+from .schemas import Schema, make_error_response
 from .orchestrator import InternalMCPChatOrchestrator
 from src.backend.services.prompt_template_service import PromptTemplateService
 
@@ -179,22 +179,43 @@ def _create_concepts(**kwargs):
     concepts = kwargs.get("concepts", [])
 
     if not parent_id:
-        return {"error": "Missing required parameter: parent_id"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: parent_id",
+            details={"missing": ["parent_id"]},
+            suggestions=[
+                "Provide a parent type concept ID, e.g., parent_id='#V#thing' or '#V#person'"
+            ],
+        )
 
     # Validate and canonicalise parent_id
     canonical_parent = canonicalise_vontology_concept_id(parent_id)
     if not canonical_parent or not ConceptsRepository.find_one(
         {"concept_id": canonical_parent}
     ):
-        return {
-            "error": f"Parent concept '{canonical_parent}' not found. Create it first or check the ID.",
-            "error_code": "parent_not_found",
-            "canonical_parent_id": canonical_parent,
-            "original_parent_id": parent_id,
-        }
+        return make_error_response(
+            "parent_not_found",
+            f"Parent concept '{canonical_parent}' not found. Create it first or check the ID.",
+            details={
+                "canonical_parent_id": canonical_parent,
+                "original_parent_id": parent_id,
+            },
+            suggestions=[
+                "Create the parent concept first",
+                "Search for similar concepts using search_concepts",
+            ],
+            related_concept_ids=[canonical_parent] if canonical_parent else [],
+        )
     validated_parent_id: str = canonical_parent  # Type-narrowed to str
     if not concepts or not isinstance(concepts, list):
-        return {"error": "Missing or invalid 'concepts' array"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing or invalid 'concepts' array",
+            details={"missing": ["concepts"]},
+            suggestions=[
+                "Provide an array of concept objects, e.g., concepts=[{name: 'MyType'}]"
+            ],
+        )
 
     results = []
     for concept_data in concepts:
@@ -278,11 +299,28 @@ def _upsert_text_relation(**kwargs):
     namespace = kwargs.get("namespace")
 
     if not concept_id:
-        return {"success": False, "error": "Missing 'concept_id' parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'concept_id' parameter",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID to attach text to"],
+        )
     if not predicate:
-        return {"success": False, "error": "Missing 'predicate' parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'predicate' parameter",
+            details={"missing": ["predicate"]},
+            suggestions=[
+                "Provide a predicate like 'hasContent', 'hasDescription', or a custom predicate"
+            ],
+        )
     if not text:
-        return {"success": False, "error": "Missing 'text' parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'text' parameter",
+            details={"missing": ["text"]},
+            suggestions=["Provide the text content to attach"],
+        )
 
     try:
         result = upsert_text_for_concept(
@@ -312,7 +350,11 @@ def _upsert_text_relation(**kwargs):
             "language": language,
         }
     except Exception as exc:
-        return {"success": False, "error": f"Failed to upsert text relation: {exc}"}
+        return make_error_response(
+            "exception",
+            f"Failed to upsert text relation: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
 
 
 def _get_text_relations(**kwargs):
@@ -324,7 +366,12 @@ def _get_text_relations(**kwargs):
     limit = kwargs.get("limit", 50)
 
     if not concept_id:
-        return {"error": "Missing 'concept_id' parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'concept_id' parameter",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID to retrieve text relations for"],
+        )
 
     try:
         relations = get_texts_for_concept(
@@ -346,7 +393,11 @@ def _get_text_relations(**kwargs):
             "relations": relations,
         }
     except Exception as exc:
-        return {"error": f"Failed to get text relations: {exc}"}
+        return make_error_response(
+            "exception",
+            f"Failed to get text relations: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
 
 
 def _update_text_relation(**kwargs):
@@ -362,11 +413,26 @@ def _update_text_relation(**kwargs):
     namespace = kwargs.get("namespace")
 
     if not concept_id:
-        return {"error": "Missing 'concept_id' parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'concept_id' parameter",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID that owns the text relation"],
+        )
     if not relation_id:
-        return {"error": "Missing 'relation_id' parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'relation_id' parameter",
+            details={"missing": ["relation_id"]},
+            suggestions=["Use get_text_relations to find the relation_id to update"],
+        )
     if not new_text:
-        return {"error": "Missing 'new_text' parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'new_text' parameter",
+            details={"missing": ["new_text"]},
+            suggestions=["Provide the new text content"],
+        )
 
     try:
         result = update_text_relation_text(
@@ -393,7 +459,11 @@ def _update_text_relation(**kwargs):
             "text_value_id": str(result.get("text_value_id")),
         }
     except Exception as exc:
-        return {"error": f"Failed to update text relation: {exc}"}
+        return make_error_response(
+            "exception",
+            f"Failed to update text relation: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
 
 
 def _delete_text_relation(**kwargs):
@@ -414,7 +484,12 @@ def _delete_text_relation(**kwargs):
     namespace = kwargs.get("namespace")
 
     if not concept_id:
-        return {"error": "Missing 'concept_id' parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'concept_id' parameter",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID that owns the text relation"],
+        )
 
     try:
         if relation_id:
@@ -465,11 +540,20 @@ def _delete_text_relation(**kwargs):
                 ),
             }
         else:
-            return {
-                "error": "Must provide either relation_id or both predicate and text"
-            }
+            return make_error_response(
+                "missing_parameter",
+                "Must provide either relation_id or both predicate and text",
+                details={"missing": ["relation_id", "predicate+text"]},
+                suggestions=[
+                    "Provide relation_id for direct deletion, or both predicate and text for matched deletion"
+                ],
+            )
     except Exception as exc:
-        return {"error": f"Failed to delete text relation: {exc}"}
+        return make_error_response(
+            "exception",
+            f"Failed to delete text relation: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
 
 
 def _get_text_relations_summary(**kwargs):
@@ -481,7 +565,12 @@ def _get_text_relations_summary(**kwargs):
     max_relation_ids_per_group = kwargs.get("max_relation_ids_per_group", 25)
 
     if not concept_id:
-        return {"error": "Missing 'concept_id' parameter", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'concept_id' parameter",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID to get text relations summary for"],
+        )
 
     try:
         return get_text_relations_summary(
@@ -491,7 +580,11 @@ def _get_text_relations_summary(**kwargs):
             max_relation_ids_per_group=max_relation_ids_per_group,
         )
     except Exception as exc:
-        return {"error": f"Failed to summarise text relations: {exc}", "success": False}
+        return make_error_response(
+            "exception",
+            f"Failed to summarise text relations: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
 
 
 def _upsert_singleton_text_relation(**kwargs):
@@ -507,11 +600,26 @@ def _upsert_singleton_text_relation(**kwargs):
     context = kwargs.get("context")
 
     if not concept_id:
-        return {"error": "Missing 'concept_id' parameter", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'concept_id' parameter",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID to attach text to"],
+        )
     if not predicate:
-        return {"error": "Missing 'predicate' parameter", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'predicate' parameter",
+            details={"missing": ["predicate"]},
+            suggestions=["Provide a predicate like 'hasContent' or 'hasDescription'"],
+        )
     if not text:
-        return {"error": "Missing 'text' parameter", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'text' parameter",
+            details={"missing": ["text"]},
+            suggestions=["Provide the text content to attach"],
+        )
 
     try:
         return upsert_singleton_text_relation(
@@ -527,10 +635,11 @@ def _upsert_singleton_text_relation(**kwargs):
             ),
         )
     except Exception as exc:
-        return {
-            "error": f"Failed to upsert singleton text relation: {exc}",
-            "success": False,
-        }
+        return make_error_response(
+            "exception",
+            f"Failed to upsert singleton text relation: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
 
 
 def _concept_exists(**kwargs):
@@ -540,7 +649,12 @@ def _concept_exists(**kwargs):
 
     concept_id = kwargs.get("concept_id")
     if not concept_id:
-        return {"error": "Missing 'concept_id' parameter", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'concept_id' parameter",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID to check existence for"],
+        )
 
     try:
         doc = ConceptsRepository.find_one({"concept_id": concept_id}, {"_id": 1})
@@ -553,7 +667,11 @@ def _concept_exists(**kwargs):
             "accessible": accessible,
         }
     except Exception as exc:
-        return {"error": f"Failed to check concept existence: {exc}", "success": False}
+        return make_error_response(
+            "exception",
+            f"Failed to check concept existence: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
 
 
 def _fetch_concept_content(**kwargs):
@@ -562,7 +680,12 @@ def _fetch_concept_content(**kwargs):
     concept_id = kwargs.get("concept_id")
     reconstruct_md = kwargs.get("reconstruct_md", True)
     if not concept_id:
-        return {"error": "Missing 'concept_id' parameter", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'concept_id' parameter",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID to fetch content for"],
+        )
 
     try:
         payload = get_vontology_node_content(
@@ -571,7 +694,11 @@ def _fetch_concept_content(**kwargs):
         payload["success"] = "error" not in payload
         return payload
     except Exception as exc:
-        return {"error": f"Failed to fetch concept content: {exc}", "success": False}
+        return make_error_response(
+            "exception",
+            f"Failed to fetch concept content: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
 
 
 def _add_names_to_concept(**kwargs):
@@ -582,14 +709,35 @@ def _add_names_to_concept(**kwargs):
     names = kwargs.get("names")
 
     if not concept_id:
-        return {"error": "Missing 'concept_id' parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing 'concept_id' parameter",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID to add names to"],
+        )
     if not names or not isinstance(names, list) or len(names) == 0:
-        return {"error": "Missing or invalid 'names' array"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing or invalid 'names' array",
+            details={"missing": ["names"]},
+            suggestions=[
+                "Provide an array of names, e.g., names=['Name1', 'Name2'] or names=[{name: 'Name', language: 'fr'}]"
+            ],
+        )
 
     # Verify concept exists
     concept = ConceptsRepository.find_one({"concept_id": concept_id})
     if not concept:
-        return {"error": f"Concept '{concept_id}' not found"}
+        return make_error_response(
+            "concept_not_found",
+            f"Concept '{concept_id}' not found",
+            details={"concept_id": concept_id},
+            suggestions=[
+                "Check the concept ID for typos",
+                "Create the concept first using create_concepts",
+            ],
+            related_concept_ids=[concept_id],
+        )
 
     results = []
     errors = []
@@ -654,48 +802,42 @@ def _add_relationship(**kwargs):
     from ...db.repositories.concepts_repository import ConceptsRepository
     from ...services.text_value_service import upsert_text_for_concept
 
-    def _err(
-        code: str,
-        message: str,
-        *,
-        details: dict | None = None,
-    ) -> dict:
-        # Keep backward compatibility: preserve the top-level 'error' string.
-        return {
-            "success": False,
-            "error": message,
-            "error_code": code,
-            "error_details": details or {},
-        }
-
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
     target = kwargs.get("target")
 
     if not source_id:
-        return _err(
+        return make_error_response(
             "missing_parameter",
             "Missing 'source_id' parameter",
             details={"missing": ["source_id"]},
+            suggestions=[
+                "Provide the source concept ID, e.g., source_id='#V#my_concept'"
+            ],
         )
     if not predicate:
-        return _err(
+        return make_error_response(
             "missing_parameter",
             "Missing 'predicate' parameter",
             details={"missing": ["predicate"]},
+            suggestions=[
+                "Provide a predicate like 'instance_of', 'typeOf', or a concept ID like '#V#hasAffiliation'"
+            ],
         )
     if not target:
-        return _err(
+        return make_error_response(
             "missing_parameter",
             "Missing 'target' parameter",
             details={"missing": ["target"]},
+            suggestions=["Provide the target concept ID or text value"],
         )
 
     if source_id == target:
-        return _err(
+        return make_error_response(
             "relationship_self_reference",
             "Source and target cannot be the same",
             details={"source_id": source_id, "target": target},
+            suggestions=["Use different concept IDs for source and target"],
         )
 
     try:
@@ -709,10 +851,15 @@ def _add_relationship(**kwargs):
         # Check if source exists
         src = repo.find_one({"concept_id": source_id})
         if not src:
-            return _err(
+            return make_error_response(
                 "source_concept_not_found",
                 f"Source concept '{source_id}' not found",
                 details={"role": "source", "concept_id": source_id},
+                suggestions=[
+                    "Create the source concept first using create_concepts",
+                    "Check the concept ID for typos",
+                ],
+                related_concept_ids=[source_id],
             )
 
         # Common text predicates are frequently provided either as plain predicate IDs
@@ -789,7 +936,7 @@ def _add_relationship(**kwargs):
 
         if not result.get("success"):
             error_code = result.get("error") or "relationship_add_failed"
-            return _err(
+            return make_error_response(
                 str(error_code),
                 str(error_code),
                 details={
@@ -798,6 +945,9 @@ def _add_relationship(**kwargs):
                     "target": target,
                     "details": result,
                 },
+                related_concept_ids=(
+                    [source_id, target] if target.startswith("#V#") else [source_id]
+                ),
             )
 
         predicate_out = result.get("predicate") or predicate_str
@@ -826,7 +976,7 @@ def _add_relationship(**kwargs):
         return response
 
     except Exception as e:
-        return _err(
+        return make_error_response(
             "exception",
             f"Exception: {str(e)}",
             details={
@@ -842,41 +992,30 @@ def _remove_relationship(**kwargs):
     """Remove a relationship between two concepts. Text relations removal is not supported here."""
     from ...db.repositories.concepts_repository import ConceptsRepository
 
-    def _err(
-        code: str,
-        message: str,
-        *,
-        details: dict | None = None,
-    ) -> dict:
-        # Keep backward compatibility: preserve the top-level 'error' string.
-        return {
-            "success": False,
-            "error": message,
-            "error_code": code,
-            "error_details": details or {},
-        }
-
     source_id = kwargs.get("source_id")
     predicate = kwargs.get("predicate")
     target = kwargs.get("target")
 
     if not source_id:
-        return _err(
+        return make_error_response(
             "missing_parameter",
             "Missing 'source_id' parameter",
             details={"missing": ["source_id"]},
+            suggestions=["Provide the source concept ID"],
         )
     if not predicate:
-        return _err(
+        return make_error_response(
             "missing_parameter",
             "Missing 'predicate' parameter",
             details={"missing": ["predicate"]},
+            suggestions=["Provide the predicate to remove"],
         )
     if not target:
-        return _err(
+        return make_error_response(
             "missing_parameter",
             "Missing 'target' parameter",
             details={"missing": ["target"]},
+            suggestions=["Provide the target concept ID"],
         )
 
     try:
@@ -891,10 +1030,15 @@ def _remove_relationship(**kwargs):
         # Verify source concept exists
         src = repo.find_one({"concept_id": source_id})
         if not src:
-            return _err(
+            return make_error_response(
                 "source_concept_not_found",
                 f"Source concept '{source_id}' not found",
                 details={"role": "source", "concept_id": source_id},
+                suggestions=[
+                    "Check the concept ID for typos",
+                    "Verify the concept exists using fetch_concept",
+                ],
+                related_concept_ids=[source_id],
             )
 
         # This tool only supports concept-to-concept relationships. Provide an
@@ -907,13 +1051,14 @@ def _remove_relationship(**kwargs):
         )
         well_known_text_predicates = {"hasContent", "hasDescription", "hasName"}
         if predicate_normalised in well_known_text_predicates:
-            return _err(
+            return make_error_response(
                 "unsupported_text_relation_removal",
                 "Text relation removal is not supported by remove_relationship",
                 details={
                     "predicate_input": predicate,
                     "predicate": predicate_normalised,
                 },
+                suggestions=["Use delete_text_relation to remove text relations"],
             )
 
         # Map common predicate aliases to stored field names
@@ -939,10 +1084,13 @@ def _remove_relationship(**kwargs):
                 if isinstance(instance_of, str):
                     instance_of = [instance_of]
                 if "#V#binary_text_predicate" in instance_of:
-                    return _err(
+                    return make_error_response(
                         "unsupported_text_relation_removal",
                         "Text relation removal is not supported by remove_relationship",
                         details={"predicate": rel_kind, "predicate_input": predicate},
+                        suggestions=[
+                            "Use delete_text_relation to remove text relations"
+                        ],
                     )
 
         # Guardrail: concept-to-concept relationship predicates must be either:
@@ -959,7 +1107,7 @@ def _remove_relationship(**kwargs):
             if pred_doc is None and is_code_concept_id(rel_kind):
                 pred_doc = build_virtual_concept_doc(rel_kind)
             if pred_doc is None:
-                return _err(
+                return make_error_response(
                     "predicate_concept_not_found",
                     (
                         f"Predicate concept '{rel_kind}' not found. "
@@ -971,9 +1119,13 @@ def _remove_relationship(**kwargs):
                         "predicate": rel_kind,
                         "predicate_input": predicate,
                     },
+                    suggestions=[
+                        "Create the predicate concept first using create_concepts with kind='predicate'"
+                    ],
+                    related_concept_ids=[rel_kind],
                 )
             if not is_predicate(pred_doc):
-                return _err(
+                return make_error_response(
                     "predicate_concept_not_typed",
                     (
                         f"Concept '{rel_kind}' exists but is not typed as a predicate. "
@@ -985,15 +1137,22 @@ def _remove_relationship(**kwargs):
                         "predicate_input": predicate,
                         "required_instance_of": "#V#predicate",
                     },
+                    suggestions=[
+                        "Add an instance_of relationship from this concept to #V#predicate using add_relationship"
+                    ],
+                    related_concept_ids=[rel_kind, "#V#predicate"],
                 )
         else:
-            return _err(
+            return make_error_response(
                 "invalid_relationship_predicate",
                 (
                     "Invalid relationship predicate. For concept-to-concept relationships, "
                     "use a structural predicate (e.g. 'typeOf', 'instance_of') or a '#V#...' predicate concept id."
                 ),
                 details={"predicate_input": predicate, "predicate_canonical": rel_kind},
+                suggestions=[
+                    "Use 'instance_of', 'typeOf', or a '#V#' prefixed predicate concept ID"
+                ],
             )
 
         # Ensure the relationship field exists (optional sanity)
@@ -1044,7 +1203,7 @@ def _remove_relationship(**kwargs):
                 "removed": False,
             }
     except Exception as e:
-        return _err(
+        return make_error_response(
             "exception",
             f"Exception: {str(e)}",
             details={
@@ -2811,7 +2970,12 @@ def _delete_concept(**kwargs):
     simulate = kwargs.get("simulate", True)
 
     if not concept_id:
-        return {"error": "Missing concept_id parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing concept_id parameter",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID to delete"],
+        )
 
     return simulate_or_delete_concept(concept_id, execute=not simulate)
 
@@ -2824,7 +2988,19 @@ def _merge_concepts(**kwargs):
     simulate = kwargs.get("simulate", True)
 
     if not source_id or not target_id:
-        return {"error": "Missing source_id or target_id parameter"}
+        missing = []
+        if not source_id:
+            missing.append("source_id")
+        if not target_id:
+            missing.append("target_id")
+        return make_error_response(
+            "missing_parameter",
+            f"Missing {' and '.join(missing)} parameter",
+            details={"missing": missing},
+            suggestions=[
+                "Provide both source_id (concept to merge from) and target_id (concept to merge into)"
+            ],
+        )
 
     return merge_concepts(source_id, target_id, simulate=simulate)
 
@@ -2844,9 +3020,19 @@ def _rename_concept(**kwargs):
     preserve_alias = kwargs.get("preserve_alias", True)
 
     if not old_id:
-        return {"error": "Missing old_id (or concept_id) parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing old_id (or concept_id) parameter",
+            details={"missing": ["old_id"]},
+            suggestions=["Provide the current concept ID to rename"],
+        )
     if not new_id:
-        return {"error": "Missing new_id parameter"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing new_id parameter",
+            details={"missing": ["new_id"]},
+            suggestions=["Provide the new concept ID to rename to"],
+        )
 
     return rename_concept(
         old_id=old_id,
@@ -2863,9 +3049,19 @@ def _update_concept(**kwargs):
     update_data = kwargs.get("update_data")
 
     if not concept_id:
-        return {"error": "Missing required parameter: concept_id"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: concept_id",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID to update"],
+        )
     if not update_data or not isinstance(update_data, dict):
-        return {"error": "Missing or invalid 'update_data' dictionary"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing or invalid 'update_data' dictionary",
+            details={"missing": ["update_data"]},
+            suggestions=["Provide update_data as a dictionary with fields to update"],
+        )
 
     try:
         result = update_concept(concept_id=concept_id, update_data=update_data)
@@ -2876,9 +3072,19 @@ def _update_concept(**kwargs):
                 "updated_fields": list(update_data.keys()),
             }
         else:
-            return {"success": False, "error": "Update failed or concept not found"}
+            return make_error_response(
+                "update_failed",
+                "Update failed or concept not found",
+                details={"concept_id": concept_id},
+                suggestions=["Check if the concept exists using concept_exists"],
+                related_concept_ids=[concept_id],
+            )
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return make_error_response(
+            "exception",
+            str(e),
+            details={"exception_type": type(e).__name__, "concept_id": concept_id},
+        )
 
 
 def _tree_input_schema() -> Schema:
@@ -5691,10 +5897,11 @@ def _jira_add_comment(**kwargs):
     issue_key = kwargs.get("issue_key")
     comment = kwargs.get("comment")
     if not issue_key or not comment:
-        return {
-            "error": "Missing required parameters: issue_key and comment",
-            "success": False,
-        }
+        return make_error_response(
+            "MISSING_PARAMS",
+            "Missing required parameters: issue_key and comment",
+            suggestions=["Provide both issue_key (e.g. 'PROJ-123') and comment text"],
+        )
 
     async def _async_comment():
         proxy = await get_jira_proxy()
@@ -5703,7 +5910,7 @@ def _jira_add_comment(**kwargs):
     try:
         return _run_async_compat(_async_comment)
     except JiraProxyError as exc:
-        return {"error": str(exc), "success": False}
+        return make_error_response("JIRA_ERROR", str(exc))
 
 
 def _jira_transition_issue(**kwargs):
@@ -5713,10 +5920,11 @@ def _jira_transition_issue(**kwargs):
     issue_key = kwargs.get("issue_key")
     transition_id = kwargs.get("transition_id")
     if not issue_key or not transition_id:
-        return {
-            "error": "Missing required parameters: issue_key and transition_id",
-            "success": False,
-        }
+        return make_error_response(
+            "MISSING_PARAMS",
+            "Missing required parameters: issue_key and transition_id",
+            suggestions=["Use jira_get_issue first to find available transition IDs"],
+        )
 
     async def _async_transition():
         proxy = await get_jira_proxy()
@@ -5727,7 +5935,7 @@ def _jira_transition_issue(**kwargs):
     try:
         return _run_async_compat(_async_transition)
     except JiraProxyError as exc:
-        return {"error": str(exc), "success": False}
+        return make_error_response("JIRA_ERROR", str(exc))
 
 
 def _jira_create_issue(**kwargs):
@@ -5742,10 +5950,13 @@ def _jira_create_issue(**kwargs):
     summary = kwargs.get("summary")
 
     if not project_key or not issue_type or not summary:
-        return {
-            "success": False,
-            "error": "Missing required parameters: project_key, issue_type, summary",
-        }
+        return make_error_response(
+            "MISSING_PARAMS",
+            "Missing required parameters: project_key, issue_type, summary",
+            suggestions=[
+                "Provide project_key (e.g. 'PROJ'), issue_type (e.g. 'Task'), and summary text"
+            ],
+        )
 
     project_key_norm = str(project_key).strip().upper()
     dry_run = bool(kwargs.get("dry_run", True))
@@ -5831,7 +6042,7 @@ def _jira_create_issue(**kwargs):
             "result": result,
         }
     except JiraProxyError as exc:
-        return {"error": str(exc), "success": False}
+        return make_error_response("JIRA_ERROR", str(exc))
 
 
 def _jira_update_issue(**kwargs):
@@ -5843,18 +6054,22 @@ def _jira_update_issue(**kwargs):
     issue_key = kwargs.get("issue_key")
     update_fields = kwargs.get("update_fields")
     if not issue_key or not isinstance(update_fields, dict):
-        return {
-            "success": False,
-            "error": "Missing required parameters: issue_key and update_fields (dict)",
-        }
+        return make_error_response(
+            "MISSING_PARAMS",
+            "Missing required parameters: issue_key and update_fields (dict)",
+            suggestions=[
+                "Provide issue_key and update_fields as a dict of field names to values"
+            ],
+        )
 
     issue_key_str = str(issue_key).strip()
     project_key = _jira_project_from_issue_key(issue_key_str)
     if not project_key:
-        return {
-            "success": False,
-            "error": "Invalid issue_key format; expected PROJECT-123",
-        }
+        return make_error_response(
+            "INVALID_ISSUE_KEY",
+            "Invalid issue_key format; expected PROJECT-123",
+            suggestions=["Use the format PROJECT-123 for issue keys"],
+        )
 
     dry_run = bool(kwargs.get("dry_run", True))
     approved = bool(kwargs.get("approved", False))
@@ -5885,10 +6100,11 @@ def _jira_update_issue(**kwargs):
         if isinstance(k, str) and k not in blocked_fields
     }
     if not safe_fields:
-        return {
-            "success": False,
-            "error": "No updatable fields provided (project/key/id are not allowed)",
-        }
+        return make_error_response(
+            "NO_UPDATABLE_FIELDS",
+            "No updatable fields provided (project/key/id are not allowed)",
+            suggestions=["Provide fields like summary, description, assignee, etc."],
+        )
 
     payload: dict[str, Any] = {"fields": safe_fields}
 
@@ -5932,7 +6148,7 @@ def _jira_update_issue(**kwargs):
             "result": result,
         }
     except JiraProxyError as exc:
-        return {"error": str(exc), "success": False}
+        return make_error_response("JIRA_ERROR", str(exc))
 
 
 def _jira_link_issue(**kwargs):
@@ -5945,20 +6161,24 @@ def _jira_link_issue(**kwargs):
     outward_issue_key = kwargs.get("outward_issue_key")
     link_type = kwargs.get("link_type")
     if not inward_issue_key or not outward_issue_key or not link_type:
-        return {
-            "success": False,
-            "error": "Missing required parameters: inward_issue_key, outward_issue_key, link_type",
-        }
+        return make_error_response(
+            "MISSING_PARAMS",
+            "Missing required parameters: inward_issue_key, outward_issue_key, link_type",
+            suggestions=[
+                "Provide both issue keys and a link type (e.g. 'Blocks', 'Relates')"
+            ],
+        )
 
     inward_key = str(inward_issue_key).strip()
     outward_key = str(outward_issue_key).strip()
     inward_project = _jira_project_from_issue_key(inward_key)
     outward_project = _jira_project_from_issue_key(outward_key)
     if not inward_project or not outward_project:
-        return {
-            "success": False,
-            "error": "Invalid issue key format; expected PROJECT-123",
-        }
+        return make_error_response(
+            "INVALID_ISSUE_KEY",
+            "Invalid issue key format; expected PROJECT-123",
+            suggestions=["Use the format PROJECT-123 for issue keys"],
+        )
 
     dry_run = bool(kwargs.get("dry_run", True))
     approved = bool(kwargs.get("approved", False))
@@ -6035,7 +6255,7 @@ def _jira_link_issue(**kwargs):
             "result": result,
         }
     except JiraProxyError as exc:
-        return {"error": str(exc), "success": False}
+        return make_error_response("JIRA_ERROR", str(exc))
 
 
 def _jira_get_myself(**kwargs):
@@ -6459,9 +6679,17 @@ def _task_create(**kwargs):
     title = kwargs.get("title")
     description = kwargs.get("description")
     if not title or not isinstance(title, str) or not title.strip():
-        return {"success": False, "error": "Missing required parameter: title"}
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: title",
+            suggestions=["Provide a non-empty title string for the task"],
+        )
     if not description or not isinstance(description, str) or not description.strip():
-        return {"success": False, "error": "Missing required parameter: description"}
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: description",
+            suggestions=["Provide a non-empty description string for the task"],
+        )
 
     assignee_id = kwargs.get("assignee_id") or kwargs.get("assignee_concept_id")
     session_id = kwargs.get("originating_session_id") or kwargs.get("session_id")
@@ -6475,7 +6703,13 @@ def _task_create(**kwargs):
         try:
             due_date = datetime.fromisoformat(due_str.replace("Z", "+00:00"))
         except ValueError:
-            return {"success": False, "error": f"Invalid due_date format: {due_str}"}
+            return make_error_response(
+                "INVALID_DATE",
+                f"Invalid due_date format: {due_str}",
+                suggestions=[
+                    "Use ISO format (e.g. '2025-12-31' or '2025-12-31T23:59:59Z')"
+                ],
+            )
 
     try:
         result = create_task(
@@ -6491,11 +6725,11 @@ def _task_create(**kwargs):
         result["success"] = True
         return result
     except InvalidTaskDataError as exc:
-        return {"success": False, "error": str(exc), "error_type": "invalid_data"}
+        return make_error_response("INVALID_DATA", str(exc))
     except TaskManagementError as exc:
-        return {"success": False, "error": str(exc), "error_type": "task_error"}
+        return make_error_response("TASK_ERROR", str(exc))
     except Exception as exc:
-        return {"success": False, "error": f"Unexpected error: {exc}"}
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
 def _task_get(**kwargs):
@@ -6504,19 +6738,20 @@ def _task_get(**kwargs):
 
     task_id = kwargs.get("task_concept_id") or kwargs.get("task_id")
     if not task_id or not isinstance(task_id, str) or not task_id.strip():
-        return {
-            "success": False,
-            "error": "Missing required parameter: task_concept_id",
-        }
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide the task's concept_id"],
+        )
 
     try:
         result = get_task(task_id.strip())
         result["success"] = True
         return result
     except TaskNotFoundError as exc:
-        return {"success": False, "error": str(exc), "error_type": "not_found"}
+        return make_error_response("NOT_FOUND", str(exc))
     except Exception as exc:
-        return {"success": False, "error": f"Unexpected error: {exc}"}
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
 def _task_list(**kwargs):
@@ -6552,7 +6787,7 @@ def _task_list(**kwargs):
             )
         return {"success": True, "tasks": tasks, "count": len(tasks)}
     except Exception as exc:
-        return {"success": False, "error": f"Unexpected error: {exc}"}
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
 def _task_update_status(**kwargs):
@@ -6567,23 +6802,28 @@ def _task_update_status(**kwargs):
     status = kwargs.get("status")
 
     if not task_id or not isinstance(task_id, str) or not task_id.strip():
-        return {
-            "success": False,
-            "error": "Missing required parameter: task_concept_id",
-        }
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide the task's concept_id"],
+        )
     if not status or not isinstance(status, str) or not status.strip():
-        return {"success": False, "error": "Missing required parameter: status"}
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: status",
+            suggestions=["Provide status (e.g. 'pending', 'in_progress', 'completed')"],
+        )
 
     try:
         result = update_task_status(task_id.strip(), status.strip())
         result["success"] = True
         return result
     except TaskNotFoundError as exc:
-        return {"success": False, "error": str(exc), "error_type": "not_found"}
+        return make_error_response("NOT_FOUND", str(exc))
     except InvalidTaskDataError as exc:
-        return {"success": False, "error": str(exc), "error_type": "invalid_data"}
+        return make_error_response("INVALID_DATA", str(exc))
     except Exception as exc:
-        return {"success": False, "error": f"Unexpected error: {exc}"}
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
 def _task_assign(**kwargs):
@@ -6598,26 +6838,28 @@ def _task_assign(**kwargs):
     assignee_id = kwargs.get("assignee_concept_id") or kwargs.get("assignee_id")
 
     if not task_id or not isinstance(task_id, str) or not task_id.strip():
-        return {
-            "success": False,
-            "error": "Missing required parameter: task_concept_id",
-        }
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide the task's concept_id"],
+        )
     if not assignee_id or not isinstance(assignee_id, str) or not assignee_id.strip():
-        return {
-            "success": False,
-            "error": "Missing required parameter: assignee_concept_id",
-        }
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: assignee_concept_id",
+            suggestions=["Provide the assignee's concept_id"],
+        )
 
     try:
         result = assign_task(task_id.strip(), assignee_id.strip())
         result["success"] = True
         return result
     except TaskNotFoundError as exc:
-        return {"success": False, "error": str(exc), "error_type": "not_found"}
+        return make_error_response("NOT_FOUND", str(exc))
     except InvalidTaskDataError as exc:
-        return {"success": False, "error": str(exc), "error_type": "invalid_data"}
+        return make_error_response("INVALID_DATA", str(exc))
     except Exception as exc:
-        return {"success": False, "error": f"Unexpected error: {exc}"}
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
 def _task_delete(**kwargs):
@@ -6627,18 +6869,19 @@ def _task_delete(**kwargs):
     task_id = kwargs.get("task_concept_id") or kwargs.get("task_id")
 
     if not task_id or not isinstance(task_id, str) or not task_id.strip():
-        return {
-            "success": False,
-            "error": "Missing required parameter: task_concept_id",
-        }
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide the task's concept_id"],
+        )
 
     try:
         deleted = delete_task(task_id.strip())
         return {"success": True, "deleted": deleted, "task_concept_id": task_id.strip()}
     except TaskNotFoundError as exc:
-        return {"success": False, "error": str(exc), "error_type": "not_found"}
+        return make_error_response("NOT_FOUND", str(exc))
     except Exception as exc:
-        return {"success": False, "error": f"Unexpected error: {exc}"}
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
 def build_default_catalogue() -> MethodCatalogue:

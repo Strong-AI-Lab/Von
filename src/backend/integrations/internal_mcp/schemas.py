@@ -9,11 +9,120 @@ fields) which is sufficient for the initial gateway scaffolding.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Mapping, MutableMapping, Tuple, Union
+from dataclasses import dataclass, field, asdict
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Tuple,
+    Union,
+)
 from types import NoneType
 
 JsonCompatibleType = Union[type, Tuple[type, ...]]
+
+
+# ---------------------------------------------------------------------------
+# Standardised MCP Error Response (JVNAUTOSCI-1053)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MCPErrorResponse:
+    """Standardised error response for MCP tool handlers.
+
+    This dataclass ensures all MCP tool errors follow a consistent structure,
+    making it easier for LLM agents to interpret failures and take corrective
+    action.
+
+    Attributes:
+        error_code: A machine-readable error identifier (e.g., 'missing_parameter',
+            'concept_not_found', 'validation_failed'). Should be snake_case.
+        message: A human-readable description of the error.
+        details: Additional structured context about the error (e.g., which
+            parameters were missing, what validation failed).
+        suggestions: A list of actionable suggestions for the LLM/user to
+            recover from the error.
+        related_concept_ids: Concept IDs that are relevant to the error context,
+            useful for the LLM to reference in subsequent operations.
+    """
+
+    error_code: str
+    message: str
+    details: Optional[Dict[str, Any]] = None
+    suggestions: Optional[List[str]] = None
+    related_concept_ids: Optional[List[str]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to a dictionary suitable for JSON serialisation.
+
+        Returns a response dict with 'success': False and the error fields.
+        Omits None values for cleaner output.
+        """
+        result: Dict[str, Any] = {
+            "success": False,
+            "error": self.message,  # Backward compatibility: top-level 'error' string
+            "error_code": self.error_code,
+        }
+        if self.details is not None:
+            result["error_details"] = self.details
+        if self.suggestions is not None:
+            result["suggestions"] = self.suggestions
+        if self.related_concept_ids is not None:
+            result["related_concept_ids"] = self.related_concept_ids
+        return result
+
+
+def make_error_response(
+    error_code: str,
+    message: str,
+    *,
+    details: Optional[Dict[str, Any]] = None,
+    suggestions: Optional[List[str]] = None,
+    related_concept_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Create a standardised MCP error response dictionary.
+
+    This is a convenience function for creating error responses without
+    explicitly instantiating MCPErrorResponse.
+
+    Args:
+        error_code: A machine-readable error identifier (snake_case).
+        message: A human-readable description of the error.
+        details: Additional structured context about the error.
+        suggestions: Actionable suggestions for recovery.
+        related_concept_ids: Relevant concept IDs for context.
+
+    Returns:
+        A dictionary with standardised error response structure, including
+        'success': False for response consistency.
+
+    Example:
+        >>> make_error_response(
+        ...     "concept_not_found",
+        ...     "Concept '#V#example' does not exist",
+        ...     details={"concept_id": "#V#example"},
+        ...     suggestions=["Create the concept first using create_concepts"]
+        ... )
+        {
+            'success': False,
+            'error': "Concept '#V#example' does not exist",
+            'error_code': 'concept_not_found',
+            'error_details': {'concept_id': '#V#example'},
+            'suggestions': ['Create the concept first using create_concepts']
+        }
+    """
+    return MCPErrorResponse(
+        error_code=error_code,
+        message=message,
+        details=details,
+        suggestions=suggestions,
+        related_concept_ids=related_concept_ids,
+    ).to_dict()
 
 
 @dataclass(frozen=True)
