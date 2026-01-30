@@ -172,12 +172,25 @@ def _get_paper_metadata(**kwargs):
 def _create_concepts(**kwargs):
     from ...vontology.utils_vontology import create_vontology_concept
     from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
+    from ...db.repositories.concepts_repository import ConceptsRepository
+    from ...utils.concept_id_utils import canonicalise_vontology_concept_id
 
     parent_id = kwargs.get("parent_id")
     concepts = kwargs.get("concepts", [])
 
     if not parent_id:
         return {"error": "Missing required parameter: parent_id"}
+
+    # Validate and canonicalise parent_id
+    canonical_parent = canonicalise_vontology_concept_id(parent_id)
+    if not ConceptsRepository.find_one({"concept_id": canonical_parent}):
+        return {
+            "error": f"Parent concept '{canonical_parent}' not found. Create it first or check the ID.",
+            "error_code": "parent_not_found",
+            "canonical_parent_id": canonical_parent,
+            "original_parent_id": parent_id,
+        }
+    parent_id = canonical_parent  # Use canonicalised form
     if not concepts or not isinstance(concepts, list):
         return {"error": "Missing or invalid 'concepts' array"}
 

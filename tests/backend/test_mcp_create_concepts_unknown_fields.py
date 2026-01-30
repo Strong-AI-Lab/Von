@@ -6,7 +6,36 @@ when the MCP orchestrator or other callers included extra context fields.
 """
 
 import pytest
+from src.backend.db.repositories.concepts_repository import ConceptsRepository
 from src.backend.integrations.internal_mcp.catalogue import _create_concepts
+
+
+@pytest.fixture(autouse=True)
+def seed_core_concepts():
+    """Seed #V#thing and #V#predicate for create_concepts tests."""
+    concepts = ConceptsRepository.collection()
+    if concepts is None:
+        pytest.skip("MongoDB not configured for this test run")
+
+    # Seed core concepts needed for tests
+    concepts.delete_many({"concept_id": {"$in": ["#V#thing", "#V#predicate"]}})
+    concepts.insert_one(
+        {
+            "concept_id": "#V#thing",
+            "relationships": {"is_a_type_of": [], "is_an_instance_of": []},
+        }
+    )
+    concepts.insert_one(
+        {
+            "concept_id": "#V#predicate",
+            "relationships": {"is_a_type_of": ["#V#thing"], "is_an_instance_of": []},
+        }
+    )
+    yield
+    # Cleanup test-created concepts
+    concepts.delete_many(
+        {"concept_id": {"$regex": "^#V#(test_concept_|multi_extra_|test_predicate_)"}}
+    )
 
 
 def test_create_concepts_accepts_namespace_field():

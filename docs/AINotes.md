@@ -37,6 +37,10 @@ When running tests that require `VON_DB_NAME=test_von_db`, ensure the environmen
 ### Server safety
 Do not auto-start the server as part of automation unless explicitly requested.
 
+### Git merge workflow
+When merging feature branches: **commit → push → checkout main → pull → merge → push main → delete branch**.
+Push the feature branch before merging so the remote tracking ref exists; otherwise `git branch -d` warns "not fully merged".
+
 ## High-signal references
 - Agent rules: `AGENTS.md`
 - User-facing overview: `USER_GUIDE.md`
