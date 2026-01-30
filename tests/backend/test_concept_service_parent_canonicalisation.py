@@ -129,7 +129,9 @@ def test_create_concept_multiple_parent_variants_all_canonicalised():
     concepts = ConceptsRepository.collection()
     if concepts is None:
         pytest.skip("MongoDB not configured for this test run")
-    concepts.delete_many({"concept_id": {"$in": ["#V#travel_expense", "#V#work_event"]}})
+    concepts.delete_many(
+        {"concept_id": {"$in": ["#V#travel_expense", "#V#work_event"]}}
+    )
     concepts.insert_one(
         {
             "concept_id": "#V#travel_expense",
