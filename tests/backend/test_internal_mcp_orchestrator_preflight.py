@@ -41,14 +41,16 @@ def test_orchestrator_injects_deterministic_preflight_context(monkeypatch):
     def _fake_search_concepts(
         *, query="", instance_of=None, filter_kind=None, **_kwargs
     ):
-        assert instance_of == "#V#conversation_preflight_predicate"
-        assert filter_kind == ["predicate"]
-        return {
-            "results": [
-                {"concept_id": "#V#author_predicate"},
-                {"concept_id": "#V#affiliation_predicate"},
-            ]
-        }
+        if instance_of == "#V#conversation_preflight_predicate":
+            assert filter_kind == ["predicate"]
+            return {
+                "results": [
+                    {"concept_id": "#V#author_predicate"},
+                    {"concept_id": "#V#affiliation_predicate"},
+                ]
+            }
+        # Return empty results for topic queries
+        return {"results": []}
 
     def _fake_get_texts_for_concept(concept_id, predicate=None, limit=50):
         if predicate != "hasName":
@@ -124,3 +126,342 @@ def test_orchestrator_injects_deterministic_preflight_context(monkeypatch):
     ]
     assert preflight_entries, "expected ontology preflight telemetry"
     assert preflight_entries[0].get("stage") == "deterministic_preflight"
+
+
+# --- JVNAUTOSCI-1052: Topic vocabulary discovery tests ---
+
+
+def test_extract_topic_keywords_from_context():
+    """Test keyword extraction from conversation context."""
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+
+    # Test with prompt only
+    keywords = orchestrator._extract_topic_keywords_from_context(
+        "Tell me about machine learning algorithms", None
+    )
+    assert "machine" in keywords or "learning" in keywords or "algorithms" in keywords
+
+    # Test with context
+    context = [
+        {"role": "user", "content": "I want to learn about neural networks"},
+        {"role": "assistant", "content": "Sure, I can help with that."},
+        {"role": "user", "content": "What about deep learning?"},
+    ]
+    keywords = orchestrator._extract_topic_keywords_from_context(
+        "How do transformers work?", context
+    )
+    # Should include keywords from both prompt and recent user messages
+    assert len(keywords) > 0
+    # Should filter stop words
+    assert "about" not in keywords
+    assert "want" not in keywords
+
+
+def test_extract_topic_keywords_filters_concept_ids():
+    """Test that explicit concept IDs are filtered from keywords."""
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+
+    keywords = orchestrator._extract_topic_keywords_from_context(
+        "Create a concept #V#machine_learning_algorithm as type", None
+    )
+    # The concept ID should be removed, but 'machine', 'learning', 'algorithm' should
+    # not appear from the ID (they might appear from other words in the prompt)
+    assert "#V#machine_learning_algorithm" not in " ".join(keywords)
+
+
+def test_discover_types_for_topic(monkeypatch):
+    """Test type discovery based on topic keywords."""
+    search_calls = []
+
+    def _fake_search_concepts(*, query="", filter_kind=None, **_kwargs):
+        search_calls.append({"query": query, "filter_kind": filter_kind})
+        if filter_kind == ["type"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#neural_network",
+                        "name": "Neural Network",
+                        "similarity_score": 0.85,
+                    },
+                    {
+                        "concept_id": "#V#deep_learning_model",
+                        "name": "Deep Learning Model",
+                        "similarity_score": 0.75,
+                    },
+                ]
+            }
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+
+    types = orchestrator._discover_types_for_topic(
+        ["neural", "network", "learning"], "en"
+    )
+
+    assert len(types) == 2
+    assert types[0]["concept_id"] == "#V#neural_network"
+    assert types[0]["name"] == "Neural Network"
+    assert any(c["filter_kind"] == ["type"] for c in search_calls)
+
+
+def test_discover_predicates_for_topic(monkeypatch):
+    """Test predicate discovery based on topic keywords."""
+    search_calls = []
+
+    def _fake_search_concepts(*, query="", filter_kind=None, **_kwargs):
+        search_calls.append({"query": query, "filter_kind": filter_kind})
+        if filter_kind == ["predicate"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#has_training_data",
+                        "name": "has training data",
+                        "similarity_score": 0.80,
+                    },
+                ]
+            }
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+
+    predicates = orchestrator._discover_predicates_for_topic(
+        ["neural", "network", "training"], "en"
+    )
+
+    assert len(predicates) == 1
+    assert predicates[0]["concept_id"] == "#V#has_training_data"
+
+
+def test_topic_vocabulary_caching(monkeypatch):
+    """Test that topic vocabulary is cached properly."""
+    call_count = {"types": 0, "predicates": 0}
+
+    def _fake_search_concepts(*, query="", filter_kind=None, **_kwargs):
+        if filter_kind == ["type"]:
+            call_count["types"] += 1
+            return {
+                "results": [
+                    {"concept_id": "#V#test_type", "name": "Test Type"},
+                ]
+            }
+        if filter_kind == ["predicate"]:
+            call_count["predicates"] += 1
+            return {
+                "results": [
+                    {"concept_id": "#V#test_predicate", "name": "Test Predicate"},
+                ]
+            }
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+
+    keywords = ["machine", "learning"]
+
+    # First discovery should hit the search
+    types1 = orchestrator._discover_types_for_topic(keywords, "en")
+    predicates1 = orchestrator._discover_predicates_for_topic(keywords, "en")
+
+    # Second discovery with same keywords should use cache
+    cache_key = orchestrator._get_topic_vocabulary_cache_key(keywords)
+
+    # Manually populate cache to simulate what _build_ontology_preflight does
+    import time
+
+    orchestrator._topic_vocabulary_cache[cache_key] = {
+        "timestamp": time.time(),
+        "types": types1,
+        "predicates": predicates1,
+    }
+
+    # Verify cache key generation is consistent
+    cache_key2 = orchestrator._get_topic_vocabulary_cache_key(keywords)
+    assert cache_key == cache_key2
+
+    # Verify keywords order doesn't affect cache key
+    cache_key3 = orchestrator._get_topic_vocabulary_cache_key(["learning", "machine"])
+    assert cache_key == cache_key3
+
+
+def test_topic_vocabulary_in_preflight_telemetry(monkeypatch):
+    """Test that topic vocabulary appears in preflight telemetry."""
+
+    def _fake_search_concepts(
+        *, query="", instance_of=None, filter_kind=None, **_kwargs
+    ):
+        if instance_of == "#V#conversation_preflight_predicate":
+            return {"results": []}
+        if filter_kind == ["type"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#research_paper",
+                        "name": "Research Paper",
+                        "similarity_score": 0.90,
+                    },
+                ]
+            }
+        if filter_kind == ["predicate"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#has_citation",
+                        "name": "has citation",
+                        "similarity_score": 0.85,
+                    },
+                ]
+            }
+        return {"results": []}
+
+    def _fake_get_texts_for_concept(concept_id, predicate=None, limit=50):
+        return []
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        _fake_get_texts_for_concept,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+
+    llm = _CapturingLLM(["ok"])
+    result = orchestrator.run(
+        prompt="Find papers about machine learning research",
+        context=[
+            {"role": "user", "content": "I'm researching neural networks"},
+        ],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+    )
+
+    preflight_entries = [
+        entry
+        for entry in (result.aux_llm_calls or [])
+        if entry.get("type") == "ontology_preflight"
+    ]
+
+    assert preflight_entries, "expected ontology preflight telemetry"
+    telemetry = preflight_entries[0]
+
+    # Check topic vocabulary is in telemetry
+    assert "topic_keywords" in telemetry
+    assert "topic_types" in telemetry
+    assert "topic_predicates" in telemetry
+    assert "topic_vocabulary_cached" in telemetry
+
+    # Verify types were discovered
+    assert len(telemetry["topic_types"]) > 0
+    assert any(t["concept_id"] == "#V#research_paper" for t in telemetry["topic_types"])
+
+
+def test_topic_vocabulary_in_system_prompt(monkeypatch):
+    """Test that topic vocabulary appears in the system prompt."""
+
+    def _fake_search_concepts(
+        *, query="", instance_of=None, filter_kind=None, **_kwargs
+    ):
+        if instance_of == "#V#conversation_preflight_predicate":
+            return {"results": []}
+        if filter_kind == ["type"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#scientific_paper",
+                        "name": "Scientific Paper",
+                        "similarity_score": 0.88,
+                    },
+                ]
+            }
+        if filter_kind == ["predicate"]:
+            return {
+                "results": [
+                    {
+                        "concept_id": "#V#authored_by",
+                        "name": "authored by",
+                        "similarity_score": 0.82,
+                    },
+                ]
+            }
+        return {"results": []}
+
+    def _fake_get_texts_for_concept(concept_id, predicate=None, limit=50):
+        return []
+
+    monkeypatch.setattr(
+        "src.backend.services.concept_search_service.search_concepts",
+        _fake_search_concepts,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        _fake_get_texts_for_concept,
+    )
+
+    gateway = cast(Any, _CapturingGateway())
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway, max_tool_invocations=1, max_context_chars=80_000
+    )
+
+    llm = _CapturingLLM(["ok"])
+    orchestrator.run(
+        prompt="Analyse this scientific paper about quantum computing",
+        context=[],
+        llm_client=llm,
+        model=None,
+        preferred_language="en",
+    )
+
+    assert llm.calls, "expected a model call"
+    context_messages = llm.calls[0]["context"] or []
+
+    # Find the preflight message
+    preflight_content = None
+    for msg in context_messages:
+        content = msg.get("content") or ""
+        if "ONTOLOGY PRE-FLIGHT" in content:
+            preflight_content = content
+            break
+
+    assert preflight_content is not None, "expected preflight message in context"
+
+    # Check topic vocabulary section
+    assert "Topic-relevant vocabulary" in preflight_content
+    assert "#V#scientific_paper" in preflight_content
+    assert "#V#authored_by" in preflight_content
+    assert "Types:" in preflight_content
+    assert "Predicates:" in preflight_content

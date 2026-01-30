@@ -336,7 +336,11 @@ class InternalMCPChatOrchestrator:
     _CURRENT_BASE_SYSTEM_PROMPT_TYPE_ID = "#V#current_von_base_system_prompt"
     _MISSING_TOOL_CALL_ACTION_ID = "#V#detect_missing_tool_call_action"
     _PREFLIGHT_PREDICATE_TYPE_ID = "#V#conversation_preflight_predicate"
+    _PREFLIGHT_TYPE_TYPE_ID = "#V#conversation_preflight_type"
     _PREFLIGHT_CACHE_TTL_SECONDS = 120
+    _TOPIC_VOCABULARY_CACHE_TTL_SECONDS = 180
+    _TOPIC_VOCABULARY_MAX_TYPES = 15
+    _TOPIC_VOCABULARY_MAX_PREDICATES = 12
     _TOOL_CALL_REPAIR_PROMPT = (
         "You are a strict tool-call repairer for an MCP agent.\n"
         "Return ONLY a JSON object or JSON array of tool-call objects.\n"
@@ -426,6 +430,10 @@ class InternalMCPChatOrchestrator:
 
         # Deterministic ontology preflight cache (per language).
         self._preflight_cache: dict[str, dict[str, Any]] = {}
+
+        # Topic vocabulary cache for context-based discovery (JVNAUTOSCI-1052).
+        # Key: hash of extracted topic keywords; Value: {timestamp, types, predicates}.
+        self._topic_vocabulary_cache: dict[str, dict[str, Any]] = {}
 
         # Workflow model policy cache (single policy instance).
         self._workflow_model_policy_cache: dict[str, Any] = {}
@@ -1500,11 +1508,11 @@ class InternalMCPChatOrchestrator:
                 "- Before using a predicate in add_relationship: fetch_concept(predicate_id) and confirm is_an_instance_of includes #V#predicate (or subtype).\n\n"
                 "CONCEPT ID CANONICALISATION (MUST FOLLOW):\n"
                 "- Concept IDs are canonicalised: lowercase, non-alphanumeric runs become single underscore\n"
-                "- CamelCase is collapsed: \"BusinessTrip\" → #V#businesstrip\n"
-                "- Spaces become underscores: \"Business Trip\" → #V#business_trip\n"
-                "- Hyphens become underscores: \"Business-Trip\" → #V#business_trip\n"
+                '- CamelCase is collapsed: "BusinessTrip" → #V#businesstrip\n'
+                '- Spaces become underscores: "Business Trip" → #V#business_trip\n'
+                '- Hyphens become underscores: "Business-Trip" → #V#business_trip\n'
                 "- ALWAYS use the concept_id from tool responses for subsequent operations\n"
-                "- If creation fails with \"already exists\", use the canonical_id from the error response\n"
+                '- If creation fails with "already exists", use the canonical_id from the error response\n'
                 "- Before referencing parent types, use fetch_concept or concept_exists to get the exact ID\n"
                 "- DO NOT guess IDs - verify them first\n\n"
                 "VERIFICATION & CONSISTENCY RULES:\n"
@@ -4052,12 +4060,325 @@ class InternalMCPChatOrchestrator:
 
         return predicates
 
+    def _extract_topic_keywords_from_context(
+        self,
+        prompt: str,
+        context: Optional[Sequence[Mapping[str, Any]]],
+        *,
+        max_recent_messages: int = 5,
+    ) -> list[str]:
+        """Extract significant topic keywords from recent conversation context.
+
+        Used for context-based ontology vocabulary discovery (JVNAUTOSCI-1052).
+        Combines keywords from the current prompt and recent user messages.
+        """
+        import re as _re
+
+        texts: list[str] = []
+
+        # Add current prompt
+        if isinstance(prompt, str) and prompt.strip():
+            texts.append(prompt.strip())
+
+        # Extract recent user messages from context
+        if context:
+            user_messages: list[str] = []
+            for msg in context:
+                if not isinstance(msg, Mapping):
+                    continue
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    user_messages.append(content.strip())
+            # Take most recent messages (last N)
+            for text in user_messages[-max_recent_messages:]:
+                texts.append(text)
+
+        if not texts:
+            return []
+
+        combined = " ".join(texts)
+
+        # Remove explicit concept IDs to avoid circular discovery
+        combined = _re.sub(r"#V#[A-Za-z0-9][A-Za-z0-9._-]*", "", combined)
+
+        # Extract words (3+ chars, alphanumeric with underscores/hyphens)
+        words = _re.findall(r"\b[A-Za-z][A-Za-z0-9_-]{2,}\b", combined)
+
+        # Common stop words to filter out
+        stop_words = {
+            "the",
+            "and",
+            "for",
+            "are",
+            "but",
+            "not",
+            "you",
+            "all",
+            "can",
+            "had",
+            "her",
+            "was",
+            "one",
+            "our",
+            "out",
+            "has",
+            "have",
+            "been",
+            "would",
+            "could",
+            "should",
+            "will",
+            "with",
+            "this",
+            "that",
+            "from",
+            "they",
+            "what",
+            "which",
+            "when",
+            "where",
+            "there",
+            "their",
+            "about",
+            "into",
+            "than",
+            "then",
+            "some",
+            "such",
+            "only",
+            "other",
+            "also",
+            "just",
+            "like",
+            "more",
+            "most",
+            "very",
+            "much",
+            "many",
+            "how",
+            "why",
+            "who",
+            "whom",
+            "does",
+            "did",
+            "these",
+            "those",
+            "them",
+            "being",
+            "each",
+            "few",
+            "any",
+            "both",
+            "after",
+            "before",
+            "please",
+            "help",
+            "tell",
+            "show",
+            "give",
+            "find",
+            "make",
+            "want",
+            "need",
+            "know",
+            "think",
+            "look",
+            "use",
+            "using",
+            "used",
+        }
+
+        # Filter and deduplicate keywords
+        seen: set[str] = set()
+        keywords: list[str] = []
+        for word in words:
+            lower = word.lower()
+            if lower in stop_words:
+                continue
+            if lower in seen:
+                continue
+            seen.add(lower)
+            keywords.append(word)
+
+        # Limit to most frequent/significant keywords (first 10)
+        return keywords[:10]
+
+    def _get_topic_vocabulary_cache_key(self, keywords: list[str]) -> str:
+        """Generate a cache key from topic keywords."""
+        if not keywords:
+            return "__empty__"
+        # Use sorted lowercase keywords for consistent hashing
+        normalised = sorted(set(k.lower() for k in keywords if k))
+        return ":".join(normalised[:6])
+
+    def _discover_types_for_topic(
+        self,
+        keywords: list[str],
+        preferred_language: str | None,
+    ) -> list[dict[str, Any]]:
+        """Discover types relevant to the given topic keywords.
+
+        JVNAUTOSCI-1052: Query Vontology for types matching the conversation topic.
+        """
+        if not keywords:
+            return []
+
+        try:
+            from src.backend.services.concept_search_service import search_concepts
+        except Exception:
+            return []
+
+        query = " ".join(keywords[:6])
+        try:
+            result = search_concepts(
+                query=query,
+                filter_kind=["type"],
+                match_type="similarity",
+                min_similarity=0.50,
+                limit=self._TOPIC_VOCABULARY_MAX_TYPES,
+            )
+        except Exception:
+            return []
+
+        entries = result.get("results") if isinstance(result, dict) else None
+        if not isinstance(entries, list):
+            return []
+
+        types: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            concept_id = entry.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            if concept_id in seen:
+                continue
+            name = entry.get("name")
+            score = entry.get("similarity_score")
+            types.append(
+                {
+                    "concept_id": concept_id,
+                    "name": (
+                        self._normalise_preflight_display_name(name) if name else None
+                    ),
+                    "score": score,
+                }
+            )
+            seen.add(concept_id)
+
+        return types
+
+    def _discover_predicates_for_topic(
+        self,
+        keywords: list[str],
+        preferred_language: str | None,
+    ) -> list[dict[str, Any]]:
+        """Discover predicates relevant to the given topic keywords.
+
+        JVNAUTOSCI-1052: Query Vontology for predicates matching the conversation topic.
+        """
+        if not keywords:
+            return []
+
+        try:
+            from src.backend.services.concept_search_service import search_concepts
+        except Exception:
+            return []
+
+        query = " ".join(keywords[:6])
+        try:
+            result = search_concepts(
+                query=query,
+                filter_kind=["predicate"],
+                match_type="similarity",
+                min_similarity=0.50,
+                limit=self._TOPIC_VOCABULARY_MAX_PREDICATES,
+            )
+        except Exception:
+            return []
+
+        entries = result.get("results") if isinstance(result, dict) else None
+        if not isinstance(entries, list):
+            return []
+
+        predicates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            concept_id = entry.get("concept_id")
+            if not isinstance(concept_id, str) or not concept_id:
+                continue
+            if concept_id in seen:
+                continue
+            name = entry.get("name")
+            score = entry.get("similarity_score")
+            predicates.append(
+                {
+                    "concept_id": concept_id,
+                    "name": (
+                        self._normalise_preflight_display_name(name) if name else None
+                    ),
+                    "score": score,
+                }
+            )
+            seen.add(concept_id)
+
+        return predicates
+
+    def _build_topic_vocabulary_section(
+        self,
+        types: list[dict[str, Any]],
+        predicates: list[dict[str, Any]],
+        keywords: list[str],
+    ) -> str | None:
+        """Build the topic vocabulary section for the preflight message."""
+        if not types and not predicates:
+            return None
+
+        lines: list[str] = [
+            f"Topic-relevant vocabulary (keywords: {', '.join(keywords[:5])}):",
+        ]
+
+        if types:
+            lines.append("  Types:")
+            for item in types[: self._TOPIC_VOCABULARY_MAX_TYPES]:
+                concept_id = item.get("concept_id")
+                name = item.get("name")
+                if not concept_id:
+                    continue
+                if name:
+                    lines.append(f'    - {concept_id} (name="{name}")')
+                else:
+                    lines.append(f"    - {concept_id}")
+
+        if predicates:
+            lines.append("  Predicates:")
+            for item in predicates[: self._TOPIC_VOCABULARY_MAX_PREDICATES]:
+                concept_id = item.get("concept_id")
+                name = item.get("name")
+                if not concept_id:
+                    continue
+                if name:
+                    lines.append(f'    - {concept_id} (name="{name}")')
+                else:
+                    lines.append(f"    - {concept_id}")
+
+        return "\n".join(lines)
+
     def _build_ontology_preflight(
-        self, prompt: str, preferred_language: str | None
+        self,
+        prompt: str,
+        preferred_language: str | None,
+        context: Optional[Sequence[Mapping[str, Any]]] = None,
     ) -> _OntologyPreflightResult:
-        """Deterministically surface preflight predicates from the Vontology.
+        """Deterministically surface preflight predicates and types from the Vontology.
 
         Stage 1 (JVNAUTOSCI-988): read-only, cheap, and scoped to the current turn.
+        Extended (JVNAUTOSCI-1052): includes context-based topic vocabulary discovery.
         """
 
         if not isinstance(prompt, str):
@@ -4144,13 +4465,62 @@ class InternalMCPChatOrchestrator:
                             )
                             seen_targeted.add(concept_id)
 
-        if not predicates and not explicit_ids and not targeted_predicates:
+        # --- Topic vocabulary discovery (JVNAUTOSCI-1052) ---
+        topic_keywords: list[str] = []
+        topic_types: list[dict[str, Any]] = []
+        topic_predicates: list[dict[str, Any]] = []
+        topic_vocabulary_section: str | None = None
+        topic_vocabulary_cached: bool = False
+
+        # Extract keywords from conversation context
+        topic_keywords = self._extract_topic_keywords_from_context(raw, context)
+        if topic_keywords:
+            topic_cache_key = self._get_topic_vocabulary_cache_key(topic_keywords)
+            cached_topic = self._topic_vocabulary_cache.get(topic_cache_key)
+
+            if (
+                cached_topic
+                and (now - cached_topic.get("timestamp", 0))
+                < self._TOPIC_VOCABULARY_CACHE_TTL_SECONDS
+            ):
+                # Use cached topic vocabulary
+                topic_types = cached_topic.get("types", [])
+                topic_predicates = cached_topic.get("predicates", [])
+                topic_vocabulary_cached = True
+            else:
+                # Discover new topic vocabulary
+                topic_types = self._discover_types_for_topic(
+                    topic_keywords, preferred_language
+                )
+                topic_predicates = self._discover_predicates_for_topic(
+                    topic_keywords, preferred_language
+                )
+                # Cache the results
+                self._topic_vocabulary_cache[topic_cache_key] = {
+                    "timestamp": now,
+                    "types": topic_types,
+                    "predicates": topic_predicates,
+                }
+
+            topic_vocabulary_section = self._build_topic_vocabulary_section(
+                topic_types, topic_predicates, topic_keywords
+            )
+
+        # Check if we have any vocabulary to surface
+        has_vocabulary = (
+            predicates
+            or explicit_ids
+            or targeted_predicates
+            or topic_types
+            or topic_predicates
+        )
+        if not has_vocabulary:
             return _OntologyPreflightResult(message=None, telemetry=None)
 
         lines: list[str] = [
-            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1):",
-            "Source: instances of #V#conversation_preflight_predicate.",
-            "Use these existing predicate concept IDs for tool planning. Do not invent new predicates here.",
+            "ONTOLOGY PRE-FLIGHT (deterministic, read-only; stage=1+topic):",
+            "Source: instances of #V#conversation_preflight_predicate + context-based discovery.",
+            "Use these existing concept IDs for tool planning. Do not invent new concepts here.",
         ]
 
         if explicit_ids:
@@ -4184,6 +4554,11 @@ class InternalMCPChatOrchestrator:
                 else:
                     lines.append(f"- {concept_id}")
 
+        # Add topic vocabulary section (JVNAUTOSCI-1052)
+        if topic_vocabulary_section:
+            lines.append("")
+            lines.append(topic_vocabulary_section)
+
         telemetry: dict[str, Any] = {
             "type": "ontology_preflight",
             "stage": "deterministic_preflight",
@@ -4193,6 +4568,11 @@ class InternalMCPChatOrchestrator:
             "explicit_ids": explicit_ids,
             "predicate_query": predicate_query,
             "targeted_predicates": targeted_predicates,
+            # JVNAUTOSCI-1052: Topic vocabulary discovery telemetry
+            "topic_keywords": topic_keywords,
+            "topic_types": topic_types,
+            "topic_predicates": topic_predicates,
+            "topic_vocabulary_cached": topic_vocabulary_cached,
         }
 
         return _OntologyPreflightResult(message="\n".join(lines), telemetry=telemetry)
@@ -5319,7 +5699,9 @@ class InternalMCPChatOrchestrator:
             _persist_trace(status="completed")
             return result
 
-        preflight = self._build_ontology_preflight(prompt, preferred_language)
+        preflight = self._build_ontology_preflight(
+            prompt, preferred_language, context=context
+        )
         if preflight.telemetry:
             aux_llm_calls.append(preflight.telemetry)
             if trace_enabled and trace is not None:
