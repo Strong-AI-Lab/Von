@@ -236,7 +236,13 @@ def create_concept(
 
     # Persist display name using text_relations (modern approach) instead of legacy names[] field
     # Determine relationship shape based on creation kind
+    # JVNAUTOSCI-1047: Canonicalise parent IDs to prevent dangling references
+    # when LLM uses variant spellings (e.g., "#V#Business_Trip" vs "#V#businesstrip")
     parent_ids = parent_concept_ids or []
+    if parent_ids:
+        from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+
+        parent_ids = [canonicalise_vontology_concept_id(p) or p for p in parent_ids]
     is_instance_of = parent_ids if create_as_instance else []
     is_a_type_of = [] if create_as_instance else parent_ids
 
