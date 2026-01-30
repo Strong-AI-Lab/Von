@@ -377,5 +377,8 @@
   "typescript.inlayHints.functionLikeReturnTypes.enabled": true,
   "git.confirmSync": false,
   "files.eol": "\n",
-  "chat.mcp.autostart": "newAndOutdated"
+  "chat.mcp.autostart": "newAndOutdated",
+  "[html]": {
+    "editor.formatOnSave": false
+  }
 }
