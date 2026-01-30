@@ -3617,6 +3617,10 @@ def create_vontology_concept(
                     "success": False,
                     "message": f"Type with id '{candidate_concept_id}' already exists.",
                     "concept": None,
+                    "error_code": "already_exists",
+                    "existing_concept_id": candidate_concept_id,
+                    "input_name": new_concept_name,
+                    "suggestion": "Use fetch_concept_content to examine the existing concept, or update_concept to modify it.",
                 }
 
         parent_concept_ids = [parent_id] if parent_id else []
@@ -3635,11 +3639,14 @@ def create_vontology_concept(
                 "success": True,
                 "message": f"Successfully created concept '{new_concept_name}'",
                 "concept": created_concept,
+                "canonical_concept_id": candidate_concept_id,
+                "input_name": new_concept_name,
             }
         return {
             "success": False,
             "message": f"Failed to create concept '{new_concept_name}'",
             "concept": None,
+            "input_name": new_concept_name,
         }
     except Exception as e:  # pragma: no cover - defensive catch
         logger.error(f"Error creating vontology concept '{new_concept_name}': {e}")

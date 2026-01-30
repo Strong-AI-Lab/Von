@@ -175,7 +175,7 @@ def _create_concepts(**kwargs):
     from ...db.repositories.concepts_repository import ConceptsRepository
     from ...utils.concept_id_utils import canonicalise_vontology_concept_id
 
-    parent_id = kwargs.get("parent_id")
+    parent_id: str | None = kwargs.get("parent_id")
     concepts = kwargs.get("concepts", [])
 
     if not parent_id:
@@ -183,14 +183,16 @@ def _create_concepts(**kwargs):
 
     # Validate and canonicalise parent_id
     canonical_parent = canonicalise_vontology_concept_id(parent_id)
-    if not ConceptsRepository.find_one({"concept_id": canonical_parent}):
+    if not canonical_parent or not ConceptsRepository.find_one(
+        {"concept_id": canonical_parent}
+    ):
         return {
             "error": f"Parent concept '{canonical_parent}' not found. Create it first or check the ID.",
             "error_code": "parent_not_found",
             "canonical_parent_id": canonical_parent,
             "original_parent_id": parent_id,
         }
-    parent_id = canonical_parent  # Use canonicalised form
+    validated_parent_id: str = canonical_parent  # Type-narrowed to str
     if not concepts or not isinstance(concepts, list):
         return {"error": "Missing or invalid 'concepts' array"}
 
@@ -218,7 +220,7 @@ def _create_concepts(**kwargs):
             parent_id_for_concept = PREDICATE_TYPE_ID
         else:
             create_as_instance = kind == "instance"
-            parent_id_for_concept = parent_id
+            parent_id_for_concept = validated_parent_id
 
         result = create_vontology_concept(
             parent_id=parent_id_for_concept,
@@ -227,14 +229,26 @@ def _create_concepts(**kwargs):
             description=concept_data.get("description"),
             notes=concept_data.get("notes"),
         )
+        # Enrich result with the requested name for traceability
+        result["requested_name"] = name
+        result["requested_kind"] = kind
         results.append(result)
+
+    # Count different outcome types for summary
+    successful = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
+    already_exists = sum(
+        1
+        for r in results
+        if isinstance(r, dict) and r.get("error_code") == "already_exists"
+    )
 
     return {
         "results": results,
         "total": len(concepts),
-        "successful": sum(
-            1 for r in results if isinstance(r, dict) and r.get("success")
-        ),
+        "successful": successful,
+        "already_existed": already_exists,
+        "failed": len(concepts) - successful - already_exists,
+        "parent_id_used": validated_parent_id,  # Canonicalised parent ID that was actually used
     }
 
 
