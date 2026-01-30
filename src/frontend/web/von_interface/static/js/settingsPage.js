@@ -948,11 +948,23 @@ function formatRagSummaryForSettings(ragData, pendingFallback) {
 }
 
 function getPreferredRagNamespace() {
+  // JVNAUTOSCI-1015: Check sessionStorage first (window-scoped, set by main.js after org sync),
+  // then fall back to localStorage for backward compatibility
   return (
+    safeSessionStorageGet('current_user_namespace') ||
     safeLocalStorageGet('current_user_namespace') ||
     safeLocalStorageGet('von_namespace') ||
     ''
   );
+}
+
+function safeSessionStorageGet(key) {
+  try {
+    if (typeof sessionStorage === 'undefined') return null;
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
 }
 
 function renderActiveNamespace() {
@@ -1598,7 +1610,12 @@ async function loadAndDisplaySettings() {
         console.log(`Organisation switched: ${orgId || 'personal'}, namespace: ${namespace}`);
         try {
           if (namespace) {
+            // JVNAUTOSCI-1015: Update both sessionStorage (for immediate reads) and localStorage (for persistence)
+            sessionStorage.setItem('current_user_namespace', namespace);
             localStorage.setItem('current_user_namespace', namespace);
+          } else {
+            sessionStorage.removeItem('current_user_namespace');
+            localStorage.removeItem('current_user_namespace');
           }
         } catch { }
 
