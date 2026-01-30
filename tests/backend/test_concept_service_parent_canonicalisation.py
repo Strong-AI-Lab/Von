@@ -163,9 +163,11 @@ def test_create_concept_multiple_parent_variants_all_canonicalised():
     assert "#V#work_event" in is_a_type_of
     assert "#V#business_travel" in is_a_type_of
 
-    # None should contain non-canonical forms
+    # None should contain non-canonical forms (concept name part should be lowercase)
     for parent_id in is_a_type_of:
-        assert parent_id == parent_id.lower(), f"Non-canonical ID stored: {parent_id}"
+        # Check that name part after #V# is lowercase
+        name_part = parent_id.replace("#V#", "")
+        assert name_part == name_part.lower(), f"Non-canonical ID stored: {parent_id}"
         assert "-" not in parent_id, f"Hyphen in stored ID: {parent_id}"
 
 
