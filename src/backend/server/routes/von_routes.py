@@ -5334,7 +5334,9 @@ def history_sessions():
             ns_org_part = namespace.split("@", 1)[-1]
             organisation_concept_id = _normalise_concept_id(ns_org_part)
 
-        include_legacy = True
+        # JVNAUTOSCI-1015: Legacy conversations without namespace are excluded.
+        # Run utilities/backfill_chat_history_namespace.py to migrate any old data.
+        include_legacy = False
         sessions = chat_history_service.get_chat_history_session_summaries(
             user_concept_id,
             limit=limit,
