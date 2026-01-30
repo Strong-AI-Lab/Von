@@ -1623,9 +1623,13 @@ async function loadAndDisplaySettings() {
         try {
           if (orgId) {
             const resolvedName = resolveOrgNameFromSelect(orgId);
-            setStoredJson(LS_ORG_KEY, { id: null, concept_id: orgId, name: resolvedName });
+            const orgData = { id: null, concept_id: orgId, name: resolvedName };
+            // Update both storages so footer reads correct value immediately
+            setStoredJson(LS_ORG_KEY, orgData);
+            try { window.parent?.sessionStorage?.setItem('von_current_org', JSON.stringify(orgData)); } catch { }
           } else {
             setStoredJson(LS_ORG_KEY, null);
+            try { window.parent?.sessionStorage?.removeItem('von_current_org'); } catch { }
           }
         } catch { }
         if (window.parent?.updateModelInfoFooterDisplay) { window.parent.updateModelInfoFooterDisplay(); }
