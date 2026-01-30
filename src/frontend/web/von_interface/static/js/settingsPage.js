@@ -1640,9 +1640,11 @@ async function loadAndDisplaySettings() {
 
         try {
           if (window.parent?.document) {
+            const resolvedNameForEvent = orgId ? resolveOrgNameFromSelect(orgId) : null;
             window.parent.document.dispatchEvent(new CustomEvent('orgSwitched', {
               detail: {
                 organisation_id: orgId || null,
+                organisation_name: resolvedNameForEvent,
                 role: null,
                 namespace: namespace || null
               }

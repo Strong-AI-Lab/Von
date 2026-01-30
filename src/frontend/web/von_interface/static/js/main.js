@@ -478,8 +478,9 @@ document.addEventListener('von:settingsChanged', loadAndDisplayLanguageIndicator
 document.addEventListener('orgSwitched', (event) => {
   const detail = event.detail || {};
   const orgId = detail.organisation_id;
+  const orgName = detail.organisation_name || null;
   const namespace = detail.namespace;
-  console.log('[main] orgSwitched event received, updating sessionStorage:', { orgId, namespace });
+  console.log('[main] orgSwitched event received, updating sessionStorage:', { orgId, orgName, namespace });
 
   try {
     if (orgId) {
@@ -489,7 +490,7 @@ document.addEventListener('orgSwitched', (event) => {
       sessionStorage.setItem('von_current_org', JSON.stringify({
         id: parsed.id || null,
         concept_id: orgId,
-        name: parsed.name || null
+        name: orgName || parsed.name || null
       }));
     } else {
       // Switching to personal (no org) - clear sessionStorage entry

@@ -62,8 +62,10 @@ export async function getSessionContext() {
  * Switch to a different organisation
  * JVNAUTOSCI-1011: Now stores in sessionStorage for window-scoped contexts,
  * but also writes to localStorage for persistence across restarts/new windows.
+ * @param {string} orgConceptId - The organisation concept ID to switch to
+ * @param {string} [orgName] - Optional organisation name for event detail
  */
-export async function switchOrganisation(orgConceptId) {
+export async function switchOrganisation(orgConceptId, orgName = null) {
     try {
         const response = await postJson('/von/api/session/set_organisation', {
             organisation_concept_id: orgConceptId
@@ -87,6 +89,7 @@ export async function switchOrganisation(orgConceptId) {
             const event = new CustomEvent('orgSwitched', {
                 detail: {
                     organisation_id: response.organisation_id,
+                    organisation_name: orgName,
                     role: response.role,
                     namespace: response.namespace,
                     window_session_id: response.window_session_id
@@ -175,15 +178,16 @@ export async function renderOrgSelector(containerId) {
                         }
                     } catch { }
                     if (orgId) {
-                        const response = await switchOrganisation(orgId);
+                        // Get the org name from the selected option
+                        const selected = e.target.selectedOptions?.[0];
+                        const label = selected ? String(selected.textContent || '').trim() : '';
+                        const orgDisplayName = label.replace(/\\s*\\(.+\\)\\s*$/, '').trim();
+                        const response = await switchOrganisation(orgId, orgDisplayName || null);
                         try {
-                            const selected = e.target.selectedOptions?.[0];
-                            const label = selected ? String(selected.textContent || '').trim() : '';
-                            const name = label.replace(/\s*\(.+\)\s*$/, '').trim();
                             const orgData = {
                                 id: null,
                                 concept_id: orgId,
-                                name: name || null
+                                name: orgDisplayName || null
                             };
                             // JVNAUTOSCI-1011: Use sessionStorage for window-scoped context
                             sessionStorage.setItem(SS_CURRENT_ORG, JSON.stringify(orgData));
@@ -221,6 +225,7 @@ export async function renderOrgSelector(containerId) {
                         const event = new CustomEvent('orgSwitched', {
                             detail: {
                                 organisation_id: null,
+                                organisation_name: null,
                                 role: null,
                                 namespace: response.namespace,
                                 window_session_id: response.window_session_id
