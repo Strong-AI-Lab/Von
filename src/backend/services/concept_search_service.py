@@ -449,6 +449,7 @@ def search_concepts(
     filter_kind: Optional[List[str]] = None,
     scope_root: Optional[str] = None,
     instance_of: Optional[str] = None,
+    direct_instances_only: bool = False,
     match_type: str = "substring",
     exact_match: bool = False,
     min_similarity: float = 0.6,
@@ -470,7 +471,8 @@ def search_concepts(
         query: Search string (concept_id or partial name)
         filter_kind: Optional list of kinds to include ["type", "individual", "predicate"]
         scope_root: Optional concept_id to restrict search to subtree (e.g., "#V#person")
-        instance_of: Optional concept_id to filter instances of type (RECURSIVE: includes descendants/subtypes automatically)
+        instance_of: Optional concept_id to filter instances of type (RECURSIVE by default: includes descendants/subtypes)
+        direct_instances_only: If True, only return direct instances of instance_of (not instances of subtypes)
         match_type: Matching strategy: "exact", "substring", "similarity", or "all" (default: "substring")
         exact_match: DEPRECATED - use match_type="exact" instead
         min_similarity: Minimum similarity score for similarity matching (0.0-1.0, default: 0.6)
@@ -564,14 +566,22 @@ def search_concepts(
         # Build base MongoDB query
         base_query = {}
 
-        # Add instance_of filter if specified (includes descendants)
+        # Add instance_of filter if specified
+        # By default includes descendants (subtypes), unless direct_instances_only=True
         if instance_of:
-            descendant_ids = get_vontology_node_and_descendant_ids(instance_of)
-            if descendant_ids:
-                base_query["relationships.is_an_instance_of"] = {"$in": descendant_ids}
-            else:
-                # Fallback to direct instances only
+            if direct_instances_only:
+                # Only direct instances of the specified type
                 base_query["relationships.is_an_instance_of"] = instance_of
+            else:
+                # Include instances of subtypes (recursive)
+                descendant_ids = get_vontology_node_and_descendant_ids(instance_of)
+                if descendant_ids:
+                    base_query["relationships.is_an_instance_of"] = {
+                        "$in": descendant_ids
+                    }
+                else:
+                    # Fallback to direct instances only
+                    base_query["relationships.is_an_instance_of"] = instance_of
 
         # Add tag filters
         if system_tags:
@@ -1214,6 +1224,7 @@ def search_concepts(
                 "filter_kind": filter_kind,
                 "scope_root": scope_root,
                 "instance_of": instance_of,
+                "direct_instances_only": direct_instances_only,
                 "include_description": include_description,
                 "include_hierarchy_path": include_hierarchy_path,
                 "page": page,

@@ -676,7 +676,12 @@ async def list_tools() -> list[Tool]:
                     "query": {"type": "string", "description": "Search query text"},
                     "instance_of": {
                         "type": "string",
-                        "description": "Filter to instances of a specific type (e.g., '#V#researcher')",
+                        "description": "Filter to instances of a specific type (e.g., '#V#researcher'). By default includes instances of subtypes.",
+                    },
+                    "direct_instances_only": {
+                        "type": "boolean",
+                        "description": "If true, only return direct instances of instance_of (not instances of subtypes). Default: false.",
+                        "default": False,
                     },
                     "filter_kind": {
                         "type": "array",
@@ -755,7 +760,12 @@ async def list_tools() -> list[Tool]:
                     "query": {"type": "string", "description": "Search query text"},
                     "instance_of": {
                         "type": "string",
-                        "description": "Filter to instances of a specific type",
+                        "description": "Filter to instances of a specific type. By default includes instances of subtypes.",
+                    },
+                    "direct_instances_only": {
+                        "type": "boolean",
+                        "description": "If true, only return direct instances of instance_of (not instances of subtypes). Default: false.",
+                        "default": False,
                     },
                     "filter_kind": {
                         "type": "array",

@@ -4,6 +4,7 @@ Integration tests for MCP instance creation and search semantics.
 JVNAUTOSCI-691: Comprehensive test suite for:
 - instance_of_type parameter behaviour (JVNAUTOSCI-689)
 - Search result deduplication (JVNAUTOSCI-690)
+- direct_instances_only search flag (JVNAUTOSCI-687)
 - Relationship correctness for dual-hierarchy concepts
 
 These are integration tests that use the real test database (VON_DB_NAME=test_von_db)
@@ -517,6 +518,184 @@ class TestRelationshipCorrectness:
         assert (
             created_id in result_ids
         ), f"Concept {created_id} should be findable via instance_of search"
+
+
+# ============================================================================
+# Test direct_instances_only Flag (JVNAUTOSCI-687)
+# ============================================================================
+
+
+class TestDirectInstancesOnly:
+    """Integration tests for direct_instances_only search parameter."""
+
+    def test_direct_instances_only_excludes_subtype_instances(self):
+        """
+        Verify direct_instances_only=True only returns direct instances of a type.
+
+        Setup:
+          - Type A (parent type)
+          - Type B (subtype of A)
+          - Instance X (instance of A)
+          - Instance Y (instance of B)
+
+        When searching with instance_of=A and direct_instances_only=True,
+        only Instance X should be returned (not Instance Y).
+        """
+        unique_suffix = uuid.uuid4().hex[:8]
+
+        # Create parent type A
+        type_a_id = _create_test_concept(
+            f"Type A {unique_suffix}",
+            parent_ids=["#V#thing"],
+            concept_id=f"#V#type_a_{unique_suffix}",
+        )
+
+        # Create subtype B (subtype of A)
+        type_b_id = _create_test_concept(
+            f"Type B {unique_suffix}",
+            parent_ids=[type_a_id],
+            concept_id=f"#V#type_b_{unique_suffix}",
+        )
+
+        # Create instance X (direct instance of A)
+        instance_x_id = _create_test_concept(
+            f"Instance X {unique_suffix}",
+            parent_ids=[],
+            concept_id=f"#V#instance_x_{unique_suffix}",
+        )
+        # Set relationships manually for instance
+        ConceptsRepository.update_one(
+            {"concept_id": instance_x_id},
+            {
+                "$set": {
+                    "relationships.is_a_type_of": [],
+                    "relationships.is_an_instance_of": [type_a_id],
+                }
+            },
+        )
+
+        # Create instance Y (instance of B, which is a subtype of A)
+        instance_y_id = _create_test_concept(
+            f"Instance Y {unique_suffix}",
+            parent_ids=[],
+            concept_id=f"#V#instance_y_{unique_suffix}",
+        )
+        ConceptsRepository.update_one(
+            {"concept_id": instance_y_id},
+            {
+                "$set": {
+                    "relationships.is_a_type_of": [],
+                    "relationships.is_an_instance_of": [type_b_id],
+                }
+            },
+        )
+
+        # Search with direct_instances_only=False (default) - should find both X and Y
+        result_recursive = search_concepts(
+            query="",
+            instance_of=type_a_id,
+            direct_instances_only=False,
+            limit=100,
+        )
+        recursive_ids = [
+            r.get("concept_id") for r in result_recursive.get("results", [])
+        ]
+
+        # Search with direct_instances_only=True - should find only X
+        result_direct = search_concepts(
+            query="",
+            instance_of=type_a_id,
+            direct_instances_only=True,
+            limit=100,
+        )
+        direct_ids = [r.get("concept_id") for r in result_direct.get("results", [])]
+
+        # Verify recursive search finds instance of subtype
+        assert (
+            instance_x_id in recursive_ids
+        ), "Recursive search should find direct instance X"
+        assert (
+            instance_y_id in recursive_ids
+        ), "Recursive search should find subtype instance Y"
+
+        # Verify direct search only finds direct instances
+        assert (
+            instance_x_id in direct_ids
+        ), "Direct search should find direct instance X"
+        assert (
+            instance_y_id not in direct_ids
+        ), "Direct search should NOT find subtype instance Y"
+
+    def test_direct_instances_only_query_info_included(self):
+        """
+        Verify direct_instances_only flag is included in query_info metadata.
+        """
+        result = search_concepts(
+            query="",
+            instance_of="#V#thing",
+            direct_instances_only=True,
+            limit=10,
+        )
+
+        query_info = result.get("query_info", {})
+        assert (
+            "direct_instances_only" in query_info
+        ), "query_info should include direct_instances_only"
+        assert (
+            query_info["direct_instances_only"] is True
+        ), "direct_instances_only should be True in query_info"
+
+        # Test with False value
+        result_false = search_concepts(
+            query="",
+            instance_of="#V#thing",
+            direct_instances_only=False,
+            limit=10,
+        )
+        query_info_false = result_false.get("query_info", {})
+        assert (
+            query_info_false["direct_instances_only"] is False
+        ), "direct_instances_only should be False"
+
+    def test_direct_instances_only_with_empty_query(self):
+        """
+        Verify direct_instances_only works correctly with empty query (fetch all instances).
+        """
+        unique_suffix = uuid.uuid4().hex[:8]
+
+        # Create a type
+        type_id = _create_test_concept(
+            f"Direct Only Type {unique_suffix}",
+            parent_ids=["#V#thing"],
+            concept_id=f"#V#direct_only_type_{unique_suffix}",
+        )
+
+        # Create direct instance
+        instance_id = _create_test_concept(
+            f"Direct Only Instance {unique_suffix}",
+            parent_ids=[],
+            concept_id=f"#V#direct_only_instance_{unique_suffix}",
+        )
+        ConceptsRepository.update_one(
+            {"concept_id": instance_id},
+            {
+                "$set": {
+                    "relationships.is_a_type_of": [],
+                    "relationships.is_an_instance_of": [type_id],
+                }
+            },
+        )
+
+        # Search with empty query and direct_instances_only
+        result = search_concepts(
+            query="",
+            instance_of=type_id,
+            direct_instances_only=True,
+            limit=100,
+        )
+
+        result_ids = [r.get("concept_id") for r in result.get("results", [])]
+        assert instance_id in result_ids, "Direct instance should be found"
 
 
 # ============================================================================

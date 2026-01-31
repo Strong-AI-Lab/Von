@@ -476,7 +476,12 @@
                     },
                     "instance_of": {
                         "type": "string",
-                        "description": "Filter to instances of a specific type (e.g., '#V#researcher')"
+                        "description": "Filter to instances of a specific type (e.g., '#V#researcher'). By default includes instances of subtypes."
+                    },
+                    "direct_instances_only": {
+                        "type": "boolean",
+                        "description": "If true, only return direct instances of instance_of (not instances of subtypes). Default: false.",
+                        "default": false
                     },
                     "filter_kind": {
                         "type": "array",
@@ -577,7 +582,12 @@
                     },
                     "instance_of": {
                         "type": "string",
-                        "description": "Filter to instances of a specific type"
+                        "description": "Filter to instances of a specific type. By default includes instances of subtypes."
+                    },
+                    "direct_instances_only": {
+                        "type": "boolean",
+                        "description": "If true, only return direct instances of instance_of (not instances of subtypes). Default: false.",
+                        "default": false
                     },
                     "filter_kind": {
                         "type": "array",
