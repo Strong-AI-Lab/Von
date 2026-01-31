@@ -64,11 +64,12 @@ PREDICATE_NAME_ALIASES: Dict[str, str] = {
     "instance": "has_instance",
 }
 
-# Vacuous supertypes that warrant a soft warning (JVNAUTOSCI-1010).
-# Adding is_a_type_of to these supertypes is allowed but discouraged.
-VACUOUS_SUPERTYPES: frozenset[str] = frozenset({"#V#thing"})
+# Blocked parent types that defeat the purpose of the ontology (JVNAUTOSCI-1072).
+# #V#thing is the universal top type - everything is implicitly a thing.
+# Explicit relationships to it provide no semantic value.
+BLOCKED_PARENT_TYPES: frozenset[str] = frozenset({"#V#thing"})
 
-# Suggested alternative supertypes to offer when vacuous typing is detected.
+# Suggested alternative supertypes to offer when blocked parent type is detected.
 SUGGESTED_SUPERTYPES: List[str] = [
     "#V#physical_object",
     "#V#abstract_object",
@@ -145,6 +146,78 @@ def compute_kind_from_relationships(
         return "type"
     else:
         return "individual"
+
+
+def detect_vacuous_typing(
+    node: Mapping[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Detect if a concept has vacuous typing (only #V#thing as parent).
+
+    Vacuous typing occurs when:
+    - A type has only #V#thing in is_a_type_of (no meaningful supertype)
+    - An individual has only #V#thing in is_an_instance_of (no meaningful type)
+
+    This is a soft warning for retrieval - agents should repair these concepts
+    by searching for appropriate parent types.
+
+    JVNAUTOSCI-1072: Centralised vacuous typing detection.
+
+    Args:
+        node: A concept document with 'relationships' field.
+
+    Returns:
+        None if no vacuous typing, otherwise a warning dict with repair suggestions.
+    """
+    if not isinstance(node, Mapping):
+        return None
+
+    relationships = node.get("relationships", {}) or {}
+    concept_id = node.get("concept_id")
+
+    # Check for vacuous type (is_a_type_of only contains #V#thing)
+    is_a_type_of = relationships.get("is_a_type_of", [])
+    if isinstance(is_a_type_of, str):
+        is_a_type_of = [is_a_type_of]
+
+    # Check for vacuous instance (is_an_instance_of only contains #V#thing)
+    is_an_instance_of = relationships.get("is_an_instance_of", [])
+    if isinstance(is_an_instance_of, str):
+        is_an_instance_of = [is_an_instance_of]
+
+    # Determine if vacuous
+    vacuous_type = len(is_a_type_of) > 0 and all(
+        t in BLOCKED_PARENT_TYPES for t in is_a_type_of
+    )
+    vacuous_instance = len(is_an_instance_of) > 0 and all(
+        t in BLOCKED_PARENT_TYPES for t in is_an_instance_of
+    )
+
+    if not vacuous_type and not vacuous_instance:
+        return None
+
+    warning: Dict[str, Any] = {
+        "code": "vacuous_typing",
+        "message": (
+            f"Concept '{concept_id}' has only #V#thing as parent. "
+            "Search for appropriate types using search_concepts or find_subconcepts "
+            "and add a more specific parent type."
+        ),
+        "concept_id": concept_id,
+        "suggested_alternatives": SUGGESTED_SUPERTYPES,
+    }
+
+    if vacuous_type:
+        warning["vacuous_is_a_type_of"] = is_a_type_of
+        warning["repair_action"] = (
+            "add_relationship with is_a_type_of to a more specific supertype"
+        )
+    if vacuous_instance:
+        warning["vacuous_is_an_instance_of"] = is_an_instance_of
+        warning["repair_action"] = (
+            "add_relationship with is_an_instance_of to a more specific type"
+        )
+
+    return warning
 
 
 def detect_kind_drift(
@@ -294,22 +367,31 @@ def add_structural_relationship(
             "concept_id": target_id,
         }
 
-    # Check for vacuous typing (JVNAUTOSCI-1010)
-    vacuous_warning = None
-    if normalised == "is_a_type_of" and target_id in VACUOUS_SUPERTYPES:
-        vacuous_warning = {
-            "code": "vacuous_supertype",
-            "message": (
-                f"Generic supertype '{target_id}' — please refine later. "
-                "Consider using a more specific supertype for better ontology quality."
-            ),
-            "suggested_alternatives": SUGGESTED_SUPERTYPES,
-        }
-        _logger.info(
-            "Vacuous typing detected: %s is_a_type_of %s",
+    # Block vacuous typing (JVNAUTOSCI-1072: hard block for #V#thing as parent)
+    # Both is_a_type_of and is_an_instance_of are blocked for #V#thing
+    if (
+        normalised in ("is_a_type_of", "is_an_instance_of")
+        and target_id in BLOCKED_PARENT_TYPES
+    ):
+        _logger.warning(
+            "Blocked vacuous typing: %s %s %s",
             source_id,
+            normalised,
             target_id,
         )
+        return {
+            "success": False,
+            "error": "blocked_parent_type",
+            "message": (
+                f"Cannot use '{target_id}' as parent type. "
+                "Search for appropriate types first using search_concepts or "
+                "find_subconcepts to find a more specific parent type."
+            ),
+            "blocked_target": target_id,
+            "predicate": normalised,
+            "source_id": source_id,
+            "suggested_alternatives": SUGGESTED_SUPERTYPES,
+        }
 
     # Ensure array storage for forward relationship
     repo._ensure_relationship_array(source_id, normalised)
@@ -328,10 +410,6 @@ def add_structural_relationship(
         "target_id": target_id,
         "forward_modified": forward_update.modified_count > 0,
     }
-
-    # Include vacuous typing warning if detected (JVNAUTOSCI-1010)
-    if vacuous_warning:
-        result["warning"] = vacuous_warning
 
     # Maintain inverse relationship
     if maintain_inverse and normalised in STRUCTURAL_INVERSE_MAP:

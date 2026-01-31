@@ -43,6 +43,7 @@ def _get_concept_by_concept_id(**kwargs):
         enrich_concept_with_text_relations,
         get_concept_by_concept_id,
     )
+    from ...services.relationship_write_service import detect_vacuous_typing
 
     concept_id = kwargs.get("concept_id")
     if not concept_id:
@@ -55,6 +56,11 @@ def _get_concept_by_concept_id(**kwargs):
         return concept
 
     concept = enrich_concept_with_text_relations(concept)
+
+    # Detect vacuous typing (soft warning for agents to repair)
+    vacuous_warning = detect_vacuous_typing(concept)
+    if vacuous_warning:
+        concept["_vacuous_typing_warning"] = vacuous_warning
 
     include_relations_arg1 = bool(kwargs.get("include_relations_arg1"))
     include_relations_any_arg = bool(kwargs.get("include_relations_any_arg"))
@@ -199,7 +205,24 @@ def _create_concepts(**kwargs):
             "Missing required parameter: parent_id",
             details={"missing": ["parent_id"]},
             suggestions=[
-                "Provide a parent type concept ID, e.g., parent_id='#V#thing' or '#V#person'"
+                "Provide a parent type concept ID, e.g., parent_id='#V#person' or '#V#physical_object'"
+            ],
+        )
+
+    # Block #V#thing as parent type (JVNAUTOSCI-1072)
+    # #V#thing is the universal top type - everything is implicitly a thing.
+    # Explicit relationships to it provide no semantic value.
+    BLOCKED_PARENT_TYPES = {"#V#thing"}
+    if parent_id in BLOCKED_PARENT_TYPES:
+        return make_error_response(
+            "blocked_parent_type",
+            f"Cannot use '{parent_id}' as parent type. Search for appropriate types first "
+            "using search_concepts or find_subconcepts to find a more specific parent type.",
+            details={"blocked_parent_id": parent_id},
+            suggestions=[
+                "Search for suitable types using search_concepts",
+                "Use find_subconcepts of #V#type to explore available types",
+                "Consider #V#physical_object, #V#abstract_object, #V#event, #V#process, or #V#information_object",
             ],
         )
 
