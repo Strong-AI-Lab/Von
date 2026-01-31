@@ -320,6 +320,8 @@ $Timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 $NewLog = Join-Path $LogsDir "von_${Port}_${Timestamp}.log"
 $RagPidFile = Join-Path $RunDir "rag_worker.pid"
 $RagLogFile = Join-Path $LogsDir "rag_worker_${Timestamp}.log"
+$ConceptIndexPidFile = Join-Path $RunDir "concept_index_worker.pid"
+$ConceptIndexLogFile = Join-Path $LogsDir "concept_index_worker_${Timestamp}.log"
 
 $script:RepairAttempted = $false
 
@@ -931,6 +933,43 @@ function Stop-RagWorker {
     Remove-Item $RagPidFile -Force -ErrorAction SilentlyContinue
 }
 
+function Start-ConceptIndexWorker {
+    if (Test-Path $ConceptIndexPidFile) {
+        $pidContent = Get-Content $ConceptIndexPidFile -Raw -ErrorAction SilentlyContinue
+        if ($pidContent -match 'PID=([0-9]+)') {
+            $oldPid = [int]$Matches[1]
+            if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
+                Write-LauncherLog "Concept Index Worker already running (PID=$oldPid)."
+                return
+            }
+        }
+        Remove-Item $ConceptIndexPidFile -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-LauncherLog "Starting Concept Index Worker..."
+    $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
+
+    $commandToRun = "& `"$pdm`" run python -u src/backend/utilities/concept_index_worker.py"
+    $psExe = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell.exe' }
+
+    $proc = Start-Process -FilePath $psExe -ArgumentList @('-NoLogo', '-NoProfile', '-Command', "$commandToRun *>> `"$ConceptIndexLogFile`"") -WorkingDirectory $Root -PassThru -WindowStyle Hidden
+
+    $startIso = (Get-Date).ToString('o')
+    Set-Content $ConceptIndexPidFile "PID=$($proc.Id)`nSTART=$startIso"
+    Write-LauncherLog "Concept Index Worker started (PID=$($proc.Id)). Log: $ConceptIndexLogFile"
+}
+
+function Stop-ConceptIndexWorker {
+    if (-not (Test-Path $ConceptIndexPidFile)) { return }
+    $content = Get-Content $ConceptIndexPidFile -Raw -ErrorAction SilentlyContinue
+    if ($content -match 'PID=([0-9]+)') {
+        $pidToKill = [int]$Matches[1]
+        Write-LauncherLog "Stopping Concept Index Worker (PID=$pidToKill)..."
+        try { Stop-Process -Id $pidToKill -Force -ErrorAction SilentlyContinue } catch { }
+    }
+    Remove-Item $ConceptIndexPidFile -Force -ErrorAction SilentlyContinue
+}
+
 function Sync-PidFileToListener {
     # Align PID file with actual port-owning python process if mismatch
     $listener = Get-ListeningProcessByPort -Port $Port
@@ -1198,6 +1237,9 @@ function Start-VonServer {
 
     # Start RAG Worker
     try { Start-RagWorker } catch { Write-LauncherLog "[rag-worker] ERROR: $($_.Exception.Message)" }
+
+    # Start Concept Index Worker
+    try { Start-ConceptIndexWorker } catch { Write-LauncherLog "[concept-index-worker] ERROR: $($_.Exception.Message)" }
 }
 
 function Stop-VonServer {
@@ -1247,6 +1289,9 @@ function Stop-VonServer {
 
     # Stop RAG Worker
     Stop-RagWorker
+
+    # Stop Concept Index Worker
+    Stop-ConceptIndexWorker
 }
 
 function Get-VonStatus {

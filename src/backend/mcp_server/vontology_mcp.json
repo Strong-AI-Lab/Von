@@ -522,6 +522,20 @@
             }
         },
         {
+            "name": "get_concept_index_status",
+            "description": "Get the embedding index status for concepts. If concept_id is provided, returns status for that specific concept. If omitted, returns aggregate embedding stats (total concepts, counts by status, concepts needing indexing).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "Optional concept ID to check (e.g., '#V#person'). If omitted, returns aggregate index stats."
+                    }
+                },
+                "required": []
+            }
+        },
+        {
             "name": "resolve_concept_by_name",
             "description": "Resolve a Vontology concept deterministically from a user-provided surface form. Read-only (no mutation). Returns resolved/ambiguous/not_found with an audit trail.",
             "inputSchema": {
