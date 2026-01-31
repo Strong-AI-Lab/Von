@@ -1503,6 +1503,7 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
         kind = concept_data.get("kind", "type")
         description = concept_data.get("description")
         notes = concept_data.get("notes")
+        instance_of_type = concept_data.get("instance_of_type")
 
         if not name_val:
             results.append(
@@ -1517,6 +1518,7 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
             create_as_instance=create_as_instance,
             description=description,
             notes=notes,
+            instance_of_type=instance_of_type,
         )
         results.append(result)
 

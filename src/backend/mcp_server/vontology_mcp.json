@@ -12,13 +12,13 @@
         },
         {
             "name": "create_concepts",
-            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Supports singleton arrays. Use add_names afterward for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context.",
+            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?, instance_of_type?}. Supports singleton arrays. Use add_names afterward for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context. Use instance_of_type when creating a concept that should be both a subtype of parent_id AND an instance of a specific type (e.g., creating a predicate instance like 'published_in' as instance of '#V#nearly_functional_binary_predicate').",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "parent_id": {
                         "type": "string",
-                        "description": "Parent concept ID"
+                        "description": "Parent concept ID for hierarchy positioning (is_a_type_of relationship)"
                     },
                     "concepts": {
                         "type": "array",
@@ -34,13 +34,18 @@
                                         "instance",
                                         "type",
                                         "predicate"
-                                    ]
+                                    ],
+                                    "description": "Concept kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationship types. When instance_of_type is provided, kind affects concept_id disambiguation but instance_of_type determines the is_an_instance_of relationship."
                                 },
                                 "description": {
                                     "type": "string"
                                 },
                                 "notes": {
                                     "type": "string"
+                                },
+                                "instance_of_type": {
+                                    "type": "string",
+                                    "description": "Optional: create concept as instance of this type (is_an_instance_of relationship). Use when the new concept should be BOTH a subtype of parent_id AND an instance of a specific type. Example: create 'published_in' predicate as subtype of '#V#predicate' AND instance of '#V#nearly_functional_binary_predicate'."
                                 }
                             },
                             "required": [

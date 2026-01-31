@@ -3552,6 +3552,7 @@ def create_vontology_concept(
     create_as_instance: bool = False,
     notes: Optional[str] = None,
     description: Optional[str] = None,
+    instance_of_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Creates a new concept in the Vontology.
@@ -3563,6 +3564,10 @@ def create_vontology_concept(
                            If False, creates a subtype of the parent.
         notes: Optional notes for the new concept
         description: Optional description for the new concept
+        instance_of_type: Optional concept_id to create an is_an_instance_of relationship.
+                         When provided, the concept will be BOTH a subtype of parent_id
+                         AND an instance of instance_of_type. This is useful for predicates
+                         that need to be instances of a specific predicate type.
 
     Returns:
         Dict with keys:
@@ -3632,6 +3637,7 @@ def create_vontology_concept(
             create_as_instance=create_as_instance,
             description=description,
             notes=notes,
+            instance_of_type=instance_of_type,
         )
 
         if created_concept:

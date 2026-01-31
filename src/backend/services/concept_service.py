@@ -200,6 +200,7 @@ def create_concept(
     linked_concepts: Optional[List[Dict[str, Any]]] = None,
     parent_concept_ids: Optional[List[str]] = None,  # For parent relationships
     create_as_instance: bool = True,  # New: determines whether to set instance vs type relationship
+    instance_of_type: Optional[str] = None,  # JVNAUTOSCI-689: explicit instance_of relationship
 ) -> Dict[str, Any]:
     """Creates a new concept in the 'concepts' collection.
     REFACTORING_NOTE: This is the first CRUD operation for the new generalized concept model.
@@ -243,8 +244,21 @@ def create_concept(
         from ..utils.concept_id_utils import canonicalise_vontology_concept_id
 
         parent_ids = [canonicalise_vontology_concept_id(p) or p for p in parent_ids]
-    is_instance_of = parent_ids if create_as_instance else []
-    is_a_type_of = [] if create_as_instance else parent_ids
+
+    # JVNAUTOSCI-689: Handle explicit instance_of_type parameter
+    # When instance_of_type is provided, the concept is BOTH:
+    # - A subtype of parent_ids (is_a_type_of)
+    # - An instance of instance_of_type (is_an_instance_of)
+    if instance_of_type:
+        from ..utils.concept_id_utils import canonicalise_vontology_concept_id
+
+        canonical_instance_type = canonicalise_vontology_concept_id(instance_of_type) or instance_of_type
+        is_instance_of = [canonical_instance_type]
+        is_a_type_of = parent_ids  # Preserve hierarchy from parent_ids
+    else:
+        # Default behaviour (backward compatible)
+        is_instance_of = parent_ids if create_as_instance else []
+        is_a_type_of = [] if create_as_instance else parent_ids
 
     concept_doc: Dict[str, Any] = {
         # DO NOT include "names" field - will be created as text_relations below
