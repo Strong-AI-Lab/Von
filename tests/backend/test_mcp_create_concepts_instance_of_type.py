@@ -24,7 +24,9 @@ class TestCreateConceptInstanceOfType:
     """Tests for instance_of_type parameter in create_concept."""
 
     @patch("src.backend.services.concept_service.ConceptsRepository")
-    def test_instance_of_type_sets_both_relationships(self, mock_repo, mock_db_collection):
+    def test_instance_of_type_sets_both_relationships(
+        self, mock_repo, mock_db_collection
+    ):
         """When instance_of_type is provided, concept has both is_a_type_of and is_an_instance_of."""
         mock_repo.collection.return_value = mock_db_collection
         mock_repo.find_one.return_value = None  # No duplicate
@@ -96,7 +98,9 @@ class TestCreateConceptInstanceOfType:
         assert relationships.get("is_an_instance_of") == []
 
     @patch("src.backend.services.concept_service.ConceptsRepository")
-    def test_backward_compatible_create_as_instance(self, mock_repo, mock_db_collection):
+    def test_backward_compatible_create_as_instance(
+        self, mock_repo, mock_db_collection
+    ):
         """create_as_instance=True without instance_of_type uses parent as instance type."""
         mock_repo.collection.return_value = mock_db_collection
         mock_repo.find_one.return_value = None

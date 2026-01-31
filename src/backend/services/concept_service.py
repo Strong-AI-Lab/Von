@@ -200,7 +200,9 @@ def create_concept(
     linked_concepts: Optional[List[Dict[str, Any]]] = None,
     parent_concept_ids: Optional[List[str]] = None,  # For parent relationships
     create_as_instance: bool = True,  # New: determines whether to set instance vs type relationship
-    instance_of_type: Optional[str] = None,  # JVNAUTOSCI-689: explicit instance_of relationship
+    instance_of_type: Optional[
+        str
+    ] = None,  # JVNAUTOSCI-689: explicit instance_of relationship
 ) -> Dict[str, Any]:
     """Creates a new concept in the 'concepts' collection.
     REFACTORING_NOTE: This is the first CRUD operation for the new generalized concept model.
@@ -252,7 +254,9 @@ def create_concept(
     if instance_of_type:
         from ..utils.concept_id_utils import canonicalise_vontology_concept_id
 
-        canonical_instance_type = canonicalise_vontology_concept_id(instance_of_type) or instance_of_type
+        canonical_instance_type = (
+            canonicalise_vontology_concept_id(instance_of_type) or instance_of_type
+        )
         is_instance_of = [canonical_instance_type]
         is_a_type_of = parent_ids  # Preserve hierarchy from parent_ids
     else:
