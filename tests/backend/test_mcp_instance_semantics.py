@@ -398,6 +398,39 @@ class TestSearchDeduplication:
         result_ids = [r.get("concept_id") for r in result.get("results", [])]
         assert result_ids.count(cid) <= 1, "Two-pass search should deduplicate results"
 
+    def test_search_response_includes_deduplication_metadata(self):
+        """
+        Verify search response includes deduplication metadata (JVNAUTOSCI-690).
+
+        The response should include:
+        - deduplicated: True
+        - duplicates_removed: count of removed duplicates
+        - total_before_dedup: count before deduplication
+        - total_after_dedup: count after deduplication
+        """
+        # Search for common term that should have results
+        result = search_concepts(
+            query="thing",
+            match_type="substring",
+            limit=50,
+        )
+
+        # Verify deduplication metadata is present
+        assert "deduplication" in result, "Response should include deduplication metadata"
+        dedup = result["deduplication"]
+        assert dedup.get("deduplicated") is True, "deduplicated should be True"
+        assert "duplicates_removed" in dedup, "Should include duplicates_removed count"
+        assert "total_before_dedup" in dedup, "Should include total_before_dedup"
+        assert "total_after_dedup" in dedup, "Should include total_after_dedup"
+
+        # Verify counts are consistent
+        assert dedup["total_before_dedup"] >= dedup["total_after_dedup"], (
+            "total_before_dedup should be >= total_after_dedup"
+        )
+        assert dedup["duplicates_removed"] == (
+            dedup["total_before_dedup"] - dedup["total_after_dedup"]
+        ), "duplicates_removed should equal difference between before and after"
+
 
 # ============================================================================
 # Test Relationship Correctness (Hierarchy Preservation)

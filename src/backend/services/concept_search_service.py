@@ -582,6 +582,7 @@ def search_concepts(
         # Two-pass search strategy: prefix first, then substring fallback
         results = []
         seen_ids = set()
+        duplicates_encountered = 0  # JVNAUTOSCI-690: Track duplicates for metadata
         match_types_used = []
 
         # DUAL SCHEMA SUPPORT: Search modern text_relations in parallel with legacy fields
@@ -614,6 +615,8 @@ def search_concepts(
                 if concept_id and concept_id not in seen_ids:
                     results.append(concept_doc)
                     seen_ids.add(concept_id)
+                elif concept_id in seen_ids:
+                    duplicates_encountered += 1
 
             match_types_used.append("instance_filter")
 
@@ -673,6 +676,8 @@ def search_concepts(
                     concept_doc["_similarity_score"] = score
                     results.append(concept_doc)
                     seen_ids.add(concept_id)
+                else:
+                    duplicates_encountered += 1
 
             if similarity_results:
                 match_types_used.append("similarity")
@@ -711,6 +716,8 @@ def search_concepts(
                         results.append(concept_doc)
                         seen_ids.add(concept_id)
                         substring_added = True
+                    elif concept_id in seen_ids:
+                        duplicates_encountered += 1
 
                 if substring_added:
                     match_types_used.append("substring")
@@ -748,6 +755,8 @@ def search_concepts(
                     if concept_id and concept_id not in seen_ids:
                         results.append(concept_doc)
                         seen_ids.add(concept_id)
+                    elif concept_id in seen_ids:
+                        duplicates_encountered += 1
 
                 # Pass 2: Substring fallback if few results
                 fallback_threshold = max(3, limit // 2)
@@ -786,6 +795,8 @@ def search_concepts(
                         if concept_id and concept_id not in seen_ids:
                             results.append(concept_doc)
                             seen_ids.add(concept_id)
+                        elif concept_id in seen_ids:
+                            duplicates_encountered += 1
             else:
                 # Special chars detected, skip directly to substring
                 substring_query = _build_name_query(
@@ -815,6 +826,8 @@ def search_concepts(
                     if concept_id not in seen_ids:
                         results.append(concept_doc)
                         seen_ids.add(concept_id)
+                    else:
+                        duplicates_encountered += 1
 
         else:
             # Single-pass search (exact or substring)
@@ -1178,10 +1191,19 @@ def search_concepts(
             f"[concept_search] Found {total_count} results, returning {len(scored_results)}"
         )
 
+        # JVNAUTOSCI-690: Calculate deduplication stats
+        total_with_duplicates = len(scored_results) + duplicates_encountered
+
         return {
             "results": scored_results,
             "total_count": total_count,
             "match_types_used": match_types_used if match_types_used else [match_type],
+            "deduplication": {
+                "deduplicated": True,
+                "duplicates_removed": duplicates_encountered,
+                "total_before_dedup": total_with_duplicates,
+                "total_after_dedup": len(scored_results),
+            },
             "query_info": {
                 "query": query,
                 "match_type": match_type,
