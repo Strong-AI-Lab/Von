@@ -416,7 +416,9 @@ class TestSearchDeduplication:
         )
 
         # Verify deduplication metadata is present
-        assert "deduplication" in result, "Response should include deduplication metadata"
+        assert (
+            "deduplication" in result
+        ), "Response should include deduplication metadata"
         dedup = result["deduplication"]
         assert dedup.get("deduplicated") is True, "deduplicated should be True"
         assert "duplicates_removed" in dedup, "Should include duplicates_removed count"
@@ -424,9 +426,9 @@ class TestSearchDeduplication:
         assert "total_after_dedup" in dedup, "Should include total_after_dedup"
 
         # Verify counts are consistent
-        assert dedup["total_before_dedup"] >= dedup["total_after_dedup"], (
-            "total_before_dedup should be >= total_after_dedup"
-        )
+        assert (
+            dedup["total_before_dedup"] >= dedup["total_after_dedup"]
+        ), "total_before_dedup should be >= total_after_dedup"
         assert dedup["duplicates_removed"] == (
             dedup["total_before_dedup"] - dedup["total_after_dedup"]
         ), "duplicates_removed should equal difference between before and after"
