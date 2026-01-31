@@ -536,6 +536,30 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="audit_concept_text_relations",
+            description="Audit all text relations attached to a concept. Reports accessibility status for each relation and whether the concept can be safely renamed. Use before rename operations to identify and resolve blocking inaccessible relations.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to audit",
+                    },
+                    "include_text_preview": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Include truncated text preview in results",
+                    },
+                    "max_preview_length": {
+                        "type": "integer",
+                        "default": 100,
+                        "description": "Maximum length for text previews",
+                    },
+                },
+                "required": ["concept_id"],
+            },
+        ),
+        Tool(
             name="concept_exists",
             description="Minimal existence/accessibility check for a concept_id.",
             inputSchema={
@@ -2428,6 +2452,50 @@ async def _handle_upsert_singleton_text_relation(
         ]
 
 
+async def _handle_audit_concept_text_relations(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    """Audit text relations for a concept, showing accessibility status.
+
+    This is used before rename operations to identify inaccessible text relations
+    that would block the rename.
+    """
+    from src.backend.services.text_value_service import audit_concept_text_relations
+
+    concept_id = arguments.get("concept_id")
+    if not concept_id:
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id to audit text relations for",
+                    "Use search_concepts to find the concept first",
+                ],
+            )
+        ]
+
+    try:
+        payload = audit_concept_text_relations(
+            concept_id,
+            include_text_preview=arguments.get("include_text_preview", True),
+            max_preview_length=arguments.get("max_preview_length", 100),
+        )
+        return [_json_text(payload)]
+    except Exception as exc:
+        return [
+            _json_error(
+                f"Failed to audit text relations: {exc}",
+                error_code="operation_failed",
+                suggestions=[
+                    "Verify the concept_id exists",
+                    "Check the concept_id format (e.g., '#V#concept_name')",
+                ],
+                related_concept_ids=[concept_id],
+            )
+        ]
+
+
 async def _handle_concept_exists(arguments: dict[str, Any]) -> list[TextContent]:
     from src.backend.security.access_control import can_access_concept
     from src.backend.vontology.code_concepts_registry import is_code_concept_id
@@ -3356,6 +3424,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "delete_text_relation": _handle_delete_text_relation,
     "get_text_relations_summary": _handle_get_text_relations_summary,
     "upsert_singleton_text_relation": _handle_upsert_singleton_text_relation,
+    "audit_concept_text_relations": _handle_audit_concept_text_relations,
     "add_names": _handle_add_names,
     "get_tree": _handle_get_tree,
     "fetch_concept": _handle_fetch_concept,

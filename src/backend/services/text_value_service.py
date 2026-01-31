@@ -723,6 +723,141 @@ def upsert_singleton_text_relation(
     }
 
 
+def audit_concept_text_relations(
+    concept_id: str,
+    *,
+    include_text_preview: bool = True,
+    max_preview_length: int = 100,
+) -> Dict[str, Any]:
+    """Audit all text relations attached to a concept, including accessibility status.
+
+    This function bypasses normal access control to provide a complete view of all
+    text relations. It's designed for pre-rename auditing to identify relations that
+    would block a rename operation.
+
+    Returns:
+        A dictionary with:
+        - concept_id: The queried concept
+        - total_relations: Total count of text relations
+        - accessible_count: Relations that can be modified by current user
+        - inaccessible_count: Relations that would block rename
+        - relations: List of relation details with accessibility status
+        - summary: Grouped counts by predicate
+    """
+    # Query all text relations directly, bypassing normal access control
+    rels = list(
+        TextRelationsRepository.find(
+            {"subject_concept_id": concept_id},
+            limit=1000,
+        )
+    )
+
+    if not rels:
+        return {
+            "success": True,
+            "concept_id": concept_id,
+            "total_relations": 0,
+            "accessible_count": 0,
+            "inaccessible_count": 0,
+            "relations": [],
+            "summary": {},
+            "can_rename": True,
+            "blocking_relations": [],
+        }
+
+    # Collect text value IDs to fetch text content
+    tv_ids: List[ObjectId] = []
+    for rel in rels:
+        tv_id = rel.get("object_text_id")
+        if tv_id:
+            try:
+                if isinstance(tv_id, ObjectId):
+                    tv_ids.append(tv_id)
+                elif isinstance(tv_id, str):
+                    tv_ids.append(ObjectId(tv_id))
+            except (InvalidId, TypeError):
+                pass
+
+    # Fetch text values
+    tv_by_id: Dict[str, Dict[str, Any]] = {}
+    if tv_ids:
+        for tv in TextValuesRepository.find({"_id": {"$in": tv_ids}}):
+            tv_by_id[str(tv.get("_id"))] = {
+                "text": tv.get("text", ""),
+                "lang": tv.get("lang", ""),
+            }
+
+    # Check accessibility for each relation
+    accessible_count = 0
+    inaccessible_count = 0
+    relations_detail: List[Dict[str, Any]] = []
+    blocking_relations: List[Dict[str, Any]] = []
+    summary_by_predicate: Dict[str, Dict[str, int]] = {}
+
+    for rel in rels:
+        rel_id = str(rel.get("_id"))
+        predicate = rel.get("predicate", "")
+        tv_id = rel.get("object_text_id")
+        tv_id_str = str(tv_id) if tv_id else ""
+
+        # Check if current user can access this concept (and thus modify relations)
+        is_accessible = can_access_concept(concept_id)
+
+        if is_accessible:
+            accessible_count += 1
+        else:
+            inaccessible_count += 1
+
+        # Get text info
+        tv_info = tv_by_id.get(tv_id_str, {})
+        text = tv_info.get("text", "")
+        lang = tv_info.get("lang", "")
+
+        # Build relation detail
+        rel_detail: Dict[str, Any] = {
+            "relation_id": rel_id,
+            "predicate": predicate,
+            "text_value_id": tv_id_str,
+            "language": lang,
+            "accessible": is_accessible,
+            "context": rel.get("context", {}),
+            "created_at": (
+                rel.get("created_at").isoformat() if rel.get("created_at") else None
+            ),
+        }
+
+        if include_text_preview:
+            preview = text[:max_preview_length]
+            if len(text) > max_preview_length:
+                preview += "..."
+            rel_detail["text_preview"] = preview
+
+        relations_detail.append(rel_detail)
+
+        if not is_accessible:
+            blocking_relations.append(rel_detail)
+
+        # Update summary
+        if predicate not in summary_by_predicate:
+            summary_by_predicate[predicate] = {"accessible": 0, "inaccessible": 0}
+        if is_accessible:
+            summary_by_predicate[predicate]["accessible"] += 1
+        else:
+            summary_by_predicate[predicate]["inaccessible"] += 1
+
+    return {
+        "success": True,
+        "concept_id": concept_id,
+        "total_relations": len(rels),
+        "accessible_count": accessible_count,
+        "inaccessible_count": inaccessible_count,
+        "can_rename": inaccessible_count == 0,
+        "relations": relations_detail,
+        "blocking_relations": blocking_relations,
+        "summary": summary_by_predicate,
+    }
+
+
 __all__ = [
     "RelationPredicate",
     "create_text_value",
@@ -734,4 +869,5 @@ __all__ = [
     "update_text_relation_text",
     "delete_text_relation_by_predicate_and_text",
     "delete_text_relation",
+    "audit_concept_text_relations",
 ]

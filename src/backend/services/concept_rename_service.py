@@ -25,7 +25,8 @@ from ..utils.concept_id_utils import (
     canonicalise_vontology_concept_id,
     validate_concept_id_for_rename,
 )
-from .text_value_service import upsert_text_for_concept
+from ..security.access_control import bypass_access_control, can_access_concept
+from .text_value_service import audit_concept_text_relations, upsert_text_for_concept
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,7 @@ def rename_concept(
     *,
     simulate: bool = True,
     preserve_alias: bool = True,
+    skip_inaccessible: bool = False,
 ) -> Dict[str, Any]:
     """Rename a concept's ID while preserving its GUID and data.
 
@@ -207,7 +209,7 @@ def rename_concept(
     1. Validates the rename is permissible
     2. Checks the new ID is available
     3. Updates all relationship references across all concepts
-    4. Updates all text_relation references
+    4. Updates all text_relation references (optionally skipping inaccessible ones)
     5. Optionally registers the old ID as an alias
     6. Updates the concept document
 
@@ -216,6 +218,8 @@ def rename_concept(
         new_id: The new concept_id to use.
         simulate: If True, returns a report without making changes.
         preserve_alias: If True, register old_id as a CODE alias (default True).
+        skip_inaccessible: If True, skip inaccessible text relations instead of
+            failing. Skipped relations are reported in the output.
 
     Returns:
         Dict containing the operation report/result.
@@ -225,9 +229,11 @@ def rename_concept(
         "simulate": simulate,
         "old_id": old_id,
         "new_id": new_id,
+        "skip_inaccessible": skip_inaccessible,
         "operations": [],
         "warnings": [],
         "errors": [],
+        "skipped_relations": [],
     }
 
     # Validate and canonicalise IDs
@@ -337,18 +343,41 @@ def rename_concept(
                 "report truncated to 50 IDs"
             )
 
-    # Analyse text_relation references
-    text_relations_affected = TextRelationsRepository.count_documents(
-        {"subject_concept_id": canonical_old}
+    # Analyse text_relation references and check accessibility
+    audit_result = audit_concept_text_relations(
+        canonical_old, include_text_preview=False
     )
+    text_relations_affected = audit_result.get("total_relations", 0)
+    accessible_count = audit_result.get("accessible_count", 0)
+    inaccessible_count = audit_result.get("inaccessible_count", 0)
+    blocking_relations = audit_result.get("blocking_relations", [])
+
     if text_relations_affected > 0:
         report["operations"].append(
             {
                 "type": "rewrite_text_relation_subjects",
                 "count": text_relations_affected,
+                "accessible": accessible_count,
+                "inaccessible": inaccessible_count,
                 "detail": f"Update subject_concept_id from '{canonical_old}' to '{canonical_new}'",
             }
         )
+
+    # Handle inaccessible text relations
+    if inaccessible_count > 0:
+        if skip_inaccessible:
+            report["warnings"].append(
+                f"{inaccessible_count} text relation(s) are inaccessible and will be skipped"
+            )
+            report["skipped_relations"] = blocking_relations
+        else:
+            report["errors"].append(
+                f"Cannot rename: {inaccessible_count} text relation(s) are inaccessible. "
+                f"Use skip_inaccessible=True to proceed anyway, or use "
+                f"audit_concept_text_relations to inspect and clean up first."
+            )
+            report["blocking_relations"] = blocking_relations
+            return report
 
     # Plan alias registration
     if preserve_alias:
@@ -395,20 +424,52 @@ def rename_concept(
                 )
 
         # 2. Rewrite text_relation subject references
-        TextRelationsRepository.update_many(
-            {"subject_concept_id": canonical_old},
-            {"$set": {"subject_concept_id": canonical_new, "updated_at": _now()}},
-        )
+        # If skip_inaccessible is True, only update accessible relations
+        if skip_inaccessible and inaccessible_count > 0:
+            # Get IDs of accessible relations and update only those
+            accessible_relation_ids = [
+                rel.get("relation_id")
+                for rel in audit_result.get("relations", [])
+                if rel.get("accessible") and rel.get("relation_id")
+            ]
+            if accessible_relation_ids:
+                from bson import ObjectId
+
+                TextRelationsRepository.update_many(
+                    {
+                        "_id": {
+                            "$in": [ObjectId(rid) for rid in accessible_relation_ids]
+                        }
+                    },
+                    {
+                        "$set": {
+                            "subject_concept_id": canonical_new,
+                            "updated_at": _now(),
+                        }
+                    },
+                )
+            report["text_relations_updated"] = len(accessible_relation_ids)
+            report["text_relations_skipped"] = inaccessible_count
+        else:
+            # Update all text relations
+            TextRelationsRepository.update_many(
+                {"subject_concept_id": canonical_old},
+                {"$set": {"subject_concept_id": canonical_new, "updated_at": _now()}},
+            )
+            report["text_relations_updated"] = text_relations_affected
+            report["text_relations_skipped"] = 0
 
         # 3. Register old ID as alias (CODE name)
+        # Use bypass_access_control since this is an admin operation
         if preserve_alias:
-            upsert_text_for_concept(
-                subject_concept_id=canonical_new,  # Use new ID as subject
-                predicate="hasName",
-                text=canonical_old,  # Old ID as the alias text
-                lang="en-NZ",
-                context={"name_type": "CODE", "alias_source": "rename"},
-            )
+            with bypass_access_control():
+                upsert_text_for_concept(
+                    subject_concept_id=canonical_new,  # Use new ID as subject
+                    predicate="hasName",
+                    text=canonical_old,  # Old ID as the alias text
+                    lang="en-NZ",
+                    context={"name_type": "CODE", "alias_source": "rename"},
+                )
 
         # 4. Update the concept document itself
         ConceptsRepository.update_one(

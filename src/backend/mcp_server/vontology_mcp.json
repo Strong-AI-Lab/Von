@@ -315,6 +315,32 @@
             }
         },
         {
+            "name": "audit_concept_text_relations",
+            "description": "Audit all text relations attached to a concept. Reports accessibility status for each relation and whether the concept can be safely renamed. Use before rename operations to identify and resolve blocking inaccessible relations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to audit"
+                    },
+                    "include_text_preview": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Include truncated text preview in results"
+                    },
+                    "max_preview_length": {
+                        "type": "integer",
+                        "default": 100,
+                        "description": "Maximum length for text previews"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ]
+            }
+        },
+        {
             "name": "concept_exists",
             "description": "Minimal existence/accessibility check for a concept_id.",
             "inputSchema": {
