@@ -179,6 +179,7 @@ class TestInstanceCreationWithInstanceOfType:
 
         created_id = result["canonical_concept_id"]
         concept = ConceptsRepository.find_one({"concept_id": created_id})
+        assert concept is not None, f"Concept {created_id} not found"
         relationships = concept.get("relationships", {})
 
         assert relationships.get("is_a_type_of") == [
@@ -213,6 +214,7 @@ class TestInstanceCreationWithInstanceOfType:
 
         created_id = result["canonical_concept_id"]
         concept = ConceptsRepository.find_one({"concept_id": created_id})
+        assert concept is not None, f"Concept {created_id} not found"
         relationships = concept.get("relationships", {})
 
         assert (
@@ -244,6 +246,7 @@ class TestInstanceCreationWithInstanceOfType:
 
         created_id = result["canonical_concept_id"]
         concept = ConceptsRepository.find_one({"concept_id": created_id})
+        assert concept is not None, f"Concept {created_id} not found"
         relationships = concept.get("relationships", {})
 
         # instance_of_type overrides: parent goes to is_a_type_of
@@ -267,6 +270,7 @@ class TestInstanceCreationWithInstanceOfType:
 
         created_id = result["canonical_concept_id"]
         concept = ConceptsRepository.find_one({"concept_id": created_id})
+        assert concept is not None, f"Concept {created_id} not found"
         relationships = concept.get("relationships", {})
 
         instance_of = relationships.get("is_an_instance_of", [])
@@ -303,6 +307,7 @@ class TestSearchDeduplication:
 
         # Update to add description containing the same term
         concepts = ConceptsRepository.collection()
+        assert concepts is not None, "Could not get concepts collection"
         concepts.update_one(
             {"concept_id": cid},
             {
@@ -349,6 +354,7 @@ class TestSearchDeduplication:
 
         # Also add a text_relation for the same name (simulating dual-schema concept)
         concepts = ConceptsRepository.collection()
+        assert concepts is not None, "Could not get concepts collection"
         concepts.update_one(
             {"concept_id": cid},
             {
@@ -470,6 +476,7 @@ class TestRelationshipCorrectness:
 
         created_id = result["canonical_concept_id"]
         concept = ConceptsRepository.find_one({"concept_id": created_id})
+        assert concept is not None, f"Concept {created_id} not found"
         relationships = concept.get("relationships", {})
 
         # Verify hierarchy is preserved
@@ -722,6 +729,9 @@ class TestBackwardCompatibility:
         concept = ConceptsRepository.find_one(
             {"concept_id": result["canonical_concept_id"]}
         )
+        assert (
+            concept is not None
+        ), f"Concept {result['canonical_concept_id']} not found"
         relationships = concept.get("relationships", {})
         assert relationships.get("is_a_type_of") == ["#V#thing"]
         assert relationships.get("is_an_instance_of") == []
@@ -748,6 +758,9 @@ class TestBackwardCompatibility:
         concept = ConceptsRepository.find_one(
             {"concept_id": result["canonical_concept_id"]}
         )
+        assert (
+            concept is not None
+        ), f"Concept {result['canonical_concept_id']} not found"
         relationships = concept.get("relationships", {})
         assert relationships.get("is_a_type_of") == []
         assert type_id in relationships.get("is_an_instance_of", [])
