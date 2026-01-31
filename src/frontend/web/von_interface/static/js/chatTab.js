@@ -9252,9 +9252,10 @@ function buildLlmDebugMetadata(debugData) {
         message_count: debugData?.messages?.length || 0
     };
 
-    if (debugData?.presenter_channels || debugData?.speech_planning) {
-        metadata.speech_planning = debugData.speech_planning || null;
-        metadata.presenter_channels = debugData.presenter_channels || null;
+    // JVNAUTOSCI-1070: Only include speech_planning summary (has char counts).
+    // Do NOT copy full presenter_channels text - it's already at top level.
+    if (debugData?.speech_planning) {
+        metadata.speech_planning = debugData.speech_planning;
     }
     if (debugData?.speech_playback) {
         metadata.speech_playback = debugData.speech_playback;
