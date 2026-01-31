@@ -15,6 +15,14 @@ jest.mock('../../src/frontend/web/von_interface/static/js/domUtils.js', () => ({
 
 const { sendMessage, showLlmDebugPopup, __test_only__rehydrateHistory, __testOnly_resetChatTtsState } = require(chatTabModulePath);
 
+function advanceTimers(ms) {
+    if (jest.isMockFunction(setTimeout)) {
+        jest.advanceTimersByTime(ms);
+        return Promise.resolve();
+    }
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 describe('chat speech planning (presenter channels)', () => {
     beforeEach(() => {
         document.body.innerHTML = `
@@ -366,7 +374,7 @@ describe('chat speech planning (presenter channels)', () => {
         expect(speakButton).toBeTruthy();
 
         speakButton.click();
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await advanceTimers(200);
         expect(global.speechSynthesis.speak).toHaveBeenCalled();
         const utterance1 = global.speechSynthesis.speak.mock.calls[0][0];
         expect(utterance1.text).toBe('SCREEN TEXT');
@@ -387,7 +395,7 @@ describe('chat speech planning (presenter channels)', () => {
 
         // Third click within cooldown should speak again without retrying backfill.
         speakButton.click();
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await advanceTimers(200);
         expect(global.speechSynthesis.speak).toHaveBeenCalled();
         const utterance2 = global.speechSynthesis.speak.mock.calls[1][0];
         expect(utterance2.text).toBe('SCREEN TEXT');

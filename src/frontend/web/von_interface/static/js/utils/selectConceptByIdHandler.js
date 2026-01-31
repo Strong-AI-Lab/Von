@@ -17,10 +17,17 @@ export function normaliseVontologyId(value) {
         id = id.slice(0, -1);
     }
 
-    // Canonicalise slug: lowercased, and replace maximal spans of non-alphanumeric
-    // characters with a single underscore.
+    // Canonicalise slug: transliterate accents to ASCII, lowercase, and replace
+    // maximal spans of non-alphanumeric characters with a single underscore.
     // This prevents hyphen/underscore variants resolving as distinct concepts.
-    const slug = id.slice(3).toLowerCase();
+    let slug = id.slice(3);
+    try {
+        slug = slug.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+        slug = slug.normalize('NFKC');
+    } catch (_) {
+        // Ignore normalisation errors and fall back to raw slug.
+    }
+    slug = slug.toLowerCase();
     const canonicalSlug = slug
         .replace(/[^a-z0-9]+/g, '_')
         .replace(/^_+|_+$/g, '');

@@ -202,4 +202,46 @@ describe('handleSelectConceptByIdDetail', () => {
         // Canonical tab id.
         expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#foo_bar', 'Loading…', false);
     });
+
+    test('canonicalises accented IDs for lookup and create', async () => {
+        const { handleSelectConceptByIdDetail } = require(handlerPath);
+
+        const createOrActivateConceptTab = jest.fn();
+        const activateTab = jest.fn();
+        const selectVontologyNodeByIdentifier = jest.fn();
+        const chooseCreateOptionsFn = jest.fn(async () => ({ createAsInstance: false, parentId: '#V#thing', kind: 'type' }));
+
+        let created = false;
+        const fetchFn = jest.fn((url, opts) => {
+            if (typeof url === 'string' && url.startsWith('/vontology/api/vontology/node_content')) {
+                expect(url).toContain('identifier=%23V%23cafe');
+                if (url.includes('raw_only=1')) {
+                    if (!created) {
+                        return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
+                    }
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ display_name: 'Cafe', kind: 'type', concept_id: '#V#cafe' })
+                    });
+                }
+                return Promise.resolve({ ok: false, status: 404, text: async () => 'not found' });
+            }
+            if (typeof url === 'string' && url === '/vontology/api/vontology/create_concept') {
+                const body = JSON.parse(opts.body);
+                expect(body.new_concept_name).toBe('cafe');
+                created = true;
+                return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ concept_id: '#V#cafe' }) });
+            }
+            return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify({}) });
+        });
+
+        await handleSelectConceptByIdDetail(
+            { conceptId: '#V#café', createConceptTab: true, kind: 'type', modifierKeys: {} },
+            { createOrActivateConceptTab, activateTab, selectVontologyNodeByIdentifier, fetchFn, chooseCreateOptionsFn }
+        );
+
+        expect(chooseCreateOptionsFn).toHaveBeenCalled();
+        expect(createOrActivateConceptTab).toHaveBeenCalledWith('#V#cafe', 'Loading…', false);
+    });
 });
