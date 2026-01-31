@@ -2304,6 +2304,14 @@ async def _handle_fetch_concept(arguments: dict[str, Any]) -> list[TextContent]:
             ]
 
         concept = enrich_concept_with_text_relations(concept)
+
+        # Detect vacuous typing (soft warning for agents to repair)
+        from ..services.relationship_write_service import detect_vacuous_typing
+
+        vacuous_warning = detect_vacuous_typing(concept)
+        if vacuous_warning:
+            concept["_vacuous_typing_warning"] = vacuous_warning
+
         include_relations_arg1 = bool(arguments.get("include_relations_arg1"))
         include_relations_any_arg = bool(arguments.get("include_relations_any_arg"))
         include_text_relations_arg1 = arguments.get(
