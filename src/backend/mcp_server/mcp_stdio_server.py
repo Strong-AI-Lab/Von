@@ -67,6 +67,10 @@ from src.backend.services.concept_relation_service import (
     build_concept_relations_payload,
 )
 from src.backend.services.concept_search_service import search_concepts
+from src.backend.services.concept_embedding_service import (
+    get_concepts_needing_indexing,
+    get_concept_embedding_stats,
+)
 from src.backend.services.text_value_service import (
     upsert_text_for_concept,
     get_texts_for_concept,
@@ -698,8 +702,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "match_type": {
                         "type": "string",
-                        "enum": ["exact", "substring", "similarity"],
-                        "description": "Type of matching",
+                        "enum": ["exact", "substring", "similarity", "semantic"],
+                        "description": "Type of matching. 'semantic' uses embedding-based vector search for conceptual similarity.",
                     },
                     "namespace": {
                         "type": ["string", "null"],
@@ -707,6 +711,20 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["query"],
+            },
+        ),
+        Tool(
+            name="get_concept_index_status",
+            description="Get statistics about the concept embedding index. Shows counts by status (pending, indexed, stale, failed), concepts needing indexing, and index namespace.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "Optional: get status for a specific concept instead of aggregate stats",
+                    },
+                },
+                "required": [],
             },
         ),
         Tool(
@@ -782,8 +800,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "match_type": {
                         "type": "string",
-                        "enum": ["exact", "substring", "similarity"],
-                        "description": "Type of matching",
+                        "enum": ["exact", "substring", "similarity", "semantic"],
+                        "description": "Type of matching. 'semantic' uses embedding-based vector search for conceptual similarity.",
                     },
                     "namespace": {
                         "type": ["string", "null"],
@@ -1479,7 +1497,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
                 str(exc),
                 error_code="tool_execution_error",
                 details={"tool": name, "exception_type": type(exc).__name__},
-                suggestions=["Check parameter values and types", "Verify concept IDs exist"],
+                suggestions=[
+                    "Check parameter values and types",
+                    "Verify concept IDs exist",
+                ],
             )
         ]
 
@@ -1545,7 +1566,11 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
             _json_error(
                 "Missing required parameters: parent_id and concepts array",
                 error_code="missing_parameter",
-                details={"missing": [p for p in ["parent_id", "concepts"] if not arguments.get(p)]},
+                details={
+                    "missing": [
+                        p for p in ["parent_id", "concepts"] if not arguments.get(p)
+                    ]
+                },
                 suggestions=[
                     "Specify parent_id (e.g., '#V#thing' for top-level concepts)",
                     "Provide concepts array with at least one {name: '...'} object",
@@ -1590,11 +1615,16 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
 async def _handle_find_subconcepts(arguments: dict[str, Any]) -> list[TextContent]:
     concept_id = arguments.get("concept_id")
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id of the type whose subtypes you want to find", "Use search_concepts to find the parent type concept_id first"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id of the type whose subtypes you want to find",
+                    "Use search_concepts to find the parent type concept_id first",
+                ],
+            )
+        ]
 
     cursor = ConceptsRepository.find(
         {"relationships.is_a_type_of": concept_id},
@@ -1619,11 +1649,16 @@ async def _handle_find_subconcepts(arguments: dict[str, Any]) -> list[TextConten
 async def _handle_find_concepts_by_name(arguments: dict[str, Any]) -> list[TextContent]:
     name_substring = arguments.get("name")
     if not name_substring:
-        return [_json_error(
-            "Missing name parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide a name or substring to search for", "Use search_concepts for more flexible semantic search"],
-        )]
+        return [
+            _json_error(
+                "Missing name parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide a name or substring to search for",
+                    "Use search_concepts for more flexible semantic search",
+                ],
+            )
+        ]
 
     search_result = search_concepts(
         query=name_substring,
@@ -1892,11 +1927,16 @@ async def _handle_get_text_relations(arguments: dict[str, Any]) -> list[TextCont
     limit = arguments.get("limit", 50)
 
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id to get text relations for", "Use search_concepts to find the concept first"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id to get text relations for",
+                    "Use search_concepts to find the concept first",
+                ],
+            )
+        ]
 
     try:
         relations = get_texts_for_concept(
@@ -1919,12 +1959,14 @@ async def _handle_get_text_relations(arguments: dict[str, Any]) -> list[TextCont
         }
         return [_json_text(payload)]
     except Exception as exc:
-        return [_json_error(
-            f"Failed to get text relations: {exc}",
-            error_code="operation_failed",
-            suggestions=["Verify the concept_id exists"],
-            related_concept_ids=[concept_id],
-        )]
+        return [
+            _json_error(
+                f"Failed to get text relations: {exc}",
+                error_code="operation_failed",
+                suggestions=["Verify the concept_id exists"],
+                related_concept_ids=[concept_id],
+            )
+        ]
 
 
 async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
@@ -1940,23 +1982,37 @@ async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextCo
     language = arguments.get("language", "en-NZ")
 
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id that owns the text relation", "Use fetch_concept with include_text_relations_arg1=true to see available relations"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id that owns the text relation",
+                    "Use fetch_concept with include_text_relations_arg1=true to see available relations",
+                ],
+            )
+        ]
     if not relation_id:
-        return [_json_error(
-            "Missing relation_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the relation_id of the text relation to update", "Use fetch_concept with include_text_relations_arg1=true to find relation IDs"],
-        )]
+        return [
+            _json_error(
+                "Missing relation_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the relation_id of the text relation to update",
+                    "Use fetch_concept with include_text_relations_arg1=true to find relation IDs",
+                ],
+            )
+        ]
     if not new_text:
-        return [_json_error(
-            "Missing new_text parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the new_text content to replace the existing text"],
-        )]
+        return [
+            _json_error(
+                "Missing new_text parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the new_text content to replace the existing text"
+                ],
+            )
+        ]
 
     try:
         result = update_text_relation_text(
@@ -1983,12 +2039,17 @@ async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextCo
         }
         return [_json_text(payload)]
     except Exception as exc:
-        return [_json_error(
-            f"Failed to update text relation: {exc}",
-            error_code="update_failed",
-            suggestions=["Verify the concept_id and relation_id exist", "Check that new_text is a valid string"],
-            related_concept_ids=[concept_id] if concept_id else None,
-        )]
+        return [
+            _json_error(
+                f"Failed to update text relation: {exc}",
+                error_code="update_failed",
+                suggestions=[
+                    "Verify the concept_id and relation_id exist",
+                    "Check that new_text is a valid string",
+                ],
+                related_concept_ids=[concept_id] if concept_id else None,
+            )
+        ]
 
 
 async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
@@ -2006,11 +2067,16 @@ async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextCo
     garbage_collect = bool(arguments.get("garbage_collect"))
 
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id that owns the text relation", "Use fetch_concept with include_text_relations_arg1=true to see available relations"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id that owns the text relation",
+                    "Use fetch_concept with include_text_relations_arg1=true to see available relations",
+                ],
+            )
+        ]
 
     try:
         if relation_id:
@@ -2061,46 +2127,68 @@ async def _handle_delete_text_relation(arguments: dict[str, Any]) -> list[TextCo
                 ),
             }
         else:
-            return [_json_error(
-                "Must provide either relation_id or both predicate and text",
-                error_code="invalid_parameter",
-                suggestions=["Provide relation_id for exact deletion", "Or provide both predicate and text for pattern match deletion"],
-            )]
+            return [
+                _json_error(
+                    "Must provide either relation_id or both predicate and text",
+                    error_code="invalid_parameter",
+                    suggestions=[
+                        "Provide relation_id for exact deletion",
+                        "Or provide both predicate and text for pattern match deletion",
+                    ],
+                )
+            ]
 
         return [_json_text(payload)]
     except Exception as exc:
-        return [_json_error(
-            f"Failed to delete text relation: {exc}",
-            error_code="operation_failed",
-            suggestions=["Verify the concept_id and identifiers are correct"],
-            related_concept_ids=[concept_id] if concept_id else None,
-        )]
+        return [
+            _json_error(
+                f"Failed to delete text relation: {exc}",
+                error_code="operation_failed",
+                suggestions=["Verify the concept_id and identifiers are correct"],
+                related_concept_ids=[concept_id] if concept_id else None,
+            )
+        ]
 
 
 async def _handle_add_names(arguments: dict[str, Any]) -> list[TextContent]:
     concept_id = arguments.get("concept_id")
     names = arguments.get("names")
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id of the concept to add names to", "Use search_concepts to find the concept first"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id of the concept to add names to",
+                    "Use search_concepts to find the concept first",
+                ],
+            )
+        ]
     if not names or not isinstance(names, list):
-        return [_json_error(
-            "Missing or invalid names array",
-            error_code="invalid_parameter",
-            suggestions=["Provide names as an array of strings or objects with name, language, name_type", "Example: ['Name1', {'name': 'Name2', 'language': 'en-NZ', 'name_type': 'NL'}]"],
-        )]
+        return [
+            _json_error(
+                "Missing or invalid names array",
+                error_code="invalid_parameter",
+                suggestions=[
+                    "Provide names as an array of strings or objects with name, language, name_type",
+                    "Example: ['Name1', {'name': 'Name2', 'language': 'en-NZ', 'name_type': 'NL'}]",
+                ],
+            )
+        ]
 
     concept = ConceptsRepository.find_one({"concept_id": concept_id})
     if not concept:
-        return [_json_error(
-            f"Concept '{concept_id}' not found",
-            error_code="concept_not_found",
-            suggestions=["Check the concept_id spelling", "Use search_concepts to verify the concept exists"],
-            related_concept_ids=[concept_id],
-        )]
+        return [
+            _json_error(
+                f"Concept '{concept_id}' not found",
+                error_code="concept_not_found",
+                suggestions=[
+                    "Check the concept_id spelling",
+                    "Use search_concepts to verify the concept exists",
+                ],
+                related_concept_ids=[concept_id],
+            )
+        ]
 
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -2165,21 +2253,31 @@ async def _handle_get_tree(arguments: dict[str, Any]) -> list[TextContent]:
 async def _handle_fetch_concept(arguments: dict[str, Any]) -> list[TextContent]:
     concept_id = arguments.get("concept_id")
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id to fetch", "Use search_concepts to find concepts by name or description"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id to fetch",
+                    "Use search_concepts to find concepts by name or description",
+                ],
+            )
+        ]
 
     try:
         concept = get_concept_by_concept_id(concept_id)
         if not concept:
-            return [_json_error(
-                f"Concept '{concept_id}' not found",
-                error_code="concept_not_found",
-                suggestions=["Check the concept_id spelling", "Use search_concepts to find available concepts"],
-                related_concept_ids=[concept_id],
-            )]
+            return [
+                _json_error(
+                    f"Concept '{concept_id}' not found",
+                    error_code="concept_not_found",
+                    suggestions=[
+                        "Check the concept_id spelling",
+                        "Use search_concepts to find available concepts",
+                    ],
+                    related_concept_ids=[concept_id],
+                )
+            ]
 
         concept = enrich_concept_with_text_relations(concept)
         include_relations_arg1 = bool(arguments.get("include_relations_arg1"))
@@ -2218,12 +2316,14 @@ async def _handle_fetch_concept(arguments: dict[str, Any]) -> list[TextContent]:
             concept["relations"] = relations_payload
         return [_json_text(concept)]
     except Exception as exc:
-        return [_json_error(
-            str(exc),
-            error_code="operation_failed",
-            suggestions=["Verify the concept_id exists", "Check parameter values"],
-            related_concept_ids=[concept_id] if concept_id else None,
-        )]
+        return [
+            _json_error(
+                str(exc),
+                error_code="operation_failed",
+                suggestions=["Verify the concept_id exists", "Check parameter values"],
+                related_concept_ids=[concept_id] if concept_id else None,
+            )
+        ]
 
 
 async def _handle_get_text_relations_summary(
@@ -2231,11 +2331,16 @@ async def _handle_get_text_relations_summary(
 ) -> list[TextContent]:
     concept_id = arguments.get("concept_id")
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id to get text relations summary for", "Use search_concepts to find concepts first"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id to get text relations summary for",
+                    "Use search_concepts to find concepts first",
+                ],
+            )
+        ]
 
     try:
         payload = get_text_relations_summary(
@@ -2246,12 +2351,17 @@ async def _handle_get_text_relations_summary(
         )
         return [_json_text(payload)]
     except Exception as exc:
-        return [_json_error(
-            f"Failed to summarise text relations: {exc}",
-            error_code="operation_failed",
-            suggestions=["Verify the concept_id exists", "Check predicate names are valid"],
-            related_concept_ids=[concept_id],
-        )]
+        return [
+            _json_error(
+                f"Failed to summarise text relations: {exc}",
+                error_code="operation_failed",
+                suggestions=[
+                    "Verify the concept_id exists",
+                    "Check predicate names are valid",
+                ],
+                related_concept_ids=[concept_id],
+            )
+        ]
 
 
 async def _handle_upsert_singleton_text_relation(
@@ -2262,23 +2372,35 @@ async def _handle_upsert_singleton_text_relation(
     text = arguments.get("text")
 
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id to add the text relation to", "Use search_concepts to find the concept first"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id to add the text relation to",
+                    "Use search_concepts to find the concept first",
+                ],
+            )
+        ]
     if not predicate:
-        return [_json_error(
-            "Missing predicate parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide a predicate (e.g. 'hasDescription', 'hasContent', 'hasName')", "Use search_concepts to find predicate concepts"],
-        )]
+        return [
+            _json_error(
+                "Missing predicate parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide a predicate (e.g. 'hasDescription', 'hasContent', 'hasName')",
+                    "Use search_concepts to find predicate concepts",
+                ],
+            )
+        ]
     if not text:
-        return [_json_error(
-            "Missing text parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the text content to associate with the concept"],
-        )]
+        return [
+            _json_error(
+                "Missing text parameter",
+                error_code="missing_parameter",
+                suggestions=["Provide the text content to associate with the concept"],
+            )
+        ]
 
     try:
         payload = upsert_singleton_text_relation(
@@ -2293,12 +2415,17 @@ async def _handle_upsert_singleton_text_relation(
         )
         return [_json_text(payload)]
     except Exception as exc:
-        return [_json_error(
-            f"Failed to upsert singleton text relation: {exc}",
-            error_code="operation_failed",
-            suggestions=["Verify the concept_id exists", "Check that predicate is a valid predicate concept_id or name"],
-            related_concept_ids=[concept_id],
-        )]
+        return [
+            _json_error(
+                f"Failed to upsert singleton text relation: {exc}",
+                error_code="operation_failed",
+                suggestions=[
+                    "Verify the concept_id exists",
+                    "Check that predicate is a valid predicate concept_id or name",
+                ],
+                related_concept_ids=[concept_id],
+            )
+        ]
 
 
 async def _handle_concept_exists(arguments: dict[str, Any]) -> list[TextContent]:
@@ -2307,11 +2434,13 @@ async def _handle_concept_exists(arguments: dict[str, Any]) -> list[TextContent]
 
     concept_id = arguments.get("concept_id")
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id to check existence for"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=["Provide the concept_id to check existence for"],
+            )
+        ]
 
     try:
         doc = ConceptsRepository.find_one({"concept_id": concept_id}, {"_id": 1})
@@ -2323,11 +2452,13 @@ async def _handle_concept_exists(arguments: dict[str, Any]) -> list[TextContent]
         }
         return [_json_text(payload)]
     except Exception as exc:
-        return [_json_error(
-            f"Failed to check concept existence: {exc}",
-            error_code="operation_failed",
-            related_concept_ids=[concept_id],
-        )]
+        return [
+            _json_error(
+                f"Failed to check concept existence: {exc}",
+                error_code="operation_failed",
+                related_concept_ids=[concept_id],
+            )
+        ]
 
 
 async def _handle_fetch_concept_content(
@@ -2335,11 +2466,16 @@ async def _handle_fetch_concept_content(
 ) -> list[TextContent]:
     concept_id = arguments.get("concept_id")
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id to fetch content for", "Use search_concepts to find concepts by name"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id to fetch content for",
+                    "Use search_concepts to find concepts by name",
+                ],
+            )
+        ]
 
     reconstruct_md = arguments.get("reconstruct_md", True)
     try:
@@ -2349,17 +2485,53 @@ async def _handle_fetch_concept_content(
         payload["success"] = "error" not in payload
         return [_json_text(payload)]
     except Exception as exc:
-        return [_json_error(
-            f"Failed to fetch concept content: {exc}",
-            error_code="operation_failed",
-            suggestions=["Verify the concept_id exists", "Use concept_exists to check if the concept is accessible"],
-            related_concept_ids=[concept_id],
-        )]
+        return [
+            _json_error(
+                f"Failed to fetch concept content: {exc}",
+                error_code="operation_failed",
+                suggestions=[
+                    "Verify the concept_id exists",
+                    "Use concept_exists to check if the concept is accessible",
+                ],
+                related_concept_ids=[concept_id],
+            )
+        ]
 
 
 async def _handle_search_concepts(arguments: dict[str, Any]) -> list[TextContent]:
     search_result = search_concepts(**arguments)
     return [_json_text(search_result)]
+
+
+async def _handle_get_concept_index_status(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    """Get concept embedding index status - either for a specific concept or aggregate stats."""
+    from src.backend.services.concept_embedding_service import (
+        get_concept_embedding_status,
+    )
+
+    concept_id = arguments.get("concept_id")
+
+    if concept_id:
+        # Get status for specific concept
+        status = get_concept_embedding_status(concept_id)
+        if status is None:
+            return [
+                _json_error(
+                    f"Concept not found: {concept_id}",
+                    error_code="concept_not_found",
+                    suggestions=[
+                        "Check the concept_id spelling",
+                        "Use search_concepts to verify the concept exists",
+                    ],
+                )
+            ]
+        return [_json_text({"success": True, "concept_status": status})]
+
+    # Get aggregate stats
+    stats = get_concept_embedding_stats()
+    return [_json_text({"success": True, "index_stats": stats})]
 
 
 async def _handle_resolve_concept_by_name(
@@ -2391,11 +2563,13 @@ async def _handle_extract_annotations(arguments: dict[str, Any]) -> list[TextCon
     input_text = arguments.get("input_text")
     context_concept_id = arguments.get("context_concept_id")
     if not input_text:
-        return [_json_error(
-            "Missing input_text parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the text to extract annotations from"],
-        )]
+        return [
+            _json_error(
+                "Missing input_text parameter",
+                error_code="missing_parameter",
+                suggestions=["Provide the text to extract annotations from"],
+            )
+        ]
 
     annotations_result = extract_annotations(text=input_text)
     if context_concept_id:
@@ -2427,11 +2601,16 @@ async def _handle_search_arxiv(arguments: dict[str, Any]) -> list[TextContent]:
 async def _handle_get_paper_metadata(arguments: dict[str, Any]) -> list[TextContent]:
     arxiv_id = arguments.get("arxiv_id")
     if not arxiv_id:
-        return [_json_error(
-            "Missing required parameter: arxiv_id",
-            error_code="missing_parameter",
-            suggestions=["Provide the arXiv paper ID (e.g. '2301.00001')", "Use search_arxiv to find papers first"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameter: arxiv_id",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the arXiv paper ID (e.g. '2301.00001')",
+                    "Use search_arxiv to find papers first",
+                ],
+            )
+        ]
 
     try:
         proxy = get_arxiv_proxy()
@@ -2448,11 +2627,16 @@ async def _handle_get_paper_metadata(arguments: dict[str, Any]) -> list[TextCont
 async def _handle_download_paper(arguments: dict[str, Any]) -> list[TextContent]:
     arxiv_id = arguments.get("arxiv_id")
     if not arxiv_id:
-        return [_json_error(
-            "Missing required parameter: arxiv_id",
-            error_code="missing_parameter",
-            suggestions=["Provide the arXiv paper ID (e.g. '2301.00001')", "Use search_arxiv to find papers first"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameter: arxiv_id",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the arXiv paper ID (e.g. '2301.00001')",
+                    "Use search_arxiv to find papers first",
+                ],
+            )
+        ]
 
     try:
         proxy = get_arxiv_proxy()
@@ -2471,11 +2655,16 @@ async def _handle_download_paper(arguments: dict[str, Any]) -> list[TextContent]
 async def _handle_finalise_cached_paper(arguments: dict[str, Any]) -> list[TextContent]:
     arxiv_id = arguments.get("arxiv_id")
     if not arxiv_id:
-        return [_json_error(
-            "Missing required parameter: arxiv_id",
-            error_code="missing_parameter",
-            suggestions=["Provide the arXiv paper ID to finalise", "Use download_paper first to cache the paper"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameter: arxiv_id",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the arXiv paper ID to finalise",
+                    "Use download_paper first to cache the paper",
+                ],
+            )
+        ]
 
     try:
         from src.backend.integrations.internal_mcp import (
@@ -2496,11 +2685,13 @@ async def _handle_finalise_cached_paper(arguments: dict[str, Any]) -> list[TextC
 async def _handle_search_web(arguments: dict[str, Any]) -> list[TextContent]:
     query = arguments.get("query")
     if not query:
-        return [_json_error(
-            "Missing query parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide a search query string"],
-        )]
+        return [
+            _json_error(
+                "Missing query parameter",
+                error_code="missing_parameter",
+                suggestions=["Provide a search query string"],
+            )
+        ]
     try:
         proxy = await get_search_proxy()
         result = await proxy.search(
@@ -2515,27 +2706,35 @@ async def _handle_search_web(arguments: dict[str, Any]) -> list[TextContent]:
         )
         return [_json_text(result)]
     except SearchProxyError as exc:
-        return [_json_error(
-            str(exc),
-            error_code="search_failed",
-            suggestions=["Check your internet connection", "Try a different query"],
-        )]
+        return [
+            _json_error(
+                str(exc),
+                error_code="search_failed",
+                suggestions=["Check your internet connection", "Try a different query"],
+            )
+        ]
     except Exception as exc:
-        return [_json_error(
-            f"Unexpected error: {exc}",
-            error_code="unexpected_error",
-        )]
+        return [
+            _json_error(
+                f"Unexpected error: {exc}",
+                error_code="unexpected_error",
+            )
+        ]
 
 
 async def _handle_context_search(arguments: dict[str, Any]) -> list[TextContent]:
     query = arguments.get("query")
     context_value = arguments.get("context")
     if not query or not context_value:
-        return [_json_error(
-            "Missing required parameters: query and context",
-            error_code="missing_parameter",
-            suggestions=["Provide both 'query' (what to search for) and 'context' (background context for the search)"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameters: query and context",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide both 'query' (what to search for) and 'context' (background context for the search)"
+                ],
+            )
+        ]
     try:
         proxy = await get_search_proxy()
         result = await proxy.context_search(
@@ -2547,26 +2746,35 @@ async def _handle_context_search(arguments: dict[str, Any]) -> list[TextContent]
         )
         return [_json_text(result)]
     except SearchProxyError as exc:
-        return [_json_error(
-            str(exc),
-            error_code="search_failed",
-            suggestions=["Check your internet connection", "Try a different query or context"],
-        )]
+        return [
+            _json_error(
+                str(exc),
+                error_code="search_failed",
+                suggestions=[
+                    "Check your internet connection",
+                    "Try a different query or context",
+                ],
+            )
+        ]
     except Exception as exc:
-        return [_json_error(
-            f"Unexpected error: {exc}",
-            error_code="unexpected_error",
-        )]
+        return [
+            _json_error(
+                f"Unexpected error: {exc}",
+                error_code="unexpected_error",
+            )
+        ]
 
 
 async def _handle_qna_search(arguments: dict[str, Any]) -> list[TextContent]:
     query = arguments.get("query")
     if not query:
-        return [_json_error(
-            "Missing query parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the question to search for answers to"],
-        )]
+        return [
+            _json_error(
+                "Missing query parameter",
+                error_code="missing_parameter",
+                suggestions=["Provide the question to search for answers to"],
+            )
+        ]
     try:
         proxy = await get_search_proxy()
         result = await proxy.qna_search(
@@ -2576,41 +2784,57 @@ async def _handle_qna_search(arguments: dict[str, Any]) -> list[TextContent]:
         )
         return [_json_text(result)]
     except SearchProxyError as exc:
-        return [_json_error(
-            str(exc),
-            error_code="search_failed",
-            suggestions=["Check your internet connection", "Try rephrasing your question"],
-        )]
+        return [
+            _json_error(
+                str(exc),
+                error_code="search_failed",
+                suggestions=[
+                    "Check your internet connection",
+                    "Try rephrasing your question",
+                ],
+            )
+        ]
     except Exception as exc:
-        return [_json_error(
-            f"Unexpected error: {exc}",
-            error_code="unexpected_error",
-        )]
+        return [
+            _json_error(
+                f"Unexpected error: {exc}",
+                error_code="unexpected_error",
+            )
+        ]
 
 
 async def _handle_extract_url(arguments: dict[str, Any]) -> list[TextContent]:
     url = arguments.get("url")
     if not url:
-        return [_json_error(
-            "Missing url parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the URL to extract content from"],
-        )]
+        return [
+            _json_error(
+                "Missing url parameter",
+                error_code="missing_parameter",
+                suggestions=["Provide the URL to extract content from"],
+            )
+        ]
     try:
         proxy = await get_search_proxy()
         result = await proxy.extract(url=url)
         return [_json_text(result)]
     except SearchProxyError as exc:
-        return [_json_error(
-            str(exc),
-            error_code="extraction_failed",
-            suggestions=["Check that the URL is accessible", "Verify the URL is correct"],
-        )]
+        return [
+            _json_error(
+                str(exc),
+                error_code="extraction_failed",
+                suggestions=[
+                    "Check that the URL is accessible",
+                    "Verify the URL is correct",
+                ],
+            )
+        ]
     except Exception as exc:
-        return [_json_error(
-            f"Unexpected error: {exc}",
-            error_code="unexpected_error",
-        )]
+        return [
+            _json_error(
+                f"Unexpected error: {exc}",
+                error_code="unexpected_error",
+            )
+        ]
 
 
 def _gmail_audit_context(tool: str) -> dict[str, str]:
@@ -2620,11 +2844,16 @@ def _gmail_audit_context(tool: str) -> dict[str, str]:
 async def _handle_gmail_list_messages(arguments: dict[str, Any]) -> list[TextContent]:
     profile = arguments.get("profile") or arguments.get("profile_id")
     if not profile:
-        return [_json_error(
-            "Missing required parameter: profile",
-            error_code="missing_parameter",
-            suggestions=["Provide the Gmail profile ID", "Use gmail_list_labels to verify available profiles"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameter: profile",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the Gmail profile ID",
+                    "Use gmail_list_labels to verify available profiles",
+                ],
+            )
+        ]
     try:
         result = gmail_service.list_messages(
             profile_id=profile,
@@ -2635,22 +2864,32 @@ async def _handle_gmail_list_messages(arguments: dict[str, Any]) -> list[TextCon
         )
         return [_json_text(result)]
     except Exception as exc:
-        return [_json_error(
-            f"Gmail list failed: {exc}",
-            error_code="gmail_error",
-            suggestions=["Verify the profile ID is correct", "Ensure Gmail integration is configured"],
-        )]
+        return [
+            _json_error(
+                f"Gmail list failed: {exc}",
+                error_code="gmail_error",
+                suggestions=[
+                    "Verify the profile ID is correct",
+                    "Ensure Gmail integration is configured",
+                ],
+            )
+        ]
 
 
 async def _handle_gmail_get_message(arguments: dict[str, Any]) -> list[TextContent]:
     profile = arguments.get("profile") or arguments.get("profile_id")
     message_id = arguments.get("message_id")
     if not profile or not message_id:
-        return [_json_error(
-            "Missing required parameters: profile and message_id",
-            error_code="missing_parameter",
-            suggestions=["Provide both profile ID and message_id", "Use gmail_list_messages to find message IDs"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameters: profile and message_id",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide both profile ID and message_id",
+                    "Use gmail_list_messages to find message IDs",
+                ],
+            )
+        ]
     try:
         result = gmail_service.get_message(
             profile_id=profile,
@@ -2660,11 +2899,13 @@ async def _handle_gmail_get_message(arguments: dict[str, Any]) -> list[TextConte
         )
         return [_json_text(result)]
     except Exception as exc:
-        return [_json_error(
-            f"Gmail get message failed: {exc}",
-            error_code="gmail_error",
-            suggestions=["Verify the message_id and profile are correct"],
-        )]
+        return [
+            _json_error(
+                f"Gmail get message failed: {exc}",
+                error_code="gmail_error",
+                suggestions=["Verify the message_id and profile are correct"],
+            )
+        ]
 
 
 async def _handle_gmail_get_attachment(arguments: dict[str, Any]) -> list[TextContent]:
@@ -2672,11 +2913,16 @@ async def _handle_gmail_get_attachment(arguments: dict[str, Any]) -> list[TextCo
     message_id = arguments.get("message_id")
     attachment_id = arguments.get("attachment_id")
     if not profile or not message_id or not attachment_id:
-        return [_json_error(
-            "Missing required parameters: profile, message_id, attachment_id",
-            error_code="missing_parameter",
-            suggestions=["Provide profile, message_id, and attachment_id", "Use gmail_get_message to find attachment IDs"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameters: profile, message_id, attachment_id",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide profile, message_id, and attachment_id",
+                    "Use gmail_get_message to find attachment IDs",
+                ],
+            )
+        ]
     try:
         result = gmail_service.get_attachment(
             profile_id=profile,
@@ -2686,21 +2932,27 @@ async def _handle_gmail_get_attachment(arguments: dict[str, Any]) -> list[TextCo
         )
         return [_json_text(result)]
     except Exception as exc:
-        return [_json_error(
-            f"Gmail get attachment failed: {exc}",
-            error_code="gmail_error",
-            suggestions=["Verify the attachment_id, message_id, and profile are correct"],
-        )]
+        return [
+            _json_error(
+                f"Gmail get attachment failed: {exc}",
+                error_code="gmail_error",
+                suggestions=[
+                    "Verify the attachment_id, message_id, and profile are correct"
+                ],
+            )
+        ]
 
 
 async def _handle_gmail_list_labels(arguments: dict[str, Any]) -> list[TextContent]:
     profile = arguments.get("profile") or arguments.get("profile_id")
     if not profile:
-        return [_json_error(
-            "Missing required parameter: profile",
-            error_code="missing_parameter",
-            suggestions=["Provide the Gmail profile ID"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameter: profile",
+                error_code="missing_parameter",
+                suggestions=["Provide the Gmail profile ID"],
+            )
+        ]
     try:
         result = gmail_service.list_labels(
             profile_id=profile,
@@ -2708,11 +2960,16 @@ async def _handle_gmail_list_labels(arguments: dict[str, Any]) -> list[TextConte
         )
         return [_json_text(result)]
     except Exception as exc:
-        return [_json_error(
-            f"Gmail list labels failed: {exc}",
-            error_code="gmail_error",
-            suggestions=["Verify the profile ID is correct", "Ensure Gmail integration is configured"],
-        )]
+        return [
+            _json_error(
+                f"Gmail list labels failed: {exc}",
+                error_code="gmail_error",
+                suggestions=[
+                    "Verify the profile ID is correct",
+                    "Ensure Gmail integration is configured",
+                ],
+            )
+        ]
 
 
 async def _handle_gmail_modify_labels(arguments: dict[str, Any]) -> list[TextContent]:
@@ -2720,17 +2977,24 @@ async def _handle_gmail_modify_labels(arguments: dict[str, Any]) -> list[TextCon
     message_id = arguments.get("message_id")
     allow_mutation = bool(arguments.get("allow_mutation"))
     if not profile or not message_id:
-        return [_json_error(
-            "Missing required parameters: profile and message_id",
-            error_code="missing_parameter",
-            suggestions=["Provide both profile ID and message_id", "Use gmail_list_messages to find message IDs"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameters: profile and message_id",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide both profile ID and message_id",
+                    "Use gmail_list_messages to find message IDs",
+                ],
+            )
+        ]
     if not allow_mutation:
-        return [_json_error(
-            "allow_mutation must be true to modify labels",
-            error_code="mutation_not_allowed",
-            suggestions=["Set allow_mutation=true to confirm label modification"],
-        )]
+        return [
+            _json_error(
+                "allow_mutation must be true to modify labels",
+                error_code="mutation_not_allowed",
+                suggestions=["Set allow_mutation=true to confirm label modification"],
+            )
+        ]
     try:
         result = gmail_service.modify_labels(
             profile_id=profile,
@@ -2742,11 +3006,16 @@ async def _handle_gmail_modify_labels(arguments: dict[str, Any]) -> list[TextCon
         )
         return [_json_text(result)]
     except Exception as exc:
-        return [_json_error(
-            f"Gmail modify labels failed: {exc}",
-            error_code="gmail_error",
-            suggestions=["Verify the message_id and profile are correct", "Ensure the labels exist"],
-        )]
+        return [
+            _json_error(
+                f"Gmail modify labels failed: {exc}",
+                error_code="gmail_error",
+                suggestions=[
+                    "Verify the message_id and profile are correct",
+                    "Ensure the labels exist",
+                ],
+            )
+        ]
 
 
 async def _handle_add_relationship(arguments: dict[str, Any]) -> list[TextContent]:
@@ -2833,11 +3102,16 @@ async def _handle_delete_concept(arguments: dict[str, Any]) -> list[TextContent]
     concept_id = arguments.get("concept_id")
     simulate = arguments.get("simulate", True)
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id to delete", "Use search_concepts to find the concept first"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id to delete",
+                    "Use search_concepts to find the concept first",
+                ],
+            )
+        ]
     result = simulate_or_delete_concept(concept_id, execute=not simulate)
     return [_json_text(result)]
 
@@ -2847,11 +3121,16 @@ async def _handle_merge_concepts(arguments: dict[str, Any]) -> list[TextContent]
     target_id = arguments.get("target_id")
     simulate = arguments.get("simulate", True)
     if not source_id or not target_id:
-        return [_json_error(
-            "Missing source_id or target_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide both source_id (concept to merge FROM) and target_id (concept to merge INTO)", "Use search_concepts to find concept IDs"],
-        )]
+        return [
+            _json_error(
+                "Missing source_id or target_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide both source_id (concept to merge FROM) and target_id (concept to merge INTO)",
+                    "Use search_concepts to find concept IDs",
+                ],
+            )
+        ]
     result = merge_concepts(source_id, target_id, simulate=simulate)
     return [_json_text(result)]
 
@@ -2860,17 +3139,27 @@ async def _handle_update_concept(arguments: dict[str, Any]) -> list[TextContent]
     concept_id = arguments.get("concept_id")
     update_data = arguments.get("update_data")
     if not concept_id:
-        return [_json_error(
-            "Missing concept_id parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide the concept_id to update", "Use search_concepts to find the concept first"],
-        )]
+        return [
+            _json_error(
+                "Missing concept_id parameter",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the concept_id to update",
+                    "Use search_concepts to find the concept first",
+                ],
+            )
+        ]
     if not update_data or not isinstance(update_data, dict):
-        return [_json_error(
-            "Missing or invalid update_data dictionary",
-            error_code="invalid_parameter",
-            suggestions=["Provide update_data as a dictionary with fields to update", "Example: {\"description\": \"new description\"}"],
-        )]
+        return [
+            _json_error(
+                "Missing or invalid update_data dictionary",
+                error_code="invalid_parameter",
+                suggestions=[
+                    "Provide update_data as a dictionary with fields to update",
+                    'Example: {"description": "new description"}',
+                ],
+            )
+        ]
     try:
         result = update_concept(concept_id=concept_id, update_data=update_data)
         if result:
@@ -2895,11 +3184,13 @@ async def _handle_update_concept(arguments: dict[str, Any]) -> list[TextContent]
 async def _handle_search_knowledge_base(arguments: dict[str, Any]) -> list[TextContent]:
     query = arguments.get("query")
     if not query:
-        return [_json_error(
-            "Missing query parameter",
-            error_code="missing_parameter",
-            suggestions=["Provide a search query for the knowledge base"],
-        )]
+        return [
+            _json_error(
+                "Missing query parameter",
+                error_code="missing_parameter",
+                suggestions=["Provide a search query for the knowledge base"],
+            )
+        ]
     try:
         service = get_rag_service()
         permissions_context = {}
@@ -2937,11 +3228,13 @@ async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
     title = arguments.get("title")
     description = arguments.get("description")
     if not title or not description:
-        return [_json_error(
-            "Missing required parameters: title and description",
-            error_code="missing_parameter",
-            suggestions=["Provide both title and description for the task"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameters: title and description",
+                error_code="missing_parameter",
+                suggestions=["Provide both title and description for the task"],
+            )
+        ]
 
     try:
         from src.backend.services.task_management_service import create_task
@@ -2964,11 +3257,16 @@ async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
 async def _handle_get_task(arguments: dict[str, Any]) -> list[TextContent]:
     task_concept_id = arguments.get("task_concept_id")
     if not task_concept_id:
-        return [_json_error(
-            "Missing required parameter: task_concept_id",
-            error_code="missing_parameter",
-            suggestions=["Provide the task_concept_id of the task to retrieve", "Use list_my_tasks to find task IDs"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameter: task_concept_id",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide the task_concept_id of the task to retrieve",
+                    "Use list_my_tasks to find task IDs",
+                ],
+            )
+        ]
 
     try:
         from src.backend.services.task_management_service import get_task
@@ -2982,11 +3280,13 @@ async def _handle_get_task(arguments: dict[str, Any]) -> list[TextContent]:
 async def _handle_list_my_tasks(arguments: dict[str, Any]) -> list[TextContent]:
     user_concept_id = arguments.get("user_concept_id")
     if not user_concept_id:
-        return [_json_error(
-            "Missing required parameter: user_concept_id",
-            error_code="missing_parameter",
-            suggestions=["Provide the user_concept_id to list tasks for"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameter: user_concept_id",
+                error_code="missing_parameter",
+                suggestions=["Provide the user_concept_id to list tasks for"],
+            )
+        ]
 
     try:
         from src.backend.services.task_management_service import get_tasks_for_user
@@ -3005,11 +3305,16 @@ async def _handle_update_task_status(arguments: dict[str, Any]) -> list[TextCont
     task_concept_id = arguments.get("task_concept_id")
     status = arguments.get("status")
     if not task_concept_id or not status:
-        return [_json_error(
-            "Missing required parameters: task_concept_id and status",
-            error_code="missing_parameter",
-            suggestions=["Provide task_concept_id and new status", "Valid statuses: pending, in_progress, completed, cancelled"],
-        )]
+        return [
+            _json_error(
+                "Missing required parameters: task_concept_id and status",
+                error_code="missing_parameter",
+                suggestions=[
+                    "Provide task_concept_id and new status",
+                    "Valid statuses: pending, in_progress, completed, cancelled",
+                ],
+            )
+        ]
 
     try:
         from src.backend.services.task_management_service import update_task_status
@@ -3058,6 +3363,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "concept_exists": _handle_concept_exists,
     "search_concepts": _handle_search_concepts,
     "vontology_concept_search": _handle_search_concepts,
+    "get_concept_index_status": _handle_get_concept_index_status,
     "resolve_concept_by_name": _handle_resolve_concept_by_name,
     "extract_annotations": _handle_extract_annotations,
     "search_arxiv": _handle_search_arxiv,

@@ -269,6 +269,7 @@ def create_concept(
         "guid": str(uuid.uuid4()),  # JVNAUTOSCI-730: Stable GUID
         "created_at": now,
         "updated_at": now,
+        "embedding_status": "pending",  # JVNAUTOSCI-680: Mark for indexing
         "attributes": attributes or {},
         "system_tags": system_tags or [],
         "user_tags": user_tags or [],
@@ -898,6 +899,8 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
             update_payload["$set"][key] = value
 
     update_payload["$set"]["updated_at"] = datetime.now(timezone.utc)
+    # Mark embedding as stale for reindexing (JVNAUTOSCI-680)
+    update_payload["$set"]["embedding_status"] = "stale"
 
     relationship_update = any(
         key == "relationships" or key.startswith("relationships.")

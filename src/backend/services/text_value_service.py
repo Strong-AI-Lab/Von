@@ -172,6 +172,19 @@ def upsert_text_for_concept(
         object_text_id=text_value_id,
         context=context,
     )
+
+    # JVNAUTOSCI-680: Mark concept embedding as stale when text relations change
+    if relation_created or context_updated:
+        try:
+            from ..db.repositories.concepts_repository import ConceptsRepository
+
+            ConceptsRepository.update_one(
+                {"concept_id": subject_concept_id},
+                {"$set": {"embedding_status": "stale"}},
+            )
+        except Exception:
+            pass  # Best effort - don't fail the main operation
+
     relation_doc = None
     if relation_id:
         try:

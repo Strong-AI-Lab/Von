@@ -444,6 +444,114 @@ def _similarity_match(
     return scored
 
 
+def _semantic_search(
+    query: str,
+    limit: int = 50,
+    filter_kind: Optional[List[str]] = None,
+    instance_of: Optional[str] = None,
+) -> List[tuple]:
+    """Perform semantic (embedding-based) search on concepts.
+
+    Uses LlamaIndex vector store with pre-computed concept embeddings.
+
+    Args:
+        query: Natural language search query
+        limit: Maximum results to return
+        filter_kind: Optional filter by kind (type, predicate, individual)
+        instance_of: Optional filter by instance_of relationship
+
+    Returns:
+        List of (concept_id, score, concept_doc) tuples sorted by relevance
+    """
+    results: List[tuple] = []
+
+    try:
+        from .rag_backends.llamaindex_backend import LlamaIndexRAGService
+        from .concept_embedding_service import CONCEPT_EMBEDDING_NAMESPACE
+
+        rag_service = LlamaIndexRAGService()
+
+        # Query the concept vector index
+        rag_results = rag_service.query(
+            query_text=query,
+            top_k=limit * 2,  # Fetch extra for post-filtering
+            namespace=CONCEPT_EMBEDDING_NAMESPACE,
+        )
+
+        if not rag_results:
+            logger.info("[semantic_search] No results from RAG query")
+            return results
+
+        # Extract concept IDs from results
+        concept_ids = []
+        score_map = {}
+        for result in rag_results:
+            metadata = result.get("metadata", {})
+            concept_id = metadata.get("concept_id")
+            score = result.get("score", 0.0)
+            if concept_id:
+                concept_ids.append(concept_id)
+                score_map[concept_id] = score
+
+        if not concept_ids:
+            return results
+
+        # Fetch full concept documents
+        concepts_cursor = ConceptsRepository.find(
+            {"concept_id": {"$in": concept_ids}},
+            projection={
+                "concept_id": 1,
+                "names": 1,
+                "name": 1,
+                "metadata.description": 1,
+                "relationships": 1,
+                "attributes": 1,
+                "system_tags": 1,
+                "user_tags": 1,
+            },
+        )
+
+        # Post-filter and build results
+        for concept_doc in concepts_cursor:
+            concept_id = concept_doc.get("concept_id")
+            if not concept_id:
+                continue
+
+            # Apply kind filter
+            if filter_kind:
+                kind = _determine_concept_kind(concept_doc)
+                if kind not in filter_kind:
+                    continue
+
+            # Apply instance_of filter
+            if instance_of:
+                relationships = concept_doc.get("relationships", {})
+                instance_of_list = relationships.get("is_an_instance_of", [])
+                if isinstance(instance_of_list, str):
+                    instance_of_list = [instance_of_list]
+
+                # Check if this concept is an instance of the target type
+                # (or any subtype - for full recursive filtering would need descendant IDs)
+                if instance_of not in instance_of_list:
+                    continue
+
+            score = score_map.get(concept_id, 0.0)
+            results.append((concept_id, score, concept_doc))
+
+        # Sort by score descending
+        results.sort(key=lambda x: -x[1])
+
+        # Limit results
+        results = results[:limit]
+
+    except ImportError as e:
+        logger.warning(f"[semantic_search] LlamaIndex not available: {e}")
+    except Exception as e:
+        logger.error(f"[semantic_search] Error: {e}", exc_info=True)
+
+    return results
+
+
 def search_concepts(
     query: str = "",
     filter_kind: Optional[List[str]] = None,
@@ -522,7 +630,7 @@ def search_concepts(
         match_type = "exact"
 
     # Validate match_type
-    valid_match_types = {"exact", "substring", "similarity", "all"}
+    valid_match_types = {"exact", "substring", "similarity", "semantic", "all"}
     if match_type not in valid_match_types:
         raise InvalidSearchParameters(
             f"Invalid match_type: {match_type}. Must be one of: {valid_match_types}"
@@ -630,8 +738,8 @@ def search_concepts(
 
             match_types_used.append("instance_filter")
 
-        # Only search text_relations for non-similarity matching (similarity handles it differently)
-        elif match_type != "similarity":
+        # Only search text_relations for non-similarity/non-semantic matching
+        elif match_type not in ("similarity", "semantic"):
             try:
                 use_exact = match_type == "exact"
                 use_prefix = (
@@ -731,6 +839,26 @@ def search_concepts(
 
                 if substring_added:
                     match_types_used.append("substring")
+
+        elif match_type == "semantic":
+            # Semantic embedding-based search via LlamaIndex
+            semantic_results = _semantic_search(
+                query=query,
+                filter_kind=filter_kind,
+                instance_of=instance_of,
+                limit=limit,
+            )
+
+            for concept_id, score, concept_doc in semantic_results:
+                if concept_id and concept_id not in seen_ids:
+                    concept_doc["_similarity_score"] = score
+                    results.append(concept_doc)
+                    seen_ids.add(concept_id)
+                elif concept_id in seen_ids:
+                    duplicates_encountered += 1
+
+            if semantic_results:
+                match_types_used.append("semantic")
 
         elif use_two_pass and match_type != "exact":
             # Check if query contains non-word chars (skip prefix if so)
