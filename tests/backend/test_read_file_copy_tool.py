@@ -11,7 +11,7 @@ def test_read_file_copy_requires_user_context(monkeypatch):
 
     result = catalogue._read_file_copy(concept_id="#V#file_copy_test")
     assert result["success"] is False
-    assert result["error"] == "missing_user_context"
+    assert result["error_code"] == "authentication_required"
 
 
 def test_read_file_copy_returns_text(monkeypatch):

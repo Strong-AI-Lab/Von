@@ -155,16 +155,31 @@ def _get_paper_metadata(**kwargs):
 
     arxiv_id = kwargs.get("arxiv_id")
     if not arxiv_id:
-        return {"error": "Missing required parameter: arxiv_id", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: arxiv_id",
+            details={"missing": ["arxiv_id"]},
+            suggestions=[
+                "Provide the arXiv ID (e.g., '2301.12345' or 'arxiv:2301.12345')"
+            ],
+        )
 
     async def _async_metadata():
         try:
             proxy = await get_arxiv_proxy()
             return await proxy.get_paper_metadata(arxiv_id=arxiv_id)
         except ArxivProxyError as e:
-            return {"error": str(e), "success": False}
+            return make_error_response(
+                "arxiv_proxy_error",
+                str(e),
+                details={"arxiv_id": arxiv_id, "exception_type": "ArxivProxyError"},
+            )
         except Exception as e:
-            return {"error": f"Unexpected error: {e}", "success": False}
+            return make_error_response(
+                "exception",
+                f"Unexpected error: {e}",
+                details={"arxiv_id": arxiv_id, "exception_type": type(e).__name__},
+            )
 
     return _run_async_compat(_async_metadata)
 
@@ -1230,9 +1245,17 @@ def _search_arxiv(**kwargs):
                 sort_order=kwargs.get("sort_order", "descending"),
             )
         except ArxivProxyError as e:
-            return {"error": str(e), "success": False}
+            return make_error_response(
+                "arxiv_proxy_error",
+                str(e),
+                details={"exception_type": "ArxivProxyError"},
+            )
         except Exception as e:
-            return {"error": f"Unexpected error: {e}", "success": False}
+            return make_error_response(
+                "exception",
+                f"Unexpected error: {e}",
+                details={"exception_type": type(e).__name__},
+            )
 
     return _run_async_compat(_async_search)
 
@@ -1243,7 +1266,14 @@ def _download_paper(**kwargs):
 
     arxiv_id = kwargs.get("arxiv_id")
     if not arxiv_id:
-        return {"error": "Missing required parameter: arxiv_id", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: arxiv_id",
+            details={"missing": ["arxiv_id"]},
+            suggestions=[
+                "Provide the arXiv ID (e.g., '2301.12345' or 'arxiv:2301.12345')"
+            ],
+        )
 
     # If the PDF is already present in the local arXiv cache, prefer finalise_cached_paper so
     # we can upload to durable storage and register the Computer File Copy without calling
@@ -1398,9 +1428,17 @@ def _download_paper(**kwargs):
 
             return stored
         except ArxivProxyError as e:
-            return {"error": str(e), "success": False}
+            return make_error_response(
+                "arxiv_proxy_error",
+                str(e),
+                details={"arxiv_id": arxiv_id, "exception_type": "ArxivProxyError"},
+            )
         except Exception as e:
-            return {"error": f"Unexpected error: {e}", "success": False}
+            return make_error_response(
+                "exception",
+                f"Unexpected error: {e}",
+                details={"arxiv_id": arxiv_id, "exception_type": type(e).__name__},
+            )
 
     return _run_async_compat(_async_download)
 
@@ -1410,7 +1448,14 @@ def _finalise_cached_paper(**kwargs):
 
     arxiv_id = kwargs.get("arxiv_id")
     if not arxiv_id:
-        return {"error": "Missing required parameter: arxiv_id", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: arxiv_id",
+            details={"missing": ["arxiv_id"]},
+            suggestions=[
+                "Provide the arXiv ID (e.g., '2301.12345' or 'arxiv:2301.12345')"
+            ],
+        )
 
     from src.backend.services.blob_uploads import BlobUploadError, put_bytes_durable
 
@@ -1657,9 +1702,17 @@ def _finalise_cached_paper(**kwargs):
             "markdown": markdown_payload,
         }
     except BlobUploadError as exc:
-        return {"success": False, "error": f"blob_store_upload_failed: {exc}"}
+        return make_error_response(
+            "blob_upload_failed",
+            f"Blob store upload failed: {exc}",
+            details={"exception_type": "BlobUploadError", "arxiv_id": arxiv_id},
+        )
     except Exception as exc:
-        return {"success": False, "error": f"Unexpected error: {exc}"}
+        return make_error_response(
+            "exception",
+            f"Unexpected error: {exc}",
+            details={"exception_type": type(exc).__name__, "arxiv_id": arxiv_id},
+        )
 
 
 def _list_papers(**kwargs):
@@ -1671,9 +1724,17 @@ def _list_papers(**kwargs):
             proxy = await get_arxiv_proxy()
             return await proxy.list_papers()
         except ArxivProxyError as e:
-            return {"error": str(e), "success": False}
+            return make_error_response(
+                "arxiv_proxy_error",
+                str(e),
+                details={"exception_type": "ArxivProxyError"},
+            )
         except Exception as e:
-            return {"error": f"Unexpected error: {e}", "success": False}
+            return make_error_response(
+                "exception",
+                f"Unexpected error: {e}",
+                details={"exception_type": type(e).__name__},
+            )
 
     return _run_async_compat(_async_list)
 
@@ -1684,16 +1745,31 @@ def _read_paper(**kwargs):
 
     arxiv_id = kwargs.get("arxiv_id")
     if not arxiv_id:
-        return {"error": "Missing required parameter: arxiv_id", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: arxiv_id",
+            details={"missing": ["arxiv_id"]},
+            suggestions=[
+                "Provide the arXiv ID (e.g., '2301.12345' or 'arxiv:2301.12345')"
+            ],
+        )
 
     async def _async_read():
         try:
             proxy = await get_arxiv_proxy()
             return await proxy.read_paper(arxiv_id=arxiv_id)
         except ArxivProxyError as e:
-            return {"error": str(e), "success": False}
+            return make_error_response(
+                "arxiv_proxy_error",
+                str(e),
+                details={"arxiv_id": arxiv_id, "exception_type": "ArxivProxyError"},
+            )
         except Exception as e:
-            return {"error": f"Unexpected error: {e}", "success": False}
+            return make_error_response(
+                "exception",
+                f"Unexpected error: {e}",
+                details={"arxiv_id": arxiv_id, "exception_type": type(e).__name__},
+            )
 
     return _run_async_compat(_async_read)
 
@@ -1710,7 +1786,12 @@ def _read_file_copy(**kwargs):
 
     concept_id = kwargs.get("concept_id") or kwargs.get("file_copy_concept_id")
     if not isinstance(concept_id, str) or not concept_id.strip():
-        return {"error": "Missing required parameter: concept_id", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: concept_id",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID of the file copy to read"],
+        )
 
     max_bytes = kwargs.get("max_bytes")
     if max_bytes is None:
@@ -1719,9 +1800,19 @@ def _read_file_copy(**kwargs):
         try:
             max_bytes = int(max_bytes)
         except (TypeError, ValueError):
-            return {"error": "Invalid max_bytes", "success": False}
+            return make_error_response(
+                "invalid_parameter",
+                "Invalid max_bytes: must be an integer",
+                details={"max_bytes": max_bytes},
+                suggestions=["Provide max_bytes as an integer (e.g., 5000000)"],
+            )
         if max_bytes <= 0:
-            return {"error": "max_bytes must be positive", "success": False}
+            return make_error_response(
+                "invalid_parameter",
+                "max_bytes must be positive",
+                details={"max_bytes": max_bytes},
+                suggestions=["Provide a positive integer for max_bytes"],
+            )
 
     as_text = kwargs.get("as_text")
     if as_text is None:
@@ -1756,7 +1847,11 @@ def _read_file_copy(**kwargs):
     def _run_read():
         user_concept_id = get_effective_user_concept_id()
         if not user_concept_id:
-            return {"error": "missing_user_context", "success": False}
+            return make_error_response(
+                "authentication_required",
+                "User authentication required to read file copies",
+                suggestions=["Ensure user context is set before calling this tool"],
+            )
 
         result = fetch_file_copy_bytes(
             file_copy_concept_id=concept_id,
@@ -1881,7 +1976,14 @@ def _read_file_copy(**kwargs):
                     try:
                         text = bytes(data_bytes).decode(str(encoding), errors="replace")
                     except LookupError:
-                        return {"success": False, "error": "invalid_encoding"}
+                        return make_error_response(
+                            "invalid_encoding",
+                            f"Invalid encoding: {encoding}",
+                            details={"encoding": encoding},
+                            suggestions=[
+                                "Use a valid encoding like 'utf-8', 'latin-1', or 'ascii'"
+                            ],
+                        )
                     payload["text"] = text
                     payload["encoding"] = str(encoding)
             else:
@@ -2578,7 +2680,14 @@ def _read_file_copy(**kwargs):
                         payload["text"] = text
                         payload["encoding"] = str(encoding)
                 except LookupError:
-                    return {"success": False, "error": "invalid_encoding"}
+                    return make_error_response(
+                        "invalid_encoding",
+                        f"Invalid encoding: {encoding}",
+                        details={"encoding": encoding},
+                        suggestions=[
+                            "Use a valid encoding like 'utf-8', 'latin-1', or 'ascii'"
+                        ],
+                    )
         else:
             import base64
 
@@ -2601,7 +2710,12 @@ def _get_predicate_extent(**kwargs):
 
     concept_id = kwargs.get("concept_id") or kwargs.get("predicate_concept_id")
     if not isinstance(concept_id, str) or not concept_id.strip():
-        return {"success": False, "error": "Missing required parameter: concept_id"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: concept_id",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID of the predicate to query"],
+        )
 
     def _coerce_int(value, field, *, default=None, minimum=None, maximum=None):
         if value is None:
@@ -2632,7 +2746,9 @@ def _get_predicate_extent(**kwargs):
             kwargs.get("sample_seed"), "sample_seed", default=None
         )
     except ValueError as exc:
-        return {"success": False, "error": str(exc)}
+        return make_error_response(
+            "invalid_parameter", str(exc), details={"exception_type": "ValueError"}
+        )
 
     sort_by = kwargs.get("sort_by") or "created_at"
     sort_order = kwargs.get("sort_order") or "desc"
@@ -2654,7 +2770,11 @@ def _get_predicate_extent(**kwargs):
     )
 
     if payload.get("error"):
-        return {"success": False, **payload}
+        return make_error_response(
+            "get_salient_relations_error",
+            payload.get("error", "Unknown error from get_predicate_extent_data"),
+            details={"payload": payload},
+        )
 
     return {"success": True, **payload}
 
@@ -2666,7 +2786,12 @@ def _search_web(**kwargs):
 
     query = kwargs.get("query")
     if not query:
-        return {"error": "Missing required parameter: query", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: query",
+            details={"missing": ["query"]},
+            suggestions=["Provide a search query string"],
+        )
 
     async def _async_search():
         try:
@@ -2682,9 +2807,17 @@ def _search_web(**kwargs):
                 include_images=kwargs.get("include_images", False),
             )
         except SearchProxyError as e:
-            return {"error": str(e), "success": False}
+            return make_error_response(
+                "search_proxy_error",
+                str(e),
+                details={"exception_type": "SearchProxyError"},
+            )
         except Exception as e:
-            return {"error": f"Unexpected error: {e}", "success": False}
+            return make_error_response(
+                "exception",
+                f"Unexpected error: {e}",
+                details={"exception_type": type(e).__name__},
+            )
 
     return _run_async_compat(_async_search)
 
@@ -2697,9 +2830,19 @@ def _context_search(**kwargs):
     context = kwargs.get("context")
 
     if not query:
-        return {"error": "Missing required parameter: query", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: query",
+            details={"missing": ["query"]},
+            suggestions=["Provide a search query string"],
+        )
     if not context:
-        return {"error": "Missing required parameter: context", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: context",
+            details={"missing": ["context"]},
+            suggestions=["Provide background context for the search"],
+        )
 
     async def _async_context_search():
         try:
@@ -2712,9 +2855,17 @@ def _context_search(**kwargs):
                 include_answer=kwargs.get("include_answer", False),
             )
         except SearchProxyError as e:
-            return {"error": str(e), "success": False}
+            return make_error_response(
+                "search_proxy_error",
+                str(e),
+                details={"exception_type": "SearchProxyError"},
+            )
         except Exception as e:
-            return {"error": f"Unexpected error: {e}", "success": False}
+            return make_error_response(
+                "exception",
+                f"Unexpected error: {e}",
+                details={"exception_type": type(e).__name__},
+            )
 
     return _run_async_compat(_async_context_search)
 
@@ -2725,7 +2876,12 @@ def _qna_search(**kwargs):
 
     query = kwargs.get("query")
     if not query:
-        return {"error": "Missing required parameter: query", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: query",
+            details={"missing": ["query"]},
+            suggestions=["Provide a question or search query"],
+        )
 
     async def _async_qna_search():
         try:
@@ -2736,9 +2892,17 @@ def _qna_search(**kwargs):
                 search_depth=kwargs.get("search_depth", "advanced"),
             )
         except SearchProxyError as e:
-            return {"error": str(e), "success": False}
+            return make_error_response(
+                "search_proxy_error",
+                str(e),
+                details={"exception_type": "SearchProxyError"},
+            )
         except Exception as e:
-            return {"error": f"Unexpected error: {e}", "success": False}
+            return make_error_response(
+                "exception",
+                f"Unexpected error: {e}",
+                details={"exception_type": type(e).__name__},
+            )
 
     return _run_async_compat(_async_qna_search)
 
@@ -2749,16 +2913,29 @@ def _extract_url(**kwargs):
 
     url = kwargs.get("url")
     if not url:
-        return {"error": "Missing required parameter: url", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: url",
+            details={"missing": ["url"]},
+            suggestions=["Provide a URL to extract content from"],
+        )
 
     async def _async_extract():
         try:
             proxy = await get_search_proxy()
             return await proxy.extract(url=url)
         except SearchProxyError as e:
-            return {"error": str(e), "success": False}
+            return make_error_response(
+                "search_proxy_error",
+                str(e),
+                details={"exception_type": "SearchProxyError", "url": url},
+            )
         except Exception as e:
-            return {"error": f"Unexpected error: {e}", "success": False}
+            return make_error_response(
+                "exception",
+                f"Unexpected error: {e}",
+                details={"exception_type": type(e).__name__, "url": url},
+            )
 
     return _run_async_compat(_async_extract)
 
@@ -2777,7 +2954,12 @@ def _resilient_extract_url(**kwargs):
 
     primary_url = kwargs.get("url")
     if not primary_url:
-        return {"error": "Missing required parameter: url", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: url",
+            details={"missing": ["url"]},
+            suggestions=["Provide a URL to extract content from"],
+        )
 
     fallback_query = kwargs.get("fallback_query")
     context = kwargs.get("context")
@@ -4235,7 +4417,12 @@ def _search_knowledge_base(**kwargs):
 
     query_text = kwargs.get("query")
     if not query_text:
-        return {"error": "Missing required parameter: query", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: query",
+            details={"missing": ["query"]},
+            suggestions=["Provide a search query string"],
+        )
 
     try:
         service = get_rag_service()  # Default backend
@@ -4363,9 +4550,18 @@ def _search_knowledge_base(**kwargs):
             "success": True,
         }
     except RAGBackendUnavailable as e:
-        return {"error": f"RAG service unavailable: {e}", "success": False}
+        return make_error_response(
+            "rag_service_unavailable",
+            f"RAG service unavailable: {e}",
+            details={"exception_type": "RAGBackendUnavailable"},
+            suggestions=["Ensure RAG service is running and accessible"],
+        )
     except Exception as e:
-        return {"error": f"Unexpected error: {e}", "success": False}
+        return make_error_response(
+            "exception",
+            f"Unexpected error: {e}",
+            details={"exception_type": type(e).__name__},
+        )
 
 
 def _search_knowledge_base_input_schema() -> Schema:
@@ -4435,7 +4631,12 @@ def _index_concept_text(**kwargs):
 
     concept_id = kwargs.get("concept_id")
     if not isinstance(concept_id, str) or not concept_id.strip():
-        return {"success": False, "error": "Missing required parameter: concept_id"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: concept_id",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID to reindex"],
+        )
 
     ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
     ns = ns_report.get("namespace")
@@ -4500,7 +4701,12 @@ def _generate_concept_description(**kwargs):
     """
     concept_id = kwargs.get("concept_id")
     if not isinstance(concept_id, str) or not concept_id.strip():
-        return {"success": False, "error": "Missing required parameter: concept_id"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: concept_id",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID for which to generate a description"],
+        )
 
     force = bool(kwargs.get("force", False))
     store = bool(kwargs.get("store", True))
@@ -4592,7 +4798,12 @@ def _get_related_concepts(**kwargs):
 
     concept_id = kwargs.get("concept_id")
     if not isinstance(concept_id, str) or not concept_id.strip():
-        return {"success": False, "error": "Missing required parameter: concept_id"}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: concept_id",
+            details={"missing": ["concept_id"]},
+            suggestions=["Provide the concept ID for similarity search"],
+        )
 
     ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
     ns = ns_report.get("namespace")
@@ -4674,7 +4885,12 @@ def _get_related_concepts(**kwargs):
             permissions_context=permissions_context,
         )
     except RAGBackendUnavailable as e:
-        return {"success": False, "error": f"RAG service unavailable: {e}", **ns_report}
+        return make_error_response(
+            "rag_service_unavailable",
+            f"RAG service unavailable: {e}",
+            details={"exception_type": "RAGBackendUnavailable", **ns_report},
+            suggestions=["Check that the RAG service is running and configured"],
+        )
 
     filtered = []
     for row in results or []:
@@ -4925,9 +5141,15 @@ def _rag_get_status(**kwargs):
                     source_system="http.admin_rag_status",
                 )
             return payload
-        return {"error": f"HTTP {res.status_code}", "success": False}
+        return make_error_response(
+            "http_error",
+            f"HTTP {res.status_code}",
+            details={"status_code": res.status_code},
+        )
     except Exception as e:
-        return {"error": str(e), "success": False}
+        return make_error_response(
+            "exception", str(e), details={"exception_type": type(e).__name__}
+        )
 
 
 def _resolve_rag_collection_from_kwargs(kwargs: dict) -> dict[str, object]:
@@ -5106,7 +5328,11 @@ def _rag_list_indexed(**kwargs):
 
     db = get_db()
     if db is None:
-        return {"error": "db_unavailable", "success": False}
+        return make_error_response(
+            "db_unavailable",
+            "Database connection unavailable",
+            suggestions=["Check database connectivity and configuration"],
+        )
     collection_report = _resolve_rag_collection_from_kwargs(kwargs)
     collection = collection_report.get("effective_collection")
     limit = int(kwargs.get("limit", 20))
@@ -5366,12 +5592,21 @@ def _rag_get_item(**kwargs):
 
     db = get_db()
     if db is None:
-        return {"error": "db_unavailable", "success": False}
+        return make_error_response(
+            "db_unavailable",
+            "Database connection unavailable",
+            suggestions=["Check database connectivity and configuration"],
+        )
     collection_report = _resolve_rag_collection_from_kwargs(kwargs)
     collection = collection_report.get("effective_collection")
     session_id = kwargs.get("session_id")
     if not session_id:
-        return {"error": "Missing session_id", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: session_id",
+            details={"missing": ["session_id"]},
+            suggestions=["Provide the session ID to query"],
+        )
 
     ns_report = _resolve_rag_namespace_from_kwargs(kwargs)
     ns = ns_report.get("namespace")
@@ -5397,7 +5632,12 @@ def _rag_get_item(**kwargs):
 
         doc = coll.find_one(query)
         if not doc:
-            return {"error": "not_found", "success": False}
+            return make_error_response(
+                "not_found",
+                f"Session {session_id} not found",
+                details={"session_id": session_id, "namespace": ns},
+                suggestions=["Check the session ID and namespace"],
+            )
 
         # Build a safe preview
         preview = []
@@ -5438,7 +5678,12 @@ def _rag_get_item(**kwargs):
         coll = db["chat_history"]
         doc = coll.find_one({"session_id": session_id, "namespace": ns})
         if not doc:
-            return {"error": "not_found", "success": False}
+            return make_error_response(
+                "not_found",
+                f"Chat history session {session_id} not found",
+                details={"session_id": session_id, "namespace": ns},
+                suggestions=["Check the session ID and namespace"],
+            )
 
         history = doc.get("history") or []
         preview_parts = []
@@ -5585,7 +5830,12 @@ def _gmail_list_messages(**kwargs):
 
     profile = kwargs.get("profile") or kwargs.get("profile_id")
     if not profile:
-        return {"error": "Missing required parameter: profile", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: profile",
+            details={"missing": ["profile"]},
+            suggestions=["Provide a Gmail profile ID"],
+        )
 
     try:
         max_results = kwargs.get("max_results")
@@ -5603,7 +5853,12 @@ def _gmail_list_messages(**kwargs):
             },
         )
     except Exception as exc:  # noqa: BLE001
-        return {"error": f"Gmail list failed: {exc}", "success": False}
+        return make_error_response(
+            "gmail_api_error",
+            f"Gmail list failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=["Check Gmail API connectivity and credentials"],
+        )
 
 
 def _gmail_get_message(**kwargs):
@@ -5612,10 +5867,12 @@ def _gmail_get_message(**kwargs):
     profile = kwargs.get("profile") or kwargs.get("profile_id")
     message_id = kwargs.get("message_id")
     if not profile or not message_id:
-        return {
-            "error": "Missing required parameters: profile and message_id",
-            "success": False,
-        }
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters: profile and message_id",
+            details={"missing": ["profile", "message_id"]},
+            suggestions=["Provide both profile ID and message ID"],
+        )
 
     try:
         return gs.get_message(
@@ -5629,7 +5886,12 @@ def _gmail_get_message(**kwargs):
             },
         )
     except Exception as exc:  # noqa: BLE001
-        return {"error": f"Gmail get message failed: {exc}", "success": False}
+        return make_error_response(
+            "gmail_api_error",
+            f"Gmail get message failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=["Check Gmail API connectivity and credentials"],
+        )
 
 
 def _gmail_get_attachment(**kwargs):
@@ -5639,10 +5901,12 @@ def _gmail_get_attachment(**kwargs):
     message_id = kwargs.get("message_id")
     attachment_id = kwargs.get("attachment_id")
     if not profile or not message_id or not attachment_id:
-        return {
-            "error": "Missing required parameters: profile, message_id, attachment_id",
-            "success": False,
-        }
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters: profile, message_id, attachment_id",
+            details={"missing": ["profile", "message_id", "attachment_id"]},
+            suggestions=["Provide profile ID, message ID, and attachment ID"],
+        )
 
     try:
         return gs.get_attachment(
@@ -5656,7 +5920,12 @@ def _gmail_get_attachment(**kwargs):
             },
         )
     except Exception as exc:  # noqa: BLE001
-        return {"error": f"Gmail get attachment failed: {exc}", "success": False}
+        return make_error_response(
+            "gmail_api_error",
+            f"Gmail get attachment failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=["Check Gmail API connectivity and credentials"],
+        )
 
 
 def _gmail_list_labels(**kwargs):
@@ -5664,7 +5933,12 @@ def _gmail_list_labels(**kwargs):
 
     profile = kwargs.get("profile") or kwargs.get("profile_id")
     if not profile:
-        return {"error": "Missing required parameter: profile", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: profile",
+            details={"missing": ["profile"]},
+            suggestions=["Provide a Gmail profile ID"],
+        )
 
     try:
         return gs.list_labels(
@@ -5676,7 +5950,12 @@ def _gmail_list_labels(**kwargs):
             },
         )
     except Exception as exc:  # noqa: BLE001
-        return {"error": f"Gmail list labels failed: {exc}", "success": False}
+        return make_error_response(
+            "gmail_api_error",
+            f"Gmail list labels failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=["Check Gmail API connectivity and credentials"],
+        )
 
 
 def _gmail_modify_labels(**kwargs):
@@ -5686,15 +5965,18 @@ def _gmail_modify_labels(**kwargs):
     message_id = kwargs.get("message_id")
     allow_mutation = bool(kwargs.get("allow_mutation"))
     if not profile or not message_id:
-        return {
-            "error": "Missing required parameters: profile and message_id",
-            "success": False,
-        }
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameters: profile and message_id",
+            details={"missing": ["profile", "message_id"]},
+            suggestions=["Provide both profile ID and message ID"],
+        )
     if not allow_mutation:
-        return {
-            "error": "allow_mutation must be true to modify labels",
-            "success": False,
-        }
+        return make_error_response(
+            "mutation_not_allowed",
+            "allow_mutation must be true to modify labels",
+            suggestions=["Set allow_mutation=True to enable label modifications"],
+        )
 
     try:
         return gs.modify_labels(
@@ -5710,7 +5992,12 @@ def _gmail_modify_labels(**kwargs):
             },
         )
     except Exception as exc:  # noqa: BLE001
-        return {"error": f"Gmail modify labels failed: {exc}", "success": False}
+        return make_error_response(
+            "gmail_api_error",
+            f"Gmail modify labels failed: {exc}",
+            details={"exception_type": type(exc).__name__},
+            suggestions=["Check Gmail API connectivity and credentials"],
+        )
 
 
 # Jira MCP handlers
@@ -5854,7 +6141,12 @@ def _jira_search(**kwargs):
 
     jql = kwargs.get("jql")
     if not jql:
-        return {"error": "Missing required parameter: jql", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: jql",
+            details={"missing": ["jql"]},
+            suggestions=["Provide a JQL query string"],
+        )
 
     async def _async_search():
         proxy = await get_jira_proxy()
@@ -5869,7 +6161,12 @@ def _jira_search(**kwargs):
     try:
         return _run_async_compat(_async_search)
     except JiraProxyError as exc:
-        return {"error": str(exc), "success": False}
+        return make_error_response(
+            "jira_proxy_error",
+            str(exc),
+            details={"exception_type": "JiraProxyError"},
+            suggestions=["Check Jira connectivity and authentication"],
+        )
 
 
 def _jira_get_issue(**kwargs):
@@ -5878,7 +6175,12 @@ def _jira_get_issue(**kwargs):
 
     issue_key = kwargs.get("issue_key")
     if not issue_key:
-        return {"error": "Missing required parameter: issue_key", "success": False}
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: issue_key",
+            details={"missing": ["issue_key"]},
+            suggestions=["Provide a Jira issue key (e.g., PROJ-123)"],
+        )
 
     async def _async_get_issue():
         proxy = await get_jira_proxy()
@@ -5887,7 +6189,12 @@ def _jira_get_issue(**kwargs):
     try:
         return _run_async_compat(_async_get_issue)
     except JiraProxyError as exc:
-        return {"error": str(exc), "success": False}
+        return make_error_response(
+            "jira_proxy_error",
+            str(exc),
+            details={"exception_type": "JiraProxyError"},
+            suggestions=["Check Jira connectivity and authentication"],
+        )
 
 
 def _jira_add_comment(**kwargs):
@@ -6269,7 +6576,12 @@ def _jira_get_myself(**kwargs):
     try:
         return _run_async_compat(_async_get_myself)
     except JiraProxyError as exc:
-        return {"error": str(exc), "success": False}
+        return make_error_response(
+            "jira_proxy_error",
+            str(exc),
+            details={"exception_type": "JiraProxyError"},
+            suggestions=["Check Jira connectivity and authentication"],
+        )
 
 
 def _jira_get_auth_config(**kwargs):
@@ -6297,7 +6609,12 @@ def _chat_get_prompt_context(
     """
 
     if not namespace or not isinstance(namespace, str) or not namespace.strip():
-        return {"success": False, "error": "namespace is required"}
+        return make_error_response(
+            "missing_parameter",
+            "namespace is required",
+            details={"missing": ["namespace"]},
+            suggestions=["Provide a user namespace for prompt context"],
+        )
 
     if not isinstance(include_content, bool):
         include_content = False
@@ -6487,7 +6804,12 @@ def _chat_introspect(
     )
 
     if not namespace or not isinstance(namespace, str) or not namespace.strip():
-        return {"success": False, "error": "namespace is required"}
+        return make_error_response(
+            "missing_parameter",
+            "namespace is required",
+            details={"missing": ["namespace"]},
+            suggestions=["Provide a user namespace for chat introspection"],
+        )
 
     # Clamp preview size
     if max_preview_chars is None:

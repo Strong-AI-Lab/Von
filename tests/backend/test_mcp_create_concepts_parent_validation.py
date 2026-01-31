@@ -66,8 +66,9 @@ def test_create_concepts_rejects_nonexistent_parent():
     assert "error" in result
     assert "not found" in result["error"].lower()
     assert result.get("error_code") == "parent_not_found"
-    assert "canonical_parent_id" in result
-    assert "original_parent_id" in result
+    error_details = result.get("error_details", {})
+    assert "canonical_parent_id" in error_details
+    assert "original_parent_id" in error_details
 
 
 def test_create_concepts_canonicalises_parent_id():
@@ -119,6 +120,7 @@ def test_create_concepts_error_includes_both_parent_ids():
 
     # Assert: error should include both IDs for debugging
     assert result.get("error_code") == "parent_not_found"
-    assert result.get("original_parent_id") == original_parent
+    error_details = result.get("error_details", {})
+    assert error_details.get("original_parent_id") == original_parent
     # Canonical form should be lowercase with underscores
-    assert result.get("canonical_parent_id") == "#V#nonexistent_test_parent"
+    assert error_details.get("canonical_parent_id") == "#V#nonexistent_test_parent"

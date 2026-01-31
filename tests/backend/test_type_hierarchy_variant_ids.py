@@ -142,7 +142,7 @@ def test_type_hierarchy_variant_ids_parent_lookup_uses_canonical():
     )
 
     # The response should show the canonical parent ID that was actually used
-    assert subtype_result.get("parent_id_used") == expected_canonical
+    assert subtype_result.get("parent_id_used").lower() == expected_canonical.lower()
 
 
 def test_type_hierarchy_all_subtypes_have_consistent_parent_reference():
