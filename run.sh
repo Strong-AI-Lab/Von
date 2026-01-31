@@ -102,8 +102,6 @@ TS="$(date +%Y%m%d_%H%M%S 2>/dev/null || date +%Y%m%d_%H%M%S)"
 NEW_LOG="${LOGS_DIR}/von_${PORT}_${TS}.log"
 RAG_PID_FILE="${RUN_DIR}/rag_worker.pid"
 RAG_LOG_FILE="${LOGS_DIR}/rag_worker_${TS}.log"
-CONCEPT_INDEX_PID_FILE="${RUN_DIR}/concept_index_worker.pid"
-CONCEPT_INDEX_LOG_FILE="${LOGS_DIR}/concept_index_worker_${TS}.log"
 TOKEN_FILE="${RUN_DIR}/admin_token.txt"
 SENTINEL_BROWSER="${RUN_DIR}/browser_opened_once"
 LOCAL_BACKUPS="${ROOT}/backups"
@@ -338,6 +336,14 @@ fi
 if [ "$ACTION" = "start" ] && [ "$BACKUP_FLAGS_SET" -eq 1 ]; then
     log "Start requested with backup flags; running backup action only."
     ACTION="backup"
+fi
+
+# Load .env file to populate environment variables (matches run.ps1 behaviour)
+if [ -f "${ROOT}/.env" ]; then
+    set -a
+    source "${ROOT}/.env"
+    set +a
+    log "Loaded .env environment variables"
 fi
 
 export PYTHONPATH="${ROOT}"
@@ -701,39 +707,6 @@ stop_rag_worker() {
     rm -f "$RAG_PID_FILE" 2>/dev/null || true
 }
 
-start_concept_index_worker_bg() {
-    # Mirrors run.ps1 best-effort background worker for concept embedding indexing.
-    if [ -f "$CONCEPT_INDEX_PID_FILE" ]; then
-        local old
-        old="$(sed -n 's/^PID=//p' "$CONCEPT_INDEX_PID_FILE" 2>/dev/null | head -n 1 || true)"
-        if [ -n "$old" ] && kill -0 "$old" >/dev/null 2>&1; then
-            log "Concept Index Worker already running (PID=$old)."
-            return 0
-        fi
-        rm -f "$CONCEPT_INDEX_PID_FILE" 2>/dev/null || true
-    fi
-    log "Starting Concept Index Worker..."
-    local pdm
-    pdm="$(pdm_cmd)"
-    nohup "$pdm" run python -u "${ROOT}/src/backend/utilities/concept_index_worker.py" >> "$CONCEPT_INDEX_LOG_FILE" 2>&1 &
-    local pid=$!
-    printf 'PID=%s\nSTART=%s\n' "$pid" "$(date -Iseconds 2>/dev/null || date)" > "$CONCEPT_INDEX_PID_FILE"
-    log "Concept Index Worker started (PID=$pid). Log: $CONCEPT_INDEX_LOG_FILE"
-}
-
-stop_concept_index_worker() {
-    if [ ! -f "$CONCEPT_INDEX_PID_FILE" ]; then
-        return 0
-    fi
-    local pid
-    pid="$(sed -n 's/^PID=//p' "$CONCEPT_INDEX_PID_FILE" 2>/dev/null | head -n 1 || true)"
-    if [ -n "$pid" ]; then
-        log "Stopping Concept Index Worker (PID=$pid)..."
-        kill "$pid" >/dev/null 2>&1 || true
-    fi
-    rm -f "$CONCEPT_INDEX_PID_FILE" 2>/dev/null || true
-}
-
 start_server() {
     # Match run.ps1: default to production DB unless explicitly set.
     if [ -z "${VON_DB_NAME:-}" ] || [ "${VON_DB_NAME:-}" = "test_von_db" ]; then
@@ -907,9 +880,6 @@ start_server() {
 
     # Start RAG worker best-effort (mirrors run.ps1)
     start_rag_worker_bg || true
-
-    # Start Concept Index worker best-effort (mirrors run.ps1)
-    start_concept_index_worker_bg || true
 }
 
 stop_server() {
@@ -988,7 +958,6 @@ stop_server() {
 
     remove_pidfile
     stop_rag_worker || true
-    stop_concept_index_worker || true
 }
 
 log_mongo_status() {

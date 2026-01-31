@@ -68,6 +68,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     console.warn('[main] Failed to initialize global tasks button:', err);
   }
 
+  // JVNAUTOSCI-1071: Initialize messages button
+  try {
+    const messagePanelModule = await import('./components/messagePanel.js');
+    const messagesBtn = document.getElementById('messagesBtn');
+    if (messagesBtn && messagePanelModule.showMessagesTab) {
+      messagesBtn.addEventListener('click', () => {
+        messagePanelModule.showMessagesTab();
+      });
+      console.log('[main] Messages button initialized');
+    }
+    // Load initial unread count
+    if (messagePanelModule.loadUnreadCount) {
+      messagePanelModule.loadUnreadCount();
+    }
+  } catch (err) {
+    console.warn('[main] Failed to initialize messages button:', err);
+  }
+
   // Start background preload of Vontology data while chat is active
   try {
     preloadVontologyData();

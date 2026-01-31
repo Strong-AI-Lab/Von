@@ -80,6 +80,12 @@
       <span id="globalTaskCountBadge" class="task-count-badge hidden" aria-hidden="true"></span>
       All Tasks
     </div>
+    <div id="messagesBtn" class="tab-button messages-tab-button" data-tab="messagesTab"
+      title="Direct messages" aria-label="Messages">
+      <span class="messages-tab-icon" aria-hidden="true">✉️</span>
+      <span id="unreadMessageBadge" class="message-count-badge hidden" aria-hidden="true"></span>
+      Messages
+    </div>
     <div class="tab-button settings-tab-button" data-tab="settingsTab">
       <span class="settings-tab-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" focusable="false" role="img">
@@ -119,6 +125,13 @@
     <div id="globalTasksTab" class="tab-content">
       <div id="globalTasksContainer" class="global-tasks-content">
         <div class="loading">Loading tasks...</div>
+      </div>
+    </div>
+
+    <!-- Messages Tab Content -->
+    <div id="messagesTab" class="tab-content">
+      <div id="messagesContainer" class="messages-content">
+        <div class="loading">Loading messages...</div>
       </div>
     </div>
 

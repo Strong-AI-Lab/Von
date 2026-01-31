@@ -164,6 +164,19 @@ def create_task(
     if created_by_concept_id:
         relationships[PREDICATE_HAS_CREATED_BY] = [created_by_concept_id]
 
+    # Visibility scoping - task visible to creator and assignee
+    visible_to_users = []
+    if created_by_concept_id:
+        visible_to_users.append(created_by_concept_id)
+    if assignee_concept_id and assignee_concept_id not in visible_to_users:
+        visible_to_users.append(assignee_concept_id)
+    if visible_to_users:
+        relationships["specific_to_user"] = visible_to_users
+
+    # Organisation scoping
+    if organisation_concept_id:
+        relationships["specific_to_org"] = [organisation_concept_id]
+
     # Handle conversation linkage (lazy creation)
     conversation_concept_id = None
     if originating_session_id:
@@ -486,6 +499,14 @@ def assign_task(task_concept_id: str, assignee_concept_id: str) -> Dict[str, Any
     ConceptsRepository.mutate_relationship_edge(
         source_id=task_concept_id,
         kind=PREDICATE_HAS_ASSIGNEE,
+        target_id=assignee_concept_id,
+        action="add",
+    )
+
+    # Also add new assignee to specific_to_user for visibility
+    ConceptsRepository.mutate_relationship_edge(
+        source_id=task_concept_id,
+        kind="specific_to_user",
         target_id=assignee_concept_id,
         action="add",
     )

@@ -53,6 +53,7 @@ from .routes.room_device_routes import room_device_bp
 from .routes.client_capabilities_routes import client_capabilities_bp
 from .routes.speech_routes import speech_bp
 from .routes.task_routes import task_bp  # Task management (JVNAUTOSCI-1040)
+from .routes.message_routes import message_bp  # Inter-user messaging (JVNAUTOSCI-1071)
 from ..db.connection_manager import (
     ensure_monitor_started,
     get_db,
@@ -254,6 +255,9 @@ def create_flask_app(
     app.register_blueprint(
         task_bp, url_prefix="/api/tasks"
     )  # Task management (JVNAUTOSCI-1040)
+    app.register_blueprint(
+        message_bp, url_prefix="/api/messages"
+    )  # Inter-user messaging (JVNAUTOSCI-1071)
     app.register_blueprint(
         auth_bp, url_prefix="/von"
     )  # Register the new auth blueprint with /von prefix to match Google OAuth config

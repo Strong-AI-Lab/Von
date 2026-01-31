@@ -1,6 +1,7 @@
 // Chat Tab Module
 import { annotateTurn, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
+import { initializeMessagePanel, loadUnreadCount } from './components/messagePanel.js';
 import { loadMyOrganisations } from './components/orgSelector.js';
 import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { initializeTaskPanel, isTaskPanelVisible, loadTasks, setCurrentSession as setTaskPanelSession, toggleTaskPanel } from './components/taskPanel.js';
@@ -8128,6 +8129,11 @@ export function initializeChatTab() {
             }
         });
     }
+
+    // JVNAUTOSCI-1071: Initialize message panel
+    initializeMessagePanel();
+    // Load initial unread count for badge
+    loadUnreadCount();
 
     // Load annotation toggle state from localStorage (default: false)
     const savedState = localStorage.getItem('annotationToggleEnabled');
