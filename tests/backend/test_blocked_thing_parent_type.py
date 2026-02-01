@@ -350,7 +350,7 @@ def test_mcp_fetch_concept_adds_vacuous_warning(monkeypatch):
 
 def test_gateway_error_response_bypasses_output_validation(monkeypatch):
     """Error responses (success=False) bypass output schema validation (JVNAUTOSCI-1072 fix).
-    
+
     When a tool returns make_error_response(), the gateway should not validate
     against the tool's success output schema – otherwise the LLM sees a confusing
     'Missing required field' error instead of the actual error message.
@@ -361,7 +361,10 @@ def test_gateway_error_response_bypasses_output_validation(monkeypatch):
         MethodCatalogue,
     )
     from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
-    from src.backend.integrations.internal_mcp.schemas import Schema, make_error_response
+    from src.backend.integrations.internal_mcp.schemas import (
+        Schema,
+        make_error_response,
+    )
 
     # Define a tool that returns an error response with output schema expecting different fields
     def handler_that_errors(**kwargs):
