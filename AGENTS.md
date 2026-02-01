@@ -34,6 +34,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - Preserve raw user-authored text when it is rendered/transformed; store originals in dataset/raw attributes where applicable.
 - Users may update this file; retain any user changes.
 - Add a regression test for every state/format-loss bug (load -> edit -> save -> re-edit).
+- **Test through the real call path**: When modifying MCP tool handlers, don't just test the handler function directly—also test through the gateway layer (`InternalMCPGateway.invoke()`). Early-return error paths may bypass output schema validation, and handlers may produce response shapes that don't match expected schemas. If a tool has an `output_schema`, verify error responses work end-to-end.
 - Prefer lightweight telemetry where practical (timings, counters, and error summaries) to support UX and future introspection.
 - When fixing reliability issues, prefer **systemic, general fixes** over point fixes: update shared pipelines, validators, and policies so that behaviour remains stable across model changes and configuration drift.
 - **DRY refactoring discipline** (CRITICAL — WET code is unacceptable):
