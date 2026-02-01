@@ -214,16 +214,50 @@ def _create_concepts(**kwargs):
     # Explicit relationships to it provide no semantic value.
     BLOCKED_PARENT_TYPES = {"#V#thing"}
     if parent_id in BLOCKED_PARENT_TYPES:
+        # Analyse what's being created to give better guidance
+        concept_names = [c.get("name", "") for c in concepts if isinstance(c, dict)]
+        creating_multiple = len(concepts) > 1
+        kind_requested = "instance"
+        if concepts and isinstance(concepts[0], dict):
+            kind_requested = (concepts[0].get("kind") or "type").strip().lower()
+
+        # Build contextual suggestions
+        suggestions = [
+            "1. FIRST search for an existing specific type that matches what you're creating "
+            "(e.g., search_concepts with query based on the domain/category of these items)",
+        ]
+
+        if creating_multiple or kind_requested == "instance":
+            suggestions.append(
+                "2. If no specific type exists but you're creating multiple similar instances, "
+                "CREATE A NEW TYPE FIRST as a subtype of an appropriate category "
+                "(#V#event for things that happen in time, #V#physical_object for tangible items, "
+                "#V#abstract_object for ideas/concepts, #V#information_object for documents/recordings)"
+            )
+            suggestions.append(
+                "3. Then create your instances as instances of that specific type, not the broad category"
+            )
+            suggestions.append(
+                "Example: For Otter recordings, first create type '#V#otter_recording_session' "
+                "as subtype of #V#event, then create instances of #V#otter_recording_session"
+            )
+        else:
+            suggestions.append(
+                "2. Consider appropriate parent types: #V#physical_object, #V#abstract_object, "
+                "#V#event, #V#process, #V#information_object, #V#living_organism"
+            )
+
         return make_error_response(
             "blocked_parent_type",
-            f"Cannot use '{parent_id}' as parent type. Search for appropriate types first "
-            "using search_concepts or find_subconcepts to find a more specific parent type.",
-            details={"blocked_parent_id": parent_id},
-            suggestions=[
-                "Search for suitable types using search_concepts",
-                "Use find_subconcepts of #V#type to explore available types",
-                "Consider #V#physical_object, #V#abstract_object, #V#event, #V#process, or #V#information_object",
-            ],
+            f"Cannot use '{parent_id}' as parent type. Every concept should have a semantically "
+            "meaningful type — search for or create a specific type rather than using the universal top type.",
+            details={
+                "blocked_parent_id": parent_id,
+                "concepts_count": len(concepts),
+                "kind_requested": kind_requested,
+                "sample_names": concept_names[:3] if concept_names else [],
+            },
+            suggestions=suggestions,
         )
 
     # Validate and canonicalise parent_id

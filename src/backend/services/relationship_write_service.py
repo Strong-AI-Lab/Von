@@ -379,14 +379,30 @@ def add_structural_relationship(
             normalised,
             target_id,
         )
+        # Build contextual guidance based on the relationship type
+        if normalised == "is_an_instance_of":
+            guidance = (
+                "When creating instances, first search for or create a specific type. "
+                "For example, if creating Otter recordings, first ensure a type like "
+                "'#V#otter_recording_session' exists (as subtype of #V#event), then make "
+                "instances of that specific type rather than the broad category."
+            )
+        else:
+            guidance = (
+                "Choose a semantically meaningful supertype. Consider: #V#physical_object "
+                "(tangible items), #V#abstract_object (ideas/concepts), #V#event (things "
+                "that happen in time), #V#process, #V#information_object (documents/recordings)."
+            )
+
         return {
             "success": False,
             "error": "blocked_parent_type",
             "message": (
-                f"Cannot use '{target_id}' as parent type. "
-                "Search for appropriate types first using search_concepts or "
-                "find_subconcepts to find a more specific parent type."
+                f"Cannot use '{target_id}' as parent type. Every concept should have a "
+                "semantically meaningful type — search for or create a specific type rather "
+                "than using the universal top type."
             ),
+            "guidance": guidance,
             "blocked_target": target_id,
             "predicate": normalised,
             "source_id": source_id,
