@@ -346,3 +346,57 @@ def test_mcp_fetch_concept_adds_vacuous_warning(monkeypatch):
     assert "_vacuous_typing_warning" in result
     assert result["_vacuous_typing_warning"]["code"] == "vacuous_typing"
     assert "suggested_alternatives" in result["_vacuous_typing_warning"]
+
+
+def test_gateway_error_response_bypasses_output_validation(monkeypatch):
+    """Error responses (success=False) bypass output schema validation (JVNAUTOSCI-1072 fix).
+    
+    When a tool returns make_error_response(), the gateway should not validate
+    against the tool's success output schema – otherwise the LLM sees a confusing
+    'Missing required field' error instead of the actual error message.
+    """
+    from src.backend.integrations.internal_mcp.gateway import (
+        InternalMCPGateway,
+        MethodDefinition,
+        MethodCatalogue,
+    )
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+    from src.backend.integrations.internal_mcp.schemas import Schema, make_error_response
+
+    # Define a tool that returns an error response with output schema expecting different fields
+    def handler_that_errors(**kwargs):
+        return make_error_response(
+            "my_error_code",
+            "Something went wrong",
+            suggestions=["Try again"],
+        )
+
+    # Output schema expects 'results', 'total', 'successful' – but error response won't have them
+    output_schema = Schema(
+        required={"results": list, "total": int, "successful": int},
+        description="test output",
+    )
+
+    definition = MethodDefinition(
+        name="test_error_tool",
+        handler=handler_that_errors,
+        input_schema=Schema(required={}, allow_unknown=True),
+        output_schema=output_schema,
+        description="Tool that returns error",
+    )
+
+    # Create catalogue and register the tool
+    catalogue = MethodCatalogue()
+    catalogue.register(definition)
+
+    # Create gateway with the catalogue
+    transport = InternalMCPTransport()
+    gateway = InternalMCPGateway(catalogue=catalogue, transport=transport, enabled=True)
+
+    # Execute the tool – this should NOT raise SchemaValidationError
+    result = gateway.invoke(method_name="test_error_tool", payload={})
+
+    # Verify we got the error response, not a SchemaValidationError
+    assert result.payload["success"] is False
+    assert result.payload["error_code"] == "my_error_code"
+    assert result.payload["error"] == "Something went wrong"

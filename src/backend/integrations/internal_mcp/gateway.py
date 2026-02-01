@@ -180,11 +180,15 @@ class InternalMCPGateway:
                 )
                 self._record_failure(method_name, message)
                 raise SchemaValidationError(message)
-            ok, errors = validate_payload(definition.output_schema, result_payload)
-            if not ok:
-                message = "; ".join(errors)
-                self._record_failure(method_name, message)
-                raise SchemaValidationError(message)
+            # Skip output schema validation for error responses (MCPErrorResponse)
+            # Error responses follow a different standardised schema with success=False
+            is_error_response = result_payload.get("success") is False
+            if not is_error_response:
+                ok, errors = validate_payload(definition.output_schema, result_payload)
+                if not ok:
+                    message = "; ".join(errors)
+                    self._record_failure(method_name, message)
+                    raise SchemaValidationError(message)
 
         self._record_success(method_name, transport_result.duration_ms)
         return transport_result
