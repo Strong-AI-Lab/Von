@@ -50,18 +50,20 @@
       <!-- Content will be dynamically added here via JavaScript -->
     </div>
 
-    <div class="loading-indicator-row">
-      <div id="loadingIndicator" class="loading-indicator" role="status" aria-live="polite" aria-hidden="true">
-        <span class="loading-indicator-dot" aria-hidden="true"></span>
-        <span class="loading-indicator-text">Thinking...</span>
-        <span class="loading-indicator-sep" aria-hidden="true"></span>
-        <button id="abortButton" class="btn abort-thinking-btn" type="button" aria-hidden="true"
-          aria-label="Stop generating" title="Stop generating">
-          <span class="abort-thinking-icon" aria-hidden="true"></span>
-          <span class="visually-hidden">Stop generating</span>
-        </button>
+    <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
+      <div class="thinking-card" role="status" aria-live="polite">
+        <div class="thinking-card-header" id="loadingIndicator">
+          <span class="thinking-card-dot" aria-hidden="true"></span>
+          <span class="thinking-card-phase loading-indicator-text">Thinking...</span>
+          <span class="thinking-card-meta" id="thinkingCardMeta"></span>
+          <button id="abortButton" class="btn thinking-card-stop" type="button" aria-hidden="true"
+            aria-label="Stop generating" title="Stop generating">
+            <span class="thinking-card-stop-icon" aria-hidden="true"></span>
+            <span class="visually-hidden">Stop generating</span>
+          </button>
+        </div>
+        <div class="thinking-card-body" id="loadingIndicatorDetail" aria-live="polite"></div>
       </div>
-      <div id="loadingIndicatorDetail" class="loading-indicator-detail" aria-live="polite"></div>
     </div>
 
     <!-- Textarea for user prompt -->
