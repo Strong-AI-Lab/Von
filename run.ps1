@@ -896,6 +896,34 @@ function Test-VonLogReady {
     return $false
 }
 
+function Get-ActualServerPort {
+    <#
+    .SYNOPSIS
+    Scans the server log to detect if the server fell back to a different port.
+    Returns the actual port the server is using, or $null if not yet determinable.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [Parameter(Mandatory = $true)][int]$RequestedPort
+    )
+    if (-not (Test-Path $LogPath)) { return $null }
+    try {
+        $tail = Get-Content $LogPath -Tail 100 -ErrorAction Stop
+        # Look for: [INFO] Port 5000 is in use. The UI will start on port 5001 instead.
+        foreach ($line in $tail) {
+            if ($line -match '\[INFO\] Port (\d+) is in use\. The UI will start on port (\d+) instead\.') {
+                return [int]$Matches[2]
+            }
+            # Also check for "Serving on http://127.0.0.1:XXXX" as definitive
+            if ($line -match 'Serving on http://[^:]+:(\d+)') {
+                return [int]$Matches[1]
+            }
+        }
+    }
+    catch { return $null }
+    return $null
+}
+
 function Start-RagWorker {
     if (Test-Path $RagPidFile) {
         $pidContent = Get-Content $RagPidFile -Raw -ErrorAction SilentlyContinue
@@ -1072,9 +1100,24 @@ function Start-VonServer {
     }
     else {
         $maxAttempts = [int]($HealthTimeoutSec * 2) # 500ms intervals (phase 1)
-        $attempt = 0; $healthy = $false; $listeningLogged = $false
+        $attempt = 0; $healthy = $false; $listeningLogged = $false; $portFallbackDetected = $false
         while ($attempt -lt $maxAttempts) {
             Start-Sleep -Milliseconds 500
+            # Check if server fell back to a different port
+            if (-not $portFallbackDetected) {
+                $actualPort = Get-ActualServerPort -LogPath $CurrentLog -RequestedPort $Port
+                if ($actualPort -and $actualPort -ne $Port) {
+                    $portFallbackDetected = $true
+                    Write-Host ""
+                    Write-Host "================================================================================" -ForegroundColor Yellow
+                    Write-Host "  WARNING: Port $Port was in use! Server started on port $actualPort instead." -ForegroundColor Yellow
+                    Write-Host "  URL: http://localhost:$actualPort/" -ForegroundColor Yellow
+                    Write-Host "================================================================================" -ForegroundColor Yellow
+                    Write-Host ""
+                    Write-LauncherLog "PORT FALLBACK: Requested port $Port was in use; server is running on port $actualPort"
+                    $Port = $actualPort
+                }
+            }
             # Early crash detection: if the launched process has exited and the port never began listening, abort fast
             if (-not $listeningLogged) {
                 try {

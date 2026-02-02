@@ -56,6 +56,13 @@ from src.backend.workflows.write_tool_policy import (
     prompt_explicitly_denies_write,
 )
 
+# Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
+from src.backend.services.tool_metadata_service import (
+    get_tool_metadata,
+    get_tool_salience,
+    is_tool_visible,
+)
+
 
 @dataclass(frozen=True)
 class OrchestratorResult:
@@ -3931,6 +3938,617 @@ class InternalMCPChatOrchestrator:
             return json.dumps(result, default=str)
 
     @staticmethod
+    def _extract_result_summary(
+        tool_name: str,
+        payload: Any,
+        *,
+        max_length: int = 80,
+    ) -> str | None:
+        """Extract a human-readable summary from a tool result for progress display.
+
+        Returns a short string describing what the tool actually did, or None if
+        no meaningful summary can be extracted.
+
+        Tool salience categories:
+        - HIGH: create_concepts, search_concepts, fetch_concept, add_relationship,
+                remove_relationship, add_names, merge_concepts, delete_concept,
+                create_task, update_task_status
+        - MEDIUM: search_*, find_*, get_task, gmail_*, upsert_text_relation
+        - LOW: get_context, audit_*, get_*_status, internal tools
+        """
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            # For lists, summarise count
+            if isinstance(payload, list):
+                count = len(payload)
+                return f"{count} item{'s' if count != 1 else ''}" if count else None
+            return None
+
+        # Error responses
+        if payload.get("error"):
+            error_msg = payload.get("error", "")
+            error_code = payload.get("error_code")
+            if error_code:
+                return f"Error: {error_code}"
+            if isinstance(error_msg, str) and error_msg:
+                short = error_msg[:50] + "..." if len(error_msg) > 50 else error_msg
+                return f"Error: {short}"
+            return "Error"
+
+        # === VONTOLOGY-DRIVEN TEMPLATE (checked first with cache) ===
+        # Try applying display template from Vontology tool metadata
+        try:
+            metadata = get_tool_metadata(tool_name)
+            if metadata.display_template:
+                vontology_result = (
+                    InternalMCPChatOrchestrator._apply_vontology_template(
+                        metadata.display_template,
+                        payload,
+                        max_length=max_length,
+                    )
+                )
+                if vontology_result:
+                    return vontology_result
+        except Exception:
+            # Fall back to hardcoded patterns if metadata service fails
+            pass
+
+        # === TOOL-SPECIFIC HANDLERS ===
+        tool_lower = tool_name.lower()
+
+        # --- Relationship tools (HIGH salience) ---
+        if tool_lower == "add_relationship":
+            predicate = payload.get("predicate") or payload.get("predicate_id")
+            target = payload.get("target_id") or payload.get("target_concept_id")
+            if predicate and target:
+                pred_short = str(predicate).replace("#V#", "")[:20]
+                tgt_short = str(target).replace("#V#", "")[:20]
+                return f"{pred_short} → {tgt_short}"
+            if payload.get("success"):
+                return "Relationship added"
+            return None
+
+        if tool_lower == "remove_relationship":
+            predicate = payload.get("predicate") or payload.get("predicate_id")
+            target = payload.get("target_id") or payload.get("target_concept_id")
+            if predicate and target:
+                pred_short = str(predicate).replace("#V#", "")[:20]
+                tgt_short = str(target).replace("#V#", "")[:20]
+                return f"Removed: {pred_short} → {tgt_short}"
+            if payload.get("success") or payload.get("removed"):
+                return "Relationship removed"
+            return None
+
+        # --- Name management (HIGH salience) ---
+        if tool_lower == "add_names":
+            added = payload.get("added") or payload.get("names_added")
+            if isinstance(added, list) and added:
+                names = [str(n.get("text") or n) for n in added[:3] if n]
+                summary = ", ".join(names)
+                if len(added) > 3:
+                    summary += f" (+{len(added) - 3})"
+                return f"Added: {summary}"
+            if isinstance(added, int) and added > 0:
+                return f"Added {added} name{'s' if added != 1 else ''}"
+            if payload.get("success"):
+                return "Names added"
+            return None
+
+        # --- Merge/delete (HIGH salience) ---
+        if tool_lower == "merge_concepts":
+            source = payload.get("source_id") or payload.get("merged_from")
+            target = payload.get("target_id") or payload.get("merged_into")
+            if source and target:
+                src_short = str(source).replace("#V#", "")[:15]
+                tgt_short = str(target).replace("#V#", "")[:15]
+                return f"Merged {src_short} → {tgt_short}"
+            if payload.get("success"):
+                return "Concepts merged"
+            return None
+
+        if tool_lower == "delete_concept":
+            deleted = payload.get("concept_id") or payload.get("deleted")
+            if deleted:
+                del_short = str(deleted).replace("#V#", "")[:25]
+                return f"Deleted: {del_short}"
+            if payload.get("success"):
+                return "Concept deleted"
+            return None
+
+        # --- Task tools (HIGH salience) ---
+        if tool_lower in ("create_task", "task_create"):
+            title = payload.get("title") or payload.get("task_title")
+            task_id = payload.get("task_id") or payload.get("id")
+            if title:
+                return f"Created: {str(title)[:40]}"
+            if task_id:
+                return f"Created task: {task_id}"
+            return "Task created"
+
+        if tool_lower in ("update_task_status", "task_update_status"):
+            new_status = payload.get("status") or payload.get("new_status")
+            task_id = payload.get("task_id")
+            if new_status:
+                return f"Status → {new_status}"
+            if payload.get("success"):
+                return "Status updated"
+            return None
+
+        if tool_lower in ("get_task", "task_get"):
+            title = payload.get("title") or payload.get("task_title")
+            status = payload.get("status")
+            if title:
+                suffix = f" ({status})" if status else ""
+                return f"{str(title)[:35]}{suffix}"
+            return None
+
+        if tool_lower in ("list_my_tasks", "task_list"):
+            tasks = payload.get("tasks") or payload.get("results") or []
+            if isinstance(tasks, list):
+                return f"{len(tasks)} task{'s' if len(tasks) != 1 else ''}"
+            return None
+
+        if tool_lower in ("assign_task", "task_assign"):
+            assignee = payload.get("assignee") or payload.get("assigned_to")
+            if assignee:
+                return f"Assigned to: {str(assignee)[:25]}"
+            if payload.get("success"):
+                return "Task assigned"
+            return None
+
+        # --- Text relation tools (MEDIUM salience) ---
+        if tool_lower in ("upsert_text_relation", "upsert_singleton_text_relation"):
+            predicate = payload.get("predicate")
+            created = payload.get("created")
+            updated = payload.get("updated")
+            if predicate:
+                pred_short = str(predicate).replace("has", "").replace("Has", "")[:20]
+                action = "Created" if created else "Updated" if updated else "Set"
+                return f"{action}: {pred_short}"
+            if created or updated or payload.get("success"):
+                return "Created" if created else "Updated" if updated else "Success"
+            return None
+
+        if tool_lower == "delete_text_relation":
+            relation_id = payload.get("relation_id") or payload.get("id")
+            if relation_id:
+                return f"Deleted relation: {str(relation_id)[:20]}"
+            if payload.get("success") or payload.get("deleted"):
+                return "Relation deleted"
+            return None
+
+        if tool_lower == "get_text_relations":
+            relations = payload.get("relations") or payload.get("text_relations") or []
+            if isinstance(relations, list):
+                return f"{len(relations)} relation{'s' if len(relations) != 1 else ''}"
+            return None
+
+        # --- RAG sync (MEDIUM salience) ---
+        if tool_lower == "rag_sync_text_relations":
+            synced = payload.get("synced") or payload.get("indexed")
+            errors = payload.get("errors") or payload.get("failed")
+            if isinstance(synced, int):
+                result = f"Synced {synced}"
+                if errors:
+                    result += f", {errors} error{'s' if errors != 1 else ''}"
+                return result
+            if payload.get("success"):
+                return "Sync complete"
+            return None
+
+        # --- Search tools (MEDIUM salience) ---
+        if tool_lower == "search_arxiv":
+            papers = payload.get("papers") or payload.get("results") or []
+            if isinstance(papers, list):
+                count = len(papers)
+                if count == 0:
+                    return "No papers found"
+                titles = [
+                    str(p.get("title", ""))[:25] for p in papers[:2] if p.get("title")
+                ]
+                if titles:
+                    summary = ", ".join(titles)
+                    if count > 2:
+                        summary += f" (+{count - 2})"
+                    return f"Found: {summary}"
+                return f"{count} paper{'s' if count != 1 else ''}"
+            return None
+
+        if tool_lower == "search_web":
+            results = payload.get("results") or payload.get("items") or []
+            if isinstance(results, list):
+                count = len(results)
+                if count == 0:
+                    return "No results"
+                return f"{count} web result{'s' if count != 1 else ''}"
+            return None
+
+        if tool_lower == "search_knowledge_base":
+            results = payload.get("results") or payload.get("items") or []
+            if isinstance(results, list):
+                count = len(results)
+                if count == 0:
+                    return "No matches"
+                return f"{count} KB match{'es' if count != 1 else ''}"
+            return None
+
+        if tool_lower in ("context_search", "qna_search"):
+            results = payload.get("results") or payload.get("items") or []
+            answer = payload.get("answer")
+            if answer:
+                return (
+                    f"Answer: {str(answer)[:50]}..."
+                    if len(str(answer)) > 50
+                    else f"Answer: {answer}"
+                )
+            if isinstance(results, list):
+                return f"{len(results)} result{'s' if len(results) != 1 else ''}"
+            return None
+
+        # --- Gmail tools (MEDIUM salience) ---
+        if tool_lower == "gmail_list_messages":
+            messages = payload.get("messages") or payload.get("results") or []
+            if isinstance(messages, list):
+                return f"{len(messages)} message{'s' if len(messages) != 1 else ''}"
+            return None
+
+        if tool_lower == "gmail_get_message":
+            subject = payload.get("subject") or payload.get("headers", {}).get(
+                "Subject"
+            )
+            if subject:
+                return f"Message: {str(subject)[:40]}"
+            return "Message retrieved"
+
+        if tool_lower == "gmail_get_attachment":
+            filename = payload.get("filename") or payload.get("name")
+            if filename:
+                return f"Attachment: {str(filename)[:30]}"
+            return "Attachment retrieved"
+
+        # --- Paper tools (MEDIUM salience) ---
+        if tool_lower == "get_paper_metadata":
+            title = payload.get("title")
+            if title:
+                return f"Paper: {str(title)[:40]}"
+            return None
+
+        if tool_lower == "download_paper":
+            arxiv_id = payload.get("arxiv_id") or payload.get("paper_id")
+            if arxiv_id:
+                return f"Downloaded: {arxiv_id}"
+            if payload.get("success"):
+                return "Paper downloaded"
+            return None
+
+        # --- Find tools (MEDIUM salience) ---
+        if tool_lower == "find_subconcepts":
+            children = payload.get("children") or payload.get("subconcepts") or []
+            if isinstance(children, list):
+                count = len(children)
+                if count == 0:
+                    return "No children"
+                names = [
+                    str(c.get("name", c.get("concept_id", "")))[:20]
+                    for c in children[:3]
+                ]
+                if names:
+                    summary = ", ".join(names)
+                    if count > 3:
+                        summary += f" (+{count - 3})"
+                    return f"Children: {summary}"
+                return f"{count} child{'ren' if count != 1 else ''}"
+            return None
+
+        if tool_lower == "find_concepts_by_name":
+            matches = (
+                payload.get("matches")
+                or payload.get("concepts")
+                or payload.get("results")
+                or []
+            )
+            if isinstance(matches, list):
+                count = len(matches)
+                if count == 0:
+                    return "No matches"
+                names = [str(m.get("name", m.get("id", "")))[:20] for m in matches[:3]]
+                if names:
+                    summary = ", ".join(names)
+                    if count > 3:
+                        summary += f" (+{count - 3})"
+                    return f"Found: {summary}"
+                return f"{count} match{'es' if count != 1 else ''}"
+            return None
+
+        if tool_lower == "resolve_concept_by_name":
+            concept_id = payload.get("concept_id")
+            name = payload.get("name")
+            if name:
+                return f"Resolved: {str(name)[:30]}"
+            if concept_id:
+                cid_short = str(concept_id).replace("#V#", "")[:25]
+                return f"Resolved: {cid_short}"
+            if payload.get("not_found") or not payload.get("concept_id"):
+                return "Not found"
+            return None
+
+        # --- Update concept (MEDIUM salience) ---
+        if tool_lower == "update_concept":
+            concept_id = payload.get("concept_id")
+            if concept_id:
+                cid_short = str(concept_id).replace("#V#", "")[:25]
+                return f"Updated: {cid_short}"
+            if payload.get("success"):
+                return "Concept updated"
+            return None
+
+        # === GENERIC PATTERNS (fallback) ===
+
+        # create_concepts: show created concept names
+        if "results" in payload and "successful" in payload:
+            results = payload.get("results", [])
+            successful = payload.get("successful", 0)
+            names = []
+            for r in results:
+                if isinstance(r, dict) and r.get("success"):
+                    name = (
+                        r.get("requested_name") or r.get("name") or r.get("concept_id")
+                    )
+                    if name:
+                        names.append(str(name))
+            if names:
+                names_str = ", ".join(names[:3])
+                if len(names) > 3:
+                    names_str += f" (+{len(names) - 3} more)"
+                return f"Created: {names_str}"
+            elif successful:
+                return f"Created {successful} concept{'s' if successful != 1 else ''}"
+            return None
+
+        # search_concepts: show result count and sample names
+        if "concepts" in payload or (
+            "results" in payload and "successful" not in payload
+        ):
+            items = payload.get("concepts") or payload.get("results") or []
+            if isinstance(items, list):
+                count = len(items)
+                if count == 0:
+                    return "No results"
+                names = []
+                for item in items[:3]:
+                    if isinstance(item, dict):
+                        name = (
+                            item.get("name")
+                            or item.get("text")
+                            or item.get("concept_id")
+                            or item.get("title")
+                        )
+                        if name:
+                            names.append(str(name)[:30])
+                if names:
+                    summary = ", ".join(names)
+                    if count > 3:
+                        summary += f" (+{count - 3} more)"
+                    return f"Found: {summary}"
+                return f"Found {count} result{'s' if count != 1 else ''}"
+
+        # Single concept fetch: show concept name
+        if "concept_id" in payload and "success" not in payload:
+            name = payload.get("name")
+            concept_id = payload.get("concept_id")
+            if name:
+                return f"Loaded: {name}"
+            elif concept_id:
+                cid_short = str(concept_id).replace("#V#", "")[:25]
+                return f"Loaded: {cid_short}"
+
+        # Generic success with target
+        if payload.get("success") or payload.get("created") or payload.get("updated"):
+            relation_id = payload.get("relation_id") or payload.get("id")
+            target = payload.get("concept_id") or payload.get("target_concept_id")
+            if relation_id:
+                return f"Created relation: {str(relation_id)[:20]}"
+            if target:
+                tgt_short = str(target).replace("#V#", "")[:25]
+                return f"Updated: {tgt_short}"
+            return "Success"
+
+        # Count-based results
+        if "count" in payload:
+            count = payload.get("count")
+            if isinstance(count, int):
+                return f"{count} item{'s' if count != 1 else ''}"
+
+        # Tree/hierarchy results
+        if "tree" in payload or "children" in payload:
+            items = payload.get("tree") or payload.get("children") or []
+            if isinstance(items, list):
+                return f"{len(items)} node{'s' if len(items) != 1 else ''}"
+
+        # Message-based responses
+        if "message" in payload:
+            msg = str(payload["message"])
+            if len(msg) <= max_length:
+                return msg
+            return msg[: max_length - 3] + "..."
+
+        return None
+
+    @staticmethod
+    def _apply_vontology_template(
+        template: str,
+        payload: dict[str, Any],
+        max_length: int = 80,
+    ) -> str | None:
+        """Apply a Vontology display template to a tool payload.
+
+        Templates use {placeholder} syntax. Supported placeholders are extracted
+        from the payload using common field name patterns.
+
+        Returns None if the template cannot be meaningfully applied.
+        """
+        if not template:
+            return None
+
+        # Build a context dict from the payload with common field mappings
+        context: dict[str, Any] = {}
+
+        # Count-related fields
+        for key in ("count", "total", "successful", "added_count", "relations_found"):
+            if key in payload:
+                context["count"] = payload[key]
+                break
+        if "count" not in context:
+            # Try to infer count from list fields
+            for key in (
+                "results",
+                "concepts",
+                "matches",
+                "items",
+                "tasks",
+                "messages",
+                "papers",
+                "issues",
+            ):
+                if isinstance(payload.get(key), list):
+                    context["count"] = len(payload[key])
+                    break
+
+        # Name/title fields
+        for key in ("name", "title", "display_name", "summary"):
+            if payload.get(key):
+                context["name"] = str(payload[key])[:40]
+                context["title"] = context["name"]
+                break
+
+        # Names list (from create_concepts)
+        if "results" in payload and isinstance(payload["results"], list):
+            names = []
+            for r in payload["results"]:
+                if isinstance(r, dict) and r.get("success"):
+                    n = r.get("requested_name") or r.get("name") or r.get("concept_id")
+                    if n:
+                        names.append(str(n)[:20])
+            if names:
+                context["names"] = ", ".join(names[:3])
+                if len(names) > 3:
+                    context["names"] += f" (+{len(names) - 3})"
+
+        # Concept IDs and relationship targets/sources
+        for key in (
+            "concept_id",
+            "target_id",
+            "target_concept_id",
+            "target",
+            "source_id",
+            "source",
+        ):
+            if payload.get(key):
+                val = str(payload[key]).replace("#V#", "")[:25]
+                context.setdefault("concept_id", val)
+                if "target" in key:
+                    context["target"] = val
+                elif "source" in key:
+                    context["source"] = val
+
+        # Relationship fields
+        for key in ("predicate", "predicate_id"):
+            if payload.get(key):
+                context["predicate"] = str(payload[key]).replace("#V#", "")[:20]
+                break
+
+        # Jira fields
+        for key in ("key", "issue_key"):
+            if payload.get(key):
+                context["key"] = str(payload[key])
+                break
+        if payload.get("status"):
+            context["status"] = str(payload["status"])[:20]
+        # Jira link fields
+        if payload.get("inwardIssue") or payload.get("inward"):
+            context["inward"] = str(payload.get("inwardIssue") or payload.get("inward"))
+        if payload.get("outwardIssue") or payload.get("outward"):
+            context["outward"] = str(
+                payload.get("outwardIssue") or payload.get("outward")
+            )
+
+        # ArXiv fields
+        if payload.get("arxiv_id"):
+            context["arxiv_id"] = str(payload["arxiv_id"])
+
+        # URL fields
+        for key in ("url", "extracted_url", "source_url"):
+            if payload.get(key):
+                url = str(payload[key])
+                context["url"] = url[:50] + "..." if len(url) > 50 else url
+                break
+
+        # Task fields
+        if payload.get("task_id"):
+            context["task_id"] = str(payload["task_id"])
+        if payload.get("assignee") or payload.get("assigned_to"):
+            context["assignee"] = str(
+                payload.get("assignee") or payload.get("assigned_to")
+            )[:25]
+
+        # Message fields (Gmail)
+        if payload.get("subject"):
+            context["subject"] = str(payload["subject"])[:40]
+        if payload.get("filename"):
+            context["filename"] = str(payload["filename"])[:30]
+
+        # Action fields (for upsert)
+        if payload.get("created"):
+            context["action"] = "Created"
+        elif payload.get("updated"):
+            context["action"] = "Updated"
+        else:
+            context["action"] = "Set"
+
+        # Boolean exists
+        if "exists" in payload:
+            context["exists"] = "Yes" if payload["exists"] else "No"
+
+        # Answer (QnA)
+        if payload.get("answer"):
+            ans = str(payload["answer"])
+            context["answer"] = ans[:50] + "..." if len(ans) > 50 else ans
+
+        # Try to apply the template
+        try:
+            # Find all placeholders
+            import re
+
+            placeholders = re.findall(r"\{(\w+)\}", template)
+            if not placeholders:
+                return template[:max_length]
+
+            # Check if we have values for enough placeholders
+            available = sum(1 for p in placeholders if p in context and context[p])
+            if available < len(placeholders) * 0.5:
+                # Less than half placeholders available, skip template
+                return None
+
+            # Substitute available values, leave others empty
+            result = template
+            for placeholder in placeholders:
+                value = context.get(placeholder, "")
+                result = result.replace(f"{{{placeholder}}}", str(value))
+
+            # Clean up empty placeholders and extra spaces
+            result = re.sub(r"\{[^}]*\}", "", result)
+            result = re.sub(r"\s+", " ", result).strip()
+
+            if not result or result == template:
+                return None
+
+            return result[:max_length] if len(result) > max_length else result
+
+        except Exception:
+            return None
+
+    @staticmethod
     def _normalise_language(language: str | None) -> str | None:
         if not isinstance(language, str):
             return None
@@ -6429,25 +7047,31 @@ class InternalMCPChatOrchestrator:
                         tool_name, result.payload, result.duration_ms, "ok"
                     )
 
+                    # Extract human-readable summary for progress display
+                    result_summary = self._extract_result_summary(
+                        tool_name, result.payload
+                    )
+
                     # Extract call_id for tracing (JVNAUTOSCI-803)
                     invocation_record = {"tool": tool_name, "payload": dict(payload)}
                     if call_id:
                         invocation_record["call_id"] = call_id
                     invocations.append(invocation_record)
 
-                    _emit_progress_local(
-                        {
-                            "status": "tool_invoked",
-                            "tool": tool_name,
-                            "batch_size": current_batch_size,
-                            "tool_calls_done": iteration_count,
-                            "tool_calls_cap": int(self._max_tool_invocations),
-                            "tool_calls_remaining": max(
-                                0, int(self._max_tool_invocations) - iteration_count
-                            ),
-                            "call_id": call_id,
-                        }
-                    )
+                    progress_info: dict[str, Any] = {
+                        "status": "tool_invoked",
+                        "tool": tool_name,
+                        "batch_size": current_batch_size,
+                        "tool_calls_done": iteration_count,
+                        "tool_calls_cap": int(self._max_tool_invocations),
+                        "tool_calls_remaining": max(
+                            0, int(self._max_tool_invocations) - iteration_count
+                        ),
+                        "call_id": call_id,
+                    }
+                    if result_summary:
+                        progress_info["result_summary"] = result_summary
+                    _emit_progress_local(progress_info)
 
                     if tool_step is not None:
                         try:

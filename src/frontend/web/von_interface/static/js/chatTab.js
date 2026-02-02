@@ -297,22 +297,51 @@ function setLoadingIndicatorTooltip(text) {
     }
 }
 
+/**
+ * Update the thinking card body with tool history HTML.
+ */
+function setLoadingIndicatorDetailHtml(html) {
+    const detailEl = getLoadingIndicatorDetailEl();
+    if (!detailEl) {
+        return;
+    }
+    const value = String(html ?? '').trim();
+    detailEl.innerHTML = value;
+
+    // Update wrapper to show/hide tool list
+    const wrapper = document.getElementById('thinkingCardWrapper');
+    if (wrapper) {
+        if (value) {
+            wrapper.classList.add('has-tools');
+        } else {
+            wrapper.classList.remove('has-tools');
+        }
+    }
+}
+
+/**
+ * Legacy function - redirects to HTML version.
+ */
 function setLoadingIndicatorDetailText(text) {
+    // For plain text, escape and wrap
     const detailEl = getLoadingIndicatorDetailEl();
     if (!detailEl) {
         return;
     }
     const value = String(text ?? '').trim();
-    detailEl.textContent = value;
-    detailEl.setAttribute('aria-hidden', value ? 'false' : 'true');
+    if (value) {
+        // Convert plain text to simple pre-formatted display
+        detailEl.innerHTML = `<div style="white-space: pre-line;">${escapeHtml(value)}</div>`;
+    } else {
+        detailEl.innerHTML = '';
+    }
 
-    const promptInput = document.getElementById('promptInput');
-    const wrapper = promptInput?.closest?.('.prompt-input-wrapper');
+    const wrapper = document.getElementById('thinkingCardWrapper');
     if (wrapper) {
         if (value) {
-            wrapper.classList.add('has-loading-detail');
+            wrapper.classList.add('has-tools');
         } else {
-            wrapper.classList.remove('has-loading-detail');
+            wrapper.classList.remove('has-tools');
         }
     }
 }
@@ -426,18 +455,10 @@ function formatToolUseProgressText(progress, request = null) {
         return DEFAULT_THINKING_TEXT;
     }
 
-    const status = typeof progress.status === 'string' ? progress.status : 'thinking';
     const phase = typeof progress.phase === 'string' ? progress.phase : null;
     const phaseLabel = typeof progress.phase_label === 'string' ? progress.phase_label : null;
-    const tool = typeof progress.tool === 'string' ? progress.tool : null;
-    const workflowTask = typeof progress.workflow_task === 'string' ? progress.workflow_task : null;
-    const batchSize = Number.isFinite(progress.batch_size) ? Number(progress.batch_size) : null;
-    const done = Number.isFinite(progress.tool_calls_done) ? Number(progress.tool_calls_done) : null;
-    const cap = Number.isFinite(progress.tool_calls_cap) ? Number(progress.tool_calls_cap) : null;
-    const remaining = Number.isFinite(progress.tool_calls_remaining) ? Number(progress.tool_calls_remaining) : null;
-    const totalElapsedMs = Number.isFinite(progress.total_elapsed_ms) ? Number(progress.total_elapsed_ms) : null;
 
-    // JVNAUTOSCI-984: Use phase label as the primary indicator text when available.
+    // Use phase label as the primary text - simplified for card header
     let primaryText = DEFAULT_THINKING_TEXT;
     if (phaseLabel) {
         primaryText = phaseLabel;
@@ -447,50 +468,35 @@ function formatToolUseProgressText(progress, request = null) {
         }
     }
 
+    return primaryText;
+}
+
+/**
+ * Update the thinking card meta element (elapsed time + tool count).
+ */
+function updateThinkingCardMeta(request, progress) {
+    const metaEl = document.getElementById('thinkingCardMeta');
+    if (!metaEl) return;
+
     const bits = [];
 
+    // Elapsed time
     const thinkingStartedAtMs = request && Number.isFinite(request.thinkingStartedAtMs)
         ? Number(request.thinkingStartedAtMs)
         : null;
-    const elapsedMs = thinkingStartedAtMs === null ? null : Date.now() - thinkingStartedAtMs;
-    if (elapsedMs !== null) {
-        bits.push(`${formatThinkingDuration(elapsedMs)}`);
+    if (thinkingStartedAtMs !== null) {
+        const elapsedMs = Date.now() - thinkingStartedAtMs;
+        bits.push(formatThinkingDuration(elapsedMs));
     }
 
-    if (tool) {
-        bits.push(`tool: ${tool}`);
-    }
-
-    if (workflowTask && !phaseLabel) {
-        // Only show workflow task if we don't already have a phase label
-        bits.push(`task: ${workflowTask}`);
-    }
-
+    // Tool count
+    const done = progress && Number.isFinite(progress.tool_calls_done) ? Number(progress.tool_calls_done) : null;
+    const cap = progress && Number.isFinite(progress.tool_calls_cap) ? Number(progress.tool_calls_cap) : null;
     if (done !== null && cap !== null && cap > 0) {
         bits.push(`${done}/${cap} tools`);
     }
 
-    // Show limit reached warning
-    if (status === 'tool_limit_reached') {
-        bits.push('limit reached');
-    }
-
-    if (status === 'tool_failed' || status === 'error') {
-        const error = typeof progress.error === 'string' ? progress.error.trim() : '';
-        if (error) {
-            // Truncate error message for display
-            const shortError = error.length > 60 ? error.substring(0, 60) + '...' : error;
-            bits.push(`error: ${shortError}`);
-        } else {
-            bits.push('error');
-        }
-    }
-
-    if (!bits.length) {
-        return primaryText;
-    }
-
-    return `${primaryText} (${bits.join(', ')})`;
+    metaEl.textContent = bits.length > 0 ? bits.join(' \u00b7 ') : '';
 }
 
 function recordToolUseHistory(request, progress) {
@@ -503,6 +509,7 @@ function recordToolUseHistory(request, progress) {
     const phase = typeof progress.phase === 'string' ? progress.phase.trim() : '';
     const phaseLabel = typeof progress.phase_label === 'string' ? progress.phase_label.trim() : '';
     const status = typeof progress.status === 'string' ? progress.status.trim() : '';
+    const resultSummary = typeof progress.result_summary === 'string' ? progress.result_summary.trim() : '';
 
     // Track phase transitions in addition to tool use.
     if (!Array.isArray(request.toolUseProgressHistory)) {
@@ -540,11 +547,24 @@ function recordToolUseHistory(request, progress) {
     const lastTask = last && typeof last.workflowTask === 'string' ? last.workflowTask : null;
     const lastBatch = last && Number.isFinite(last.batchSize) ? Number(last.batchSize) : null;
 
+    // Determine success/fail status
+    const isSuccess = status === 'tool_invoked';
+    const isFail = status === 'tool_failed' || status === 'tool_blocked' || status === 'error';
+
     if (lastTool === tool && lastTask === workflowTask && lastBatch === batchSize) {
+        // Update result summary and status for existing entry if new info is provided
+        if (last) {
+            if (resultSummary) {
+                last.resultSummary = resultSummary;
+            }
+            if (isSuccess || isFail) {
+                last.success = isSuccess;
+            }
+        }
         return;
     }
 
-    history.push({ tool, workflowTask, batchSize, phase });
+    history.push({ tool, workflowTask, batchSize, phase, resultSummary, success: isSuccess ? true : (isFail ? false : null) });
 }
 
 function formatThinkingDuration(elapsedMs) {
@@ -559,60 +579,64 @@ function formatThinkingDuration(elapsedMs) {
     return `${totalSeconds}s`;
 }
 
-function formatToolUseHistoryTooltip(request) {
+/**
+ * Render the tool history as structured HTML for the thinking card body.
+ * No longer shows phase history (phases are in the header).
+ */
+function renderToolHistoryHTML(request) {
     if (!request) {
         return '';
     }
 
-    const thinkingStartedAtMs = Number.isFinite(request.thinkingStartedAtMs)
-        ? Number(request.thinkingStartedAtMs)
-        : null;
-    const elapsedMs = thinkingStartedAtMs === null ? null : Date.now() - thinkingStartedAtMs;
-
     const toolHistory = Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory : [];
-    const phaseHistory = Array.isArray(request.phaseHistory) ? request.phaseHistory : [];
 
-    const lines = [];
-
-    // Phase history section (JVNAUTOSCI-984).
-    if (phaseHistory.length > 0) {
-        for (let i = 0; i < phaseHistory.length; i++) {
-            const entry = phaseHistory[i];
-            const label = entry.phaseLabel || entry.phase || 'Unknown';
-            const startTs = entry.timestamp;
-            const endTs = i + 1 < phaseHistory.length
-                ? phaseHistory[i + 1].timestamp
-                : Date.now();
-            const durationMs = endTs - startTs;
-            lines.push(`${label} (${formatThinkingDuration(durationMs)})`);
-        }
-    }
-
-    // Tool history section.
-    if (toolHistory.length > 0) {
-        if (lines.length > 0) {
-            lines.push('');
-        }
-        for (const entry of toolHistory) {
-            const tool = entry && typeof entry.tool === 'string' ? entry.tool : '';
-            const workflowTask = entry && typeof entry.workflowTask === 'string' ? entry.workflowTask : '';
-            if (!tool && !workflowTask) {
-                continue;
-            }
-            const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
-            if (batchSize === null) {
-                lines.push(`${tool || workflowTask}`);
-            } else {
-                lines.push(`${tool || workflowTask} (batch ${batchSize})`);
-            }
-        }
-    }
-
-    if (lines.length === 0) {
+    if (toolHistory.length === 0) {
         return '';
     }
 
-    return lines.join('\n');
+    const items = [];
+    for (const entry of toolHistory) {
+        const tool = entry && typeof entry.tool === 'string' ? entry.tool : '';
+        const workflowTask = entry && typeof entry.workflowTask === 'string' ? entry.workflowTask : '';
+        if (!tool && !workflowTask) {
+            continue;
+        }
+        const batchSize = entry && Number.isFinite(entry.batchSize) ? Number(entry.batchSize) : null;
+        const resultSummary = entry && typeof entry.resultSummary === 'string' ? entry.resultSummary : '';
+        const success = entry.success;
+
+        // Status icon and class
+        let statusIcon = '';
+        let statusClass = 'pending';
+        if (success === true) {
+            statusIcon = '✓';
+            statusClass = 'success';
+        } else if (success === false) {
+            statusIcon = '✗';
+            statusClass = 'failure';
+        }
+
+        const toolName = escapeHtml(tool || workflowTask);
+        const batchLabel = batchSize !== null ? `<span class="thinking-card-tool-batch">(batch ${batchSize})</span>` : '';
+        const resultLabel = resultSummary ? `<span class="thinking-card-tool-result">${escapeHtml(resultSummary)}</span>` : '';
+
+        items.push(`<div class="thinking-card-tool">
+            <span class="thinking-card-tool-status ${statusClass}">${statusIcon}</span>
+            <span class="thinking-card-tool-name">${toolName}</span>${batchLabel}${resultLabel}
+        </div>`);
+    }
+
+    return items.join('');
+}
+
+/**
+ * Legacy function - redirects to renderToolHistoryHTML.
+ * Returns empty string for backwards compatibility with tooltip usage.
+ */
+function formatToolUseHistoryTooltip(request) {
+    // For backwards compatibility, this can still return plain text for tooltips
+    // But the primary display now uses renderToolHistoryHTML
+    return '';
 }
 
 function stopToolUseProgressPolling(request) {
@@ -680,7 +704,8 @@ function startThinkingTooltipTicker(request) {
             stopThinkingTooltipTicker(request);
             return;
         }
-        setLoadingIndicatorDetailText(formatToolUseHistoryTooltip(request));
+        setLoadingIndicatorDetailHtml(renderToolHistoryHTML(request));
+        updateThinkingCardMeta(request, null);
     }, 1000);
 }
 
@@ -724,7 +749,8 @@ function startToolUseProgressPolling(request) {
         }
 
         // Keep detail text "alive" even before the server has any tool-progress state.
-        setLoadingIndicatorDetailText(formatToolUseHistoryTooltip(request));
+        setLoadingIndicatorDetailHtml(renderToolHistoryHTML(request));
+        updateThinkingCardMeta(request, null);
 
         try {
             const resp = await fetch(`/von/progress/${encodeURIComponent(requestId)}`,
@@ -759,8 +785,9 @@ function startToolUseProgressPolling(request) {
             poll.consecutiveNotFound = 0;
             poll.nextDelayMs = 350;
             setLoadingIndicatorText(formatToolUseProgressText(progress, request));
+            updateThinkingCardMeta(request, progress);
             recordToolUseHistory(request, progress);
-            setLoadingIndicatorDetailText(formatToolUseHistoryTooltip(request));
+            setLoadingIndicatorDetailHtml(renderToolHistoryHTML(request));
 
             const status = typeof progress?.status === 'string' ? progress.status : null;
             if (status === 'disabled') {
@@ -8288,27 +8315,38 @@ export function initializeChatTab() {
 }
 
 function setThinkingState(isThinking) {
+    const wrapper = document.getElementById('thinkingCardWrapper');
     const loadingIndicator = document.getElementById('loadingIndicator');
     const loadingDetail = document.getElementById('loadingIndicatorDetail');
     const abortButton = document.getElementById('abortButton');
     const sendButton = document.getElementById('sendButton');
+    const metaEl = document.getElementById('thinkingCardMeta');
+
+    // Toggle wrapper visibility (controls the entire card)
+    if (wrapper) {
+        wrapper.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+        if (!isThinking) {
+            wrapper.classList.remove('has-tools');
+        }
+    }
 
     if (loadingIndicator) {
-        loadingIndicator.style.display = isThinking ? 'inline-flex' : 'none';
-        loadingIndicator.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
         if (isThinking) {
             setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
-            setLoadingIndicatorTooltip('');
         } else {
             setLoadingIndicatorText(DEFAULT_THINKING_TEXT);
-            setLoadingIndicatorTooltip('');
         }
     }
 
     if (loadingDetail) {
-        loadingDetail.style.display = isThinking ? 'block' : 'none';
         if (!isThinking) {
-            setLoadingIndicatorDetailText('');
+            loadingDetail.innerHTML = '';
+        }
+    }
+
+    if (metaEl) {
+        if (!isThinking) {
+            metaEl.textContent = '';
         }
     }
 
@@ -8317,7 +8355,6 @@ function setThinkingState(isThinking) {
     }
 
     if (abortButton) {
-        abortButton.style.display = isThinking ? 'inline-flex' : 'none';
         abortButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
     }
 }

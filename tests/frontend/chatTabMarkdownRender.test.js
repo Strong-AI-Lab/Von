@@ -19,9 +19,17 @@ describe('chat markdown rendering (assistant)', () => {
     beforeEach(() => {
         document.body.innerHTML = `
             <div id="scrollableField"></div>
-            <div id="loadingIndicator" aria-hidden="true"></div>
+            <div class="thinking-card-wrapper" id="thinkingCardWrapper" aria-hidden="true">
+                <div class="thinking-card">
+                    <div class="thinking-card-header" id="loadingIndicator">
+                        <span class="thinking-card-phase loading-indicator-text">Thinking...</span>
+                        <span class="thinking-card-meta" id="thinkingCardMeta"></span>
+                        <button id="abortButton" aria-hidden="true"></button>
+                    </div>
+                    <div class="thinking-card-body" id="loadingIndicatorDetail"></div>
+                </div>
+            </div>
             <button id="sendButton"></button>
-            <button id="abortButton" aria-hidden="true"></button>
             <textarea id="promptInput"></textarea>
             <input type="checkbox" id="annotationToggle" />
         `;
