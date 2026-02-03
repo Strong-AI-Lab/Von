@@ -79,41 +79,29 @@ _durable_action_registry = None
 def _build_durable_workflow_registry():
     """Build a WorkflowRegistry with default workflows registered."""
     from ..workflows import WorkflowRegistry, register_default_workflows
+    from ..workflows.durable.rag_sync_workflow import get_rag_sync_workflow_registration
 
     registry = WorkflowRegistry()
     register_default_workflows(registry)
+
+    # Register durable-specific workflows
+    registry.register(get_rag_sync_workflow_registration())
+
     return registry
 
 
 def _build_durable_action_registry():
     """Build an ActionRegistry for durable workflow execution.
 
-    This is a minimal registry for background workers. Action handlers
-    for durable workflows should be registered here.
+    This registry contains action handlers for durable background workflows.
     """
-    from ..workflows import ActionRegistry, ActionSpec, WorkflowActionResult
+    from ..workflows import ActionRegistry
+    from ..workflows.durable.rag_sync_workflow import register_rag_sync_actions
 
     registry = ActionRegistry()
 
-    # Add placeholder/stub handlers for durable workflows.
-    # Real handlers can be added as workflows are migrated.
-    def _noop_handler(request):
-        return WorkflowActionResult(outputs={})
-
-    # Register stub handlers for commonly used actions
-    for action_id in (
-        "rag_sync.fetch_sessions",
-        "rag_sync.index_batch",
-        "rag_sync.update_status",
-        "rag_sync.report",
-    ):
-        registry.register(
-            ActionSpec(
-                action_id=action_id,
-                handler=_noop_handler,
-                description=f"Durable workflow action: {action_id}",
-            )
-        )
+    # Register RAG sync workflow actions (Phase 4: JVNAUTOSCI-1075)
+    register_rag_sync_actions(registry)
 
     return registry
 
