@@ -1,4 +1,27 @@
-"""Default method catalogue for the internal MCP gateway."""
+"""Default method catalogue for the internal MCP gateway.
+
+SCHEMA DESIGN GUIDELINES
+========================
+When defining input schemas for new tools, follow these conventions to ensure
+LLM compatibility:
+
+1. **Include `namespace` as an optional parameter** on user-facing tools, even if
+   the handler ignores it. LLMs learn parameter patterns across tools and will
+   attempt to pass `namespace` if they see it accepted elsewhere. Use:
+       "namespace": (str, type(None)),
+
+2. **Prefer `allow_unknown=True`** for input schemas unless you have a specific
+   reason to reject unexpected fields. Strict schemas (`allow_unknown=False`)
+   will reject calls when LLMs hallucinate extra parameters.
+
+3. **Output schemas can be strict** (`allow_unknown=False`) since they validate
+   what *we* return, not what the LLM sends.
+
+4. **Document ignored parameters** with a comment so future maintainers understand
+   why they're accepted but unused.
+
+See JVNAUTOSCI-1044 for an example of namespace rejection breaking tool calls.
+"""
 
 from __future__ import annotations
 
@@ -2864,10 +2887,13 @@ def _search_web(**kwargs):
                 include_images=kwargs.get("include_images", False),
             )
         except SearchProxyError as e:
+            details = e.details.to_dict() if e.details else {}
+            details["exception_type"] = "SearchProxyError"
             return make_error_response(
-                "search_proxy_error",
+                details.get("error_type", "search_proxy_error"),
                 str(e),
-                details={"exception_type": "SearchProxyError"},
+                details=details,
+                suggestions=details.get("suggestions", []),
             )
         except Exception as e:
             return make_error_response(
@@ -2912,10 +2938,13 @@ def _context_search(**kwargs):
                 include_answer=kwargs.get("include_answer", False),
             )
         except SearchProxyError as e:
+            details = e.details.to_dict() if e.details else {}
+            details["exception_type"] = "SearchProxyError"
             return make_error_response(
-                "search_proxy_error",
+                details.get("error_type", "search_proxy_error"),
                 str(e),
-                details={"exception_type": "SearchProxyError"},
+                details=details,
+                suggestions=details.get("suggestions", []),
             )
         except Exception as e:
             return make_error_response(
@@ -2949,10 +2978,13 @@ def _qna_search(**kwargs):
                 search_depth=kwargs.get("search_depth", "advanced"),
             )
         except SearchProxyError as e:
+            details = e.details.to_dict() if e.details else {}
+            details["exception_type"] = "SearchProxyError"
             return make_error_response(
-                "search_proxy_error",
+                details.get("error_type", "search_proxy_error"),
                 str(e),
-                details={"exception_type": "SearchProxyError"},
+                details=details,
+                suggestions=details.get("suggestions", []),
             )
         except Exception as e:
             return make_error_response(
@@ -2982,10 +3014,14 @@ def _extract_url(**kwargs):
             proxy = await get_search_proxy()
             return await proxy.extract(url=url)
         except SearchProxyError as e:
+            details = e.details.to_dict() if e.details else {}
+            details["exception_type"] = "SearchProxyError"
+            details["url"] = url
             return make_error_response(
-                "search_proxy_error",
+                details.get("error_type", "search_proxy_error"),
                 str(e),
-                details={"exception_type": "SearchProxyError", "url": url},
+                details=details,
+                suggestions=details.get("suggestions", []),
             )
         except Exception as e:
             return make_error_response(
@@ -2995,6 +3031,44 @@ def _extract_url(**kwargs):
             )
 
     return _run_async_compat(_async_extract)
+
+
+def _search_proxy_diagnostics(**kwargs):
+    """Get diagnostics and health status for the Tavily search proxy.
+
+    Use this to debug search/extraction failures, check Tavily API connectivity,
+    and review recent call history.
+    """
+    from .search_proxy_mcp import get_search_proxy, SearchProxyError
+
+    include_health_check = kwargs.get("include_health_check", False)
+
+    async def _async_diagnostics():
+        try:
+            proxy = await get_search_proxy()
+            diagnostics = proxy.get_diagnostics()
+
+            if include_health_check:
+                health = await proxy.check_health()
+                diagnostics["health_check"] = health
+
+            return diagnostics
+        except SearchProxyError as e:
+            details = e.details.to_dict() if e.details else {}
+            details["exception_type"] = "SearchProxyError"
+            return {
+                "error": str(e),
+                "details": details,
+                "proxy_initialised": False,
+            }
+        except Exception as e:
+            return {
+                "error": f"Failed to get diagnostics: {e}",
+                "exception_type": type(e).__name__,
+                "proxy_initialised": False,
+            }
+
+    return _run_async_compat(_async_diagnostics)
 
 
 def _resilient_extract_url(**kwargs):
@@ -4274,6 +4348,37 @@ def _extract_url_output_schema() -> Schema:
     )
 
 
+def _search_proxy_diagnostics_input_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={"include_health_check": (bool,)},
+        allow_unknown=True,
+        description="search_proxy_diagnostics input: include_health_check (bool, default false, runs a test search to verify Tavily connectivity)",
+    )
+
+
+def _search_proxy_diagnostics_output_schema() -> Schema:
+    return Schema(
+        required={},
+        optional={
+            "stats": (dict, type(None)),
+            "last_call": (dict, type(None)),
+            "recent_calls": (list, type(None)),
+            "config": (dict, type(None)),
+            "health_check": (dict, type(None)),
+            "error": (str, type(None)),
+            "details": (dict, type(None)),
+            "proxy_initialised": (bool, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "search_proxy_diagnostics output: stats (call_count, error_count, success_rate, avg_duration), "
+            "last_call (telemetry for most recent call), recent_calls (list of recent call telemetry), "
+            "config (proxy configuration), health_check (if requested: healthy, latency_ms, etc.)"
+        ),
+    )
+
+
 def _resilient_extract_url_input_schema() -> Schema:
     return Schema(
         required={
@@ -4788,6 +4893,8 @@ def _generate_concept_description_input_schema() -> Schema:
         optional={
             "force": (bool,),
             "store": (bool,),
+            # Accept namespace for LLM consistency (ignored by handler)
+            "namespace": (str, type(None)),
         },
         allow_unknown=False,
         description=(
@@ -7804,6 +7911,20 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Extract main text from a URL with deterministic fallbacks. First tries direct extraction; if the page is empty/blocked "
                 "(common for JavaScript-rendered profile pages), it falls back to web search and attempts extraction from a small set of "
                 "candidate URLs. Returns content plus provenance (attempted URLs and search query)."
+            ),
+        ),
+        MethodDefinition(
+            name="search_proxy_diagnostics",
+            handler=_search_proxy_diagnostics,
+            input_schema=_search_proxy_diagnostics_input_schema(),
+            output_schema=_search_proxy_diagnostics_output_schema(),
+            category="read",
+            timeout_sec=30.0,
+            description=(
+                "Get diagnostics and health status for the Tavily search proxy. Returns stats (call count, error rate, "
+                "average latency), recent call telemetry with timing and error details, and configuration. "
+                "Set include_health_check=true to run a live connectivity test. "
+                "Use this to debug search/extraction failures or verify Tavily API connectivity."
             ),
         ),
         # Gmail MCP tools (read-only surface)

@@ -2,6 +2,20 @@
 
 Manages subprocess communication with external search MCP servers (primarily Tavily)
 using the MCP protocol.
+
+Telemetry and Diagnostics
+-------------------------
+This module provides detailed telemetry for debugging extraction/search failures:
+
+- Each call records timing, response shape, and error details
+- Use `get_stats()` for aggregate statistics
+- Use `get_diagnostics()` for recent call history
+- Use `check_health()` to verify Tavily connectivity
+
+Common failure modes:
+- "Request failed: Connection refused" - npx/Tavily subprocess failed to start
+- "Request failed: Timeout" - Tavily API slow or unresponsive
+- Empty extraction - Target site blocks automated requests or is JS-rendered
 """
 
 from __future__ import annotations
@@ -10,9 +24,11 @@ import asyncio
 import re
 import logging
 import os
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .mcp_proxy_base import MCPServerConfig, MCPStdIOClient, MCPToolClientError
 
@@ -57,8 +73,59 @@ class SearchProxyConfig:
     timeout_sec: float = 30.0
 
 
+@dataclass
+class SearchProxyErrorDetails:
+    """Structured error details for search proxy failures."""
+
+    error_type: str
+    message: str
+    tool_name: Optional[str] = None
+    url: Optional[str] = None
+    query: Optional[str] = None
+    duration_ms: Optional[float] = None
+    timestamp_utc: Optional[str] = None
+    underlying_error: Optional[str] = None
+    suggestions: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "error_type": self.error_type,
+            "message": self.message,
+        }
+        if self.tool_name:
+            d["tool_name"] = self.tool_name
+        if self.url:
+            d["url"] = self.url
+        if self.query:
+            d["query"] = self.query
+        if self.duration_ms is not None:
+            d["duration_ms"] = round(self.duration_ms, 2)
+        if self.timestamp_utc:
+            d["timestamp_utc"] = self.timestamp_utc
+        if self.underlying_error:
+            d["underlying_error"] = self.underlying_error
+        if self.suggestions:
+            d["suggestions"] = self.suggestions
+        return d
+
+
 class SearchProxyError(Exception):
-    """Raised when search proxy operations fail."""
+    """Raised when search proxy operations fail.
+
+    Attributes:
+        details: Structured error information for diagnostics.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        details: Optional[SearchProxyErrorDetails] = None,
+    ):
+        super().__init__(message)
+        self.details = details or SearchProxyErrorDetails(
+            error_type="unknown",
+            message=message,
+        )
 
 
 class SearchMCPProxy:
@@ -79,7 +146,14 @@ class SearchMCPProxy:
         )
         return MCPStdIOClient(config)
 
-    async def _call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    async def _call_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        *,
+        context_url: Optional[str] = None,
+        context_query: Optional[str] = None,
+    ) -> Any:
         """Call an MCP tool and return the result.
 
         Creates a new MCP session for each tool call to avoid lifecycle issues.
@@ -87,13 +161,18 @@ class SearchMCPProxy:
         Args:
             tool_name: Name of the tool to call
             arguments: Tool arguments
+            context_url: URL being processed (for error context)
+            context_query: Search query (for error context)
 
         Returns:
             Tool result (parsed from response)
 
         Raises:
-            SearchProxyError: If tool call fails
+            SearchProxyError: If tool call fails (with detailed diagnostics)
         """
+        start_time = time.perf_counter()
+        timestamp_utc = datetime.now(timezone.utc).isoformat()
+
         try:
             # Only apply Tavily's formatted-text parser to `tavily-search`.
             # `tavily-extract` frequently returns JSON; forcing the search parser can
@@ -102,13 +181,79 @@ class SearchMCPProxy:
             text_parser = (
                 _parse_tavily_text_response if tool_name == "tavily-search" else None
             )
-            return await self._client.call_tool(
+            result = await self._client.call_tool(
                 tool_name,
                 arguments,
                 text_parser=text_parser,
             )
+            return result
         except MCPToolClientError as exc:
-            raise SearchProxyError(f"Request failed: {exc}") from exc
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            error_str = str(exc)
+
+            # Classify error and provide actionable suggestions
+            suggestions = []
+            error_type = "mcp_tool_error"
+
+            if "timeout" in error_str.lower():
+                error_type = "timeout"
+                suggestions = [
+                    "The Tavily API is slow or unresponsive",
+                    "Check your network connection",
+                    "Try again in a few moments",
+                ]
+            elif "connection refused" in error_str.lower():
+                error_type = "connection_refused"
+                suggestions = [
+                    "The Tavily MCP subprocess failed to start",
+                    "Ensure Node.js and npx are installed",
+                    "Check TAVILY_API_KEY is valid",
+                ]
+            elif "api" in error_str.lower() and "key" in error_str.lower():
+                error_type = "api_key_error"
+                suggestions = [
+                    "TAVILY_API_KEY may be invalid or expired",
+                    "Check your Tavily account status",
+                ]
+            elif "rate" in error_str.lower() or "limit" in error_str.lower():
+                error_type = "rate_limit"
+                suggestions = [
+                    "Tavily API rate limit reached",
+                    "Wait before retrying",
+                    "Consider upgrading your Tavily plan",
+                ]
+            else:
+                suggestions = [
+                    "Check the URL is accessible",
+                    "The target site may block automated requests",
+                    "Try a different URL or use web search as fallback",
+                ]
+
+            details = SearchProxyErrorDetails(
+                error_type=error_type,
+                message=f"Tavily {tool_name} failed",
+                tool_name=tool_name,
+                url=context_url,
+                query=context_query,
+                duration_ms=duration_ms,
+                timestamp_utc=timestamp_utc,
+                underlying_error=error_str[:500],  # Truncate long errors
+                suggestions=suggestions,
+            )
+
+            logger.error(
+                "%s %s failed after %.1fms: [%s] %s",
+                _LOG_TAG,
+                tool_name,
+                duration_ms,
+                error_type,
+                error_str,
+            )
+
+            raise SearchProxyError(
+                f"Request failed: {exc}",
+                details=details,
+            ) from exc
 
     async def search(
         self,
@@ -154,7 +299,11 @@ class SearchMCPProxy:
         # Filter out keys with None or False values to send a clean payload
         final_arguments = {k: v for k, v in arguments.items() if v}
 
-        return await self._call_tool("tavily-search", final_arguments)
+        return await self._call_tool(
+            "tavily-search",
+            final_arguments,
+            context_query=query,
+        )
 
     async def context_search(
         self,
@@ -194,7 +343,11 @@ class SearchMCPProxy:
         # Use tavily-search with context embedded in query
         combined_query = f"{query} (context: {context})"
         arguments["query"] = combined_query
-        return await self._call_tool("tavily-search", arguments)
+        return await self._call_tool(
+            "tavily-search",
+            arguments,
+            context_query=combined_query,
+        )
 
     async def qna_search(
         self,
@@ -230,6 +383,7 @@ class SearchMCPProxy:
         return await self._call_tool(
             "tavily-search",
             arguments,
+            context_query=query,
         )
 
     async def extract(
@@ -244,7 +398,11 @@ class SearchMCPProxy:
         Returns:
             Dict with extracted content
         """
-        raw = await self._call_tool("tavily-extract", {"urls": [url]})
+        raw = await self._call_tool(
+            "tavily-extract",
+            {"urls": [url]},
+            context_url=url,
+        )
 
         # Normalise common Tavily extract shapes into Von's expected output.
         # We keep this tolerant because different MCP versions may return slightly
@@ -304,16 +462,81 @@ class SearchMCPProxy:
             "error": "No extractable content returned for URL (page may be JavaScript-rendered or restrict automated extraction).",
         }
 
-    def get_stats(self) -> Dict[str, int]:
+    def get_stats(self) -> Dict[str, Any]:
         """Get proxy statistics.
 
         Returns:
-            Dict with call_count and error_count
+            Dict with call_count, error_count, total_duration_ms, and success_rate
         """
+        call_count = self._client.call_count
+        error_count = self._client.error_count
+        success_rate = (
+            ((call_count - error_count) / call_count * 100) if call_count > 0 else 100.0
+        )
         return {
-            "call_count": self._client.call_count,
-            "error_count": self._client.error_count,
+            "call_count": call_count,
+            "error_count": error_count,
+            "total_duration_ms": round(self._client.total_duration_ms, 2),
+            "success_rate_percent": round(success_rate, 1),
+            "avg_duration_ms": (
+                round(self._client.total_duration_ms / call_count, 2)
+                if call_count > 0
+                else 0.0
+            ),
         }
+
+    def get_diagnostics(self) -> Dict[str, Any]:
+        """Get detailed diagnostics for debugging.
+
+        Returns:
+            Dict with stats, last call info, and recent call history
+        """
+        last_call = None
+        if self._client.last_call_telemetry:
+            last_call = self._client.last_call_telemetry.to_dict()
+
+        recent_calls = [t.to_dict() for t in self._client.telemetry_history[-10:]]
+
+        return {
+            "stats": self.get_stats(),
+            "last_call": last_call,
+            "recent_calls": recent_calls,
+            "config": {
+                "command": self._config.command,
+                "timeout_sec": self._config.timeout_sec,
+                "api_key_set": bool(self._config.api_key),
+            },
+        }
+
+    async def check_health(self) -> Dict[str, Any]:
+        """Check Tavily connectivity with a simple search.
+
+        Returns:
+            Dict with healthy (bool), latency_ms, and any error details
+        """
+        start_time = time.perf_counter()
+        try:
+            result = await self.search(
+                query="test",
+                max_results=1,
+                search_depth="basic",
+            )
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            has_results = bool(result.get("results"))
+            return {
+                "healthy": True,
+                "latency_ms": round(duration_ms, 2),
+                "has_results": has_results,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        except SearchProxyError as exc:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            return {
+                "healthy": False,
+                "latency_ms": round(duration_ms, 2),
+                "error": exc.details.to_dict() if exc.details else str(exc),
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            }
 
 
 # Singleton instance
