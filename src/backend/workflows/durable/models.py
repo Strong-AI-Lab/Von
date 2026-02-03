@@ -1,0 +1,376 @@
+"""Data models for durable workflow execution.
+
+Defines the WorkflowInstance and WorkflowSchedule dataclasses that map to
+MongoDB documents in the workflow_instances and workflow_schedules collections.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+
+
+class WorkflowInstanceStatus(str, Enum):
+    """Status of a workflow instance."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    PAUSED = "paused"
+
+    def is_terminal(self) -> bool:
+        """Return True if this is a terminal status."""
+        return self in (
+            WorkflowInstanceStatus.COMPLETED,
+            WorkflowInstanceStatus.FAILED,
+            WorkflowInstanceStatus.CANCELLED,
+        )
+
+    def is_resumable(self) -> bool:
+        """Return True if a workflow in this status can be resumed."""
+        return self in (
+            WorkflowInstanceStatus.PENDING,
+            WorkflowInstanceStatus.PAUSED,
+        )
+
+
+class ScheduleType(str, Enum):
+    """Type of workflow schedule."""
+
+    ONCE = "once"
+    INTERVAL = "interval"
+    CRON = "cron"
+
+
+@dataclass
+class WorkflowInstance:
+    """A persistent workflow execution instance.
+
+    Maps to a document in the workflow_instances MongoDB collection.
+    Supports checkpoint/resume for long-running workflows.
+    """
+
+    # Identity
+    instance_id: str
+    workflow_id: str  # Definition ID (e.g., "#V#rag_sync_workflow")
+
+    # Ownership
+    user_id: str
+    org_id: str
+    namespace: str
+
+    # Status
+    status: WorkflowInstanceStatus
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+    # Execution state (for checkpoint/resume)
+    current_state: str = ""
+    workflow_data: dict[str, Any] = field(default_factory=dict)
+    step_index: int = 0
+
+    # Locking (for distributed workers)
+    locked_by: str | None = None
+    lock_expires_at: datetime | None = None
+
+    # Inputs/outputs
+    inputs: dict[str, Any] = field(default_factory=dict)
+    outputs: dict[str, Any] | None = None
+
+    # Error info
+    error: str | None = None
+    error_step: str | None = None
+    retry_count: int = 0
+    max_retries: int = 3
+
+    # Scheduling reference
+    schedule_id: str | None = None
+
+    # Tracing
+    execution_trace_id: str | None = None
+
+    @classmethod
+    def create(
+        cls,
+        workflow_id: str,
+        *,
+        user_id: str,
+        org_id: str,
+        namespace: str,
+        inputs: dict[str, Any] | None = None,
+        schedule_id: str | None = None,
+        max_retries: int = 3,
+    ) -> WorkflowInstance:
+        """Create a new workflow instance with generated ID."""
+        return cls(
+            instance_id=str(uuid.uuid4()),
+            workflow_id=workflow_id,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            status=WorkflowInstanceStatus.PENDING,
+            created_at=datetime.now(timezone.utc),
+            inputs=inputs or {},
+            schedule_id=schedule_id,
+            max_retries=max_retries,
+        )
+
+    def to_doc(self) -> dict[str, Any]:
+        """Convert to MongoDB document format."""
+        return {
+            "instance_id": self.instance_id,
+            "workflow_id": self.workflow_id,
+            "user_id": self.user_id,
+            "org_id": self.org_id,
+            "namespace": self.namespace,
+            "status": self.status.value,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "current_state": self.current_state,
+            "workflow_data": self.workflow_data,
+            "step_index": self.step_index,
+            "locked_by": self.locked_by,
+            "lock_expires_at": self.lock_expires_at,
+            "inputs": self.inputs,
+            "outputs": self.outputs,
+            "error": self.error,
+            "error_step": self.error_step,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "schedule_id": self.schedule_id,
+            "execution_trace_id": self.execution_trace_id,
+        }
+
+    @classmethod
+    def from_doc(cls, doc: dict[str, Any]) -> WorkflowInstance:
+        """Create instance from MongoDB document."""
+        return cls(
+            instance_id=doc["instance_id"],
+            workflow_id=doc["workflow_id"],
+            user_id=doc["user_id"],
+            org_id=doc["org_id"],
+            namespace=doc["namespace"],
+            status=WorkflowInstanceStatus(doc["status"]),
+            created_at=doc["created_at"],
+            started_at=doc.get("started_at"),
+            completed_at=doc.get("completed_at"),
+            current_state=doc.get("current_state", ""),
+            workflow_data=doc.get("workflow_data", {}),
+            step_index=doc.get("step_index", 0),
+            locked_by=doc.get("locked_by"),
+            lock_expires_at=doc.get("lock_expires_at"),
+            inputs=doc.get("inputs", {}),
+            outputs=doc.get("outputs"),
+            error=doc.get("error"),
+            error_step=doc.get("error_step"),
+            retry_count=doc.get("retry_count", 0),
+            max_retries=doc.get("max_retries", 3),
+            schedule_id=doc.get("schedule_id"),
+            execution_trace_id=doc.get("execution_trace_id"),
+        )
+
+    def to_status_dict(self) -> dict[str, Any]:
+        """Convert to a JSON-serialisable status dict for API responses."""
+        return {
+            "instance_id": self.instance_id,
+            "workflow_id": self.workflow_id,
+            "status": self.status.value,
+            "current_state": self.current_state,
+            "step_index": self.step_index,
+            "created_at": self.created_at.isoformat(),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": (
+                self.completed_at.isoformat() if self.completed_at else None
+            ),
+            "error": self.error,
+            "has_outputs": self.outputs is not None,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+        }
+
+
+@dataclass
+class WorkflowSchedule:
+    """A scheduled workflow trigger.
+
+    Maps to a document in the workflow_schedules MongoDB collection.
+    Supports one-time, interval, and cron-based scheduling.
+    """
+
+    # Identity
+    schedule_id: str
+    workflow_id: str  # Definition ID to run
+
+    # Ownership
+    user_id: str
+    org_id: str
+    namespace: str
+
+    # Schedule config
+    schedule_type: ScheduleType
+    run_at: datetime | None = None  # For "once"
+    interval_seconds: int | None = None  # For "interval"
+    cron_expression: str | None = None  # For "cron"
+
+    # State
+    enabled: bool = True
+    last_run_at: datetime | None = None
+    next_run_at: datetime | None = None
+
+    # Inputs
+    default_inputs: dict[str, Any] = field(default_factory=dict)
+
+    # Metadata
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    description: str | None = None
+
+    @classmethod
+    def create_once(
+        cls,
+        workflow_id: str,
+        run_at: datetime,
+        *,
+        user_id: str,
+        org_id: str,
+        namespace: str,
+        default_inputs: dict[str, Any] | None = None,
+        description: str | None = None,
+    ) -> WorkflowSchedule:
+        """Create a one-time schedule."""
+        return cls(
+            schedule_id=str(uuid.uuid4()),
+            workflow_id=workflow_id,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            schedule_type=ScheduleType.ONCE,
+            run_at=run_at,
+            next_run_at=run_at,
+            default_inputs=default_inputs or {},
+            description=description,
+        )
+
+    @classmethod
+    def create_interval(
+        cls,
+        workflow_id: str,
+        interval_seconds: int,
+        *,
+        user_id: str,
+        org_id: str,
+        namespace: str,
+        default_inputs: dict[str, Any] | None = None,
+        description: str | None = None,
+        start_at: datetime | None = None,
+    ) -> WorkflowSchedule:
+        """Create an interval-based schedule."""
+        now = datetime.now(timezone.utc)
+        next_run = start_at if start_at and start_at > now else now
+        return cls(
+            schedule_id=str(uuid.uuid4()),
+            workflow_id=workflow_id,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            schedule_type=ScheduleType.INTERVAL,
+            interval_seconds=interval_seconds,
+            next_run_at=next_run,
+            default_inputs=default_inputs or {},
+            description=description,
+        )
+
+    @classmethod
+    def create_cron(
+        cls,
+        workflow_id: str,
+        cron_expression: str,
+        *,
+        user_id: str,
+        org_id: str,
+        namespace: str,
+        default_inputs: dict[str, Any] | None = None,
+        description: str | None = None,
+    ) -> WorkflowSchedule:
+        """Create a cron-based schedule.
+
+        Args:
+            cron_expression: Standard 5-field cron expression (minute hour day month weekday).
+        """
+        return cls(
+            schedule_id=str(uuid.uuid4()),
+            workflow_id=workflow_id,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            schedule_type=ScheduleType.CRON,
+            cron_expression=cron_expression,
+            default_inputs=default_inputs or {},
+            description=description,
+            # next_run_at will be computed by the scheduler
+        )
+
+    def to_doc(self) -> dict[str, Any]:
+        """Convert to MongoDB document format."""
+        return {
+            "schedule_id": self.schedule_id,
+            "workflow_id": self.workflow_id,
+            "user_id": self.user_id,
+            "org_id": self.org_id,
+            "namespace": self.namespace,
+            "schedule_type": self.schedule_type.value,
+            "run_at": self.run_at,
+            "interval_seconds": self.interval_seconds,
+            "cron_expression": self.cron_expression,
+            "enabled": self.enabled,
+            "last_run_at": self.last_run_at,
+            "next_run_at": self.next_run_at,
+            "default_inputs": self.default_inputs,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "description": self.description,
+        }
+
+    @classmethod
+    def from_doc(cls, doc: dict[str, Any]) -> WorkflowSchedule:
+        """Create schedule from MongoDB document."""
+        return cls(
+            schedule_id=doc["schedule_id"],
+            workflow_id=doc["workflow_id"],
+            user_id=doc["user_id"],
+            org_id=doc["org_id"],
+            namespace=doc["namespace"],
+            schedule_type=ScheduleType(doc["schedule_type"]),
+            run_at=doc.get("run_at"),
+            interval_seconds=doc.get("interval_seconds"),
+            cron_expression=doc.get("cron_expression"),
+            enabled=doc.get("enabled", True),
+            last_run_at=doc.get("last_run_at"),
+            next_run_at=doc.get("next_run_at"),
+            default_inputs=doc.get("default_inputs", {}),
+            created_at=doc.get("created_at", datetime.now(timezone.utc)),
+            updated_at=doc.get("updated_at", datetime.now(timezone.utc)),
+            description=doc.get("description"),
+        )
+
+    def to_status_dict(self) -> dict[str, Any]:
+        """Convert to a JSON-serialisable status dict for API responses."""
+        return {
+            "schedule_id": self.schedule_id,
+            "workflow_id": self.workflow_id,
+            "schedule_type": self.schedule_type.value,
+            "enabled": self.enabled,
+            "cron_expression": self.cron_expression,
+            "interval_seconds": self.interval_seconds,
+            "run_at": self.run_at.isoformat() if self.run_at else None,
+            "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
+            "next_run_at": self.next_run_at.isoformat() if self.next_run_at else None,
+            "description": self.description,
+        }

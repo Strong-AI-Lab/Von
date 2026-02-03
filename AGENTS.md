@@ -11,7 +11,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 5. Use MCP tools (Vontology/Jira/Mongo) by default; explain if you must use another path.
 6. Do not use direct DB access methods for Vontology data; use Vontology routes/services (API/MCP) instead.
 7. **Vontology is THE source of truth** for all persistent knowledge and data. Exceptions (e.g., ephemeral caches, session state) must be rare and explicitly justified.
-8. JIRA issues must be assigned on creation (assignee = current user unless told otherwise).
+8. Jira issues must be assigned on creation (assignee = current user unless told otherwise).
 9. Keep changes minimal, well-scoped, and add/update tests and docs where relevant.
 10. Prefer small, composable functions; avoid monolithic helpers.
 11. Always check VS Code Problems panel (or run `get_errors`) after edits and when errors are reported. If the Problems panel is not available, run `pyright` as a proxy.
@@ -19,10 +19,11 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 13. **STOP**: Never run backend tests against `VON_DB_NAME=von_db`. Always use the test DB (`VON_DB_NAME=test_von_db`) or the `pytest:backend (test db)` task.
 14. Requiring a user choice is almost always dispreferred; prefer LLM reasoning to achieve reliability and only ask the user when ambiguity cannot be resolved safely.
 15. When in doubt, run tests or re-run tests without requiring user confirmation.
-16. In the case that multiple tests are faiing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
-17. If you think you've finished implementing a JIRA task, read the task again and check.
-18. **DRY first**: When fixing a repeated pattern, create a central helper function FIRST, then replace all usages. Never fix instances one-by-one with inline code.
-19. **Search before you write**: Before implementing ANY helper, utility, or repeated logic, SEARCH the codebase for existing implementations. If similar code exists in 2+ places, refactor first.
+16. In the case that multiple tests are failing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
+17. If you think you've finished implementing a Jira task, read the task again and check.
+18. **DRY first**: Create central helpers FIRST, then replace all usages. See "DRY refactoring discipline" in Workflow section.
+19. **Comment for evolution**: Add comments that guide future modifications. See "Self-Documenting, Evolvable Code" section.
+20. **Proactive hygiene**: Periodically review touched files and their neighbours for inconsistency, duplication, and drift. Fix proactively.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
@@ -62,7 +63,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 	- **Names:** Display names are resolved from `names[]` (NL then ABBR, preferred language first). Create/update names via `hasName` text relations (primary NL in `en-NZ`), and include CODE names for the `concept_id` and GUID where applicable. Do not rely on legacy top-level `name` fields.
 	- **Descriptions:** Canonical descriptions are stored in `hasDescription` text relations. Avoid writing legacy `description` fields or `concept_data.preserved_fields` directly; use the concept/text relation services.
 	- **Types vs individuals:** Types use `relationships.is_a_type_of` (parents). Individuals use `relationships.is_an_instance_of` (types). Computed kind is derived from these relationships, so avoid mixing them on the same concept.
-	- **Type guidance predicates:** For types, prefer `#V#salient_binary_predicate_for_type` (or `salient_predicate_scopes.type_level`) to drive salient predicate prompts. These lists are consumed by salient predicate aggregation and relation elicitation. It is almost never appropriate for a type to be #V#is_a_type_of #V#thing (similarly, individuals should not be instances of thing). Seach the ontology for suitable types to attach concepts to. Use the most restrictive applicable and appropriate supertypes.
+	- **Type guidance predicates:** For types, prefer `#V#salient_binary_predicate_for_type` (or `salient_predicate_scopes.type_level`) to drive salient predicate prompts. These lists are consumed by salient predicate aggregation and relation elicitation. It is almost never appropriate for a type to be #V#is_a_type_of #V#thing (similarly, individuals should not be instances of thing). Search the ontology for suitable types to attach concepts to. Use the most restrictive applicable and appropriate supertypes.
 	- **Suggested relations:** Use the meta-relations service (`suggested_relations_for_type`) for type-level suggestions when possible; legacy `relationships.suggested_relations_for_type` is read as a fallback.
 - **Vontology-first checklist (mandatory for ontology-related work):**
 	1. Resolve candidate concepts by name (MCP search/resolve).
@@ -76,7 +77,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - When uncertain, ask succinctly; do not guess or fabricate behaviour.
 - When working on a task that may involve changes, you may open a branch based on the Jira task name (e.g. `JVNAUTOSCI-956-short-title`).
 - When you start work on a task (including restarting from Done or other closed states), transition it to In Progress.
-- When commenting on a JIRA task, say that the comment is generated by you (naming the agent) on behalf of the user
+- When commenting on a Jira task, say that the comment is generated by you (naming the agent) on behalf of the user
 - When asked to "merge", default to: ensure changes are committed, fast-forward merge into `main`, push `main`, then delete the local and remote feature branch; if deletion needs a force flag, ask for confirmation first.
 
 ## Tooling and Automation
@@ -154,3 +155,98 @@ This keeps overhead low while providing actionable reports.
 ## Research Prototype Engineering Philosophy
 - Build research-appropriate quality: modular, extensible, and understandable.
 - Avoid enterprise-scale over-engineering; keep abstractions just deep enough for near-term change.
+
+## Self-Documenting, Evolvable Code
+Code comments are not just explanations—they are **guidance for future modification**. Use comments strategically to steer the codebase toward global consistency and safe evolution.
+
+### When to Add Guiding Comments
+1. **Design rationale**: When a choice isn't obvious, explain *why* (not just *what*). Future agents and developers will otherwise repeat the same mistakes or undo intentional decisions.
+2. **Cross-cutting conventions**: When a file or module establishes patterns that other code should follow, document those patterns prominently (module docstrings, section headers). Example: schema design guidelines in `catalogue.py`.
+3. **Footgun warnings**: When code has non-obvious failure modes (e.g., strict validation rejecting LLM-hallucinated fields), add a comment explaining the risk and the mitigation pattern.
+4. **Consistency requirements**: When a parameter, field, or pattern must be included for global consistency even if unused locally, document why. Example: `# Accept namespace for LLM consistency (ignored by handler)`.
+5. **Evolution hooks**: When you anticipate future changes, leave breadcrumbs: `# TODO: when X is implemented, update Y` or `# Future: consider Z for better performance`.
+
+### Comment Style Guidelines
+- **Be actionable**: "Include `namespace` in all user-facing tool schemas" is better than "namespace is important".
+- **Reference issues**: Link to Jira tickets (e.g., `See JVNAUTOSCI-1044`) so readers can find full context.
+- **Prefer module/class docstrings** for conventions that affect entire files; use inline comments for localised warnings.
+- **Keep comments current**: When changing code, update or remove stale comments. Wrong comments are worse than no comments.
+
+### Examples of Good Guiding Comments
+```python
+# Module docstring establishing conventions:
+"""
+SCHEMA DESIGN GUIDELINES
+========================
+1. Include `namespace` as optional on user-facing tools (LLMs generalise patterns).
+2. Prefer allow_unknown=True for inputs; strict validation rejects hallucinated fields.
+See JVNAUTOSCI-1044 for the failure mode this prevents.
+"""
+
+# Inline comment explaining non-obvious inclusion:
+optional={
+    "namespace": (str, type(None)),  # Accepted but ignored; LLM consistency
+}
+
+# Warning comment for future maintainers:
+# WARNING: Do not remove this fallback—external callers depend on the legacy format.
+```
+
+### Anti-Patterns
+- **Commenting *what* without *why***: `# increment counter` adds nothing; `# increment to track retry attempts for rate-limit backoff` adds value.
+- **Orphaned TODOs**: If you add a TODO, also add context (who should do it, when, why).
+- **Defensive silence**: Not commenting tricky code because "it's obvious" guarantees future breakage.
+
+## Agent-Friendly Engineering Practices
+These practices make codebases more navigable and consistent for AI agents, who lack tribal knowledge and rely on explicit signals.
+
+### Canonical Reference Implementations
+When establishing a pattern, create ONE exemplary instance and comment it as the reference. Agents learn by example more reliably than by rule.
+```python
+# REFERENCE IMPLEMENTATION for tool input schemas.
+# Copy this pattern for new tools. See JVNAUTOSCI-1044.
+def _example_tool_input_schema() -> Schema:
+    return Schema(
+        required={"concept_id": str},
+        optional={
+            "namespace": (str, type(None)),  # Accept for LLM consistency
+        },
+        allow_unknown=True,  # Tolerate hallucinated fields
+    )
+```
+Then elsewhere: `# See _example_tool_input_schema for the canonical pattern.`
+
+### Fail-Fast with Diagnostic Errors
+Error messages must include **what was provided** and **what was expected**. Agents iterating on fixes need both.
+```python
+# Bad:
+raise ValueError("Invalid field")
+
+# Good:
+raise ValueError(f"Unexpected field '{field}'. Valid fields: {list(schema.keys())}")
+```
+
+### Schema-First Interfaces
+Define types/schemas/contracts **before** implementing behaviour. Agents reason better about explicit contracts than emergent behaviour.
+- Use `Schema` definitions for MCP tools
+- Use TypedDict/dataclass for internal interfaces
+- Document return shapes in docstrings when formal schemas aren't practical
+
+### Structured Telemetry and Introspection
+Embed diagnostic payloads throughout the system (like the `aux_llm_calls` JSON). When something fails, the debugging story should be readable from structured output.
+- Include `stage`, `type`, `error`, and `context` fields in diagnostic records
+- Prefer structured dicts over free-form log strings
+- Make introspection endpoints (like `chat_introspect`) available for debugging
+
+### Convention Over Configuration
+Reduce the number of valid ways to accomplish a task. Fewer choices = fewer agent mistakes.
+- Establish one canonical path for common operations (e.g., one way to add a relationship)
+- When multiple approaches exist, deprecate the worse ones explicitly
+- Document "the one right way" in module docstrings
+
+### Proactive Consistency Reviews
+Periodically scan touched files and their neighbours for inconsistency, duplication, and drift—then fix proactively.
+- When editing a file, skim related files for parallel patterns that should match
+- After completing a task, do a quick grep for similar code that might need the same fix
+- Treat documentation (like this file) as code: review it for internal consistency when editing
+- Flag accumulated debt in Jira rather than ignoring it
