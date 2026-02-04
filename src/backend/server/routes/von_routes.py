@@ -5485,7 +5485,6 @@ def history_sessions():
                     continue
                 if session_id in outgoing_by_session:
                     summary["has_shared_participants"] = True
-
         existing_session_ids = {
             s.get("session_id") for s in sessions if isinstance(s, dict)
         }
