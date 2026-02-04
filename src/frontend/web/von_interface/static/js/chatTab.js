@@ -5435,10 +5435,10 @@ async function refreshChatSessionTabs() {
             activeChatSessionOwnerId = activeSession?.shared_owner_user_id || null;
         }
 
-    // Only adopt server's active_session_id if we don't already have a local selection.
-    // This prevents race conditions where the user clicks a tab but the server response
-    // from a concurrent refresh overwrites their selection.
-    if (activeSessionId && !activeChatSessionId) {
+        // Only adopt server's active_session_id if we don't already have a local selection.
+        // This prevents race conditions where the user clicks a tab but the server response
+        // from a concurrent refresh overwrites their selection.
+        if (activeSessionId && !activeChatSessionId) {
             const activeSession = sessions.find(
                 s => (typeof s?.session_id === 'string') && s.session_id === activeSessionId
             );
