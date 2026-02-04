@@ -1,10 +1,24 @@
 import { annotateTurn, postJson } from './apiService.js';
 import { addMessageToChat, elements, renderSpanSuggestions } from './domUtils.js';
 
+/**
+ * Show/hide the thinking card wrapper (or legacy loadingIndicator).
+ * JVNAUTOSCI-1080: Use aria-hidden on wrapper instead of inline display.
+ */
+function setPresenterThinkingState(isThinking) {
+  const wrapper = document.getElementById('thinkingCardWrapper');
+  if (wrapper) {
+    wrapper.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+  } else if (elements.loadingIndicator) {
+    // Legacy fallback for pages without thinking card wrapper
+    elements.loadingIndicator.style.display = isThinking ? 'block' : 'none';
+  }
+}
+
 export async function sendMessageToServer() {
   const prompt = elements.promptInput.value.trim();
   if (!prompt) return;
-  if (elements.loadingIndicator) elements.loadingIndicator.style.display = 'block';
+  setPresenterThinkingState(true);
   if (elements.vonIntro) elements.vonIntro.style.display = 'none';
   const userTurnId = `u-${Date.now()}`;
   addMessageToChat('user', prompt, { turnId: userTurnId });
@@ -44,7 +58,7 @@ export async function sendMessageToServer() {
     console.error(err);
     addMessageToChat('system', `Error: ${err.message}`);
   } finally {
-    if (elements.loadingIndicator) elements.loadingIndicator.style.display = 'none';
+    setPresenterThinkingState(false);
   }
 }
 

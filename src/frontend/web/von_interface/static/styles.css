@@ -3503,16 +3503,9 @@ button:disabled {
 
 
 /* Loading Indicator */
-#loadingIndicator {
-    /* height: 20px; /* No longer needed when using display: none */
-    margin-top: 10px;
-    color: #0078d4;
-    font-style: italic;
-    text-align: center;
-    font-size: 0.9rem;
-    display: none;
-    /* Change visibility to display */
-}
+/* Legacy #loadingIndicator rules removed - visibility now controlled by
+   .thinking-card-wrapper[aria-hidden] and .thinking-card-header flex layout.
+   See JVNAUTOSCI-1080: stop button was hidden due to display: none here. */
 
 /* Footer */
 footer {
