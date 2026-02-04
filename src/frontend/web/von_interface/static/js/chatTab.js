@@ -642,6 +642,48 @@ function renderToolHistoryHTML(request) {
 }
 
 /**
+ * Render workflow discovery results as HTML for the thinking card.
+ * JVNAUTOSCI-1076: Shows relevant workflows found during conversation turn.
+ */
+function renderWorkflowDiscoveryHTML(workflows) {
+    if (!workflows || !Array.isArray(workflows) || workflows.length === 0) {
+        return '';
+    }
+
+    const items = workflows.map(wf => {
+        const name = escapeHtml(wf.name || wf.concept_id || 'Unknown workflow');
+        const score = typeof wf.relevance_score === 'number'
+            ? `<span class="thinking-card-workflow-score">${Math.round(wf.relevance_score * 100)}%</span>`
+            : '';
+        const desc = wf.description
+            ? `<span class="thinking-card-workflow-desc">${escapeHtml(wf.description.slice(0, 80))}${wf.description.length > 80 ? '...' : ''}</span>`
+            : '';
+        return `<div class="thinking-card-workflow">
+            <span class="thinking-card-workflow-icon">⚡</span>
+            <span class="thinking-card-workflow-name">${name}</span>${score}${desc}
+        </div>`;
+    });
+
+    return `<div class="thinking-card-workflows">
+        <div class="thinking-card-workflows-header">Possibly relevant workflows:</div>
+        ${items.join('')}
+    </div>`;
+}
+
+/**
+ * Render the complete thinking card body HTML including tool history and workflow discovery.
+ * JVNAUTOSCI-1076: Combines tool history with workflow suggestions.
+ */
+function renderThinkingCardBodyHTML(request) {
+    const toolHistoryHtml = renderToolHistoryHTML(request);
+    const workflowHtml = request?.workflowDiscovery?.matches
+        ? renderWorkflowDiscoveryHTML(request.workflowDiscovery.matches)
+        : '';
+
+    return toolHistoryHtml + workflowHtml;
+}
+
+/**
  * Legacy function - redirects to renderToolHistoryHTML.
  * Returns empty string for backwards compatibility with tooltip usage.
  */
@@ -716,7 +758,7 @@ function startThinkingTooltipTicker(request) {
             stopThinkingTooltipTicker(request);
             return;
         }
-        setLoadingIndicatorDetailHtml(renderToolHistoryHTML(request));
+        setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
         updateThinkingCardMeta(request, null);
     }, 1000);
 }
@@ -761,7 +803,7 @@ function startToolUseProgressPolling(request) {
         }
 
         // Keep detail text "alive" even before the server has any tool-progress state.
-        setLoadingIndicatorDetailHtml(renderToolHistoryHTML(request));
+        setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
         updateThinkingCardMeta(request, null);
 
         try {
@@ -799,7 +841,13 @@ function startToolUseProgressPolling(request) {
             setLoadingIndicatorText(formatToolUseProgressText(progress, request));
             updateThinkingCardMeta(request, progress);
             recordToolUseHistory(request, progress);
-            setLoadingIndicatorDetailHtml(renderToolHistoryHTML(request));
+
+            // JVNAUTOSCI-1076: Capture workflow discovery from progress
+            if (progress.workflow_discovery && progress.workflow_discovery.matches) {
+                request.workflowDiscovery = progress.workflow_discovery;
+            }
+
+            setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
 
             const status = typeof progress?.status === 'string' ? progress.status : null;
             if (status === 'disabled') {
@@ -9792,6 +9840,8 @@ async function showLlmDebugPopup(turnId, options = {}) {
     const toolsPre = document.getElementById('chatLlmDebugTools');
     const auxSection = document.getElementById('chatLlmDebugAuxSection');
     const auxPre = document.getElementById('chatLlmDebugAux');
+    const workflowDiscoverySection = document.getElementById('chatLlmDebugWorkflowDiscoverySection');
+    const workflowDiscoveryPre = document.getElementById('chatLlmDebugWorkflowDiscovery');
 
     if (!popup || !metaDiv || !messagesPre || !responsePre || !toolsSection || !toolsPre || !auxSection || !auxPre) {
         console.error('[chatTab] LLM debug popup elements missing');
@@ -9947,6 +9997,21 @@ async function showLlmDebugPopup(turnId, options = {}) {
         }
     } else {
         auxSection.classList.add('hidden');
+    }
+
+    // Display workflow discovery results if any (JVNAUTOSCI-1076)
+    if (workflowDiscoverySection && workflowDiscoveryPre) {
+        const workflowDiscovery = debugData.workflow_discovery;
+        if (workflowDiscovery && (workflowDiscovery.workflows?.length > 0 || workflowDiscovery.error)) {
+            workflowDiscoverySection.classList.remove('hidden');
+            try {
+                workflowDiscoveryPre.textContent = JSON.stringify(workflowDiscovery, null, 2);
+            } catch (e) {
+                workflowDiscoveryPre.textContent = 'Error formatting workflow discovery';
+            }
+        } else {
+            workflowDiscoverySection.classList.add('hidden');
+        }
     }
 
     // Store full data for copy function, including computed metadata

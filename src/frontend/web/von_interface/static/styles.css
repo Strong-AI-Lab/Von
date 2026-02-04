@@ -5215,6 +5215,62 @@ footer {
     opacity: 0.5;
 }
 
+/* Workflow discovery results in thinking card (JVNAUTOSCI-1076) */
+.thinking-card-workflows {
+    padding: 8px 0 4px 0;
+    border-top: 1px solid #e2e8f0;
+    margin-top: 8px;
+}
+
+.thinking-card-workflows-header {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #64748b;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.thinking-card-workflow {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 4px 0;
+}
+
+.thinking-card-workflow:not(:last-child) {
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.thinking-card-workflow-icon {
+    flex-shrink: 0;
+    font-size: 0.8rem;
+    opacity: 0.7;
+}
+
+.thinking-card-workflow-name {
+    font-weight: 500;
+    color: #1e40af;
+}
+
+.thinking-card-workflow-score {
+    font-size: 0.7rem;
+    color: #059669;
+    background-color: #d1fae5;
+    padding: 1px 5px;
+    border-radius: 4px;
+    margin-left: 4px;
+    font-weight: 500;
+}
+
+.thinking-card-workflow-desc {
+    display: block;
+    font-size: 0.72rem;
+    color: #64748b;
+    margin-top: 2px;
+    padding-left: 20px;
+}
+
 .upload-file-status {
     margin-left: 10px;
     font-size: 0.85rem;

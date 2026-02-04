@@ -2865,6 +2865,59 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         }
 
         # ---------------------------------------------------------
+        # JVNAUTOSCI-1076: Workflow discovery during conversation turn
+        # ---------------------------------------------------------
+        # Search for applicable workflows based on user input.
+        # Results are surfaced in llm_debug for the Thinking context display.
+        workflow_discovery_result: dict[str, Any] | None = None
+        workflow_discovery_enabled = os.getenv(
+            "VON_WORKFLOW_DISCOVERY_ENABLE", "1"
+        ).lower() in {"1", "true"}
+
+        if workflow_discovery_enabled and prompt_text and len(prompt_text.strip()) >= 5:
+            try:
+                if show_tool_use_progress:
+                    _set_tool_progress(
+                        progress_scope_key,
+                        request_id,
+                        {
+                            "status": "thinking",
+                            "phase": "workflow_discovery",
+                            "phase_label": "Searching for workflows",
+                            "request_id": request_id,
+                        },
+                    )
+                from ...services.workflow_discovery_service import (
+                    discover_workflows_for_turn,
+                )
+
+                workflow_discovery_result = discover_workflows_for_turn(
+                    prompt_text,
+                    namespace=user_namespace,
+                )
+                if workflow_discovery_result:
+                    current_app.logger.info(
+                        "[WORKFLOW_DISCOVERY] Found %d relevant workflows for prompt",
+                        workflow_discovery_result.get("match_count", 0),
+                    )
+                    # Emit workflow discovery results in tool progress for frontend
+                    if show_tool_use_progress:
+                        _set_tool_progress(
+                            progress_scope_key,
+                            request_id,
+                            {
+                                "status": "thinking",
+                                "phase": "workflow_discovery_complete",
+                                "phase_label": "Found workflows",
+                                "request_id": request_id,
+                                "workflow_discovery": workflow_discovery_result,
+                            },
+                        )
+            except Exception as e:
+                current_app.logger.warning("[WORKFLOW_DISCOVERY] Search failed: %s", e)
+                workflow_discovery_result = None
+
+        # ---------------------------------------------------------
         # Tool-backed RAG counts (avoid KA vs chat-history confusion)
         # ---------------------------------------------------------
         # We bypass the LLM for simple factual questions about indexed sessions,
@@ -4575,6 +4628,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             ),
             "aux_llm_calls": auxiliary_llm_calls,
             "buttonify": buttonify_meta,
+            # JVNAUTOSCI-1076: Workflow discovery results for Thinking context
+            "workflow_discovery": workflow_discovery_result,
         }
 
         # Derive warnings from debug info and add to structure
