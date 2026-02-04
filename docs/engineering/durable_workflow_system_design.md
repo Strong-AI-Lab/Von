@@ -216,6 +216,12 @@ interface WorkflowInstance {
   workflow_data: object;         // Serialised WorkflowState.data
   step_index: number;            // For sequential workflows: last completed step
 
+    // Progress tracking
+    progress_current: number | null;
+    progress_total: number | null;
+    progress_message: string | null;
+    progress_updated_at: Date | null;
+
   // Locking (for distributed workers)
   locked_by: string | null;      // Worker ID holding lock
   lock_expires_at: Date | null;  // Auto-release stale locks
@@ -942,7 +948,7 @@ Add to existing `#V#llm_workflow`:
 ### 11.5 Phase 5: Observability (Week 4)
 
 1. Add progress tracking to instance model
-2. Implement WebSocket for live status updates
+2. Implement SSE stream for live status updates
 3. Create simple workflow status UI component
 4. Documentation and user guide
 
@@ -1039,6 +1045,11 @@ class TestResumeScenarios:
 - `workflow_instance_duration_seconds` - Histogram: execution time
 - `workflow_checkpoint_count` - Counter: checkpoints written
 - `workflow_resume_count` - Counter: workflows resumed
+
+**Live status stream**:
+- `GET /api/workflows/instances/stream` (SSE)
+- Filters: `user_id`, `org_id`, `namespace`, `workflow_id`, `instance_id`, `status` (comma-separated)
+- Payload includes progress fields (`progress.current`, `progress.total`, `progress.message`)
 
 ### 14.2 Alerts
 

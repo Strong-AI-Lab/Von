@@ -225,12 +225,13 @@ def _handle_collect_docs(request: WorkflowActionRequest) -> WorkflowActionResult
 
         # Convert to serialisable dicts for checkpointing
         doc_dicts = [
-            {"doc_id": d.doc_id, "text": d.text, "metadata": d.metadata}
-            for d in docs
+            {"doc_id": d.doc_id, "text": d.text, "metadata": d.metadata} for d in docs
         ]
 
         batch_size = int(ctx.get("batch_size", DEFAULT_RAG_SYNC_BATCH_SIZE))
-        total_batches = (len(doc_dicts) + batch_size - 1) // batch_size if doc_dicts else 0
+        total_batches = (
+            (len(doc_dicts) + batch_size - 1) // batch_size if doc_dicts else 0
+        )
 
         logger.info(
             "[rag_sync_workflow] Collected %d docs (%d batches) for namespace=%s",

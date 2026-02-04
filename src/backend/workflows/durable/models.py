@@ -75,6 +75,12 @@ class WorkflowInstance:
     workflow_data: dict[str, Any] = field(default_factory=dict)
     step_index: int = 0
 
+    # Progress tracking
+    progress_current: int | None = None
+    progress_total: int | None = None
+    progress_message: str | None = None
+    progress_updated_at: datetime | None = None
+
     # Locking (for distributed workers)
     locked_by: str | None = None
     lock_expires_at: datetime | None = None
@@ -119,6 +125,9 @@ class WorkflowInstance:
             inputs=inputs or {},
             schedule_id=schedule_id,
             max_retries=max_retries,
+            progress_current=0,
+            progress_message="queued",
+            progress_updated_at=datetime.now(timezone.utc),
         )
 
     def to_doc(self) -> dict[str, Any]:
@@ -136,6 +145,10 @@ class WorkflowInstance:
             "current_state": self.current_state,
             "workflow_data": self.workflow_data,
             "step_index": self.step_index,
+            "progress_current": self.progress_current,
+            "progress_total": self.progress_total,
+            "progress_message": self.progress_message,
+            "progress_updated_at": self.progress_updated_at,
             "locked_by": self.locked_by,
             "lock_expires_at": self.lock_expires_at,
             "inputs": self.inputs,
@@ -164,6 +177,10 @@ class WorkflowInstance:
             current_state=doc.get("current_state", ""),
             workflow_data=doc.get("workflow_data", {}),
             step_index=doc.get("step_index", 0),
+            progress_current=doc.get("progress_current"),
+            progress_total=doc.get("progress_total"),
+            progress_message=doc.get("progress_message"),
+            progress_updated_at=doc.get("progress_updated_at"),
             locked_by=doc.get("locked_by"),
             lock_expires_at=doc.get("lock_expires_at"),
             inputs=doc.get("inputs", {}),
@@ -189,6 +206,16 @@ class WorkflowInstance:
             "completed_at": (
                 self.completed_at.isoformat() if self.completed_at else None
             ),
+            "progress": {
+                "current": self.progress_current,
+                "total": self.progress_total,
+                "message": self.progress_message,
+                "updated_at": (
+                    self.progress_updated_at.isoformat()
+                    if self.progress_updated_at
+                    else None
+                ),
+            },
             "error": self.error,
             "has_outputs": self.outputs is not None,
             "retry_count": self.retry_count,

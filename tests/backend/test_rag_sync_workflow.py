@@ -43,7 +43,9 @@ class TestRagSyncWorkflowDefinition:
             RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
         )
 
-        assert RAG_TEXT_RELATION_SYNC_WORKFLOW_ID == "#V#rag_text_relation_sync_workflow"
+        assert (
+            RAG_TEXT_RELATION_SYNC_WORKFLOW_ID == "#V#rag_text_relation_sync_workflow"
+        )
 
     def test_build_workflow_returns_definition(self) -> None:
         """build_rag_text_relation_sync_workflow() should return a WorkflowDefinition."""

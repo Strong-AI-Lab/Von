@@ -116,10 +116,19 @@ class DurableWorkflowExecutor:
             step_index = 0
 
         # Create execution environment
+        from ...languagemodels.llm_interface import (
+            get_active_model_name,
+            get_llm_client,
+        )
+
+        llm_client = get_llm_client(
+            user_concept_id=instance.user_id,
+            org_concept_id=instance.org_id,
+        )
         environment = WorkflowEnvironment(
-            user_id=instance.user_id,
-            org_id=instance.org_id,
-            namespace=instance.namespace,
+            llm_client=llm_client,
+            model=get_active_model_name(),
+            user_namespace=instance.namespace,
         )
 
         # Create trace for observability
@@ -133,6 +142,7 @@ class DurableWorkflowExecutor:
         termination_states = set(definition.termination_states) | {
             state_id for state_id, spec in definition.states.items() if spec.terminal
         }
+        total_steps = max(1, len(definition.states))
 
         transitions = 0
         while transitions < self._max_transitions:
@@ -164,6 +174,9 @@ class DurableWorkflowExecutor:
                     workflow_data=context,
                     step_index=step_index,
                     error=error,
+                    progress_current=step_index,
+                    progress_total=total_steps,
+                    progress_message=current_state,
                 )
                 return DurableWorkflowResult(
                     instance_id=instance_id,
@@ -211,6 +224,9 @@ class DurableWorkflowExecutor:
                         step_index=step_index,
                         error=error,
                         error_step=action.action_id,
+                        progress_current=step_index,
+                        progress_total=total_steps,
+                        progress_message=current_state,
                     )
                     trace.finish_failed(error)
                     return DurableWorkflowResult(
@@ -232,8 +248,11 @@ class DurableWorkflowExecutor:
                     current_state=current_state,
                     workflow_data=context,
                     step_index=step_index,
+                    progress_current=step_index,
+                    progress_total=total_steps,
+                    progress_message=current_state,
                 )
-                trace.finish_success()
+                trace.finish_completed()
                 return DurableWorkflowResult(
                     instance_id=instance_id,
                     data=context,
@@ -267,6 +286,9 @@ class DurableWorkflowExecutor:
                     workflow_data=context,
                     step_index=step_index,
                     error=error,
+                    progress_current=step_index,
+                    progress_total=total_steps,
+                    progress_message=current_state,
                 )
                 trace.finish_failed(error)
                 return DurableWorkflowResult(
@@ -284,6 +306,9 @@ class DurableWorkflowExecutor:
                 current_state=next_state,
                 workflow_data=context,
                 step_index=step_index,
+                progress_current=step_index,
+                progress_total=total_steps,
+                progress_message=next_state,
             )
 
             trace.record_state_transition(
@@ -301,6 +326,9 @@ class DurableWorkflowExecutor:
             workflow_data=context,
             step_index=step_index,
             error=error,
+            progress_current=step_index,
+            progress_total=total_steps,
+            progress_message=current_state,
         )
         trace.finish_failed(error)
         return DurableWorkflowResult(

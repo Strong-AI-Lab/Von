@@ -143,12 +143,27 @@ class WorkflowInstanceManager:
     def _get_instances_collection(self) -> Collection | None:
         """Get the workflow_instances collection."""
         db = get_db()
-        return db[WORKFLOW_INSTANCES_COLLECTION] if db else None
+        return db[WORKFLOW_INSTANCES_COLLECTION] if db is not None else None
 
     def _get_schedules_collection(self) -> Collection | None:
         """Get the workflow_schedules collection."""
         db = get_db()
-        return db[WORKFLOW_SCHEDULES_COLLECTION] if db else None
+        return db[WORKFLOW_SCHEDULES_COLLECTION] if db is not None else None
+
+    def _broadcast_instance(self, instance: WorkflowInstance) -> None:
+        try:
+            from ...services.durable_workflow_stream_service import (
+                broadcast_workflow_instance,
+            )
+
+            broadcast_workflow_instance(instance)
+        except Exception as exc:
+            logger.debug("[durable_workflow] Broadcast skipped: %s", exc)
+
+    def _broadcast_instance_status(self, instance_id: str) -> None:
+        instance = self.get_instance(instance_id)
+        if instance is not None:
+            self._broadcast_instance(instance)
 
     # -------------------------------------------------------------------------
     # Instance CRUD
@@ -202,6 +217,7 @@ class WorkflowInstanceManager:
             instance.instance_id,
             workflow_id,
         )
+        self._broadcast_instance(instance)
         return instance.instance_id
 
     def get_instance(self, instance_id: str) -> WorkflowInstance | None:
@@ -225,6 +241,7 @@ class WorkflowInstanceManager:
         *,
         user_id: str | None = None,
         org_id: str | None = None,
+        namespace: str | None = None,
         status: WorkflowInstanceStatus | str | None = None,
         workflow_id: str | None = None,
         limit: int = 50,
@@ -234,6 +251,7 @@ class WorkflowInstanceManager:
         Args:
             user_id: Filter by user.
             org_id: Filter by organisation.
+            namespace: Filter by namespace.
             status: Filter by status.
             workflow_id: Filter by workflow definition.
             limit: Maximum results to return.
@@ -250,6 +268,8 @@ class WorkflowInstanceManager:
             query["user_id"] = user_id
         if org_id:
             query["org_id"] = org_id
+        if namespace:
+            query["namespace"] = namespace
         if status:
             status_val = (
                 status.value if isinstance(status, WorkflowInstanceStatus) else status
@@ -309,6 +329,8 @@ class WorkflowInstanceManager:
                 "status": WorkflowInstanceStatus.RUNNING.value,
                 "locked_by": worker_id,
                 "lock_expires_at": lock_expires,
+                "progress_message": "running",
+                "progress_updated_at": now,
             },
             "$setOnInsert": {"started_at": now},
         }
@@ -322,6 +344,8 @@ class WorkflowInstanceManager:
                     "locked_by": worker_id,
                     "lock_expires_at": lock_expires,
                     "started_at": now,
+                    "progress_message": "running",
+                    "progress_updated_at": now,
                 }
             },
             return_document=True,
@@ -336,6 +360,8 @@ class WorkflowInstanceManager:
                         "status": WorkflowInstanceStatus.RUNNING.value,
                         "locked_by": worker_id,
                         "lock_expires_at": lock_expires,
+                        "progress_message": "running",
+                        "progress_updated_at": now,
                     }
                 },
                 return_document=True,
@@ -348,6 +374,7 @@ class WorkflowInstanceManager:
                 worker_id,
                 instance.instance_id,
             )
+            self._broadcast_instance(instance)
             return instance
         return None
 
@@ -413,6 +440,9 @@ class WorkflowInstanceManager:
         step_index: int | None = None,
         error: str | None = None,
         error_step: str | None = None,
+        progress_current: int | None = None,
+        progress_total: int | None = None,
+        progress_message: str | None = None,
     ) -> bool:
         """Persist checkpoint data for an instance.
 
@@ -425,6 +455,9 @@ class WorkflowInstanceManager:
             step_index: Optional sequential step index.
             error: Optional error message (for failed checkpoints).
             error_step: Optional step that caused the error.
+            progress_current: Optional progress step index.
+            progress_total: Optional total step count.
+            progress_message: Optional progress status message.
 
         Returns:
             True if checkpoint was saved.
@@ -445,6 +478,17 @@ class WorkflowInstanceManager:
             update["$set"]["error"] = error
         if error_step is not None:
             update["$set"]["error_step"] = error_step
+        if progress_current is not None:
+            update["$set"]["progress_current"] = progress_current
+        if progress_total is not None:
+            update["$set"]["progress_total"] = progress_total
+        if progress_message is not None:
+            update["$set"]["progress_message"] = progress_message
+        if any(
+            field is not None
+            for field in (progress_current, progress_total, progress_message)
+        ):
+            update["$set"]["progress_updated_at"] = datetime.now(timezone.utc)
 
         result = coll.update_one({"instance_id": instance_id}, update)
         if result.modified_count > 0:
@@ -453,6 +497,7 @@ class WorkflowInstanceManager:
                 instance_id,
                 current_state,
             )
+            self._broadcast_instance_status(instance_id)
         return result.modified_count > 0
 
     # -------------------------------------------------------------------------
@@ -487,6 +532,8 @@ class WorkflowInstanceManager:
                 "completed_at": now,
                 "locked_by": None,
                 "lock_expires_at": None,
+                "progress_message": "completed",
+                "progress_updated_at": now,
             }
         }
         if outputs is not None:
@@ -497,6 +544,7 @@ class WorkflowInstanceManager:
         result = coll.update_one({"instance_id": instance_id}, update)
         if result.modified_count > 0:
             logger.info("[durable_workflow] Instance %s completed", instance_id)
+            self._broadcast_instance_status(instance_id)
         return result.modified_count > 0
 
     def mark_failed(
@@ -530,6 +578,8 @@ class WorkflowInstanceManager:
                 "error": error,
                 "locked_by": None,
                 "lock_expires_at": None,
+                "progress_message": "failed",
+                "progress_updated_at": now,
             }
         }
         if error_step:
@@ -542,6 +592,7 @@ class WorkflowInstanceManager:
             logger.warning(
                 "[durable_workflow] Instance %s failed: %s", instance_id, error
             )
+            self._broadcast_instance_status(instance_id)
         return result.modified_count > 0
 
     def mark_cancelled(self, instance_id: str) -> bool:
@@ -575,11 +626,14 @@ class WorkflowInstanceManager:
                     "completed_at": now,
                     "locked_by": None,
                     "lock_expires_at": None,
+                    "progress_message": "cancelled",
+                    "progress_updated_at": now,
                 }
             },
         )
         if result.modified_count > 0:
             logger.info("[durable_workflow] Instance %s cancelled", instance_id)
+            self._broadcast_instance_status(instance_id)
         return result.modified_count > 0
 
     def pause_instance(self, instance_id: str) -> bool:
@@ -605,11 +659,14 @@ class WorkflowInstanceManager:
                     "status": WorkflowInstanceStatus.PAUSED.value,
                     "locked_by": None,
                     "lock_expires_at": None,
+                    "progress_message": "paused",
+                    "progress_updated_at": datetime.now(timezone.utc),
                 }
             },
         )
         if result.modified_count > 0:
             logger.info("[durable_workflow] Instance %s paused", instance_id)
+            self._broadcast_instance_status(instance_id)
         return result.modified_count > 0
 
     def is_cancelled(self, instance_id: str) -> bool:
@@ -666,11 +723,15 @@ class WorkflowInstanceManager:
                     "error": None,
                     "error_step": None,
                     "completed_at": None,
+                    "progress_current": 0,
+                    "progress_message": "queued",
+                    "progress_updated_at": datetime.now(timezone.utc),
                 }
             },
         )
         if result.modified_count > 0:
             logger.info("[durable_workflow] Instance %s reset for retry", instance_id)
+            self._broadcast_instance_status(instance_id)
         return result.modified_count > 0
 
     # -------------------------------------------------------------------------

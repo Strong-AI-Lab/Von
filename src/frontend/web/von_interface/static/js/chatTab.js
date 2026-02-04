@@ -100,6 +100,18 @@ const sharedConversationResyncInFlight = new Set();
 const SSE_RECONNECT_BASE_DELAY_MS = 1000;
 const SSE_RECONNECT_MAX_DELAY_MS = 30000;
 
+// Durable workflow status stream (Phase 5 observability)
+const WORKFLOW_STATUS_ACTIVE = new Set(['pending', 'running', 'paused']);
+const WORKFLOW_STATUS_RECONNECT_BASE_MS = 1500;
+const WORKFLOW_STATUS_RECONNECT_MAX_MS = 20000;
+const workflowStatusStreamState = {
+    eventSource: null,
+    reconnectAttempts: 0,
+    reconnectTimeoutId: null,
+    items: new Map(),
+    lastSnapshotAt: 0
+};
+
 // Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
 // Stored locally only; intended to feed future introspection.
 const LS_CHAT_TABS_LOAD_STATS = 'von:chatSessionTabsLoadStats';
@@ -7836,6 +7848,240 @@ function hideNewSharedMessagesIndicator() {
     }
 }
 
+function getWorkflowStatusElements() {
+    return {
+        panel: document.getElementById('workflowStatusPanel'),
+        body: document.getElementById('workflowStatusBody'),
+        refreshButton: document.getElementById('workflowStatusRefresh')
+    };
+}
+
+function formatWorkflowName(workflowId) {
+    if (!workflowId) return 'Unknown workflow';
+    const trimmed = String(workflowId).trim();
+    if (trimmed.startsWith('#V#')) {
+        return trimmed.slice(3).replace(/_/g, ' ');
+    }
+    return trimmed;
+}
+
+function formatWorkflowStatusLabel(status) {
+    if (!status) return 'unknown';
+    return String(status).replace(/_/g, ' ');
+}
+
+function buildWorkflowStatusQuery({ includeStatusFilter } = {}) {
+    const params = new URLSearchParams();
+    const namespace = getSessionScopedNamespace();
+    const orgContext = getSessionScopedOrgContext();
+    const userId = getCurrentUserConceptId();
+
+    if (namespace) params.set('namespace', namespace);
+    if (orgContext?.concept_id || orgContext?.id) {
+        params.set('org_id', orgContext.concept_id || orgContext.id);
+    }
+    if (userId) params.set('user_id', userId);
+    if (includeStatusFilter) {
+        params.set('status', Array.from(WORKFLOW_STATUS_ACTIVE).join(','));
+    }
+    return params;
+}
+
+function renderWorkflowStatusList(items) {
+    const { body } = getWorkflowStatusElements();
+    if (!body) return;
+
+    if (!items.length) {
+        body.innerHTML = '<div class="workflow-status-empty">No active workflows</div>';
+        return;
+    }
+
+    const ordered = items.slice().sort((a, b) => {
+        const rank = (status) => {
+            if (status === 'running') return 0;
+            if (status === 'pending') return 1;
+            if (status === 'paused') return 2;
+            return 3;
+        };
+        const statusDelta = rank(a.status) - rank(b.status);
+        if (statusDelta !== 0) return statusDelta;
+        return (b.updated_at || '').localeCompare(a.updated_at || '');
+    });
+
+    const html = ordered.map((item) => {
+        const workflowName = escapeHtml(formatWorkflowName(item.workflow_id));
+        const statusLabel = escapeHtml(formatWorkflowStatusLabel(item.status));
+        const statusClass = escapeHtml(item.status || 'unknown');
+        const currentState = escapeHtml(item.current_state || '');
+        const progress = item.progress || {};
+        const progressCurrent = Number.isFinite(progress.current) ? Number(progress.current) : null;
+        const progressTotal = Number.isFinite(progress.total) ? Number(progress.total) : null;
+        const progressMessage = escapeHtml(progress.message || '');
+
+        let percent = null;
+        if (progressCurrent !== null && progressTotal && progressTotal > 0) {
+            percent = Math.min(100, Math.max(0, Math.round((progressCurrent / progressTotal) * 100)));
+        }
+
+        const progressLabelBits = [];
+        if (progressCurrent !== null && progressTotal) {
+            progressLabelBits.push(`Step ${progressCurrent}/${progressTotal}`);
+        } else if (Number.isFinite(item.step_index)) {
+            progressLabelBits.push(`Step ${Number(item.step_index)}`);
+        }
+        if (progressMessage) {
+            progressLabelBits.push(progressMessage);
+        } else if (currentState) {
+            progressLabelBits.push(currentState);
+        }
+
+        const progressLabel = progressLabelBits.length
+            ? `<div class="workflow-status-progress-text">${escapeHtml(progressLabelBits.join(' · '))}</div>`
+            : '';
+
+        const progressBar = percent !== null
+            ? `<div class="workflow-status-progress-bar">
+                <span style="width: ${percent}%;"></span>
+              </div>`
+            : '';
+
+        return `
+            <div class="workflow-status-item status-${statusClass}">
+              <div class="workflow-status-item-header">
+                <div class="workflow-status-name">${workflowName}</div>
+                <span class="workflow-status-badge status-${statusClass}">${statusLabel}</span>
+              </div>
+              <div class="workflow-status-meta">State: ${currentState || '—'}</div>
+              <div class="workflow-status-progress">
+                ${progressBar}
+                ${progressLabel}
+              </div>
+            </div>
+        `;
+    }).join('');
+
+    body.innerHTML = html;
+}
+
+function applyWorkflowStatusUpdate(payload) {
+    if (!payload || !payload.instance_id) return;
+    const status = payload.status || '';
+    if (!WORKFLOW_STATUS_ACTIVE.has(status)) {
+        workflowStatusStreamState.items.delete(payload.instance_id);
+        renderWorkflowStatusList(Array.from(workflowStatusStreamState.items.values()));
+        return;
+    }
+    workflowStatusStreamState.items.set(payload.instance_id, payload);
+    renderWorkflowStatusList(Array.from(workflowStatusStreamState.items.values()));
+}
+
+async function refreshWorkflowStatusSnapshot({ silent = false } = {}) {
+    const { panel } = getWorkflowStatusElements();
+    if (!panel) return;
+
+    const params = buildWorkflowStatusQuery();
+    params.set('limit', '50');
+
+    try {
+        const resp = await fetch(`/api/workflows/instances?${params.toString()}`,
+            { method: 'GET', headers: buildChatFetchHeaders() });
+        if (!resp.ok) {
+            if (!silent) {
+                console.warn('[workflowStatus] Snapshot fetch failed', resp.status);
+            }
+            return;
+        }
+        const data = await resp.json();
+        const items = Array.isArray(data?.items) ? data.items : [];
+        workflowStatusStreamState.items.clear();
+        items.forEach((item) => {
+            if (WORKFLOW_STATUS_ACTIVE.has(item.status)) {
+                workflowStatusStreamState.items.set(item.instance_id, item);
+            }
+        });
+        workflowStatusStreamState.lastSnapshotAt = Date.now();
+        renderWorkflowStatusList(Array.from(workflowStatusStreamState.items.values()));
+    } catch (err) {
+        if (!silent) {
+            console.warn('[workflowStatus] Snapshot fetch failed', err);
+        }
+    }
+}
+
+function stopWorkflowStatusStream() {
+    if (workflowStatusStreamState.reconnectTimeoutId) {
+        clearTimeout(workflowStatusStreamState.reconnectTimeoutId);
+        workflowStatusStreamState.reconnectTimeoutId = null;
+    }
+    if (workflowStatusStreamState.eventSource) {
+        workflowStatusStreamState.eventSource.close();
+        workflowStatusStreamState.eventSource = null;
+    }
+}
+
+function scheduleWorkflowStatusReconnect() {
+    if (workflowStatusStreamState.reconnectTimeoutId) return;
+    workflowStatusStreamState.reconnectAttempts += 1;
+    const delay = Math.min(
+        WORKFLOW_STATUS_RECONNECT_BASE_MS * Math.pow(2, workflowStatusStreamState.reconnectAttempts - 1),
+        WORKFLOW_STATUS_RECONNECT_MAX_MS
+    );
+    workflowStatusStreamState.reconnectTimeoutId = setTimeout(() => {
+        workflowStatusStreamState.reconnectTimeoutId = null;
+        startWorkflowStatusStream();
+    }, delay);
+}
+
+function startWorkflowStatusStream() {
+    const { panel } = getWorkflowStatusElements();
+    if (!panel || typeof EventSource === 'undefined') return;
+
+    stopWorkflowStatusStream();
+
+    const params = buildWorkflowStatusQuery({ includeStatusFilter: true });
+    const url = `/api/workflows/instances/stream?${params.toString()}`;
+    const eventSource = new EventSource(url);
+    workflowStatusStreamState.eventSource = eventSource;
+
+    eventSource.onopen = () => {
+        workflowStatusStreamState.reconnectAttempts = 0;
+    };
+
+    eventSource.onerror = () => {
+        if (workflowStatusStreamState.eventSource !== eventSource) return;
+        if (eventSource.readyState === EventSource.CLOSED) {
+            eventSource.close();
+            workflowStatusStreamState.eventSource = null;
+            scheduleWorkflowStatusReconnect();
+        }
+    };
+
+    eventSource.addEventListener('workflow_status', (event) => {
+        let payload;
+        try {
+            payload = JSON.parse(event.data);
+        } catch (err) {
+            console.warn('[workflowStatus] Failed to parse event', err);
+            return;
+        }
+        applyWorkflowStatusUpdate(payload);
+    });
+}
+
+function initializeWorkflowStatusPanel() {
+    const { panel, refreshButton } = getWorkflowStatusElements();
+    if (!panel) return;
+
+    if (refreshButton) {
+        refreshButton.addEventListener('click', () => {
+            void refreshWorkflowStatusSnapshot();
+        });
+    }
+
+    startWorkflowStatusStream();
+    void refreshWorkflowStatusSnapshot({ silent: true });
+}
+
 function startIncomingInvitePolling() {
     if (incomingInvitePollTimerId) return;
     incomingInvitePollTimerId = window.setInterval(() => {
@@ -7864,6 +8110,9 @@ async function handleOrgSwitchForChatTab(detail) {
     }
 
     closeSharedConversationStream();
+    stopWorkflowStatusStream();
+    workflowStatusStreamState.items.clear();
+    renderWorkflowStatusList([]);
 
     if (container) {
         renderChatSessionTabsPlaceholder('loading');
@@ -7898,6 +8147,8 @@ async function handleOrgSwitchForChatTab(detail) {
     }
 
     void loadIncomingInvites({ silent: true });
+    startWorkflowStatusStream();
+    void refreshWorkflowStatusSnapshot({ silent: true });
 }
 
 try {
@@ -7918,6 +8169,15 @@ function handleAuthStatusChangeForChatTab(detail) {
     if (container) {
         renderChatSessionTabsPlaceholder(detail?.authenticated ? 'loading' : 'unauthenticated');
         container.hidden = false;
+    }
+
+    stopWorkflowStatusStream();
+    workflowStatusStreamState.items.clear();
+    renderWorkflowStatusList([]);
+
+    if (detail?.authenticated !== false) {
+        startWorkflowStatusStream();
+        void refreshWorkflowStatusSnapshot({ silent: true });
     }
 
     scheduleChatSessionTabsRefresh(true);
@@ -8161,6 +8421,9 @@ export function initializeChatTab() {
     initializeMessagePanel();
     // Load initial unread count for badge
     loadUnreadCount();
+
+    // Phase 5: Workflow monitor panel
+    initializeWorkflowStatusPanel();
 
     // Load annotation toggle state from localStorage (default: false)
     const savedState = localStorage.getItem('annotationToggleEnabled');

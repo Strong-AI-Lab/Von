@@ -526,7 +526,9 @@ def submit_durable_rag_sync(
 
     try:
         from ..workflows.durable.startup import get_instance_manager
-        from ..workflows.durable.rag_sync_workflow import RAG_TEXT_RELATION_SYNC_WORKFLOW_ID
+        from ..workflows.durable.rag_sync_workflow import (
+            RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
+        )
 
         instance_manager = get_instance_manager()
 

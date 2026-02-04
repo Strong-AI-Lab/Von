@@ -413,12 +413,14 @@ def api_list_workflow_instances():
     Query params:
     - user_id: Filter by user
     - org_id: Filter by organisation
+    - namespace: Filter by namespace
     - status: Filter by status (pending, running, completed, failed, cancelled, paused)
     - workflow_id: Filter by workflow definition
     - limit: Maximum results (default 50)
     """
     user_id = request.args.get("user_id")
     org_id = request.args.get("org_id")
+    namespace = request.args.get("namespace")
     status_str = request.args.get("status")
     workflow_id = request.args.get("workflow_id")
     limit = min(int(request.args.get("limit", "50")), 200)
@@ -434,6 +436,7 @@ def api_list_workflow_instances():
     instances = manager.list_instances(
         user_id=user_id,
         org_id=org_id,
+        namespace=namespace,
         status=status,
         workflow_id=workflow_id,
         limit=limit,
@@ -598,6 +601,70 @@ def api_pause_workflow_instance(instance_id: str):
         return jsonify({"status": "paused", "instance_id": instance_id})
     else:
         return jsonify({"error": "pause_failed"}), 500
+
+
+@workflows_bp.get("/api/workflows/instances/stream")
+def api_stream_workflow_instances():
+    """Stream workflow status updates via SSE.
+
+    Query params:
+    - user_id: Filter by user
+    - org_id: Filter by organisation
+    - namespace: Filter by namespace
+    - workflow_id: Filter by workflow definition
+    - instance_id: Filter to a single instance
+    - status: Comma-separated list of statuses
+    """
+    from flask import Response, stream_with_context
+
+    try:
+        from ...services.durable_workflow_stream_service import (
+            get_workflow_stream_service,
+        )
+
+        user_id = request.args.get("user_id")
+        org_id = request.args.get("org_id")
+        namespace = request.args.get("namespace")
+        workflow_id = request.args.get("workflow_id")
+        instance_id = request.args.get("instance_id")
+        status_raw = request.args.get("status")
+
+        statuses = None
+        if isinstance(status_raw, str) and status_raw.strip():
+            statuses = {
+                status.strip().lower()
+                for status in status_raw.split(",")
+                if status.strip()
+            }
+
+        stream_service = get_workflow_stream_service()
+        subscriber = stream_service.subscribe(
+            user_id=user_id or None,
+            org_id=org_id or None,
+            namespace=namespace or None,
+            workflow_id=workflow_id or None,
+            instance_id=instance_id or None,
+            statuses=statuses,
+        )
+
+        def generate():
+            try:
+                for event_data in stream_service.generate_events(subscriber):
+                    yield event_data
+            finally:
+                stream_service.unsubscribe(subscriber)
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except Exception as e:
+        logger.exception("Workflow status stream error")
+        return jsonify({"error": str(e)}), 500
 
 
 # =============================================================================
