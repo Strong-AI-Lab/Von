@@ -479,3 +479,90 @@ def sync_text_relations_to_rag(
         "added": added,
         "failed": failed,
     }
+
+
+def submit_durable_rag_sync(
+    *,
+    namespace: str,
+    user_id: str,
+    org_id: str,
+    predicates: Optional[Sequence[str]] = None,
+    languages: Optional[Sequence[str]] = None,
+    concept_ids: Optional[Sequence[str]] = None,
+    limit: int = 5000,
+    batch_size: int = 200,
+) -> Dict[str, Any]:
+    """Submit a durable workflow to sync text relations to RAG.
+
+    This is the non-blocking alternative to sync_text_relations_to_rag().
+    The workflow executes in the background with checkpointing support.
+
+    Args:
+        namespace: The namespace to sync (e.g., "#V#user@org").
+        user_id: User concept ID initiating the sync.
+        org_id: Organisation concept ID for context.
+        predicates: Optional list of predicate IDs to filter.
+        languages: Optional list of language codes to filter.
+        concept_ids: Optional list of concept IDs to filter.
+        limit: Maximum documents to sync (default: 5000).
+        batch_size: Documents per batch (default: 200).
+
+    Returns:
+        Dict with:
+            - success: True if workflow was submitted
+            - instance_id: The workflow instance ID for status queries
+            - error: Error message if submission failed
+    """
+    import os
+
+    # Check if durable workflows are enabled
+    enabled = os.getenv("VON_DURABLE_WORKFLOWS_ENABLE", "0").lower() in {"1", "true"}
+    if not enabled:
+        return {
+            "success": False,
+            "error": "durable_workflows_disabled",
+            "hint": "Set VON_DURABLE_WORKFLOWS_ENABLE=1 to enable durable workflows",
+        }
+
+    try:
+        from ..workflows.durable.startup import get_instance_manager
+        from ..workflows.durable.rag_sync_workflow import (
+            RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
+        )
+
+        instance_manager = get_instance_manager()
+
+        # Build workflow inputs
+        inputs: Dict[str, Any] = {
+            "namespace": namespace,
+            "limit": limit,
+            "batch_size": batch_size,
+        }
+        if predicates:
+            inputs["predicates"] = list(predicates)
+        if languages:
+            inputs["languages"] = list(languages)
+        if concept_ids:
+            inputs["concept_ids"] = list(concept_ids)
+
+        # Create and submit the instance
+        instance_id = instance_manager.create_instance(
+            RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            inputs=inputs,
+        )
+
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "workflow_id": RAG_TEXT_RELATION_SYNC_WORKFLOW_ID,
+            "namespace": namespace,
+        }
+
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+        }

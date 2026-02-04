@@ -275,7 +275,7 @@
       "monitor": false
     }
   ],
-  "python.defaultInterpreterPath": ".venv\\Scripts\\python.exe",
+  "python.defaultInterpreterPath": "c:\\Users\\witbr\\Documents\\Programming\\Strong-AI-Lab\\Von\\.venv\\Scripts\\python.exe",
   "javascript.suggestionActions.enabled": true,
   "workbench.editor.enablePreview": false,
   "python.analysis.inlayHints.functionReturnTypes": true,

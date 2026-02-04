@@ -16,6 +16,7 @@ Welcome to Von! This comprehensive guide will help you understand and use Von ef
    - 2.2 [Explore the Vontology](#22-explore-the-vontology)
    - 2.3 [Building Your First Knowledge Base: A Complete Workflow](#23-building-your-first-knowledge-base-a-complete-workflow)
    - 2.4 [Next Steps: Expanding Your Knowledge Base](#24-next-steps-expanding-your-knowledge-base)
+   - 2.5 [Workflow Monitor](#25-workflow-monitor)
 
 ---
 
@@ -205,7 +206,7 @@ Now let's build structured knowledge. Start by creating a concept for your resea
    - **Notes** (optional): `Parent concept for organizing different neural network architectures in my research`
 5. **Click "Create Type"**
 
-**Result**: 
+**Result**:
 - Your concept is created with ID `#V#neural_network_architecture`
 - It appears under "Thing" in the Vontology tree
 - It's stored in MongoDB with full metadata (description, notes, attributes, relationships)
@@ -277,7 +278,7 @@ Now let's add a concrete research paper to your knowledge base.
    - **URL**: https://arxiv.org/abs/1706.03762
 4. **Click "Save"**
 
-**Result**: 
+**Result**:
 - The paper is stored in MongoDB (likely in `von_db.entities` or similar collection)
 - It's linked to `#V#transformer_architecture` via `is_an_instance_of` relationship
 - Von now knows about this specific paper in your research domain
@@ -306,8 +307,8 @@ Now let's ask Von the **same question** we started with, but now it can ground i
 ```
 Based on your Vontology and entities, transformer architectures represent a significant
 innovation in neural network design. According to the paper "Attention Is All You Need"
-in your knowledge base (which you've classified under #V#transformer_architecture), 
-the key innovation is that transformers are "based solely on attention mechanisms, 
+in your knowledge base (which you've classified under #V#transformer_architecture),
+the key innovation is that transformers are "based solely on attention mechanisms,
 dispensing with recurrence and convolutions entirely."
 
 This differentiates transformers from the other architectures in your Vontology:
@@ -407,5 +408,15 @@ If you loaded the sample knowledge (`python src/utilities/init_database.py --ful
 - ✓ The power of grounding AI responses in curated, verifiable knowledge
 - ✓ The before/after impact of structured knowledge on AI interactions
 - ✓ Where your data lives (MongoDB `von_db` database) and how to back it up
+
+### 2.5 Workflow Monitor
+
+Von tracks long-running workflows (such as scheduled syncs) in the background. The **Workflow Monitor** panel appears near the top of the Conversations tab and shows:
+
+- Active workflows with their status (running, pending, paused)
+- The current state and step count
+- Progress cues for long-running tasks
+
+Use the **Refresh** button to pull the latest snapshot if needed. Completed workflows disappear automatically once they finish.
 
 ---

@@ -38,6 +38,18 @@
 
     <div id="chatSessionMetadata" class="chat-session-metadata" aria-label="Conversation metadata"></div>
 
+    <div id="workflowStatusPanel" class="workflow-status-panel" aria-live="polite" aria-label="Workflow status">
+      <div class="workflow-status-header">
+        <span class="workflow-status-title">Workflow Monitor</span>
+        <div class="workflow-status-actions">
+          <button id="workflowStatusRefresh" class="btn-mini" type="button" title="Refresh workflows">Refresh</button>
+        </div>
+      </div>
+      <div id="workflowStatusBody" class="workflow-status-body">
+        <div class="workflow-status-empty">No active workflows</div>
+      </div>
+    </div>
+
     <div id="historyBanner" class="history-banner hidden" role="status" aria-live="polite">
       <span id="historyBannerText" class="history-banner-text">Older conversation available</span>
       <button id="loadOlderHistoryBtn" class="history-banner-btn" type="button">

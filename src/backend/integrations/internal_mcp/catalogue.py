@@ -4957,6 +4957,491 @@ def _check_placeholder_description_output_schema() -> Schema:
     )
 
 
+# =============================================================================
+# Durable Workflow Instance Handlers (JVNAUTOSCI-1075)
+# =============================================================================
+
+
+def _workflow_create_instance(**kwargs):
+    """Create a new durable workflow instance."""
+    from ...workflows.durable import WorkflowInstanceManager
+
+    workflow_id = kwargs.get("workflow_id")
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "workflow_id is required",
+            details={"missing": ["workflow_id"]},
+        )
+
+    user_id = kwargs.get("user_id", "anonymous")
+    org_id = kwargs.get("org_id", "default")
+    namespace = kwargs.get("namespace", f"{user_id}/{org_id}")
+    inputs = kwargs.get("inputs", {})
+    max_retries = kwargs.get("max_retries", 3)
+
+    try:
+        manager = WorkflowInstanceManager()
+        instance_id = manager.create_instance(
+            workflow_id.strip(),
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            inputs=inputs if isinstance(inputs, dict) else {},
+            max_retries=int(max_retries),
+        )
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "status": "pending",
+        }
+    except Exception as e:
+        return make_error_response(
+            "create_failed",
+            f"Failed to create workflow instance: {e}",
+        )
+
+
+def _workflow_list_instances(**kwargs):
+    """List workflow instances with filters."""
+    from ...workflows.durable import WorkflowInstanceManager, WorkflowInstanceStatus
+
+    user_id = kwargs.get("user_id")
+    org_id = kwargs.get("org_id")
+    status_str = kwargs.get("status")
+    workflow_id = kwargs.get("workflow_id")
+    limit = min(int(kwargs.get("limit", 50)), 200)
+
+    status = None
+    if status_str:
+        try:
+            status = WorkflowInstanceStatus(status_str.lower())
+        except ValueError:
+            return make_error_response(
+                "invalid_status",
+                f"Invalid status: {status_str}. Valid values: pending, running, completed, failed, cancelled, paused",
+            )
+
+    manager = WorkflowInstanceManager()
+    instances = manager.list_instances(
+        user_id=user_id,
+        org_id=org_id,
+        status=status,
+        workflow_id=workflow_id,
+        limit=limit,
+    )
+
+    return {
+        "success": True,
+        "instances": [inst.to_status_dict() for inst in instances],
+        "count": len(instances),
+    }
+
+
+def _workflow_get_instance(**kwargs):
+    """Get details of a specific workflow instance."""
+    from ...workflows.durable import WorkflowInstanceManager
+
+    instance_id = kwargs.get("instance_id")
+    if not isinstance(instance_id, str) or not instance_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "instance_id is required",
+            details={"missing": ["instance_id"]},
+        )
+
+    manager = WorkflowInstanceManager()
+    instance = manager.get_instance(instance_id.strip())
+
+    if not instance:
+        return make_error_response(
+            "not_found",
+            f"Workflow instance not found: {instance_id}",
+        )
+
+    result = instance.to_status_dict()
+    result["success"] = True
+    result["inputs"] = instance.inputs
+    result["outputs"] = instance.outputs
+    result["user_id"] = instance.user_id
+    result["org_id"] = instance.org_id
+    result["namespace"] = instance.namespace
+    result["error_step"] = instance.error_step
+    result["schedule_id"] = instance.schedule_id
+    result["workflow_data"] = instance.workflow_data
+
+    return result
+
+
+def _workflow_cancel_instance(**kwargs):
+    """Cancel a running or pending workflow instance."""
+    from ...workflows.durable import WorkflowInstanceManager
+
+    instance_id = kwargs.get("instance_id")
+    if not isinstance(instance_id, str) or not instance_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "instance_id is required",
+            details={"missing": ["instance_id"]},
+        )
+
+    manager = WorkflowInstanceManager()
+    instance = manager.get_instance(instance_id.strip())
+
+    if not instance:
+        return make_error_response(
+            "not_found",
+            f"Workflow instance not found: {instance_id}",
+        )
+
+    if instance.status.is_terminal():
+        return make_error_response(
+            "already_terminal",
+            f"Instance is already in terminal status: {instance.status.value}",
+        )
+
+    success = manager.mark_cancelled(instance_id.strip())
+    if success:
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "status": "cancelled",
+        }
+    else:
+        return make_error_response("cancel_failed", "Failed to cancel instance")
+
+
+def _workflow_retry_instance(**kwargs):
+    """Reset a failed workflow instance for retry."""
+    from ...workflows.durable import WorkflowInstanceManager, WorkflowInstanceStatus
+
+    instance_id = kwargs.get("instance_id")
+    if not isinstance(instance_id, str) or not instance_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "instance_id is required",
+            details={"missing": ["instance_id"]},
+        )
+
+    manager = WorkflowInstanceManager()
+    instance = manager.get_instance(instance_id.strip())
+
+    if not instance:
+        return make_error_response(
+            "not_found",
+            f"Workflow instance not found: {instance_id}",
+        )
+
+    if instance.status != WorkflowInstanceStatus.FAILED:
+        return make_error_response(
+            "not_failed",
+            f"Instance is not in failed status: {instance.status.value}",
+        )
+
+    success = manager.reset_for_retry(instance_id.strip())
+    if success:
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "status": "pending",
+            "retry_count": instance.retry_count,
+        }
+    else:
+        return make_error_response(
+            "retry_limit_exceeded",
+            f"Maximum retries exceeded: {instance.retry_count}/{instance.max_retries}",
+        )
+
+
+# =============================================================================
+# Durable Workflow Schedule Handlers
+# =============================================================================
+
+
+def _workflow_create_schedule(**kwargs):
+    """Create a new workflow schedule."""
+    from datetime import datetime, timezone
+    from ...workflows.durable import (
+        WorkflowInstanceManager,
+        WorkflowSchedule,
+        ScheduleType,
+    )
+
+    workflow_id = kwargs.get("workflow_id")
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "workflow_id is required",
+            details={"missing": ["workflow_id"]},
+        )
+
+    user_id = kwargs.get("user_id", "anonymous")
+    org_id = kwargs.get("org_id", "default")
+    namespace = kwargs.get("namespace", f"{user_id}/{org_id}")
+    default_inputs = kwargs.get("default_inputs", {})
+    description = kwargs.get("description")
+
+    schedule_type_str = kwargs.get("schedule_type", "interval")
+    try:
+        schedule_type = ScheduleType(schedule_type_str.lower())
+    except ValueError:
+        return make_error_response(
+            "invalid_schedule_type",
+            f"Invalid schedule_type: {schedule_type_str}. Valid values: once, interval, cron",
+        )
+
+    schedule = None
+
+    if schedule_type == ScheduleType.INTERVAL:
+        interval_seconds = kwargs.get("interval_seconds")
+        if not interval_seconds or not isinstance(interval_seconds, (int, float)):
+            return make_error_response(
+                "missing_parameter",
+                "interval_seconds is required for interval type",
+            )
+        schedule = WorkflowSchedule.create_interval(
+            workflow_id.strip(),
+            interval_seconds=int(interval_seconds),
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            default_inputs=default_inputs if isinstance(default_inputs, dict) else {},
+            description=description,
+        )
+
+    elif schedule_type == ScheduleType.CRON:
+        cron_expression = kwargs.get("cron_expression")
+        if not isinstance(cron_expression, str) or not cron_expression.strip():
+            return make_error_response(
+                "missing_parameter",
+                "cron_expression is required for cron type",
+            )
+        schedule = WorkflowSchedule.create_cron(
+            workflow_id.strip(),
+            cron_expression=cron_expression.strip(),
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            default_inputs=default_inputs if isinstance(default_inputs, dict) else {},
+            description=description,
+        )
+
+    elif schedule_type == ScheduleType.ONCE:
+        run_at_str = kwargs.get("run_at")
+        if not isinstance(run_at_str, str) or not run_at_str.strip():
+            return make_error_response(
+                "missing_parameter",
+                "run_at is required for once type",
+            )
+        try:
+            run_at = datetime.fromisoformat(run_at_str.replace("Z", "+00:00"))
+        except ValueError:
+            return make_error_response(
+                "invalid_datetime",
+                "Invalid run_at datetime format. Use ISO format: 2026-02-04T10:00:00Z",
+            )
+        schedule = WorkflowSchedule.create_once(
+            workflow_id.strip(),
+            run_at=run_at,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            default_inputs=default_inputs if isinstance(default_inputs, dict) else {},
+            description=description,
+        )
+
+    if schedule is None:
+        return make_error_response("create_failed", "Failed to create schedule")
+
+    try:
+        manager = WorkflowInstanceManager()
+        schedule_id = manager.create_schedule(schedule)
+        return {
+            "success": True,
+            "schedule_id": schedule_id,
+            "schedule_type": schedule_type.value,
+        }
+    except Exception as e:
+        return make_error_response(
+            "create_failed",
+            f"Failed to create workflow schedule: {e}",
+        )
+
+
+def _workflow_list_schedules(**kwargs):
+    """List workflow schedules."""
+    from ...workflows.durable import WorkflowInstanceManager
+
+    user_id = kwargs.get("user_id")
+    enabled_only = kwargs.get("enabled_only", False)
+    limit = min(int(kwargs.get("limit", 50)), 200)
+
+    manager = WorkflowInstanceManager()
+    schedules = manager.list_schedules(
+        user_id=user_id,
+        enabled_only=bool(enabled_only),
+        limit=limit,
+    )
+
+    return {
+        "success": True,
+        "schedules": [sched.to_status_dict() for sched in schedules],
+        "count": len(schedules),
+    }
+
+
+def _workflow_get_schedule(**kwargs):
+    """Get details of a specific workflow schedule."""
+    from ...workflows.durable import WorkflowInstanceManager
+
+    schedule_id = kwargs.get("schedule_id")
+    if not isinstance(schedule_id, str) or not schedule_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "schedule_id is required",
+            details={"missing": ["schedule_id"]},
+        )
+
+    manager = WorkflowInstanceManager()
+    schedule = manager.get_schedule(schedule_id.strip())
+
+    if not schedule:
+        return make_error_response(
+            "not_found",
+            f"Workflow schedule not found: {schedule_id}",
+        )
+
+    result = schedule.to_status_dict()
+    result["success"] = True
+    result["user_id"] = schedule.user_id
+    result["org_id"] = schedule.org_id
+    result["namespace"] = schedule.namespace
+    result["default_inputs"] = schedule.default_inputs
+    result["created_at"] = (
+        schedule.created_at.isoformat() if schedule.created_at else None
+    )
+    result["updated_at"] = (
+        schedule.updated_at.isoformat() if schedule.updated_at else None
+    )
+
+    return result
+
+
+def _workflow_set_schedule_enabled(**kwargs):
+    """Enable or disable a workflow schedule."""
+    from ...workflows.durable import WorkflowInstanceManager
+
+    schedule_id = kwargs.get("schedule_id")
+    if not isinstance(schedule_id, str) or not schedule_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "schedule_id is required",
+            details={"missing": ["schedule_id"]},
+        )
+
+    enabled = kwargs.get("enabled")
+    if not isinstance(enabled, bool):
+        return make_error_response(
+            "missing_parameter",
+            "enabled (boolean) is required",
+            details={"missing": ["enabled"]},
+        )
+
+    manager = WorkflowInstanceManager()
+    schedule = manager.get_schedule(schedule_id.strip())
+
+    if not schedule:
+        return make_error_response(
+            "not_found",
+            f"Workflow schedule not found: {schedule_id}",
+        )
+
+    success = manager.set_schedule_enabled(schedule_id.strip(), enabled)
+    if success:
+        return {
+            "success": True,
+            "schedule_id": schedule_id,
+            "enabled": enabled,
+        }
+    else:
+        return make_error_response("update_failed", "Failed to update schedule")
+
+
+def _workflow_delete_schedule(**kwargs):
+    """Delete a workflow schedule."""
+    from ...workflows.durable import WorkflowInstanceManager
+
+    schedule_id = kwargs.get("schedule_id")
+    if not isinstance(schedule_id, str) or not schedule_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "schedule_id is required",
+            details={"missing": ["schedule_id"]},
+        )
+
+    manager = WorkflowInstanceManager()
+    schedule = manager.get_schedule(schedule_id.strip())
+
+    if not schedule:
+        return make_error_response(
+            "not_found",
+            f"Workflow schedule not found: {schedule_id}",
+        )
+
+    success = manager.delete_schedule(schedule_id.strip())
+    if success:
+        return {
+            "success": True,
+            "deleted": True,
+            "schedule_id": schedule_id,
+        }
+    else:
+        return make_error_response("delete_failed", "Failed to delete schedule")
+
+
+def _workflow_trigger_schedule(**kwargs):
+    """Manually trigger a workflow schedule immediately."""
+    from ...workflows.durable import WorkflowInstanceManager
+
+    schedule_id = kwargs.get("schedule_id")
+    if not isinstance(schedule_id, str) or not schedule_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "schedule_id is required",
+            details={"missing": ["schedule_id"]},
+        )
+
+    manager = WorkflowInstanceManager()
+    schedule = manager.get_schedule(schedule_id.strip())
+
+    if not schedule:
+        return make_error_response(
+            "not_found",
+            f"Workflow schedule not found: {schedule_id}",
+        )
+
+    try:
+        instance_id = manager.create_instance(
+            schedule.workflow_id,
+            user_id=schedule.user_id,
+            org_id=schedule.org_id,
+            namespace=schedule.namespace,
+            inputs=schedule.default_inputs,
+            schedule_id=schedule.schedule_id,
+        )
+        return {
+            "success": True,
+            "instance_id": instance_id,
+            "schedule_id": schedule_id,
+            "status": "triggered",
+        }
+    except Exception as e:
+        return make_error_response(
+            "trigger_failed",
+            f"Failed to trigger schedule: {e}",
+        )
+
+
 def _get_related_concepts(**kwargs):
     """Find concepts with similar descriptions (vector similarity)."""
 
@@ -8384,6 +8869,321 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Check if a description text appears to be an auto-generated placeholder "
                 "(e.g., derived from concept ID, timestamp-based, or too short). "
                 "Use this to identify concepts that need proper descriptions."
+            ),
+        ),
+        # =============================================================================
+        # Durable Workflow Instance Tools (JVNAUTOSCI-1075)
+        # =============================================================================
+        MethodDefinition(
+            name="workflow_create_instance",
+            handler=_workflow_create_instance,
+            input_schema=Schema(
+                required={"workflow_id": str},
+                optional={
+                    "user_id": str,
+                    "org_id": str,
+                    "namespace": (str, type(None)),
+                    "inputs": (dict, type(None)),
+                    "max_retries": int,
+                },
+                allow_unknown=True,
+                description="Create a durable workflow instance.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "instance_id": str,
+                    "status": str,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Result with instance_id if successful.",
+            ),
+            category="write",
+            description=(
+                "Create a new durable workflow instance. The workflow will be queued for "
+                "execution by a background worker. Use workflow_get_instance to check status."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_list_instances",
+            handler=_workflow_list_instances,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "user_id": (str, type(None)),
+                    "org_id": (str, type(None)),
+                    "status": (str, type(None)),
+                    "workflow_id": (str, type(None)),
+                    "limit": int,
+                },
+                allow_unknown=True,
+                description="List workflow instances with filters.",
+            ),
+            output_schema=Schema(
+                required={"success": bool, "instances": list, "count": int},
+                optional={"error": str, "error_code": str},
+                allow_unknown=True,
+                description="List of workflow instance summaries.",
+            ),
+            category="read",
+            description=(
+                "List durable workflow instances. Filter by user, org, status, or workflow_id. "
+                "Valid statuses: pending, running, completed, failed, cancelled, paused."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_get_instance",
+            handler=_workflow_get_instance,
+            input_schema=Schema(
+                required={"instance_id": str},
+                optional={},
+                allow_unknown=True,
+                description="Get a workflow instance by ID.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "instance_id": str,
+                    "workflow_id": str,
+                    "status": str,
+                    "current_state": str,
+                    "step_index": int,
+                    "inputs": dict,
+                    "outputs": (dict, type(None)),
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Full workflow instance details.",
+            ),
+            category="read",
+            description=(
+                "Get detailed status of a durable workflow instance including current state, "
+                "inputs, outputs, and any errors."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_cancel_instance",
+            handler=_workflow_cancel_instance,
+            input_schema=Schema(
+                required={"instance_id": str},
+                optional={},
+                allow_unknown=True,
+                description="Cancel a workflow instance.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "instance_id": str,
+                    "status": str,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Cancellation result.",
+            ),
+            category="write",
+            description=(
+                "Cancel a running or pending workflow instance. The worker will stop "
+                "execution at the next checkpoint. Cannot cancel already-terminal instances."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_retry_instance",
+            handler=_workflow_retry_instance,
+            input_schema=Schema(
+                required={"instance_id": str},
+                optional={},
+                allow_unknown=True,
+                description="Retry a failed workflow instance.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "instance_id": str,
+                    "status": str,
+                    "retry_count": int,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Retry result.",
+            ),
+            category="write",
+            description=(
+                "Reset a failed workflow instance for retry. Only works if the instance "
+                "has not exceeded its max_retries limit. Execution will resume from "
+                "the last checkpoint."
+            ),
+        ),
+        # =============================================================================
+        # Durable Workflow Schedule Tools
+        # =============================================================================
+        MethodDefinition(
+            name="workflow_create_schedule",
+            handler=_workflow_create_schedule,
+            input_schema=Schema(
+                required={"workflow_id": str, "schedule_type": str},
+                optional={
+                    "user_id": str,
+                    "org_id": str,
+                    "namespace": (str, type(None)),
+                    "interval_seconds": int,
+                    "cron_expression": str,
+                    "run_at": str,
+                    "default_inputs": (dict, type(None)),
+                    "description": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Create a workflow schedule. schedule_type: 'interval', 'cron', or 'once'. "
+                    "Provide interval_seconds for interval, cron_expression for cron, "
+                    "run_at (ISO datetime) for once."
+                ),
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "schedule_id": str,
+                    "schedule_type": str,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Schedule creation result.",
+            ),
+            category="write",
+            description=(
+                "Create a scheduled trigger for a workflow. Supports three types: "
+                "'interval' (run every N seconds), 'cron' (5-field cron expression), "
+                "'once' (run at a specific time). The scheduler will automatically "
+                "create workflow instances when schedules are due."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_list_schedules",
+            handler=_workflow_list_schedules,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "user_id": (str, type(None)),
+                    "enabled_only": bool,
+                    "limit": int,
+                },
+                allow_unknown=True,
+                description="List workflow schedules.",
+            ),
+            output_schema=Schema(
+                required={"success": bool, "schedules": list, "count": int},
+                optional={"error": str, "error_code": str},
+                allow_unknown=True,
+                description="List of workflow schedules.",
+            ),
+            category="read",
+            description="List workflow schedules. Filter by user or enabled status.",
+        ),
+        MethodDefinition(
+            name="workflow_get_schedule",
+            handler=_workflow_get_schedule,
+            input_schema=Schema(
+                required={"schedule_id": str},
+                optional={},
+                allow_unknown=True,
+                description="Get a schedule by ID.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "schedule_id": str,
+                    "workflow_id": str,
+                    "schedule_type": str,
+                    "enabled": bool,
+                    "cron_expression": (str, type(None)),
+                    "interval_seconds": (int, type(None)),
+                    "next_run_at": (str, type(None)),
+                    "last_run_at": (str, type(None)),
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Full schedule details.",
+            ),
+            category="read",
+            description="Get detailed information about a workflow schedule.",
+        ),
+        MethodDefinition(
+            name="workflow_set_schedule_enabled",
+            handler=_workflow_set_schedule_enabled,
+            input_schema=Schema(
+                required={"schedule_id": str, "enabled": bool},
+                optional={},
+                allow_unknown=True,
+                description="Enable or disable a schedule.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "schedule_id": str,
+                    "enabled": bool,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Update result.",
+            ),
+            category="write",
+            description="Enable or disable a workflow schedule.",
+        ),
+        MethodDefinition(
+            name="workflow_delete_schedule",
+            handler=_workflow_delete_schedule,
+            input_schema=Schema(
+                required={"schedule_id": str},
+                optional={},
+                allow_unknown=True,
+                description="Delete a schedule.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "deleted": bool,
+                    "schedule_id": str,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Deletion result.",
+            ),
+            category="write",
+            description="Delete a workflow schedule permanently.",
+        ),
+        MethodDefinition(
+            name="workflow_trigger_schedule",
+            handler=_workflow_trigger_schedule,
+            input_schema=Schema(
+                required={"schedule_id": str},
+                optional={},
+                allow_unknown=True,
+                description="Manually trigger a schedule.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "instance_id": str,
+                    "schedule_id": str,
+                    "status": str,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Trigger result with new instance_id.",
+            ),
+            category="write",
+            description=(
+                "Manually trigger a workflow schedule immediately, creating a new "
+                "workflow instance. Useful for testing or ad-hoc execution."
             ),
         ),
     ]

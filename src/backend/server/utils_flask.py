@@ -67,6 +67,140 @@ from ..services.annotation_extraction_service import (
 APP_VERSION = "v20250421_1015_backend"  # Updated version
 
 
+# --- Durable Workflow System Globals ---
+# These are module-level singletons for the durable workflow system.
+# Initialised lazily via _start_durable_workflow_system().
+# Type: WorkflowRegistry | None (from ..workflows)
+_durable_workflow_registry = None
+# Type: ActionRegistry | None (from ..workflows)
+_durable_action_registry = None
+
+
+def _build_durable_workflow_registry():
+    """Build a WorkflowRegistry with default workflows registered."""
+    from ..workflows import WorkflowRegistry, register_default_workflows
+    from ..workflows.durable.rag_sync_workflow import get_rag_sync_workflow_registration
+
+    registry = WorkflowRegistry()
+    register_default_workflows(registry)
+
+    # Register durable-specific workflows
+    registry.register(get_rag_sync_workflow_registration())
+
+    return registry
+
+
+def _build_durable_action_registry():
+    """Build an ActionRegistry for durable workflow execution.
+
+    This registry contains action handlers for durable background workflows.
+    """
+    from ..workflows import ActionRegistry
+    from ..workflows.durable.rag_sync_workflow import register_rag_sync_actions
+
+    registry = ActionRegistry()
+
+    # Register RAG sync workflow actions (Phase 4: JVNAUTOSCI-1075)
+    register_rag_sync_actions(registry)
+
+    return registry
+
+
+def _get_durable_definition_loader():
+    """Create a definition loader function for the durable worker."""
+    global _durable_workflow_registry
+
+    if _durable_workflow_registry is None:
+        _durable_workflow_registry = _build_durable_workflow_registry()
+
+    registry = _durable_workflow_registry  # Local reference for closure
+
+    def loader(workflow_id: str):
+        return registry.get(workflow_id)
+
+    return loader
+
+
+def _start_durable_workflow_system(app_logger) -> dict | None:
+    """Start the durable workflow worker and scheduler.
+
+    Returns the system components dict or None if disabled/failed.
+    """
+    global _durable_workflow_registry, _durable_action_registry
+
+    # Check if enabled via environment
+    enabled = os.getenv("VON_DURABLE_WORKFLOWS_ENABLE", "0").lower() in {"1", "true"}
+    if not enabled:
+        try:
+            app_logger.info(
+                "[durable_workflows] Disabled. Set VON_DURABLE_WORKFLOWS_ENABLE=1 to activate."
+            )
+        except Exception:
+            pass
+        return None
+
+    try:
+        from ..workflows.durable.startup import (
+            start_worker_and_scheduler,
+            recover_orphaned_instances,
+            get_system_status,
+        )
+
+        # Build registries if not already done
+        if _durable_workflow_registry is None:
+            _durable_workflow_registry = _build_durable_workflow_registry()
+        if _durable_action_registry is None:
+            _durable_action_registry = _build_durable_action_registry()
+
+        # Recover any orphaned instances from previous crashes
+        recovered = recover_orphaned_instances()
+        if recovered > 0:
+            app_logger.info(
+                "[durable_workflows] Recovered %d orphaned instances.", recovered
+            )
+
+        # Start worker and scheduler
+        result = start_worker_and_scheduler(
+            registry=_durable_action_registry,
+            definition_loader=_get_durable_definition_loader(),
+            enable_worker=True,
+            enable_scheduler=True,
+            worker_poll_interval=float(
+                os.getenv("VON_DURABLE_WORKER_POLL_INTERVAL", "5.0")
+            ),
+            scheduler_check_interval=float(
+                os.getenv("VON_DURABLE_SCHEDULER_CHECK_INTERVAL", "60.0")
+            ),
+        )
+
+        # Log status
+        status = get_system_status()
+        app_logger.info(
+            "[durable_workflows] Started. worker=%s, scheduler=%s, pending=%d",
+            status.get("worker_running"),
+            status.get("scheduler_running"),
+            status.get("instances", {}).get("pending", 0),
+        )
+
+        return result
+    except Exception as exc:
+        try:
+            app_logger.warning("[durable_workflows] Failed to start: %s", exc)
+        except Exception:
+            pass
+        return None
+
+
+def _stop_durable_workflow_system():
+    """Stop the durable workflow system gracefully."""
+    try:
+        from ..workflows.durable.startup import stop_worker_and_scheduler
+
+        stop_worker_and_scheduler(timeout=10.0)
+    except Exception:
+        pass
+
+
 def _is_running_under_pytest() -> bool:
     # Avoid startup side-effects (DB writes, slow calls) during test imports.
     if os.getenv("PYTEST_CURRENT_TEST"):
@@ -380,6 +514,28 @@ def create_flask_app(
         except Exception as exc:  # pragma: no cover
             try:
                 app.logger.warning("[startup] Failed to start requeue thread: %s", exc)
+            except Exception:
+                pass
+
+    # --- Durable Workflow System Startup ---
+    # Start background worker and scheduler for durable workflows.
+    # Skip during pytest to avoid DB side-effects during test imports.
+    durable_workflow_components = None
+    if not _is_running_under_pytest():
+        try:
+            durable_workflow_components = _start_durable_workflow_system(app.logger)
+            if durable_workflow_components is not None:
+                app.config["DURABLE_WORKFLOW_COMPONENTS"] = durable_workflow_components
+
+                # Register atexit handler for graceful shutdown
+                import atexit
+
+                atexit.register(_stop_durable_workflow_system)
+        except Exception as exc:  # pragma: no cover
+            try:
+                app.logger.warning(
+                    "[startup] Durable workflow system startup failed: %s", exc
+                )
             except Exception:
                 pass
 
@@ -1875,6 +2031,17 @@ def create_flask_app(
             "python_version": sys.version.split()[0],
         }
         diag["mongo"] = mongo_diag
+        # Durable workflow system status (best-effort)
+        try:
+            from ..workflows.durable.startup import get_system_status
+
+            durable_status = get_system_status()
+            diag["durable_workflows"] = durable_status
+        except Exception as exc:
+            diag["durable_workflows"] = {
+                "error": str(exc),
+                "available": False,
+            }
         gateway = app.config.get("INTERNAL_MCP_GATEWAY")
         if gateway is None:
             diag["internal_mcp_gateway"] = {"configured": False}
@@ -1979,6 +2146,13 @@ def create_flask_app(
             return jsonify(success=False, error="shutdown_disabled"), 403
         if provided != expected:
             return jsonify(success=False, error="unauthorized"), 401
+
+        # Gracefully stop durable workflow system before server shutdown
+        try:
+            _stop_durable_workflow_system()
+        except Exception as exc:
+            app.logger.warning("[shutdown] Durable workflow stop error: %s", exc)
+
         func = request.environ.get("werkzeug.server.shutdown")
         if func is None:
             # Fallback for production servers like Waitress: schedule hard exit
