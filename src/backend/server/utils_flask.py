@@ -80,12 +80,16 @@ def _build_durable_workflow_registry():
     """Build a WorkflowRegistry with default workflows registered."""
     from ..workflows import WorkflowRegistry, register_default_workflows
     from ..workflows.durable.rag_sync_workflow import get_rag_sync_workflow_registration
+    from ..workflows.durable.considerations_workflow import (
+        get_considerations_workflow_registration,
+    )
 
     registry = WorkflowRegistry()
     register_default_workflows(registry)
 
     # Register durable-specific workflows
     registry.register(get_rag_sync_workflow_registration())
+    registry.register(get_considerations_workflow_registration())
 
     return registry
 
@@ -97,11 +101,16 @@ def _build_durable_action_registry():
     """
     from ..workflows import ActionRegistry
     from ..workflows.durable.rag_sync_workflow import register_rag_sync_actions
+    from ..workflows.durable.considerations_workflow import (
+        register_considerations_actions,
+    )
 
     registry = ActionRegistry()
 
     # Register RAG sync workflow actions (Phase 4: JVNAUTOSCI-1075)
     register_rag_sync_actions(registry)
+    # Register considerations workflow actions (JVNAUTOSCI-1081)
+    register_considerations_actions(registry)
 
     return registry
 

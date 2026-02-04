@@ -61,6 +61,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - When code needs to manipulate real-world or conceptual entities (tasks, organisations, ideas, documents, relations, predicates, claims, assertions, rules, workflows, etc.), **always start by checking whether they already exist in Vontology**. Reuse/connect to existing representations; update them if needed; otherwise create new concepts rigorously.
 - **Vontology representation guidance (from code behaviour):**
 	- **Names:** Display names are resolved from `names[]` (NL then ABBR, preferred language first). Create/update names via `hasName` text relations (primary NL in `en-NZ`), and include CODE names for the `concept_id` and GUID where applicable. Do not rely on legacy top-level `name` fields.
+	- **Text preservation:** Keep text relation values exactly as-is unless a user explicitly asks to rename or normalise them. Do not auto-replace underscores with spaces (e.g., `has_url` -> `has url`).
 	- **Descriptions:** Canonical descriptions are stored in `hasDescription` text relations. Avoid writing legacy `description` fields or `concept_data.preserved_fields` directly; use the concept/text relation services.
 	- **Types vs individuals:** Types use `relationships.is_a_type_of` (parents). Individuals use `relationships.is_an_instance_of` (types). Computed kind is derived from these relationships, so avoid mixing them on the same concept.
 	- **Type guidance predicates:** For types, prefer `#V#salient_binary_predicate_for_type` (or `salient_predicate_scopes.type_level`) to drive salient predicate prompts. These lists are consumed by salient predicate aggregation and relation elicitation. It is almost never appropriate for a type to be #V#is_a_type_of #V#thing (similarly, individuals should not be instances of thing). Search the ontology for suitable types to attach concepts to. Use the most restrictive applicable and appropriate supertypes.
@@ -70,6 +71,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 	2. Check for existing predicate/type concepts before inventing anything.
 	3. If a list of concepts is needed, prefer a Vontology type and query its instances.
 	4. Record the chosen canonical IDs in the Jira issue.
+- For fairly complex capability improvements, run a background search for related Jira issues, Confluence design docs, and existing Vontology concepts before proposing a plan.
 - **No hard-coded ontology lists**: do not add fixed lists of predicate/type IDs or names in code. If you believe a hard-coded list is unavoidable, you must:
 	- explain why Vontology lookup is not viable,
 	- add a Jira note documenting the exception, and

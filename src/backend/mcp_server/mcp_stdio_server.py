@@ -1993,6 +1993,16 @@ async def _handle_get_text_relations(arguments: dict[str, Any]) -> list[TextCont
         ]
 
 
+def _warn_if_underscore_replaced(old_text: str, new_text: str) -> list[str]:
+    if not old_text or not new_text:
+        return []
+    if "_" in old_text and " " in new_text and old_text.replace("_", " ") == new_text:
+        return [
+            "new_text replaces underscores with spaces; avoid renaming text values unless explicitly intended"
+        ]
+    return []
+
+
 async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextContent]:
     """Handle update_text_relation tool call."""
     namespace = (
@@ -2051,8 +2061,10 @@ async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextCo
             concept_id=concept_id,
         )
 
-        old_preview = str(result.get("old_text", ""))[:100]
+        old_text = str(result.get("old_text", ""))
+        old_preview = old_text[:100]
         new_preview = new_text[:100] + "..." if len(new_text) > 100 else new_text
+        warnings = _warn_if_underscore_replaced(old_text, new_text)
 
         payload = {
             "success": True,
@@ -2061,6 +2073,8 @@ async def _handle_update_text_relation(arguments: dict[str, Any]) -> list[TextCo
             "new_text_preview": new_preview,
             "text_value_id": str(result.get("text_value_id")),
         }
+        if warnings:
+            payload["warnings"] = warnings
         return [_json_text(payload)]
     except Exception as exc:
         return [
