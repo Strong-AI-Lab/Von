@@ -484,7 +484,9 @@ class InternalMCPChatOrchestrator:
         # and durable workflows/actions.  See JVNAUTOSCI-922 Phase 1.
         self._workflow_registry = build_workflow_registry()
         self._action_registry = self._build_action_registry()
-        self._workflow_executor = WorkflowExecutor(registry=self._action_registry)
+        self._workflow_executor = WorkflowExecutor(
+            registry=self._action_registry, max_transitions=50
+        )
         self._workflow_selector = WorkflowSelector(
             registry=self._workflow_registry,
             prompt_service=self._prompt_templates,
@@ -714,22 +716,37 @@ class InternalMCPChatOrchestrator:
                 description="Decide which write-category tools are allowed for this prompt.",
             )
         )
-        # Tool-calling workflow actions (JVNAUTOSCI-922 Phase 2.1).
-        # These stubs will be replaced with real implementations that
-        # extract the corresponding procedural blocks from run().
-        for action_id in (
-            "tool_calling.plan",
-            "tool_calling.validate",
-            "tool_calling.execute",
-            "tool_calling.backfill",
-        ):
-            registry.register(
-                ActionSpec(
-                    action_id=action_id,
-                    handler=self._noop_action,
-                    description=f"Stub for {action_id}; wired in JVNAUTOSCI-922 Phase 2.",
-                )
+        # Tool-calling workflow actions (JVNAUTOSCI-922 Phase 2).
+        # Real handlers that wrap the procedural tool-calling logic;
+        # driven by #V#tool_calling_workflow state machine.
+        registry.register(
+            ActionSpec(
+                action_id="tool_calling.plan",
+                handler=self._action_tool_calling_plan,
+                description="Initial LLM call + missing-tool-call recovery.",
             )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="tool_calling.validate",
+                handler=self._action_tool_calling_validate,
+                description="Preflight validation, coercion, and repair.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="tool_calling.execute",
+                handler=self._action_tool_calling_execute,
+                description="Execute tool-call batch against MCP gateway.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="tool_calling.backfill",
+                handler=self._action_tool_calling_backfill,
+                description="Summariser LLM call; detect chained tool calls.",
+            )
+        )
         return registry
 
     @staticmethod
@@ -1204,6 +1221,702 @@ class InternalMCPChatOrchestrator:
             outputs={
                 "presenter_channels": presenter_channels,
                 "narration_emitted": bool(spoken),
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Tool-calling workflow handlers (JVNAUTOSCI-922 Phase 2)
+    #
+    # These four handlers encapsulate the procedural tool-calling logic
+    # that was previously inline in ``run()``.  They operate on a shared
+    # ``data`` dict (the workflow context) and return outputs that drive
+    # state transitions in ``#V#tool_calling_workflow``.
+    #
+    # Key data-dict fields consumed/produced:
+    #   prompt, augmented_context (mutable list), policy_state,
+    #   registry_snapshot, user/org_concept_id, model_for_stage (callable),
+    #   record_llm_call (callable), emit_progress / emit_phase_transition /
+    #   check_cancellation (callables), aux_llm_calls / llm_calls (mutable
+    #   lists), invocations / tool_messages (mutable lists),
+    #   tool_calls, tool_calls_present, iteration_count, final_response,
+    #   orchestrator_result (pre-built OrchestratorResult for error exits).
+    # ------------------------------------------------------------------
+
+    def _action_tool_calling_plan(self, request: Any) -> WorkflowActionResult:
+        """Phase 1 of tool calling: initial LLM call + missing-tool-call recovery.
+
+        Determines structured vs legacy path, makes the LLM call, interprets
+        the response, and runs the missing-tool-call recovery workflow if no
+        valid tool calls are found.
+
+        Outputs:
+            tool_calls_present (bool): True if tool calls were extracted.
+            direct_response (bool): True if no tools needed (plain text).
+            response (str): The raw LLM response text.
+            tool_calls (list | None): Extracted tool-call dicts.
+            use_structured (bool): Whether structured calling was used.
+            orchestrator_result (OrchestratorResult | None): Pre-built error
+                result if a parse error terminates the flow early.
+        """
+        data = request.data
+        env = request.environment
+        llm_client = env.llm_client
+        prompt = data["prompt"]
+        augmented_context = data["augmented_context"]
+        policy_state = data["policy_state"]
+        registry_snapshot = data.get("registry_snapshot")
+        user_concept_id = data.get("user_concept_id")
+        org_concept_id = data.get("org_concept_id")
+        model_for_stage = data["model_for_stage"]
+        record_llm_call = data["record_llm_call"]
+        emit_phase_transition = data.get("emit_phase_transition")
+        aux_llm_calls = data["aux_llm_calls"]
+        llm_calls = data["llm_calls"]
+        gmail_profile = data.get("gmail_profile") or env.default_gmail_profile
+
+        # Emit planning phase.
+        if callable(emit_phase_transition):
+            emit_phase_transition(
+                self.PHASE_TOOL_PLAN,
+            )
+
+        # Determine structured vs legacy calling.
+        use_structured = (
+            hasattr(llm_client, "generate_with_tools")
+            and hasattr(llm_client, "_should_use_structured_calling")
+            and llm_client._should_use_structured_calling()
+        )
+        if policy_state.enabled and policy_state.policy:
+            use_structured = True
+
+        response = ""
+        tool_calls = None
+        has_valid_tool_call = False
+        tool_call_parse_error: ToolCallParsingError | None = None
+        interpretation = None
+
+        if use_structured:
+            self._logger.debug("[mcp_orchestrator] Using structured tool calling path")
+            try:
+                tool_call_model = model_for_stage("tool_call")
+                tool_definitions = self._convert_mcp_tools_to_structured_definitions()
+                llm_response, tool_call_model, _ = self._run_llm_with_tools_fallbacks(
+                    stage="tool_call",
+                    prompt=prompt,
+                    context=augmented_context,
+                    tool_definitions=tool_definitions,
+                    default_client=llm_client,
+                    default_model=tool_call_model,
+                    policy_state=policy_state,
+                    registry_snapshot=registry_snapshot,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                    llm_calls_log=llm_calls,
+                    aux_log=aux_llm_calls,
+                    record_llm_call=record_llm_call,
+                )
+                if llm_response.tool_calls:
+                    response = llm_response.text_response or ""
+                    tool_calls = [
+                        {
+                            self._ACTION_FIELD: self._CALL_ACTION,
+                            self._TOOL_FIELD: tc.tool_name,
+                            self._PAYLOAD_FIELD: tc.payload,
+                            "_call_id": tc.call_id,
+                        }
+                        for tc in llm_response.tool_calls
+                    ]
+                    has_valid_tool_call = True
+                else:
+                    response = llm_response.text_response
+                    tool_calls = None
+                    has_valid_tool_call = False
+            except Exception as exc:
+                self._logger.warning(
+                    "[mcp_orchestrator] Structured calling failed, falling back to legacy: %s",
+                    exc,
+                )
+                use_structured = False
+
+        if not use_structured:
+            tool_call_model = model_for_stage("tool_call")
+            response, tool_call_model, _ = self._run_llm_with_fallbacks(
+                stage="tool_call",
+                prompt=prompt,
+                context=augmented_context,
+                default_client=llm_client,
+                default_model=tool_call_model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                llm_calls_log=llm_calls,
+                aux_log=aux_llm_calls,
+                record_llm_call=record_llm_call,
+            )
+            tool_calls = None
+            has_valid_tool_call = False
+
+        # Interpret response (legacy path only).
+        if not use_structured:
+            interpretation = self._interpret_model_turn(response)
+            response = interpretation.response_text
+            tool_calls = interpretation.tool_calls
+            tool_call_parse_error = interpretation.tool_call_parse_error
+            has_valid_tool_call = bool(tool_calls)
+
+        # Missing-tool-call recovery.
+        if not has_valid_tool_call:
+            workflow_def = self._workflow_registry.get(MISSING_TOOL_CALL_WORKFLOW_ID)
+            if workflow_def is not None:
+                workflow_context = {
+                    "user_prompt": prompt,
+                    "response_text": (
+                        response if isinstance(response, str) else str(response)
+                    ),
+                    "interpretation": interpretation,
+                    "use_structured": use_structured,
+                    "tool_call_parse_error": tool_call_parse_error,
+                    "aux_llm_calls": aux_llm_calls,
+                    "augmented_context": augmented_context,
+                    "tool_calls": tool_calls,
+                    "missing_tool_assessor": self._assess_missing_tool_call,
+                    "extract_tool_calls_fn": self._extract_tool_calls,
+                    "record_llm_call": record_llm_call,
+                    "classifier_model": model_for_stage("classifier"),
+                    "policy_state": policy_state,
+                    "default_model": tool_call_model,
+                    "registry_snapshot": registry_snapshot,
+                    "user_concept_id": user_concept_id,
+                    "org_concept_id": org_concept_id,
+                }
+                recovery_model = model_for_stage("tool_recovery")
+                recovery_env = WorkflowEnvironment(
+                    llm_client=llm_client,
+                    gateway=self._gateway,
+                    model=recovery_model,
+                    user_namespace=env.user_namespace,
+                    auxiliary_system_prompt=env.auxiliary_system_prompt,
+                    max_tool_invocations=env.max_tool_invocations,
+                    default_gmail_profile=gmail_profile,
+                )
+                workflow_result = self._workflow_executor.run(
+                    workflow_def,
+                    environment=recovery_env,
+                    data=workflow_context,
+                    trace=request.trace,
+                )
+                response = workflow_result.data.get("response_text", response)
+                interpretation = workflow_result.data.get(
+                    "interpretation", interpretation
+                )
+                tool_calls = workflow_result.data.get("tool_calls", tool_calls)
+                tool_call_parse_error = workflow_result.data.get(
+                    "tool_call_parse_error", tool_call_parse_error
+                )
+                has_valid_tool_call = bool(tool_calls)
+
+        # Determine next state.
+        if has_valid_tool_call:
+            return WorkflowActionResult(
+                outputs={
+                    "tool_calls_present": True,
+                    "direct_response": False,
+                    "response": response,
+                    "tool_calls": tool_calls,
+                    "use_structured": use_structured,
+                    "tool_call_model": tool_call_model,
+                }
+            )
+
+        # No tool calls — direct response or error.
+        if tool_call_parse_error is not None:
+            build_error = data.get("build_parse_error_result")
+            if callable(build_error):
+                error_result = build_error(tool_call_parse_error)
+                return WorkflowActionResult(
+                    outputs={
+                        "tool_calls_present": False,
+                        "direct_response": True,
+                        "orchestrator_result": error_result,
+                    }
+                )
+
+        return WorkflowActionResult(
+            outputs={
+                "tool_calls_present": False,
+                "direct_response": True,
+                "final_response": response if isinstance(response, str) else str(response),
+            }
+        )
+
+    def _action_tool_calling_validate(self, request: Any) -> WorkflowActionResult:
+        """Preflight validation, coercion, and repair of extracted tool calls.
+
+        Runs ``_preflight_tool_calls`` and on errors attempts
+        ``_attempt_tool_call_repair``.  If validation still fails, produces
+        a pre-built ``orchestrator_result`` that terminates the workflow.
+
+        Outputs:
+            tool_calls_validated (bool): True if tool calls passed validation.
+            tool_calls (list): Possibly repaired tool calls.
+            orchestrator_result (OrchestratorResult | None): Error result.
+        """
+        data = request.data
+        env = request.environment
+        llm_client = env.llm_client
+        tool_calls = data.get("tool_calls")
+        if not tool_calls:
+            return WorkflowActionResult(
+                outputs={"tool_calls_validated": False, "tool_calls_present": False}
+            )
+
+        prompt = data.get("prompt", "")
+        augmented_context = data.get("augmented_context", [])
+        policy_state = data["policy_state"]
+        registry_snapshot = data.get("registry_snapshot")
+        user_concept_id = data.get("user_concept_id")
+        org_concept_id = data.get("org_concept_id")
+        model_for_stage = data["model_for_stage"]
+        record_llm_call = data["record_llm_call"]
+        aux_llm_calls = data["aux_llm_calls"]
+        llm_calls = data["llm_calls"]
+        gmail_profile = data.get("gmail_profile") or env.default_gmail_profile
+        conversation_session_id = data.get("conversation_session_id")
+
+        # Build method catalogue on first validation pass.
+        if "method_catalogue" not in data:
+            method_catalogue = self._gateway.describe_methods()
+            tool_categories: dict[str, str] = {}
+            for name, meta in method_catalogue.items():
+                if not isinstance(meta, Mapping):
+                    continue
+                category = meta.get("category")
+                if isinstance(category, str):
+                    tool_categories[name] = category
+            data["method_catalogue"] = method_catalogue
+            data["tool_categories"] = tool_categories
+        method_catalogue = data["method_catalogue"]
+
+        preflight = self._preflight_tool_calls(
+            cast(list, tool_calls),
+            method_catalogue,
+            user_namespace=env.user_namespace,
+            selected_gmail_profile=gmail_profile,
+            conversation_session_id=conversation_session_id,
+        )
+        if preflight.warnings:
+            try:
+                aux_llm_calls.append(
+                    {"type": "tool_call_coercions", "warnings": list(preflight.warnings)}
+                )
+            except Exception:
+                pass
+
+        if preflight.errors:
+            repaired_calls = None
+            if method_catalogue:
+                tool_call_model = data.get("tool_call_model") or model_for_stage("tool_call")
+                repaired_calls = self._attempt_tool_call_repair(
+                    current_response=(
+                        data.get("response", "")
+                        if isinstance(data.get("response"), str)
+                        else str(data.get("response", ""))
+                    ),
+                    errors=preflight.errors,
+                    tool_list=sorted(method_catalogue.keys()),
+                    llm_client=llm_client,
+                    policy_state=policy_state,
+                    default_model=tool_call_model,
+                    registry_snapshot=registry_snapshot,
+                    user_concept_id=user_concept_id,
+                    org_concept_id=org_concept_id,
+                    aux_llm_calls=aux_llm_calls,
+                    llm_calls_log=llm_calls,
+                    record_llm_call=record_llm_call,
+                )
+            if repaired_calls:
+                preflight = self._preflight_tool_calls(
+                    repaired_calls,
+                    method_catalogue,
+                    user_namespace=env.user_namespace,
+                    selected_gmail_profile=gmail_profile,
+                    conversation_session_id=conversation_session_id,
+                )
+                if not preflight.errors:
+                    tool_calls = repaired_calls
+
+        if preflight.errors:
+            invocations = data.get("invocations", [])
+            tool_messages = data.get("tool_messages", [])
+            build_error = data.get("build_validation_error_result")
+            if callable(build_error):
+                error_result = build_error(
+                    preflight.errors,
+                    preflight.warnings,
+                    preflight.tool_unavailable,
+                    raw_tool_call=(
+                        data.get("response", "")
+                        if isinstance(data.get("response"), str)
+                        else str(data.get("response", ""))
+                    ),
+                    invocations_override=tuple(invocations),
+                    tool_messages_override=tuple(tool_messages),
+                )
+                return WorkflowActionResult(
+                    outputs={
+                        "tool_calls_validated": False,
+                        "orchestrator_result": error_result,
+                    }
+                )
+            return WorkflowActionResult(
+                outputs={"tool_calls_validated": False},
+                status="failed",
+                error="validation_failed: " + "; ".join(preflight.errors),
+            )
+
+        return WorkflowActionResult(
+            outputs={
+                "tool_calls_validated": True,
+                "tool_calls": tool_calls,
+            }
+        )
+
+    def _action_tool_calling_execute(self, request: Any) -> WorkflowActionResult:
+        """Execute a batch of tool calls against the MCP gateway.
+
+        Handles batch-capping, write-policy enforcement, payload defaults,
+        gateway invocation, and progress emission.  Mutates
+        ``augmented_context``, ``invocations``, and ``tool_messages`` in
+        the shared data dict.
+
+        Outputs:
+            tool_execution_complete (bool): Always True on success.
+            iteration_count (int): Total tools executed so far.
+        """
+        data = request.data
+        env = request.environment
+        llm_client = env.llm_client
+        prompt = data.get("prompt", "")
+        augmented_context = data["augmented_context"]
+        tool_calls = data.get("tool_calls") or []
+        method_catalogue = data.get("method_catalogue", {})
+        tool_categories = data.get("tool_categories", {})
+        invocations = data.setdefault("invocations", [])
+        tool_messages = data.setdefault("tool_messages", [])
+        iteration_count = data.get("iteration_count", 0)
+        allowed_write_tools: set = data.get("allowed_write_tools", set())
+        recent_user_prompts = data.get("recent_user_prompts", [])
+        gmail_profile = data.get("gmail_profile") or env.default_gmail_profile
+        conversation_session_id = data.get("conversation_session_id")
+        emit_progress = data.get("emit_progress")
+        check_cancellation = data.get("check_cancellation")
+        max_tool_invocations = env.max_tool_invocations or 8
+        batch_cap = max(1, int(getattr(self, "_tool_batch_cap", 4)))
+
+        # Emit tool_execute phase.
+        emit_phase_transition = data.get("emit_phase_transition")
+        if callable(emit_phase_transition) and iteration_count == 0:
+            emit_phase_transition(
+                self.PHASE_TOOL_EXECUTE,
+                extra={
+                    "tool_calls_cap": int(max_tool_invocations),
+                    "tool_batch_cap": int(batch_cap),
+                },
+            )
+
+        # Enforce invocation limit + batch cap.
+        remaining = max_tool_invocations - iteration_count
+        if remaining <= 0:
+            return WorkflowActionResult(
+                outputs={
+                    "tool_execution_complete": True,
+                    "iteration_count": iteration_count,
+                }
+            )
+        allowed_count = min(remaining, batch_cap)
+        remaining_tool_calls = []
+        if len(tool_calls) > allowed_count:
+            remaining_tool_calls = list(tool_calls[allowed_count:])
+            tool_calls = list(tool_calls[:allowed_count])
+
+        current_batch_size = len(tool_calls)
+
+        # Add assistant response to context (once per batch).
+        response_text = data.get("response", "")
+        if iteration_count == 0:
+            augmented_context.extend(
+                [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": response_text},
+                ]
+            )
+        else:
+            augmented_context.append(
+                {"role": "assistant", "content": data.get("current_response", response_text)}
+            )
+
+        # Cancellation check.
+        if callable(check_cancellation):
+            try:
+                check_cancellation()
+            except Exception:
+                return WorkflowActionResult(
+                    outputs={
+                        "tool_execution_complete": True,
+                        "iteration_count": iteration_count,
+                    },
+                    status="failed",
+                    error="cancelled",
+                )
+
+        write_policy_reason = data.get("write_policy_reason", "")
+
+        for tool_request in tool_calls:
+            iteration_count += 1
+            tool_name = tool_request.get(self._TOOL_FIELD)
+            payload = tool_request.get(self._PAYLOAD_FIELD) or {}
+            call_id = tool_request.get("_call_id")
+
+            if not isinstance(tool_name, str):
+                continue
+            if not isinstance(payload, dict):
+                payload = dict(payload) if isinstance(payload, Mapping) else {}
+            else:
+                payload = dict(payload)
+            tool_request[self._PAYLOAD_FIELD] = payload
+
+            # Write-policy gate.
+            tool_category = tool_categories.get(tool_name)
+            if tool_category == "write" and tool_name not in allowed_write_tools:
+                allowed_write_tools, write_policy_reason = (
+                    self._resolve_allowed_write_tools(
+                        prompt=prompt,
+                        requested_write_tools=[tool_name],
+                        recent_user_prompts=recent_user_prompts,
+                        llm_client=llm_client,
+                        model=env.model,
+                        user_namespace=env.user_namespace,
+                        auxiliary_system_prompt=env.auxiliary_system_prompt,
+                        trace=request.trace,
+                    )
+                )
+
+            if tool_category == "write" and tool_name not in allowed_write_tools:
+                message = (
+                    f"Blocked write tool {tool_name!r}: the user request appears read-only. "
+                    "If you intended to perform a write, restate the request explicitly."
+                )
+                tool_payload = self._format_tool_result(
+                    tool_name, None, None, "error", message
+                )
+                blocked_record: dict[str, Any] = {
+                    "tool": tool_name, "payload": dict(payload),
+                    "error": message, "blocked": True,
+                }
+                if write_policy_reason:
+                    blocked_record["write_policy_reason"] = write_policy_reason
+                if call_id:
+                    blocked_record["call_id"] = call_id
+                invocations.append(blocked_record)
+                if callable(emit_progress):
+                    emit_progress({
+                        "status": "tool_blocked", "tool": tool_name,
+                        "batch_size": current_batch_size,
+                        "tool_calls_done": iteration_count,
+                        "tool_calls_cap": int(max_tool_invocations),
+                        "tool_calls_remaining": max(0, max_tool_invocations - iteration_count),
+                        "call_id": call_id, "error": message,
+                    })
+                augmented_context.append({"role": "tool", "content": tool_payload})
+                tool_messages.append({"role": "tool", "content": tool_payload})
+                continue
+
+            try:
+                schema = self._tool_schema_for_name(tool_name, method_catalogue)
+                self._apply_payload_defaults(
+                    tool_name, payload, schema=schema,
+                    user_namespace=env.user_namespace,
+                    selected_gmail_profile=gmail_profile,
+                    conversation_session_id=conversation_session_id,
+                )
+
+                result = self._gateway.invoke(tool_name, payload)
+                tool_payload = self._format_tool_result(
+                    tool_name, result.payload, result.duration_ms, "ok"
+                )
+                result_summary = self._extract_result_summary(tool_name, result.payload)
+
+                invocation_record: dict[str, Any] = {"tool": tool_name, "payload": dict(payload)}
+                if call_id:
+                    invocation_record["call_id"] = call_id
+                invocations.append(invocation_record)
+
+                progress_info: dict[str, Any] = {
+                    "status": "tool_invoked", "tool": tool_name,
+                    "batch_size": current_batch_size,
+                    "tool_calls_done": iteration_count,
+                    "tool_calls_cap": int(max_tool_invocations),
+                    "tool_calls_remaining": max(0, max_tool_invocations - iteration_count),
+                    "call_id": call_id,
+                }
+                if result_summary:
+                    progress_info["result_summary"] = result_summary
+                if callable(emit_progress):
+                    emit_progress(progress_info)
+
+                self._logger.info(
+                    "[mcp_orchestrator] Tool invocation #%d: tool=%s",
+                    iteration_count, tool_name,
+                )
+            except Exception as exc:
+                tool_payload = self._format_tool_result(
+                    tool_name, None, None, "error", str(exc)
+                )
+                error_record: dict[str, Any] = {
+                    "tool": tool_name, "payload": dict(payload), "error": str(exc),
+                }
+                if call_id:
+                    error_record["call_id"] = call_id
+                invocations.append(error_record)
+                if callable(emit_progress):
+                    emit_progress({
+                        "status": "tool_failed", "tool": tool_name,
+                        "batch_size": current_batch_size,
+                        "tool_calls_done": iteration_count,
+                        "tool_calls_cap": int(max_tool_invocations),
+                        "tool_calls_remaining": max(0, max_tool_invocations - iteration_count),
+                        "call_id": call_id, "error": str(exc),
+                    })
+                self._logger.warning("[mcp_orchestrator] Tool %s failed: %s", tool_name, exc)
+
+            augmented_context.append({"role": "tool", "content": tool_payload})
+            tool_messages.append({"role": "tool", "content": tool_payload})
+
+        # Store remaining overflow tool calls for the backfill handler.
+        data["allowed_write_tools"] = allowed_write_tools
+        data["write_policy_reason"] = write_policy_reason
+        return WorkflowActionResult(
+            outputs={
+                "tool_execution_complete": True,
+                "iteration_count": iteration_count,
+                "remaining_tool_calls": remaining_tool_calls,
+            }
+        )
+
+    def _action_tool_calling_backfill(self, request: Any) -> WorkflowActionResult:
+        """Summariser LLM call after tool execution; detect chained tool calls.
+
+        If there are remaining overflow tool calls (from batch capping),
+        they are returned directly without an LLM call.  Otherwise a
+        summariser call asks the LLM to produce a user-facing response or
+        additional tool calls.
+
+        Outputs:
+            more_tool_calls (bool): True if chained tool calls were found.
+            tool_calls (list | None): New tool calls (if any).
+            tool_calls_present (bool): Same as more_tool_calls.
+            final_response (str | None): Final text response (if done).
+        """
+        data = request.data
+        env = request.environment
+        llm_client = env.llm_client
+        augmented_context = data["augmented_context"]
+        policy_state = data["policy_state"]
+        registry_snapshot = data.get("registry_snapshot")
+        user_concept_id = data.get("user_concept_id")
+        org_concept_id = data.get("org_concept_id")
+        model_for_stage = data["model_for_stage"]
+        record_llm_call = data["record_llm_call"]
+        aux_llm_calls = data["aux_llm_calls"]
+        llm_calls = data["llm_calls"]
+        iteration_count = data.get("iteration_count", 0)
+        max_tool_invocations = env.max_tool_invocations or 8
+
+        # If there are overflow tool calls from batch capping, return them
+        # directly as chained calls (no summariser LLM call needed).
+        remaining = data.get("remaining_tool_calls") or []
+        if remaining and iteration_count < max_tool_invocations:
+            return WorkflowActionResult(
+                outputs={
+                    "more_tool_calls": True,
+                    "tool_calls_present": True,
+                    "tool_calls_validated": False,
+                    "tool_calls": remaining,
+                    "remaining_tool_calls": [],
+                }
+            )
+
+        # Summariser LLM call.
+        follow_up_prompt = (
+            "Provide a final answer to the user now that the tool result is available. "
+            "If the tool failed, explain the error. "
+            "If you need to call another tool, you may do so."
+        )
+        summariser_model = model_for_stage("summariser")
+        current_response, summariser_model, _ = self._run_llm_with_fallbacks(
+            stage="summariser",
+            prompt=follow_up_prompt,
+            context=augmented_context,
+            default_client=llm_client,
+            default_model=summariser_model,
+            policy_state=policy_state,
+            registry_snapshot=registry_snapshot,
+            user_concept_id=user_concept_id,
+            org_concept_id=org_concept_id,
+            llm_calls_log=llm_calls,
+            aux_log=aux_llm_calls,
+            record_llm_call=record_llm_call,
+        )
+
+        # Check if the summariser response contains more tool calls.
+        if iteration_count < max_tool_invocations:
+            try:
+                new_tool_calls = self._extract_tool_calls(current_response)
+                if new_tool_calls:
+                    return WorkflowActionResult(
+                        outputs={
+                            "more_tool_calls": True,
+                            "tool_calls_present": True,
+                            "tool_calls_validated": False,
+                            "tool_calls": new_tool_calls,
+                            "current_response": current_response,
+                            "remaining_tool_calls": [],
+                        }
+                    )
+            except ToolCallParsingError:
+                # Parse error during chained extraction — treat as done
+                # rather than failing the whole flow.
+                self._logger.debug(
+                    "[mcp_orchestrator] Chained tool-call extraction failed; "
+                    "treating summariser response as final."
+                )
+
+        # Log if we hit the iteration limit.
+        if (
+            iteration_count >= max_tool_invocations
+            and self._is_json_action_response(current_response)
+        ):
+            self._logger.warning(
+                "[mcp_orchestrator] Reached max tool invocation limit (%d), "
+                "but LLM still wants to call tools.",
+                max_tool_invocations,
+            )
+            emit_progress = data.get("emit_progress")
+            if callable(emit_progress):
+                emit_progress({
+                    "status": "tool_limit_reached",
+                    "tool_calls_done": iteration_count,
+                    "tool_calls_cap": int(max_tool_invocations),
+                    "tool_calls_remaining": 0,
+                })
+
+        return WorkflowActionResult(
+            outputs={
+                "more_tool_calls": False,
+                "tool_calls_present": False,
+                "final_response": current_response,
+                "current_response": current_response,
             }
         )
 
@@ -6497,732 +7210,92 @@ class InternalMCPChatOrchestrator:
 
             return screen_text
 
-        # Phase 3 (JVNAUTOSCI-799): Attempt structured tool calling if available
-        use_structured = (
-            hasattr(llm_client, "generate_with_tools")
-            and hasattr(llm_client, "_should_use_structured_calling")
-            and llm_client._should_use_structured_calling()
-        )
-        if policy_state.enabled and policy_state.policy:
-            use_structured = True
-
-        response = ""
-
-        # JVNAUTOSCI-984: Emit tool_plan phase transition.
-        _emit_phase_transition_local(self.PHASE_TOOL_PLAN)
-
-        if use_structured:
-            self._logger.debug("[mcp_orchestrator] Using structured tool calling path")
-            try:
-                tool_call_model = _model_for_stage("tool_call")
-                if trace_enabled and trace is not None:
-                    llm_step = trace.start_step(
-                        "llm.generate_with_tools",
-                        inputs={
-                            "prompt": prompt,
-                            "model": tool_call_model or "default",
-                            "context_messages": len(augmented_context),
-                        },
-                    )
-                tool_definitions = self._convert_mcp_tools_to_structured_definitions()
-                llm_response, tool_call_model, _ = self._run_llm_with_tools_fallbacks(
-                    stage="tool_call",
-                    prompt=prompt,
-                    context=augmented_context,
-                    tool_definitions=tool_definitions,
-                    default_client=llm_client,
-                    default_model=tool_call_model,
-                    policy_state=policy_state,
-                    registry_snapshot=registry_snapshot,
-                    user_concept_id=user_concept_id,
-                    org_concept_id=org_concept_id,
-                    llm_calls_log=llm_calls,
-                    aux_log=aux_llm_calls,
-                    record_llm_call=_record_llm_call,
-                )
-
-                # Convert to legacy format for compatibility
-                if llm_response.tool_calls:
-                    # Have tool calls - will process via structured path
-                    response = llm_response.text_response or ""
-                    tool_calls = [
-                        {
-                            self._ACTION_FIELD: self._CALL_ACTION,
-                            self._TOOL_FIELD: tc.tool_name,
-                            self._PAYLOAD_FIELD: tc.payload,
-                            "_call_id": tc.call_id,  # Preserve for tracing (JVNAUTOSCI-803)
-                        }
-                        for tc in llm_response.tool_calls
-                    ]
-                    has_valid_tool_call = True
-                    self._logger.debug(
-                        "[mcp_orchestrator] Structured calling extracted %d tool(s)",
-                        len(tool_calls),
-                    )
-                else:
-                    # No tool calls - return text response
-                    response = llm_response.text_response
-                    tool_calls = None
-                    has_valid_tool_call = False
-                if trace_enabled and trace is not None:
-                    llm_step.finish_success(
-                        {
-                            "response_preview": (
-                                response[:800]
-                                if isinstance(response, str)
-                                else str(response)[:800]
-                            ),
-                            "tool_call_count": len(tool_calls or []),
-                            "model": tool_call_model or "default",
-                        }
-                    )
-            except Exception as exc:
-                if trace_enabled and trace is not None:
-                    try:
-                        llm_step.finish_failed(str(exc))
-                    except Exception:
-                        pass
-                self._logger.warning(
-                    "[mcp_orchestrator] Structured calling failed, falling back to legacy: %s",
-                    exc,
-                )
-                use_structured = False
-
-        if not use_structured:
-            # Legacy path: generate() returns text, parse tool calls from JSON
-            tool_call_model = _model_for_stage("tool_call")
-            if trace_enabled and trace is not None:
-                llm_step = trace.start_step(
-                    "llm.generate",
-                    inputs={
-                        "prompt": prompt,
-                        "model": tool_call_model or "default",
-                        "context_messages": len(augmented_context),
-                    },
-                )
-            response, tool_call_model, _ = self._run_llm_with_fallbacks(
-                stage="tool_call",
-                prompt=prompt,
-                context=augmented_context,
-                default_client=llm_client,
-                default_model=tool_call_model,
-                policy_state=policy_state,
-                registry_snapshot=registry_snapshot,
-                user_concept_id=user_concept_id,
-                org_concept_id=org_concept_id,
-                llm_calls_log=llm_calls,
-                aux_log=aux_llm_calls,
-                record_llm_call=_record_llm_call,
+        # ----------------------------------------------------------------
+        # JVNAUTOSCI-922 Phase 2: Route tool calling through the workflow
+        # engine instead of inline procedural code.
+        # ----------------------------------------------------------------
+        tool_calling_def = self._workflow_registry.get(TOOL_CALLING_WORKFLOW_ID)
+        if tool_calling_def is None:
+            # Safety fallback — should never happen since the workflow is
+            # registered by default, but return a plain LLM response.
+            self._logger.error(
+                "[mcp_orchestrator] tool_calling_workflow not found in registry"
             )
-            tool_calls = None  # Will be extracted below
-            has_valid_tool_call = False  # Will be set below
-            if trace_enabled and trace is not None:
-                llm_step.finish_success(
-                    {
-                        "response_preview": (
-                            response[:800]
-                            if isinstance(response, str)
-                            else str(response)[:800]
-                        ),
-                        "model": tool_call_model or "default",
-                    }
-                )
+            response_text = _maybe_apply_narration_routing(
+                "I attempted to use tools but the tool-calling workflow is not "
+                "available.  Please try again or report this issue."
+            )
+            result = OrchestratorResult(
+                response_text=response_text,
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=tuple(aux_llm_calls),
+                llm_calls=tuple(llm_calls),
+                llm_usage=_aggregate_usage_total(),
+                orchestrator_duration_ms=_orchestrator_duration_ms(),
+            )
+            _persist_trace(status="completed")
+            return result
 
-        # Detect JSON tool-call output for diagnostics (JVNAUTOSCI-698).
-        # Only warn if we fail to parse/execute it.
-        # Skip detection for structured path - it handles tool calls natively
-        tool_call_parse_error: ToolCallParsingError | None = None
-        interpretation: _ModelTurnInterpretation | None = None
+        tc_env = WorkflowEnvironment(
+            llm_client=llm_client,
+            gateway=self._gateway,
+            model=model,
+            user_namespace=user_namespace,
+            auxiliary_system_prompt=auxiliary_system_prompt,
+            max_tool_invocations=self._max_tool_invocations,
+            default_gmail_profile=gmail_profile or self._default_gmail_profile,
+        )
+        tc_data: dict[str, Any] = {
+            # Inputs.
+            "prompt": prompt,
+            "augmented_context": augmented_context,
+            "policy_state": policy_state,
+            "registry_snapshot": registry_snapshot,
+            "user_concept_id": user_concept_id,
+            "org_concept_id": org_concept_id,
+            "conversation_session_id": conversation_session_id,
+            "recent_user_prompts": recent_user_prompts,
+            "gmail_profile": gmail_profile or self._default_gmail_profile,
+            # Closures from run().
+            "model_for_stage": _model_for_stage,
+            "record_llm_call": _record_llm_call,
+            "emit_progress": _emit_progress_local,
+            "emit_phase_transition": _emit_phase_transition_local,
+            "check_cancellation": _check_cancellation_local,
+            "build_parse_error_result": _build_tool_call_parse_error_result,
+            "build_validation_error_result": _build_tool_call_validation_error_result,
+            # Shared mutable state.
+            "aux_llm_calls": aux_llm_calls,
+            "llm_calls": llm_calls,
+            "invocations": [],
+            "tool_messages": [],
+            # Inter-handler state initialised here; handlers override.
+            "iteration_count": 0,
+            "allowed_write_tools": set(),
+        }
 
-        if not use_structured:
-            interpretation = self._interpret_model_turn(response)
-            response = interpretation.response_text
-            is_json_action = interpretation.is_json_action
-            tool_calls = interpretation.tool_calls
-            tool_call_parse_error = interpretation.tool_call_parse_error
-            has_valid_tool_call = bool(tool_calls)
-        else:
-            # Structured path already extracted tool calls above
-            is_json_action = False  # Not relevant for structured calling
-
-        # Only attempt extraction if detection passed (has action="call_tool" structure)
-        # This prevents treating tool result JSON as tool call requests (JVNAUTOSCI-699)
-        if not has_valid_tool_call:
-            workflow_def = self._workflow_registry.get(MISSING_TOOL_CALL_WORKFLOW_ID)
-            workflow_context = {
-                "user_prompt": prompt,
-                "response_text": (
-                    response if isinstance(response, str) else str(response)
-                ),
-                "interpretation": interpretation,
-                "use_structured": use_structured,
-                "tool_call_parse_error": tool_call_parse_error,
-                "aux_llm_calls": aux_llm_calls,
-                "augmented_context": augmented_context,
-                "tool_calls": tool_calls,
-                "missing_tool_assessor": self._assess_missing_tool_call,
-                "extract_tool_calls_fn": self._extract_tool_calls,
-                "record_llm_call": _record_llm_call,
-                "classifier_model": _model_for_stage("classifier"),
-                "policy_state": policy_state,
-                "default_model": tool_call_model,
-                "registry_snapshot": registry_snapshot,
-                "user_concept_id": user_concept_id,
-                "org_concept_id": org_concept_id,
-            }
-            if workflow_def is not None:
-                recovery_model = _model_for_stage("tool_recovery")
-                env = WorkflowEnvironment(
-                    llm_client=llm_client,
-                    gateway=self._gateway,
-                    model=recovery_model,
-                    user_namespace=user_namespace,
-                    auxiliary_system_prompt=auxiliary_system_prompt,
-                    max_tool_invocations=self._max_tool_invocations,
-                    default_gmail_profile=gmail_profile or self._default_gmail_profile,
-                )
-                workflow_result = self._workflow_executor.run(
-                    workflow_def,
-                    environment=env,
-                    data=workflow_context,
-                    trace=trace if trace_enabled else None,
-                )
-                response = workflow_result.data.get("response_text", response)
-                interpretation = workflow_result.data.get(
-                    "interpretation", interpretation
-                )
-                tool_calls = workflow_result.data.get("tool_calls", tool_calls)
-                tool_call_parse_error = workflow_result.data.get(
-                    "tool_call_parse_error", tool_call_parse_error
-                )
-                has_valid_tool_call = bool(tool_calls)
-                if trace is not None:
-                    trace.metadata.setdefault("workflows", {})
-                    trace.metadata["workflows"]["missing_tool_call"] = {
-                        "final_state": workflow_result.final_state,
-                        "completed": workflow_result.completed,
-                        "error": workflow_result.error,
-                    }
-
-            if not has_valid_tool_call:
-                if tool_call_parse_error is not None:
-                    result = _build_tool_call_parse_error_result(
-                        tool_call_parse_error,
-                    )
-                    _persist_trace(status="completed")
-                    return result
-
-                response_text = _maybe_apply_narration_routing(response)
-                result = OrchestratorResult(
-                    response_text=response_text,
-                    extra_messages=(),
-                    tool_invocations=(),
-                    aux_llm_calls=tuple(aux_llm_calls),
-                    llm_calls=tuple(llm_calls),
-                    llm_usage=_aggregate_usage_total(),
-                    orchestrator_duration_ms=_orchestrator_duration_ms(),
-                )
-                _persist_trace(status="completed")
-                return result
-
-        assert tool_calls is not None
-        self._logger.debug("[mcp_orchestrator] Extracted tool requests: %s", tool_calls)
-
-        invocations: List[Mapping[str, Any]] = []
-        tool_messages: List[Mapping[str, Any]] = []
-        selected_gmail_profile = gmail_profile or self._default_gmail_profile
-
-        method_catalogue = self._gateway.describe_methods()
-        tool_categories: dict[str, str] = {}
-        for name, meta in method_catalogue.items():
-            if not isinstance(meta, Mapping):
-                continue
-            category = meta.get("category")
-            if isinstance(category, str):
-                tool_categories[name] = category
-
-        allowed_write_tools: set[str] = set()
-        write_policy_reason = ""
-
-        # Support chained tool calls up to max_tool_invocations limit (JVNAUTOSCI-699)
-        iteration_count = 0
-        current_response = response
-        # Track if we're in the first iteration with structured tool calls already extracted
-        first_iteration_structured = use_structured and has_valid_tool_call
-
-        # JVNAUTOSCI-984: Emit tool_execute phase transition before the tool loop.
-        _emit_phase_transition_local(
-            self.PHASE_TOOL_EXECUTE,
-            extra={
-                "tool_calls_cap": int(self._max_tool_invocations),
-                "tool_batch_cap": int(self._tool_batch_cap),
-            },
+        tc_result = self._workflow_executor.run(
+            tool_calling_def,
+            environment=tc_env,
+            data=tc_data,
+            trace=trace if trace_enabled else None,
         )
 
-        while iteration_count < self._max_tool_invocations:
-            # JVNAUTOSCI-1038: Check for cancellation at start of each tool iteration
-            _check_cancellation_local()
+        # Unpack the workflow result.
+        if tc_result.data.get("orchestrator_result") is not None:
+            # Handler produced a pre-built OrchestratorResult (error case).
+            _persist_trace(status="completed")
+            return tc_result.data["orchestrator_result"]
 
-            remaining_tool_calls: list[_ToolCallRequest] = []
+        final_response = tc_result.data.get("final_response", "")
+        if not isinstance(final_response, str):
+            final_response = str(final_response)
+        tool_messages = tc_result.data.get("tool_messages", [])
+        invocations = tc_result.data.get("invocations", [])
+        iteration_count = tc_result.data.get("iteration_count", 0)
 
-            # Skip extraction on first iteration if structured calling already did it
-            if first_iteration_structured:
-                first_iteration_structured = False  # Only skip once
-            else:
-                try:
-                    tool_calls = self._extract_tool_calls(current_response)
-                except ToolCallParsingError as exc:
-                    workflow_def = self._workflow_registry.get(
-                        MISSING_TOOL_CALL_WORKFLOW_ID
-                    )
-                    workflow_context = {
-                        "user_prompt": prompt,
-                        "response_text": (
-                            current_response
-                            if isinstance(current_response, str)
-                            else str(current_response)
-                        ),
-                        "interpretation": None,
-                        "use_structured": False,
-                        "tool_call_parse_error": exc,
-                        "aux_llm_calls": aux_llm_calls,
-                        "augmented_context": augmented_context,
-                        "tool_calls": None,
-                        "missing_tool_assessor": self._assess_missing_tool_call,
-                        "extract_tool_calls_fn": self._extract_tool_calls,
-                        "record_llm_call": _record_llm_call,
-                        "classifier_model": _model_for_stage("classifier"),
-                        "policy_state": policy_state,
-                        "default_model": tool_call_model,
-                        "user_concept_id": user_concept_id,
-                        "org_concept_id": org_concept_id,
-                    }
-                    if workflow_def is not None:
-                        recovery_model = _model_for_stage("tool_recovery")
-                        env = WorkflowEnvironment(
-                            llm_client=llm_client,
-                            gateway=self._gateway,
-                            model=recovery_model,
-                            user_namespace=user_namespace,
-                            auxiliary_system_prompt=auxiliary_system_prompt,
-                            max_tool_invocations=self._max_tool_invocations,
-                            default_gmail_profile=gmail_profile
-                            or self._default_gmail_profile,
-                        )
-                        workflow_result = self._workflow_executor.run(
-                            workflow_def,
-                            environment=env,
-                            data=workflow_context,
-                            trace=trace if trace_enabled else None,
-                        )
-                        current_response = workflow_result.data.get(
-                            "response_text", current_response
-                        )
-                        tool_calls = workflow_result.data.get("tool_calls")
-                        exc = workflow_result.data.get("tool_call_parse_error", exc)
-                    if tool_calls:
-                        # Resume loop with recovered tool calls
-                        pass
-                    else:
-                        result = _build_tool_call_parse_error_result(
-                            exc,
-                            invocations_override=tuple(invocations),
-                            tool_messages_override=tuple(tool_messages),
-                        )
-                        _persist_trace(status="completed")
-                        return result
-
-            if not tool_calls:
-                break
-
-            preflight = self._preflight_tool_calls(
-                cast(list[_ToolCallRequest], tool_calls),
-                method_catalogue,
-                user_namespace=user_namespace,
-                selected_gmail_profile=selected_gmail_profile,
-                conversation_session_id=conversation_session_id,
-            )
-            if preflight.warnings:
-                try:
-                    aux_llm_calls.append(
-                        {
-                            "type": "tool_call_coercions",
-                            "warnings": list(preflight.warnings),
-                        }
-                    )
-                except Exception:
-                    pass
-            if preflight.errors:
-                repaired_calls = None
-                if method_catalogue:
-                    repaired_calls = self._attempt_tool_call_repair(
-                        current_response=(
-                            current_response
-                            if isinstance(current_response, str)
-                            else str(current_response)
-                        ),
-                        errors=preflight.errors,
-                        tool_list=sorted(method_catalogue.keys()),
-                        llm_client=llm_client,
-                        policy_state=policy_state,
-                        default_model=tool_call_model,
-                        registry_snapshot=registry_snapshot,
-                        user_concept_id=user_concept_id,
-                        org_concept_id=org_concept_id,
-                        aux_llm_calls=aux_llm_calls,
-                        llm_calls_log=llm_calls,
-                        record_llm_call=_record_llm_call,
-                    )
-
-                if repaired_calls:
-                    preflight = self._preflight_tool_calls(
-                        repaired_calls,
-                        method_catalogue,
-                        user_namespace=user_namespace,
-                        selected_gmail_profile=selected_gmail_profile,
-                        conversation_session_id=conversation_session_id,
-                    )
-                    if not preflight.errors:
-                        tool_calls = repaired_calls
-
-            if preflight.errors:
-                result = _build_tool_call_validation_error_result(
-                    preflight.errors,
-                    preflight.warnings,
-                    preflight.tool_unavailable,
-                    raw_tool_call=(
-                        current_response
-                        if isinstance(current_response, str)
-                        else str(current_response)
-                    ),
-                    invocations_override=tuple(invocations),
-                    tool_messages_override=tuple(tool_messages),
-                )
-                _persist_trace(status="completed")
-                return result
-
-            # Enforce invocation limit across batched calls.
-            remaining = self._max_tool_invocations - iteration_count
-            if remaining <= 0:
-                break
-            batch_cap = max(1, int(getattr(self, "_tool_batch_cap", 4)))
-            allowed = min(remaining, batch_cap)
-            if len(tool_calls) > allowed:
-                remaining_tool_calls = cast(
-                    list[_ToolCallRequest], tool_calls[allowed:]
-                )
-                tool_calls = cast(list[_ToolCallRequest], tool_calls[:allowed])
-
-            current_batch_size = len(tool_calls)
-
-            # Add the assistant JSON response once per batch.
-            if iteration_count == 0:
-                augmented_context.extend(
-                    [
-                        {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": current_response},
-                    ]
-                )
-            else:
-                augmented_context.append(
-                    {"role": "assistant", "content": current_response}
-                )
-
-            for tool_request in tool_calls:
-                iteration_count += 1
-                tool_name = tool_request.get(self._TOOL_FIELD)
-                payload = tool_request.get(self._PAYLOAD_FIELD) or {}
-                call_id = tool_request.get("_call_id")
-
-                tool_step = None
-                if trace_enabled and trace is not None and isinstance(tool_name, str):
-                    tool_step = trace.start_step(
-                        f"tool.{tool_name}",
-                        inputs={
-                            "tool": tool_name,
-                            "call_id": call_id,
-                            "payload": (
-                                dict(payload)
-                                if isinstance(payload, Mapping)
-                                else payload
-                            ),
-                        },
-                    )
-
-                if not isinstance(tool_name, str):
-                    raise ToolCallParsingError(
-                        "Tool name must be a string.",
-                        raw_response=(
-                            current_response
-                            if isinstance(current_response, str)
-                            else str(current_response)
-                        ),
-                    )
-                if not isinstance(payload, MutableMapping):
-                    raise ToolCallParsingError(
-                        "Tool payload must be a JSON object.",
-                        raw_response=(
-                            current_response
-                            if isinstance(current_response, str)
-                            else str(current_response)
-                        ),
-                    )
-                if not isinstance(payload, dict):
-                    payload = dict(payload)
-                else:
-                    payload = dict(payload)
-                tool_request[self._PAYLOAD_FIELD] = payload
-
-                # Safety: block write-category tools unless user explicitly requested a Vontology mutation.
-                # This is intentionally enforced at execution time so it applies to both legacy and
-                # structured tool-calling paths, including retry flows.
-                tool_category = tool_categories.get(tool_name)
-                if tool_category == "write":
-                    if tool_name not in allowed_write_tools:
-                        allowed_write_tools, write_policy_reason = (
-                            self._resolve_allowed_write_tools(
-                                prompt=prompt,
-                                requested_write_tools=[tool_name],
-                                recent_user_prompts=recent_user_prompts,
-                                llm_client=llm_client,
-                                model=model,
-                                user_namespace=user_namespace,
-                                auxiliary_system_prompt=auxiliary_system_prompt,
-                                trace=trace if trace_enabled else None,
-                            )
-                        )
-
-                if tool_category == "write" and tool_name not in allowed_write_tools:
-                    message = (
-                        f"Blocked write tool {tool_name!r}: the user request appears read-only. "
-                        "If you intended to perform a write (Vontology changes or artefact storage), restate the request explicitly."
-                    )
-                    tool_payload = self._format_tool_result(
-                        tool_name, None, None, "error", message
-                    )
-
-                    blocked_record: dict[str, Any] = {
-                        "tool": tool_name,
-                        "payload": dict(payload),
-                        "error": message,
-                        "blocked": True,
-                    }
-                    if write_policy_reason:
-                        blocked_record["write_policy_reason"] = write_policy_reason
-                    if call_id:
-                        blocked_record["call_id"] = call_id
-                    invocations.append(blocked_record)
-
-                    if tool_step is not None:
-                        try:
-                            tool_step.finish_failed(message)
-                        except Exception:
-                            pass
-
-                    _emit_progress_local(
-                        {
-                            "status": "tool_blocked",
-                            "tool": tool_name,
-                            "batch_size": current_batch_size,
-                            "tool_calls_done": iteration_count,
-                            "tool_calls_cap": int(self._max_tool_invocations),
-                            "tool_calls_remaining": max(
-                                0, int(self._max_tool_invocations) - iteration_count
-                            ),
-                            "call_id": call_id,
-                            "error": message,
-                        }
-                    )
-
-                    augmented_context.append({"role": "tool", "content": tool_payload})
-                    tool_messages.append({"role": "tool", "content": tool_payload})
-                    continue
-
-                try:
-                    schema = self._tool_schema_for_name(tool_name, method_catalogue)
-                    self._apply_payload_defaults(
-                        tool_name,
-                        payload,
-                        schema=schema,
-                        user_namespace=user_namespace,
-                        selected_gmail_profile=selected_gmail_profile,
-                        conversation_session_id=conversation_session_id,
-                    )
-
-                    if tool_name.startswith("gmail_"):
-                        if payload.get("profile"):
-                            self._logger.info(
-                                "[mcp_orchestrator] Using gmail_profile=%s for tool=%s",
-                                payload.get("profile"),
-                                tool_name,
-                            )
-                        else:
-                            self._logger.warning(
-                                "[mcp_orchestrator] Gmail tool=%s invoked without profile and no default configured",
-                                tool_name,
-                            )
-                    else:
-                        if user_namespace and "namespace" in payload:
-                            self._logger.info(
-                                "[mcp_orchestrator] Using namespace=%s for tool=%s",
-                                payload.get("namespace"),
-                                tool_name,
-                            )
-                        elif user_namespace:
-                            self._logger.warning(
-                                "[mcp_orchestrator] No user_namespace available for tool=%s (unauthenticated request)",
-                                tool_name,
-                            )
-
-                    result = self._gateway.invoke(tool_name, payload)
-                    tool_payload = self._format_tool_result(
-                        tool_name, result.payload, result.duration_ms, "ok"
-                    )
-
-                    # Extract human-readable summary for progress display
-                    result_summary = self._extract_result_summary(
-                        tool_name, result.payload
-                    )
-
-                    # Extract call_id for tracing (JVNAUTOSCI-803)
-                    invocation_record = {"tool": tool_name, "payload": dict(payload)}
-                    if call_id:
-                        invocation_record["call_id"] = call_id
-                    invocations.append(invocation_record)
-
-                    progress_info: dict[str, Any] = {
-                        "status": "tool_invoked",
-                        "tool": tool_name,
-                        "batch_size": current_batch_size,
-                        "tool_calls_done": iteration_count,
-                        "tool_calls_cap": int(self._max_tool_invocations),
-                        "tool_calls_remaining": max(
-                            0, int(self._max_tool_invocations) - iteration_count
-                        ),
-                        "call_id": call_id,
-                    }
-                    if result_summary:
-                        progress_info["result_summary"] = result_summary
-                    _emit_progress_local(progress_info)
-
-                    if tool_step is not None:
-                        try:
-                            tool_step.finish_success(
-                                {
-                                    "status": "ok",
-                                    "duration_ms": result.duration_ms,
-                                }
-                            )
-                        except Exception:
-                            pass
-
-                    log_msg = (
-                        "[mcp_orchestrator] Tool invocation #%d: tool=%s, model=%s"
-                        + (", call_id=%s" if call_id else "")
-                    )
-                    log_args = [iteration_count, tool_name, model or "default"]
-                    if call_id:
-                        log_args.append(call_id)
-                    self._logger.info(log_msg, *log_args)
-                except (
-                    Exception
-                ) as exc:  # pragma: no cover - error handling path validated separately
-                    tool_payload = self._format_tool_result(
-                        tool_name, None, None, "error", str(exc)
-                    )
-
-                    # Extract call_id for error tracing (JVNAUTOSCI-803)
-                    error_record = {
-                        "tool": tool_name,
-                        "payload": dict(payload),
-                        "error": str(exc),
-                    }
-                    if call_id:
-                        error_record["call_id"] = call_id
-                    invocations.append(error_record)
-
-                    _emit_progress_local(
-                        {
-                            "status": "tool_failed",
-                            "tool": tool_name,
-                            "batch_size": current_batch_size,
-                            "tool_calls_done": iteration_count,
-                            "tool_calls_cap": int(self._max_tool_invocations),
-                            "tool_calls_remaining": max(
-                                0, int(self._max_tool_invocations) - iteration_count
-                            ),
-                            "call_id": call_id,
-                            "error": str(exc),
-                        }
-                    )
-
-                    if tool_step is not None:
-                        try:
-                            tool_step.finish_failed(str(exc))
-                        except Exception:
-                            pass
-
-                    log_msg = "[mcp_orchestrator] Tool %s failed: %s" + (
-                        " (call_id=%s)" if call_id else ""
-                    )
-                    log_args = [tool_name, exc]
-                    if call_id:
-                        log_args.append(call_id)
-                    self._logger.warning(log_msg, *log_args)
-
-                augmented_context.append({"role": "tool", "content": tool_payload})
-                tool_messages.append({"role": "tool", "content": tool_payload})
-
-            # If the model provided more tool calls than the batch cap, execute them
-            # (up to max_tool_invocations) before asking for a final answer. This
-            # prevents the assistant from prematurely narrating completion after only
-            # the first batch executes (JVNAUTOSCI-941).
-            if remaining_tool_calls and iteration_count < self._max_tool_invocations:
-                current_response = json.dumps(remaining_tool_calls)
-                continue
-
-            follow_up_prompt = (
-                "Provide a final answer to the user now that the tool result is available. "
-                "If the tool failed, explain the error. "
-                "If you need to call another tool, you may do so."
-            )
-            summariser_model = _model_for_stage("summariser")
-            current_response, summariser_model, _ = self._run_llm_with_fallbacks(
-                stage="summariser",
-                prompt=follow_up_prompt,
-                context=augmented_context,
-                default_client=llm_client,
-                default_model=summariser_model,
-                policy_state=policy_state,
-                registry_snapshot=registry_snapshot,
-                user_concept_id=user_concept_id,
-                org_concept_id=org_concept_id,
-                llm_calls_log=llm_calls,
-                aux_log=aux_llm_calls,
-                record_llm_call=_record_llm_call,
-            )
-
-        # Log if we hit the iteration limit
-        if (
-            iteration_count >= self._max_tool_invocations
-            and self._is_json_action_response(current_response)
-        ):
-            self._logger.warning(
-                "[mcp_orchestrator] Reached max tool invocation limit (%d), "
-                "but LLM still wants to call tools. Returning current response.",
-                self._max_tool_invocations,
-            )
-            # JVNAUTOSCI-984: Emit progress update for tool limit reached.
-            _emit_progress_local(
-                {
-                    "status": "tool_limit_reached",
-                    "tool_calls_done": iteration_count,
-                    "tool_calls_cap": int(self._max_tool_invocations),
-                    "tool_calls_remaining": 0,
-                }
-            )
-
-        final_response_text = _maybe_apply_narration_routing(current_response)
+        final_response_text = _maybe_apply_narration_routing(final_response)
         final_response_text = _maybe_apply_critic(
             final_response_text, tool_messages_for_critic=tool_messages
         )

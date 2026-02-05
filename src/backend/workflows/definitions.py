@@ -290,44 +290,45 @@ def build_write_tool_policy_workflow() -> WorkflowDefinition:
 def build_tool_calling_workflow() -> WorkflowDefinition:
     """Workflow wrapping the standard tool-calling pipeline.
 
-    States: plan → validate → execute → backfill → completed/failed.
+    Flow::
+
+        plan  ──[tool_calls_present]──▸  validate
+          │                                  │
+          └──[direct_response]──▸ completed   ├──[tool_calls_present]──▸ execute ──▸ backfill
+                                              │                                       │
+                                              └──[no tools]──▸ completed               ├──[more_tool_calls]──▸ validate  (loop)
+                                                                                       └──[done]──▸ completed
 
     This expresses the same logic currently inline in ``orchestrator.run()``
-    (LLM call → missing-tool-call recovery → tool execution → screen
-    backfill) as a declarative workflow so that it can participate in
+    (LLM call → missing-tool-call recovery → preflight → tool execution →
+    screen backfill) as a declarative workflow so that it can participate in
     workflow selection alongside narration, todo refresh, etc.
 
-    See JVNAUTOSCI-922 Phase 2.1.
+    The execute handler processes **one batch** of tool calls (respecting
+    ``tool_batch_cap``).  Overflow batches and chained tool calls from the
+    backfill LLM response re-enter via ``validate``.
+
+    See JVNAUTOSCI-922 Phase 2.
     """
     plan = WorkflowStateSpec(
         state_id="plan",
         actions=(
             WorkflowActionInvocation(
                 action_id="tool_calling.plan",
-                description="Generate tool calls via LLM.",
+                description="Generate tool calls via LLM (structured or legacy).",
             ),
         ),
         transitions=(
             _transition_if_flag_set(
                 "tool_calls_present",
-                to_state="execute",
+                to_state="validate",
                 reason="tool_calls_found",
             ),
-            _transition_if_flag_set(
-                "needs_validation",
-                to_state="validate",
-                reason="needs_missing_tool_call_recovery",
-            ),
-            # No tool calls found and none expected — direct response
-            _transition_if_flag_set(
-                "direct_response",
-                to_state="completed",
-                reason="direct_response",
-            ),
+            # No tool calls found (or error with pre-built result) → done
             WorkflowTransitionSpec(
-                to_state="validate",
+                to_state="completed",
                 condition=lambda ctx: True,
-                reason="default_to_validate",
+                reason="direct_response",
             ),
         ),
     )
@@ -337,20 +338,20 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
         actions=(
             WorkflowActionInvocation(
                 action_id="tool_calling.validate",
-                description="Recover missing or malformed tool calls.",
+                description="Preflight validation, coercion, and repair of tool calls.",
             ),
         ),
         transitions=(
             _transition_if_flag_set(
-                "tool_calls_present",
+                "tool_calls_validated",
                 to_state="execute",
-                reason="tool_calls_recovered",
+                reason="validation_passed",
             ),
-            # No tool calls even after recovery — return direct response
+            # Validation error → completed with error result
             WorkflowTransitionSpec(
                 to_state="completed",
                 condition=lambda ctx: True,
-                reason="no_tool_calls",
+                reason="validation_error",
             ),
         ),
     )
@@ -360,19 +361,16 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
         actions=(
             WorkflowActionInvocation(
                 action_id="tool_calling.execute",
-                description="Execute extracted tool calls against MCP gateway.",
+                description="Execute tool-call batch against MCP gateway.",
             ),
         ),
         transitions=(
-            _transition_if_flag_set(
-                "tool_execution_complete",
-                to_state="backfill",
-                reason="tools_executed",
-            ),
+            # Execute always transitions to backfill (even on errors, the
+            # backfill summariser can explain what went wrong).
             WorkflowTransitionSpec(
-                to_state="failed",
+                to_state="backfill",
                 condition=lambda ctx: True,
-                reason="tool_execution_error",
+                reason="batch_executed",
             ),
         ),
     )
@@ -382,10 +380,16 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
         actions=(
             WorkflowActionInvocation(
                 action_id="tool_calling.backfill",
-                description="Generate user-facing response incorporating tool results.",
+                description="Summariser LLM call; detect chained tool calls.",
             ),
         ),
         transitions=(
+            # Chained tool calls from the summariser response
+            _transition_if_flag_set(
+                "more_tool_calls",
+                to_state="validate",
+                reason="chained_tool_calls",
+            ),
             WorkflowTransitionSpec(
                 to_state="completed",
                 condition=lambda ctx: True,
