@@ -4962,6 +4962,40 @@ def _check_placeholder_description_output_schema() -> Schema:
 # =============================================================================
 
 
+def _workflow_list_definitions(**kwargs):
+    """List available workflow definitions."""
+    from ...workflows.durable.registry_factory import build_durable_workflow_registry
+
+    limit = min(int(kwargs.get("limit", 50)), 200)
+
+    try:
+        registry = build_durable_workflow_registry()
+        ids = sorted(list(registry.all_workflow_ids()))
+
+        # Enriched descriptions
+        definitions = []
+        for wid in ids[:limit]:
+            defn = registry.get(wid)
+            definitions.append(
+                {
+                    "workflow_id": wid,
+                    "description": defn.purpose if defn.purpose else "",
+                    "initial_state": defn.initial_state if defn else "",
+                }
+            )
+
+        return {
+            "success": True,
+            "definitions": definitions,
+            "count": len(definitions),
+        }
+    except Exception as e:
+        return make_error_response(
+            "list_failed",
+            f"Failed to list workflow definitions: {e}",
+        )
+
+
 def _workflow_create_instance(**kwargs):
     """Create a new durable workflow instance."""
     from ...workflows.durable import WorkflowInstanceManager
@@ -8874,6 +8908,24 @@ def build_default_catalogue() -> MethodCatalogue:
         # =============================================================================
         # Durable Workflow Instance Tools (JVNAUTOSCI-1075)
         # =============================================================================
+        MethodDefinition(
+            name="workflow_list_definitions",
+            handler=_workflow_list_definitions,
+            input_schema=Schema(
+                required={},
+                optional={"limit": int},
+                allow_unknown=True,
+                description="List available workflow definitions.",
+            ),
+            output_schema=Schema(
+                required={"success": bool, "definitions": list, "count": int},
+                optional={"error": str, "error_code": str},
+                allow_unknown=True,
+                description="List of workflow definitions.",
+            ),
+            category="read",
+            description="List available workflow definitions (IDs, descriptions) that can be instantiated.",
+        ),
         MethodDefinition(
             name="workflow_create_instance",
             handler=_workflow_create_instance,

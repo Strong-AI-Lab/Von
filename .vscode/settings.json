@@ -285,6 +285,8 @@
   "files.trimTrailingWhitespace": true,
   "chat.agent.maxRequests": 100,
   "atlascode.jira.enabled": true,
+  "atlascode.rovodev.enabled": false,
+  "atlascode.rovodev.showEntitlementNotifications": false,
   "typescript.inlayHints.enumMemberValues.enabled": true,
   "git.pruneOnFetch": true,
   "terminal.integrated.showEnvironmentContributions": false,

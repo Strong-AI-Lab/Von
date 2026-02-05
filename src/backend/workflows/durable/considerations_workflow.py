@@ -315,14 +315,13 @@ def _handle_prepare_batch(request: WorkflowActionRequest) -> WorkflowActionResul
         return WorkflowActionResult(status="failed", error=str(e))
 
 
-async def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResult:
-    """Generate and save text for each concept in batch."""
-    # Note: Using async because LLM calls are async usually, but if LLMClient is sync, we wrap or call directly.
-    # The DurableWorkflowWorker supports async handlers if they return Coroutine.
-    # We will assume synchronous LLMClient usage for now if not async.
-    # Actually, `get_llm_client().generate` is typically synchronous in this codebase?
-    # Let's check imports. `from ...services.llm_service import get_llm_client`.
-    # Codebase seems to use sync wrappers often.
+def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResult:
+    """Generate and save considerations text for each concept in the current batch.
+
+    Uses the synchronous LLMClient.generate() API. If async LLM calls
+    are needed in future, make the ActionRegistry.execute() path async-aware
+    first (see JVNAUTOSCI-803).
+    """
 
     try:
         ctx = request.data
@@ -426,7 +425,7 @@ def register_considerations_actions(registry: ActionRegistry) -> None:
         ActionSpec(
             "considerations.process_batch", _handle_process_batch, side_effects="write"
         )
-    )  # Async supported?
+    )
     registry.register(
         ActionSpec("considerations.finalise", _handle_finalise, side_effects="none")
     )
