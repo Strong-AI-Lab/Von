@@ -21,6 +21,7 @@ from .models import (
     WorkflowSchedule,
     ScheduleType,
 )
+from .vontology_schedule_repository import VontologyScheduleRepository
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ class WorkflowInstanceManager:
 
     def __init__(self, lock_ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS) -> None:
         self._lock_ttl = lock_ttl_seconds
+        self._schedule_repo = VontologyScheduleRepository()
         _ensure_indexes()
 
     def _get_instances_collection(self) -> Collection | None:
@@ -750,17 +752,13 @@ class WorkflowInstanceManager:
         Raises:
             RuntimeError: If database is unavailable.
         """
-        coll = self._get_schedules_collection()
-        if coll is None:
-            raise RuntimeError("Database unavailable for schedule creation")
-
-        coll.insert_one(schedule.to_doc())
-        logger.info(
-            "[durable_workflow] Created schedule %s for workflow %s",
-            schedule.schedule_id,
-            schedule.workflow_id,
-        )
-        return schedule.schedule_id
+        try:
+            return self._schedule_repo.create_schedule(schedule)
+        except Exception as e:
+            logger.error(
+                f"[durable_workflow] Failed to create schedule in Vontology: {e}"
+            )
+            raise RuntimeError(f"Schedule creation failed: {e}")
 
     def get_schedule(self, schedule_id: str) -> WorkflowSchedule | None:
         """Load a schedule by ID.
@@ -771,12 +769,7 @@ class WorkflowInstanceManager:
         Returns:
             WorkflowSchedule if found, None otherwise.
         """
-        coll = self._get_schedules_collection()
-        if coll is None:
-            return None
-
-        doc = coll.find_one({"schedule_id": schedule_id})
-        return WorkflowSchedule.from_doc(doc) if doc else None
+        return self._schedule_repo.get_schedule(schedule_id)
 
     def list_schedules(
         self,
@@ -795,18 +788,11 @@ class WorkflowInstanceManager:
         Returns:
             List of matching schedules.
         """
-        coll = self._get_schedules_collection()
-        if coll is None:
-            return []
-
-        query: dict[str, Any] = {}
-        if user_id:
-            query["user_id"] = user_id
-        if enabled_only:
-            query["enabled"] = True
-
-        cursor = coll.find(query).sort("created_at", -1).limit(limit)
-        return [WorkflowSchedule.from_doc(doc) for doc in cursor]
+        return self._schedule_repo.list_schedules(
+            user_id=user_id,
+            enabled_only=enabled_only,
+            limit=limit,
+        )
 
     def find_due_schedules(self, limit: int = 100) -> list[WorkflowSchedule]:
         """Find schedules that are due to run.
@@ -817,19 +803,7 @@ class WorkflowInstanceManager:
         Returns:
             List of schedules where next_run_at <= now.
         """
-        coll = self._get_schedules_collection()
-        if coll is None:
-            return []
-
-        now = datetime.now(timezone.utc)
-        cursor = coll.find(
-            {
-                "enabled": True,
-                "next_run_at": {"$lte": now},
-            }
-        ).limit(limit)
-
-        return [WorkflowSchedule.from_doc(doc) for doc in cursor]
+        return self._schedule_repo.find_due_schedules(limit=limit)
 
     def update_schedule_after_run(
         self,
@@ -846,26 +820,10 @@ class WorkflowInstanceManager:
         Returns:
             True if updated.
         """
-        coll = self._get_schedules_collection()
-        if coll is None:
-            return False
-
-        now = datetime.now(timezone.utc)
-        update: dict[str, Any] = {
-            "$set": {
-                "last_run_at": now,
-                "updated_at": now,
-            }
-        }
-        if next_run_at is not None:
-            update["$set"]["next_run_at"] = next_run_at
-        else:
-            # Disable one-time schedules after they run
-            update["$set"]["enabled"] = False
-            update["$set"]["next_run_at"] = None
-
-        result = coll.update_one({"schedule_id": schedule_id}, update)
-        return result.modified_count > 0
+        return self._schedule_repo.update_schedule_after_run(
+            schedule_id=schedule_id,
+            next_run_at=next_run_at,
+        )
 
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> bool:
         """Enable or disable a schedule.
@@ -877,20 +835,7 @@ class WorkflowInstanceManager:
         Returns:
             True if updated.
         """
-        coll = self._get_schedules_collection()
-        if coll is None:
-            return False
-
-        result = coll.update_one(
-            {"schedule_id": schedule_id},
-            {
-                "$set": {
-                    "enabled": enabled,
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            },
-        )
-        return result.modified_count > 0
+        return self._schedule_repo.set_schedule_enabled(schedule_id, enabled)
 
     def delete_schedule(self, schedule_id: str) -> bool:
         """Delete a schedule.
@@ -901,11 +846,9 @@ class WorkflowInstanceManager:
         Returns:
             True if deleted.
         """
-        coll = self._get_schedules_collection()
-        if coll is None:
-            return False
-
-        result = coll.delete_one({"schedule_id": schedule_id})
-        if result.deleted_count > 0:
-            logger.info("[durable_workflow] Deleted schedule %s", schedule_id)
-        return result.deleted_count > 0
+        result = self._schedule_repo.delete_schedule(schedule_id)
+        if result:
+            logger.info(
+                "[durable_workflow] Deleted schedule %s (Vontology)", schedule_id
+            )
+        return result
