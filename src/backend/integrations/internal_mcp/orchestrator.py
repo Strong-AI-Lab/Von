@@ -44,12 +44,15 @@ from ...workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
     MISSING_TOOL_CALL_WORKFLOW_ID,
+    TOOL_CALLING_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
-    register_default_workflows,
 )
 from ...workflows.engine import WorkflowExecutor
-from ...workflows.workflow_registry import WorkflowRegistry
 from ...workflows.workflow_selector import WorkflowSelector
+from ...workflows.durable.registry_factory import (
+    build_workflow_registry,
+    build_durable_action_registry,
+)
 
 from src.backend.workflows.write_tool_policy import (
     compute_allowed_write_tools,
@@ -477,8 +480,9 @@ class InternalMCPChatOrchestrator:
         )
 
         self._prompt_templates = PromptTemplateService()
-        self._workflow_registry = WorkflowRegistry()
-        register_default_workflows(self._workflow_registry)
+        # Unified registries: single source of truth for both conversation-turn
+        # and durable workflows/actions.  See JVNAUTOSCI-922 Phase 1.
+        self._workflow_registry = build_workflow_registry()
         self._action_registry = self._build_action_registry()
         self._workflow_executor = WorkflowExecutor(registry=self._action_registry)
         self._workflow_selector = WorkflowSelector(
@@ -486,8 +490,8 @@ class InternalMCPChatOrchestrator:
             prompt_service=self._prompt_templates,
             verdict_mapping={
                 "plain_response": CHAT_ASSISTANT_WORKFLOW_ID,
-                "tool_seeking": CHAT_ASSISTANT_WORKFLOW_ID,
-                "summarisation": CHAT_ASSISTANT_WORKFLOW_ID,
+                "tool_seeking": TOOL_CALLING_WORKFLOW_ID,
+                "summarisation": TOOL_CALLING_WORKFLOW_ID,
                 "narration": CHAT_NARRATION_WORKFLOW_ID,
             },
             classifier_prompt_ids=self._TURN_SELECTOR_PROMPTS,
@@ -630,7 +634,19 @@ class InternalMCPChatOrchestrator:
         return max(min_value, min(max_value, int(value)))
 
     def _build_action_registry(self) -> ActionRegistry:
-        registry = ActionRegistry()
+        """Build a unified action registry for all workflow execution.
+
+        Starts from the durable action registry (rag_sync, considerations)
+        and adds conversation-turn handlers (narration, missing-tool-call,
+        write-policy, todo-refresh).  The result is a single registry usable
+        by both WorkflowExecutor and DurableWorkflowExecutor.
+
+        See JVNAUTOSCI-922 Phase 1.1 — unified ActionRegistry.
+        """
+        # Start with durable handlers as the base.
+        registry = build_durable_action_registry()
+
+        # Conversation-turn handlers — these reference ``self`` methods.
         registry.register(
             ActionSpec(
                 action_id="missing_tool_call.assess",
@@ -675,7 +691,7 @@ class InternalMCPChatOrchestrator:
                 description="Attach narration output to presenter channels.",
             )
         )
-        # Stubs for workflow catalogue completeness (Issue 7)
+        # Stubs for workflow catalogue completeness
         for action_id in (
             "todo_refresh.check_cache",
             "todo_refresh.fetch_gmail",
@@ -698,6 +714,22 @@ class InternalMCPChatOrchestrator:
                 description="Decide which write-category tools are allowed for this prompt.",
             )
         )
+        # Tool-calling workflow actions (JVNAUTOSCI-922 Phase 2.1).
+        # These stubs will be replaced with real implementations that
+        # extract the corresponding procedural blocks from run().
+        for action_id in (
+            "tool_calling.plan",
+            "tool_calling.validate",
+            "tool_calling.execute",
+            "tool_calling.backfill",
+        ):
+            registry.register(
+                ActionSpec(
+                    action_id=action_id,
+                    handler=self._noop_action,
+                    description=f"Stub for {action_id}; wired in JVNAUTOSCI-922 Phase 2.",
+                )
+            )
         return registry
 
     @staticmethod

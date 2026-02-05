@@ -52,10 +52,17 @@ class ActionSpec:
 
 
 class ActionRegistry:
-    """Registry of declarative workflow actions."""
+    """Registry of declarative workflow actions.
+
+    Supports both strict registration (raises on duplicate) and idempotent
+    registration via ``register_if_absent``.  Use ``merge`` to combine
+    registries from different subsystems (e.g. orchestrator + durable).
+    """
 
     def __init__(self) -> None:
         self._actions: Dict[str, ActionSpec] = {}
+
+    # --- registration -------------------------------------------------------
 
     def register(self, spec: ActionSpec) -> None:
         if not isinstance(spec, ActionSpec):
@@ -64,8 +71,43 @@ class ActionRegistry:
             raise ValueError(f"action already registered: {spec.action_id}")
         self._actions[spec.action_id] = spec
 
+    def register_if_absent(self, spec: ActionSpec) -> bool:
+        """Register *spec* only if its ``action_id`` is not already present.
+
+        Returns True if the action was registered, False if skipped.
+        """
+        if not isinstance(spec, ActionSpec):
+            raise TypeError("spec must be an ActionSpec")
+        if spec.action_id in self._actions:
+            return False
+        self._actions[spec.action_id] = spec
+        return True
+
+    def merge(self, other: "ActionRegistry", *, overwrite: bool = False) -> None:
+        """Merge all actions from *other* into this registry.
+
+        Args:
+            other: Source registry whose actions will be copied in.
+            overwrite: If True, existing actions with the same ID are
+                replaced.  If False (default), existing actions are kept
+                and duplicates from *other* are silently skipped.
+        """
+        for action_id, spec in other._actions.items():
+            if overwrite or action_id not in self._actions:
+                self._actions[action_id] = spec
+
+    # --- lookup -------------------------------------------------------------
+
     def get(self, action_id: str) -> ActionSpec | None:
         return self._actions.get(action_id)
+
+    def has(self, action_id: str) -> bool:
+        """Return True if *action_id* is registered."""
+        return action_id in self._actions
+
+    def all_action_ids(self) -> list[str]:
+        """Return all registered action IDs."""
+        return list(self._actions.keys())
 
     def execute(
         self,

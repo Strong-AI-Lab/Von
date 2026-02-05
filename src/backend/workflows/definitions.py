@@ -18,6 +18,7 @@ CHAT_NARRATION_WORKFLOW_ID = "#V#chat_narration_workflow"
 CHAT_ASSISTANT_WORKFLOW_ID = "#V#chat_assistant_workflow"
 TODO_REFRESH_WORKFLOW_ID = "#V#todo_refresh_workflow"
 WRITE_TOOL_POLICY_WORKFLOW_ID = "#V#write_tool_policy_workflow"
+TOOL_CALLING_WORKFLOW_ID = "#V#tool_calling_workflow"
 
 
 def _transition_if_flag_set(
@@ -286,6 +287,132 @@ def build_write_tool_policy_workflow() -> WorkflowDefinition:
     )
 
 
+def build_tool_calling_workflow() -> WorkflowDefinition:
+    """Workflow wrapping the standard tool-calling pipeline.
+
+    States: plan → validate → execute → backfill → completed/failed.
+
+    This expresses the same logic currently inline in ``orchestrator.run()``
+    (LLM call → missing-tool-call recovery → tool execution → screen
+    backfill) as a declarative workflow so that it can participate in
+    workflow selection alongside narration, todo refresh, etc.
+
+    See JVNAUTOSCI-922 Phase 2.1.
+    """
+    plan = WorkflowStateSpec(
+        state_id="plan",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="tool_calling.plan",
+                description="Generate tool calls via LLM.",
+            ),
+        ),
+        transitions=(
+            _transition_if_flag_set(
+                "tool_calls_present",
+                to_state="execute",
+                reason="tool_calls_found",
+            ),
+            _transition_if_flag_set(
+                "needs_validation",
+                to_state="validate",
+                reason="needs_missing_tool_call_recovery",
+            ),
+            # No tool calls found and none expected — direct response
+            _transition_if_flag_set(
+                "direct_response",
+                to_state="completed",
+                reason="direct_response",
+            ),
+            WorkflowTransitionSpec(
+                to_state="validate",
+                condition=lambda ctx: True,
+                reason="default_to_validate",
+            ),
+        ),
+    )
+
+    validate = WorkflowStateSpec(
+        state_id="validate",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="tool_calling.validate",
+                description="Recover missing or malformed tool calls.",
+            ),
+        ),
+        transitions=(
+            _transition_if_flag_set(
+                "tool_calls_present",
+                to_state="execute",
+                reason="tool_calls_recovered",
+            ),
+            # No tool calls even after recovery — return direct response
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda ctx: True,
+                reason="no_tool_calls",
+            ),
+        ),
+    )
+
+    execute = WorkflowStateSpec(
+        state_id="execute",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="tool_calling.execute",
+                description="Execute extracted tool calls against MCP gateway.",
+            ),
+        ),
+        transitions=(
+            _transition_if_flag_set(
+                "tool_execution_complete",
+                to_state="backfill",
+                reason="tools_executed",
+            ),
+            WorkflowTransitionSpec(
+                to_state="failed",
+                condition=lambda ctx: True,
+                reason="tool_execution_error",
+            ),
+        ),
+    )
+
+    backfill = WorkflowStateSpec(
+        state_id="backfill",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="tool_calling.backfill",
+                description="Generate user-facing response incorporating tool results.",
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda ctx: True,
+                reason="backfill_done",
+            ),
+        ),
+    )
+
+    completed = WorkflowStateSpec(state_id="completed", terminal=True)
+    failed = WorkflowStateSpec(state_id="failed", terminal=True)
+
+    return WorkflowDefinition(
+        workflow_id=TOOL_CALLING_WORKFLOW_ID,
+        initial_state="plan",
+        states={
+            "plan": plan,
+            "validate": validate,
+            "execute": execute,
+            "backfill": backfill,
+            "completed": completed,
+            "failed": failed,
+        },
+        termination_states=("completed", "failed"),
+        purpose="Standard tool-calling pipeline: plan → validate → execute → backfill.",
+    )
+
+
 def register_default_workflows(registry: WorkflowRegistry) -> None:
     for registration in (
         WorkflowRegistration(
@@ -324,6 +451,12 @@ def register_default_workflows(registry: WorkflowRegistry) -> None:
             workflow_id=WRITE_TOOL_POLICY_WORKFLOW_ID,
             definition=build_write_tool_policy_workflow(),
             purpose="Write-tool policy decision pipeline.",
+            source="built_in",
+        ),
+        WorkflowRegistration(
+            workflow_id=TOOL_CALLING_WORKFLOW_ID,
+            definition=build_tool_calling_workflow(),
+            purpose="Standard tool-calling pipeline.",
             source="built_in",
         ),
     ):

@@ -27,9 +27,27 @@ class WorkflowRegistry:
             raise ValueError(f"workflow already registered: {registration.workflow_id}")
         self._workflows[registration.workflow_id] = registration
 
+    def register_if_absent(self, registration: WorkflowRegistration) -> bool:
+        """Register *registration* only if its workflow_id is not present.
+
+        Returns True if registered, False if skipped.
+        """
+        if registration.workflow_id in self._workflows:
+            return False
+        self._workflows[registration.workflow_id] = registration
+        return True
+
+    def has(self, workflow_id: str) -> bool:
+        """Return True if *workflow_id* is registered."""
+        return workflow_id in self._workflows
+
     def get(self, workflow_id: str) -> Optional[WorkflowDefinition]:
         entry = self._workflows.get(workflow_id)
         return entry.definition if entry else None
+
+    def get_registration(self, workflow_id: str) -> Optional[WorkflowRegistration]:
+        """Return the full ``WorkflowRegistration`` for *workflow_id*."""
+        return self._workflows.get(workflow_id)
 
     def all_workflow_ids(self) -> Iterable[str]:
         return list(self._workflows.keys())
