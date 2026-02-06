@@ -693,21 +693,42 @@ class InternalMCPChatOrchestrator:
                 description="Attach narration output to presenter channels.",
             )
         )
-        # Stubs for workflow catalogue completeness
-        for action_id in (
-            "todo_refresh.check_cache",
-            "todo_refresh.fetch_gmail",
-            "todo_refresh.extract_tasks",
-            "todo_refresh.prioritise",
-            "todo_refresh.summarise",
-        ):
-            registry.register(
-                ActionSpec(
-                    action_id=action_id,
-                    handler=self._noop_action,
-                    description="Placeholder action; real implementation to be bound via MCP.",
-                )
+        # Todo-refresh workflow actions (JVNAUTOSCI-922 Phase 2.3).
+        registry.register(
+            ActionSpec(
+                action_id="todo_refresh.check_cache",
+                handler=self._action_todo_refresh_check_cache,
+                description="Check task cache freshness; skip Gmail if recent.",
             )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="todo_refresh.fetch_gmail",
+                handler=self._action_todo_refresh_fetch_gmail,
+                description="Fetch recent Gmail messages via MCP gateway.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="todo_refresh.extract_tasks",
+                handler=self._action_todo_refresh_extract_tasks,
+                description="LLM extraction of actionable tasks from emails.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="todo_refresh.prioritise",
+                handler=self._action_todo_refresh_prioritise,
+                description="Assign priority to extracted tasks via LLM.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="todo_refresh.summarise",
+                handler=self._action_todo_refresh_summarise,
+                description="Persist tasks and produce human-readable summary.",
+            )
+        )
 
         registry.register(
             ActionSpec(
@@ -1225,6 +1246,486 @@ class InternalMCPChatOrchestrator:
         )
 
     # ------------------------------------------------------------------
+    # Todo-refresh workflow handlers (JVNAUTOSCI-922 Phase 2.3)
+    #
+    # Five handlers that replace the ``_noop_action`` stubs registered for
+    # the ``#V#todo_refresh_workflow`` state machine:
+    #   check_cache -> maybe_fetch_gmail -> extract_tasks -> prioritise
+    #   -> summarise -> completed
+    #
+    # Key data-dict fields consumed/produced:
+    #   user_namespace, gmail_profile (inputs from caller),
+    #   todo_refresh_needed (flag: cache stale?), raw_gmail_messages,
+    #   extracted_tasks (list[dict]), prioritised_tasks (list[dict]),
+    #   persisted_tasks (list[dict]), todo_summary (str).
+    # ------------------------------------------------------------------
+
+    # Configurable via env var; how many seconds before tasks are
+    # considered stale and a refresh from Gmail is warranted.
+    _TODO_CACHE_TTL_SECONDS: int = int(
+        os.environ.get("VON_TODO_CACHE_TTL_SECONDS", "3600")
+    )
+
+    def _action_todo_refresh_check_cache(
+        self, request: Any
+    ) -> WorkflowActionResult:
+        """Check whether the user's task list is fresh enough to skip Gmail.
+
+        Looks at the most recently created ``#V#task_specification`` for the
+        current user.  If it was created less than ``_TODO_CACHE_TTL_SECONDS``
+        ago, sets ``todo_refresh_needed=False`` and the workflow short-circuits
+        to *completed*.
+        """
+        from ...services.task_management_service import get_tasks_for_user
+
+        data = request.data
+        user_ns = (
+            data.get("user_namespace")
+            or getattr(request.environment, "user_namespace", None)
+        )
+
+        if not user_ns:
+            # No user context - nothing to cache-check; proceed with refresh.
+            self._logger.debug(
+                "[todo_refresh] No user namespace; skipping cache check"
+            )
+            return WorkflowActionResult(
+                outputs={"todo_refresh_needed": True}
+            )
+
+        try:
+            existing_tasks = get_tasks_for_user(user_ns)
+        except Exception as exc:
+            self._logger.warning(
+                "[todo_refresh] Cache check failed: %s - proceeding with refresh",
+                exc,
+            )
+            return WorkflowActionResult(
+                outputs={"todo_refresh_needed": True}
+            )
+
+        if not existing_tasks:
+            return WorkflowActionResult(
+                outputs={"todo_refresh_needed": True}
+            )
+
+        # Find most recent updated_at / created_at.
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        newest_ts: datetime | None = None
+        for task in existing_tasks:
+            for key in ("updated_at", "created_at"):
+                raw = task.get(key)
+                if raw is None:
+                    continue
+                if isinstance(raw, str):
+                    try:
+                        raw = datetime.fromisoformat(raw)
+                    except (ValueError, TypeError):
+                        continue
+                if isinstance(raw, datetime):
+                    if raw.tzinfo is None:
+                        raw = raw.replace(tzinfo=timezone.utc)
+                    if newest_ts is None or raw > newest_ts:
+                        newest_ts = raw
+
+        if newest_ts is None:
+            return WorkflowActionResult(
+                outputs={"todo_refresh_needed": True}
+            )
+
+        age_seconds = (now - newest_ts).total_seconds()
+        stale = age_seconds > self._TODO_CACHE_TTL_SECONDS
+        self._logger.info(
+            "[todo_refresh] Cache age %.0fs, TTL %ds -> %s",
+            age_seconds,
+            self._TODO_CACHE_TTL_SECONDS,
+            "stale" if stale else "fresh",
+        )
+        return WorkflowActionResult(
+            outputs={"todo_refresh_needed": stale}
+        )
+
+    def _action_todo_refresh_fetch_gmail(
+        self, request: Any
+    ) -> WorkflowActionResult:
+        """Fetch recent Gmail messages via the MCP gateway.
+
+        Retrieves up to 10 recent messages using ``gmail_list_messages`` and
+        then fetches full bodies for messages that look actionable (contain
+        common task/todo keywords in the snippet).
+        """
+        data = request.data
+        gateway = request.environment.gateway
+        gmail_profile = (
+            data.get("gmail_profile")
+            or getattr(request.environment, "default_gmail_profile", None)
+        )
+
+        if not gateway:
+            self._logger.warning("[todo_refresh] No gateway available")
+            return WorkflowActionResult(
+                outputs={"raw_gmail_messages": [], "gmail_fetch_ok": False}
+            )
+
+        if not gmail_profile:
+            self._logger.warning(
+                "[todo_refresh] No gmail_profile configured; skipping fetch"
+            )
+            return WorkflowActionResult(
+                outputs={"raw_gmail_messages": [], "gmail_fetch_ok": False}
+            )
+
+        # List recent messages.
+        try:
+            list_result = gateway.invoke(
+                "gmail_list_messages",
+                {
+                    "profile": gmail_profile,
+                    "max_results": 10,
+                    "query": "newer_than:3d",
+                },
+            )
+            messages_list = (list_result.payload or {}).get("messages", [])
+        except Exception as exc:
+            self._logger.warning("[todo_refresh] gmail_list_messages failed: %s", exc)
+            return WorkflowActionResult(
+                outputs={"raw_gmail_messages": [], "gmail_fetch_ok": False}
+            )
+
+        if not messages_list:
+            self._logger.info("[todo_refresh] No recent Gmail messages found")
+            return WorkflowActionResult(
+                outputs={"raw_gmail_messages": [], "gmail_fetch_ok": True}
+            )
+
+        full_messages: list[dict[str, Any]] = []
+        for msg_summary in messages_list[:10]:
+            msg_id = msg_summary.get("id")
+            if not msg_id:
+                continue
+            try:
+                detail_result = gateway.invoke(
+                    "gmail_get_message",
+                    {"profile": gmail_profile, "message_id": msg_id},
+                )
+                if detail_result.payload:
+                    full_messages.append(detail_result.payload)
+            except Exception as exc:
+                self._logger.debug(
+                    "[todo_refresh] gmail_get_message(%s) failed: %s", msg_id, exc
+                )
+
+        self._logger.info(
+            "[todo_refresh] Fetched %d/%d Gmail messages",
+            len(full_messages),
+            len(messages_list),
+        )
+        return WorkflowActionResult(
+            outputs={
+                "raw_gmail_messages": full_messages,
+                "gmail_fetch_ok": True,
+            }
+        )
+
+    def _action_todo_refresh_extract_tasks(
+        self, request: Any
+    ) -> WorkflowActionResult:
+        """Use the LLM to extract actionable tasks from Gmail message bodies.
+
+        Reads ``raw_gmail_messages`` from the workflow context, builds a prompt
+        asking the model to identify tasks, and parses the structured JSON
+        response.  Outputs ``extracted_tasks`` - a list of dicts with keys
+        ``title``, ``description``, ``source_email_id``.
+        """
+        data = request.data
+        raw_messages: list[dict[str, Any]] = data.get("raw_gmail_messages") or []
+
+        if not raw_messages:
+            self._logger.info("[todo_refresh] No messages to extract tasks from")
+            return WorkflowActionResult(
+                outputs={"extracted_tasks": []}
+            )
+
+        # Build a digest of email contents for the LLM.
+        digest_parts: list[str] = []
+        for idx, msg in enumerate(raw_messages, 1):
+            subject = msg.get("subject") or msg.get("headers", {}).get("Subject", "(no subject)")
+            sender = msg.get("from") or msg.get("headers", {}).get("From", "unknown")
+            body = msg.get("body") or msg.get("snippet") or ""
+            # Truncate very long bodies.
+            if len(body) > 2000:
+                body = body[:2000] + "..."
+            digest_parts.append(
+                f"### Email {idx}\nFrom: {sender}\nSubject: {subject}\n\n{body}\n"
+            )
+
+        email_digest = "\n---\n".join(digest_parts)
+
+        extraction_prompt = (
+            "You are an expert personal assistant.  Analyse the following email "
+            "messages and extract actionable to-do items.  For each task, provide:\n"
+            "- title: a short (~10 word) task title\n"
+            "- description: 1-2 sentence description of what needs to be done\n"
+            "- source_email_index: which email number (1-based) it came from\n\n"
+            "Return your answer as a JSON array of objects.  If there are no "
+            "actionable items, return an empty array [].\n\n"
+            "EMAILS:\n" + email_digest
+        )
+
+        llm_client = request.environment.llm_client
+        model = request.environment.model
+        if not llm_client:
+            self._logger.warning("[todo_refresh] No LLM client for extraction")
+            return WorkflowActionResult(outputs={"extracted_tasks": []})
+
+        try:
+            llm_response = llm_client.generate(
+                prompt=extraction_prompt,
+                context=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You extract actionable tasks from emails.  "
+                            "Reply ONLY with a JSON array.  No markdown fences."
+                        ),
+                    },
+                ],
+                model=model,
+            )
+        except Exception as exc:
+            self._logger.warning("[todo_refresh] LLM extraction failed: %s", exc)
+            return WorkflowActionResult(outputs={"extracted_tasks": []})
+
+        # Parse the JSON array from the response.
+        extracted: list[dict[str, Any]] = []
+        try:
+            import json as _json
+
+            text = llm_response.strip() if isinstance(llm_response, str) else str(llm_response).strip()
+            # Strip markdown code fences if present.
+            if text.startswith("```"):
+                lines = text.split("\n")
+                text = "\n".join(
+                    lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+                )
+            parsed = _json.loads(text)
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict) and item.get("title"):
+                        extracted.append(
+                            {
+                                "title": str(item["title"]),
+                                "description": str(
+                                    item.get("description", "")
+                                ),
+                                "source_email_index": item.get(
+                                    "source_email_index"
+                                ),
+                            }
+                        )
+        except Exception as exc:
+            self._logger.warning(
+                "[todo_refresh] Failed to parse extracted tasks: %s", exc
+            )
+
+        # Log to aux_llm_calls for observability.
+        aux_log = data.get("aux_llm_calls")
+        if isinstance(aux_log, list):
+            aux_log.append(
+                {
+                    "type": "todo_refresh.extract_tasks",
+                    "model": model,
+                    "email_count": len(raw_messages),
+                    "extracted_count": len(extracted),
+                }
+            )
+
+        self._logger.info(
+            "[todo_refresh] Extracted %d tasks from %d emails",
+            len(extracted),
+            len(raw_messages),
+        )
+        return WorkflowActionResult(outputs={"extracted_tasks": extracted})
+
+    def _action_todo_refresh_prioritise(
+        self, request: Any
+    ) -> WorkflowActionResult:
+        """Assign priority (low/medium/high/critical) to extracted tasks.
+
+        If there are ≤3 tasks, uses a simple heuristic (all medium).
+        For larger batches, calls the LLM to assign priorities
+        contextually.
+        """
+        data = request.data
+        extracted: list[dict[str, Any]] = data.get("extracted_tasks") or []
+
+        if not extracted:
+            return WorkflowActionResult(outputs={"prioritised_tasks": []})
+
+        # Simple heuristic for small batches - avoids an LLM call.
+        if len(extracted) <= 3:
+            for task in extracted:
+                task.setdefault("priority", "medium")
+            return WorkflowActionResult(
+                outputs={"prioritised_tasks": extracted}
+            )
+
+        # Use LLM for larger batches.
+        import json as _json
+
+        task_summaries = _json.dumps(
+            [{"index": i, "title": t["title"], "description": t.get("description", "")}
+             for i, t in enumerate(extracted)],
+            indent=2,
+        )
+        prioritise_prompt = (
+            "Given these tasks, assign a priority to each: low, medium, high, "
+            "or critical.  Consider urgency, deadlines, and importance.\n\n"
+            "Tasks:\n" + task_summaries + "\n\n"
+            "Return a JSON array of objects with keys: index, priority."
+        )
+
+        llm_client = request.environment.llm_client
+        model = request.environment.model
+
+        try:
+            llm_response = llm_client.generate(
+                prompt=prioritise_prompt,
+                context=[
+                    {
+                        "role": "system",
+                        "content": "You prioritise tasks.  Reply ONLY with a JSON array.",
+                    },
+                ],
+                model=model,
+            )
+            text = llm_response.strip() if isinstance(llm_response, str) else str(llm_response).strip()
+            if text.startswith("```"):
+                lines = text.split("\n")
+                text = "\n".join(
+                    lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+                )
+            parsed = _json.loads(text)
+            if isinstance(parsed, list):
+                priority_map = {}
+                for item in parsed:
+                    if isinstance(item, dict):
+                        idx = item.get("index")
+                        prio = item.get("priority", "medium")
+                        if isinstance(idx, int) and prio in (
+                            "low", "medium", "high", "critical"
+                        ):
+                            priority_map[idx] = prio
+                for i, task in enumerate(extracted):
+                    task["priority"] = priority_map.get(i, "medium")
+        except Exception as exc:
+            self._logger.warning(
+                "[todo_refresh] LLM prioritisation failed: %s - defaulting to medium",
+                exc,
+            )
+            for task in extracted:
+                task.setdefault("priority", "medium")
+
+        return WorkflowActionResult(outputs={"prioritised_tasks": extracted})
+
+    def _action_todo_refresh_summarise(
+        self, request: Any
+    ) -> WorkflowActionResult:
+        """Persist prioritised tasks via the task management service and
+        produce a human-readable summary.
+
+        Creates each task as a ``#V#task_specification`` concept with the
+        appropriate priority and assignee.  Skips tasks whose titles match
+        an existing pending task for this user (deduplication).
+        """
+        from ...services.task_management_service import (
+            create_task,
+            get_tasks_for_user,
+        )
+
+        data = request.data
+        prioritised: list[dict[str, Any]] = data.get("prioritised_tasks") or []
+        user_ns = (
+            data.get("user_namespace")
+            or getattr(request.environment, "user_namespace", None)
+        )
+
+        if not prioritised:
+            return WorkflowActionResult(
+                outputs={
+                    "persisted_tasks": [],
+                    "todo_summary": "No new tasks found from recent emails.",
+                }
+            )
+
+        # Deduplicate against existing pending tasks.
+        existing_titles: set[str] = set()
+        if user_ns:
+            try:
+                existing = get_tasks_for_user(user_ns, status_filter="pending")
+                existing_titles = {
+                    (t.get("title") or "").strip().lower() for t in existing
+                }
+            except Exception:
+                pass
+
+        persisted: list[dict[str, Any]] = []
+        skipped = 0
+        for task in prioritised:
+            title = (task.get("title") or "").strip()
+            if not title:
+                continue
+            if title.lower() in existing_titles:
+                skipped += 1
+                continue
+
+            try:
+                result = create_task(
+                    title=title,
+                    description=task.get("description") or title,
+                    priority=task.get("priority", "medium"),
+                    assignee_concept_id=user_ns,
+                    created_by_concept_id=user_ns,
+                )
+                persisted.append(result)
+                existing_titles.add(title.lower())
+            except Exception as exc:
+                self._logger.warning(
+                    "[todo_refresh] Failed to create task '%s': %s",
+                    title,
+                    exc,
+                )
+
+        # Build human-readable summary.
+        summary_lines = [
+            f"Refreshed to-do list: {len(persisted)} new task(s) created"
+        ]
+        if skipped:
+            summary_lines[0] += f", {skipped} duplicate(s) skipped"
+        summary_lines[0] += "."
+        for t in persisted:
+            prio = t.get("priority", "medium")
+            summary_lines.append(
+                f"  • [{prio.upper()}] {t.get('title', 'Untitled')}"
+            )
+
+        summary = "\n".join(summary_lines)
+        self._logger.info(
+            "[todo_refresh] Persisted %d tasks, skipped %d duplicates",
+            len(persisted),
+            skipped,
+        )
+
+        return WorkflowActionResult(
+            outputs={
+                "persisted_tasks": persisted,
+                "todo_summary": summary,
+            }
+        )
+
+    # ------------------------------------------------------------------
     # Tool-calling workflow handlers (JVNAUTOSCI-922 Phase 2)
     #
     # These four handlers encapsulate the procedural tool-calling logic
@@ -1446,7 +1947,9 @@ class InternalMCPChatOrchestrator:
             outputs={
                 "tool_calls_present": False,
                 "direct_response": True,
-                "final_response": response if isinstance(response, str) else str(response),
+                "final_response": (
+                    response if isinstance(response, str) else str(response)
+                ),
             }
         )
 
@@ -1508,7 +2011,10 @@ class InternalMCPChatOrchestrator:
         if preflight.warnings:
             try:
                 aux_llm_calls.append(
-                    {"type": "tool_call_coercions", "warnings": list(preflight.warnings)}
+                    {
+                        "type": "tool_call_coercions",
+                        "warnings": list(preflight.warnings),
+                    }
                 )
             except Exception:
                 pass
@@ -1516,7 +2022,9 @@ class InternalMCPChatOrchestrator:
         if preflight.errors:
             repaired_calls = None
             if method_catalogue:
-                tool_call_model = data.get("tool_call_model") or model_for_stage("tool_call")
+                tool_call_model = data.get("tool_call_model") or model_for_stage(
+                    "tool_call"
+                )
                 repaired_calls = self._attempt_tool_call_repair(
                     current_response=(
                         data.get("response", "")
@@ -1653,7 +2161,10 @@ class InternalMCPChatOrchestrator:
             )
         else:
             augmented_context.append(
-                {"role": "assistant", "content": data.get("current_response", response_text)}
+                {
+                    "role": "assistant",
+                    "content": data.get("current_response", response_text),
+                }
             )
 
         # Cancellation check.
@@ -1711,8 +2222,10 @@ class InternalMCPChatOrchestrator:
                     tool_name, None, None, "error", message
                 )
                 blocked_record: dict[str, Any] = {
-                    "tool": tool_name, "payload": dict(payload),
-                    "error": message, "blocked": True,
+                    "tool": tool_name,
+                    "payload": dict(payload),
+                    "error": message,
+                    "blocked": True,
                 }
                 if write_policy_reason:
                     blocked_record["write_policy_reason"] = write_policy_reason
@@ -1720,14 +2233,20 @@ class InternalMCPChatOrchestrator:
                     blocked_record["call_id"] = call_id
                 invocations.append(blocked_record)
                 if callable(emit_progress):
-                    emit_progress({
-                        "status": "tool_blocked", "tool": tool_name,
-                        "batch_size": current_batch_size,
-                        "tool_calls_done": iteration_count,
-                        "tool_calls_cap": int(max_tool_invocations),
-                        "tool_calls_remaining": max(0, max_tool_invocations - iteration_count),
-                        "call_id": call_id, "error": message,
-                    })
+                    emit_progress(
+                        {
+                            "status": "tool_blocked",
+                            "tool": tool_name,
+                            "batch_size": current_batch_size,
+                            "tool_calls_done": iteration_count,
+                            "tool_calls_cap": int(max_tool_invocations),
+                            "tool_calls_remaining": max(
+                                0, max_tool_invocations - iteration_count
+                            ),
+                            "call_id": call_id,
+                            "error": message,
+                        }
+                    )
                 augmented_context.append({"role": "tool", "content": tool_payload})
                 tool_messages.append({"role": "tool", "content": tool_payload})
                 continue
@@ -1735,7 +2254,9 @@ class InternalMCPChatOrchestrator:
             try:
                 schema = self._tool_schema_for_name(tool_name, method_catalogue)
                 self._apply_payload_defaults(
-                    tool_name, payload, schema=schema,
+                    tool_name,
+                    payload,
+                    schema=schema,
                     user_namespace=env.user_namespace,
                     selected_gmail_profile=gmail_profile,
                     conversation_session_id=conversation_session_id,
@@ -1747,17 +2268,23 @@ class InternalMCPChatOrchestrator:
                 )
                 result_summary = self._extract_result_summary(tool_name, result.payload)
 
-                invocation_record: dict[str, Any] = {"tool": tool_name, "payload": dict(payload)}
+                invocation_record: dict[str, Any] = {
+                    "tool": tool_name,
+                    "payload": dict(payload),
+                }
                 if call_id:
                     invocation_record["call_id"] = call_id
                 invocations.append(invocation_record)
 
                 progress_info: dict[str, Any] = {
-                    "status": "tool_invoked", "tool": tool_name,
+                    "status": "tool_invoked",
+                    "tool": tool_name,
                     "batch_size": current_batch_size,
                     "tool_calls_done": iteration_count,
                     "tool_calls_cap": int(max_tool_invocations),
-                    "tool_calls_remaining": max(0, max_tool_invocations - iteration_count),
+                    "tool_calls_remaining": max(
+                        0, max_tool_invocations - iteration_count
+                    ),
                     "call_id": call_id,
                 }
                 if result_summary:
@@ -1767,28 +2294,39 @@ class InternalMCPChatOrchestrator:
 
                 self._logger.info(
                     "[mcp_orchestrator] Tool invocation #%d: tool=%s",
-                    iteration_count, tool_name,
+                    iteration_count,
+                    tool_name,
                 )
             except Exception as exc:
                 tool_payload = self._format_tool_result(
                     tool_name, None, None, "error", str(exc)
                 )
                 error_record: dict[str, Any] = {
-                    "tool": tool_name, "payload": dict(payload), "error": str(exc),
+                    "tool": tool_name,
+                    "payload": dict(payload),
+                    "error": str(exc),
                 }
                 if call_id:
                     error_record["call_id"] = call_id
                 invocations.append(error_record)
                 if callable(emit_progress):
-                    emit_progress({
-                        "status": "tool_failed", "tool": tool_name,
-                        "batch_size": current_batch_size,
-                        "tool_calls_done": iteration_count,
-                        "tool_calls_cap": int(max_tool_invocations),
-                        "tool_calls_remaining": max(0, max_tool_invocations - iteration_count),
-                        "call_id": call_id, "error": str(exc),
-                    })
-                self._logger.warning("[mcp_orchestrator] Tool %s failed: %s", tool_name, exc)
+                    emit_progress(
+                        {
+                            "status": "tool_failed",
+                            "tool": tool_name,
+                            "batch_size": current_batch_size,
+                            "tool_calls_done": iteration_count,
+                            "tool_calls_cap": int(max_tool_invocations),
+                            "tool_calls_remaining": max(
+                                0, max_tool_invocations - iteration_count
+                            ),
+                            "call_id": call_id,
+                            "error": str(exc),
+                        }
+                    )
+                self._logger.warning(
+                    "[mcp_orchestrator] Tool %s failed: %s", tool_name, exc
+                )
 
             augmented_context.append({"role": "tool", "content": tool_payload})
             tool_messages.append({"role": "tool", "content": tool_payload})
@@ -1871,20 +2409,96 @@ class InternalMCPChatOrchestrator:
 
         # Check if the summariser response contains more tool calls.
         if iteration_count < max_tool_invocations:
-            try:
-                new_tool_calls = self._extract_tool_calls(current_response)
-                if new_tool_calls:
+            interpretation = self._interpret_model_turn(current_response)
+            if interpretation.tool_calls:
+                return WorkflowActionResult(
+                    outputs={
+                        "more_tool_calls": True,
+                        "tool_calls_present": True,
+                        "tool_calls_validated": False,
+                        "tool_calls": interpretation.tool_calls,
+                        "current_response": current_response,
+                        "remaining_tool_calls": [],
+                    }
+                )
+
+            if interpretation.tool_call_parse_error is not None:
+                exc = interpretation.tool_call_parse_error
+                workflow_def = self._workflow_registry.get(
+                    MISSING_TOOL_CALL_WORKFLOW_ID
+                )
+                if workflow_def is not None:
+                    workflow_context = {
+                        "user_prompt": data.get("prompt") or "",
+                        "response_text": (
+                            current_response
+                            if isinstance(current_response, str)
+                            else str(current_response)
+                        ),
+                        "interpretation": interpretation,
+                        "use_structured": False,
+                        "tool_call_parse_error": exc,
+                        "aux_llm_calls": aux_llm_calls,
+                        "augmented_context": augmented_context,
+                        "tool_calls": None,
+                        "missing_tool_assessor": self._assess_missing_tool_call,
+                        "extract_tool_calls_fn": self._extract_tool_calls,
+                        "record_llm_call": record_llm_call,
+                        "classifier_model": model_for_stage("classifier"),
+                        "policy_state": policy_state,
+                        "default_model": summariser_model,
+                        "registry_snapshot": registry_snapshot,
+                        "user_concept_id": user_concept_id,
+                        "org_concept_id": org_concept_id,
+                    }
+                    recovery_model = model_for_stage("tool_recovery")
+                    recovery_env = WorkflowEnvironment(
+                        llm_client=llm_client,
+                        gateway=self._gateway,
+                        model=recovery_model,
+                        user_namespace=env.user_namespace,
+                        auxiliary_system_prompt=env.auxiliary_system_prompt,
+                        max_tool_invocations=env.max_tool_invocations,
+                        default_gmail_profile=env.default_gmail_profile,
+                    )
+                    workflow_result = self._workflow_executor.run(
+                        workflow_def,
+                        environment=recovery_env,
+                        data=workflow_context,
+                        trace=request.trace,
+                    )
+                    current_response = workflow_result.data.get(
+                        "response_text", current_response
+                    )
+                    recovered_calls = workflow_result.data.get("tool_calls")
+                    exc = workflow_result.data.get("tool_call_parse_error", exc)
+                    if recovered_calls:
+                        return WorkflowActionResult(
+                            outputs={
+                                "more_tool_calls": True,
+                                "tool_calls_present": True,
+                                "tool_calls_validated": False,
+                                "tool_calls": recovered_calls,
+                                "current_response": current_response,
+                                "remaining_tool_calls": [],
+                            }
+                        )
+
+                build_error = data.get("build_parse_error_result")
+                if callable(build_error):
+                    invocations = data.get("invocations") or []
+                    tool_messages = data.get("tool_messages") or []
+                    error_result = build_error(
+                        exc,
+                        invocations_override=tuple(invocations),
+                        tool_messages_override=tuple(tool_messages),
+                    )
                     return WorkflowActionResult(
                         outputs={
-                            "more_tool_calls": True,
-                            "tool_calls_present": True,
-                            "tool_calls_validated": False,
-                            "tool_calls": new_tool_calls,
-                            "current_response": current_response,
-                            "remaining_tool_calls": [],
+                            "orchestrator_result": error_result,
                         }
                     )
-            except ToolCallParsingError:
+
                 # Parse error during chained extraction — treat as done
                 # rather than failing the whole flow.
                 self._logger.debug(
@@ -1893,9 +2507,8 @@ class InternalMCPChatOrchestrator:
                 )
 
         # Log if we hit the iteration limit.
-        if (
-            iteration_count >= max_tool_invocations
-            and self._is_json_action_response(current_response)
+        if iteration_count >= max_tool_invocations and self._is_json_action_response(
+            current_response
         ):
             self._logger.warning(
                 "[mcp_orchestrator] Reached max tool invocation limit (%d), "
@@ -1904,12 +2517,14 @@ class InternalMCPChatOrchestrator:
             )
             emit_progress = data.get("emit_progress")
             if callable(emit_progress):
-                emit_progress({
-                    "status": "tool_limit_reached",
-                    "tool_calls_done": iteration_count,
-                    "tool_calls_cap": int(max_tool_invocations),
-                    "tool_calls_remaining": 0,
-                })
+                emit_progress(
+                    {
+                        "status": "tool_limit_reached",
+                        "tool_calls_done": iteration_count,
+                        "tool_calls_cap": int(max_tool_invocations),
+                        "tool_calls_remaining": 0,
+                    }
+                )
 
         return WorkflowActionResult(
             outputs={
