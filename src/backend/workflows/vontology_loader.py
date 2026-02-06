@@ -278,13 +278,29 @@ def build_workflow_process_graph(
 def load_workflow_definition_from_vontology(
     workflow_id: str,
 ) -> Optional[WorkflowDefinition]:
-    """Load an executable WorkflowDefinition from Vontology."""
+    """Load an executable WorkflowDefinition from Vontology.
+
+    JVNAUTOSCI-922 Phase 3.2: This function converts the raw process graph
+    produced by ``build_workflow_process_graph()`` into an executable
+    ``WorkflowDefinition`` for the workflow engine.
+
+    Fixes applied (Phase 3.2):
+    - Correct key: reads ``initial_step`` (not ``initial_state``) from graph.
+    - Lambda capture: transition conditions capture control-flow values by
+      default-argument binding to avoid Python late-binding closure bugs.
+    - ``on_failure`` transitions: mapped to a condition checking the
+      ``last_action_failed`` context flag (set by the action registry on error).
+    - Input mapping: reads ``hasInputMap`` / ``has_input_map`` relationships
+      from step concepts to populate ``WorkflowActionInvocation.inputs``.
+    - Metadata: preconditions, effects, and variable read/write lists are
+      carried through as ``WorkflowStateSpec.metadata`` for introspection.
+    """
     graph, warnings = build_workflow_process_graph(workflow_id)
     if not graph:
         return None
 
-    initial_state_id = graph.get("initial_state")
-    # fallback if initial_state (from graph) is None but steps exist
+    # Correct key from build_workflow_process_graph output.
+    initial_state_id = graph.get("initial_step")
     if not initial_state_id:
         steps = graph.get("steps")
         if steps and len(steps) > 0:
@@ -293,6 +309,10 @@ def load_workflow_definition_from_vontology(
     if not initial_state_id:
         return None
 
+    # Pre-fetch step docs for input-map reading.
+    step_ids = [s["step_id"] for s in graph.get("steps", []) if s.get("step_id")]
+    step_docs = _fetch_concepts_by_id(step_ids) if step_ids else {}
+
     states: Dict[str, WorkflowStateSpec] = {}
 
     for step in graph.get("steps", []):
@@ -300,64 +320,121 @@ def load_workflow_definition_from_vontology(
         invokes_action = step.get("invokes_action")
         control_flow = step.get("control_flow", {})
 
-        actions = []
+        actions: list[WorkflowActionInvocation] = []
         if invokes_action:
-            # We assume inputs are implicit or passed via context for now
-            # In a full impl, we'd read 'hasInputMap' from the step
-            actions.append(WorkflowActionInvocation(action_id=invokes_action))
+            # Read input mapping from Vontology (hasInputMap relationships).
+            input_map: Dict[str, Any] = {}
+            doc = step_docs.get(step_id, {})
+            step_rels = doc.get("relationships") or {}
+            if isinstance(step_rels, dict):
+                raw_inputs = _all_relationship_targets(
+                    step_rels,
+                    (
+                        "hasInputMap",
+                        "has_input_map",
+                        "#V#hasInputMap",
+                        "#V#has_input_map",
+                    ),
+                )
+                # Input maps are stored as "key=value" or "key:value" strings.
+                for entry in raw_inputs:
+                    if "=" in entry:
+                        k, _, v = entry.partition("=")
+                    elif ":" in entry:
+                        k, _, v = entry.partition(":")
+                    else:
+                        continue
+                    k, v = k.strip(), v.strip()
+                    if k:
+                        input_map[k] = v
 
-        transitions = []
+            actions.append(
+                WorkflowActionInvocation(
+                    action_id=invokes_action,
+                    inputs=input_map if input_map else {},
+                )
+            )
 
-        # Priority: OnFailure -> OnTrue/False -> Next (unconditional)
-        if control_flow.get("on_failure"):
-            # TODO: Support exception-based transition triggers in engine
-            pass
+        transitions: list[WorkflowTransitionSpec] = []
 
-        if control_flow.get("on_true"):
-            # Transition if context 'last_step_ok' is True (stub)
+        # --- Build transitions with correct variable capture ---
+        # Use default-argument binding (val=val) to capture the current
+        # loop iteration's values, avoiding Python's late-binding closure bug.
+
+        on_failure_target = control_flow.get("on_failure")
+        on_true_target = control_flow.get("on_true")
+        on_false_target = control_flow.get("on_false")
+        next_target = control_flow.get("next")
+
+        # Priority: on_failure → on_true/on_false → next (unconditional).
+
+        if on_failure_target:
             transitions.append(
                 WorkflowTransitionSpec(
-                    to_state=control_flow["on_true"],
-                    condition=lambda ctx: bool(
+                    to_state=on_failure_target,
+                    condition=lambda ctx, _t=on_failure_target: bool(
+                        ctx.get("last_action_failed")
+                    ),
+                    reason="on_failure",
+                )
+            )
+
+        if on_true_target:
+            transitions.append(
+                WorkflowTransitionSpec(
+                    to_state=on_true_target,
+                    condition=lambda ctx, _t=on_true_target: bool(
                         ctx.get("last_step_ok") or ctx.get("result")
                     ),
                     reason="on_true",
                 )
             )
 
-        if control_flow.get("on_false"):
-            # Transition if context 'last_step_ok' is False
+        if on_false_target:
             transitions.append(
                 WorkflowTransitionSpec(
-                    to_state=control_flow["on_false"],
-                    condition=lambda ctx: not bool(
+                    to_state=on_false_target,
+                    condition=lambda ctx, _t=on_false_target: not bool(
                         ctx.get("last_step_ok") or ctx.get("result")
                     ),
                     reason="on_false",
                 )
             )
 
-        if control_flow.get("next"):
-            # Unconditional transition (always true fallback)
+        if next_target:
             transitions.append(
                 WorkflowTransitionSpec(
-                    to_state=control_flow["next"],
-                    condition=lambda ctx: True,
+                    to_state=next_target,
+                    condition=lambda ctx, _t=next_target: True,
                     reason="next_step",
                 )
             )
 
-        # Check for terminal
-        is_terminal = not transitions and not control_flow.get("next")
+        is_terminal = not transitions and not next_target
+
+        # Carry Vontology metadata through for introspection.
+        step_metadata: Dict[str, Any] = {}
+        preconditions = step.get("preconditions")
+        effects = step.get("effects")
+        reads_vars = step.get("reads_variables")
+        writes_vars = step.get("writes_variables")
+        if preconditions:
+            step_metadata["preconditions"] = preconditions
+        if effects:
+            step_metadata["effects"] = effects
+        if reads_vars:
+            step_metadata["reads_variables"] = reads_vars
+        if writes_vars:
+            step_metadata["writes_variables"] = writes_vars
 
         states[step_id] = WorkflowStateSpec(
             state_id=step_id,
             actions=actions,
             transitions=transitions,
             terminal=is_terminal,
+            metadata=step_metadata,
         )
 
-    # Fetch description
     purpose = best_effort_workflow_narrative_text(workflow_id)
 
     return WorkflowDefinition(

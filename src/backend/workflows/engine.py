@@ -30,6 +30,10 @@ class WorkflowStateSpec:
     actions: Sequence[WorkflowActionInvocation] = ()
     transitions: Sequence[WorkflowTransitionSpec] = ()
     terminal: bool = False
+    # Optional metadata from Vontology graph (preconditions, effects, etc.).
+    # Not consumed by the engine itself but available for introspection and
+    # future constraint-checking.  See JVNAUTOSCI-922 Phase 3.2.
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
