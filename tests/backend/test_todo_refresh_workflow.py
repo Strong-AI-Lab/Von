@@ -33,6 +33,7 @@ from src.backend.workflows.engine import WorkflowExecutor
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_env(**overrides: Any) -> WorkflowEnvironment:
     """Build a ``WorkflowEnvironment`` with sensible defaults."""
     defaults = dict(
@@ -88,6 +89,7 @@ def _build_orchestrator_stub():
 # ---------------------------------------------------------------------------
 # check_cache handler
 # ---------------------------------------------------------------------------
+
 
 class TestCheckCache:
     """Tests for ``_action_todo_refresh_check_cache``."""
@@ -154,6 +156,7 @@ class TestCheckCache:
 # fetch_gmail handler
 # ---------------------------------------------------------------------------
 
+
 class TestFetchGmail:
     """Tests for ``_action_todo_refresh_fetch_gmail``."""
 
@@ -180,9 +183,7 @@ class TestFetchGmail:
 
     def test_empty_inbox_returns_ok(self):
         gateway = MagicMock()
-        gateway.invoke.return_value = _FakeGatewayResult(
-            payload={"messages": []}
-        )
+        gateway.invoke.return_value = _FakeGatewayResult(payload={"messages": []})
         orch = _build_orchestrator_stub()
         req = _make_request(env=_make_env(gateway=gateway))
         result = orch._action_todo_refresh_fetch_gmail(req)
@@ -234,6 +235,7 @@ class TestFetchGmail:
 # extract_tasks handler
 # ---------------------------------------------------------------------------
 
+
 class TestExtractTasks:
     """Tests for ``_action_todo_refresh_extract_tasks``."""
 
@@ -247,10 +249,20 @@ class TestExtractTasks:
 
     def test_parses_llm_json_response(self):
         llm_client = MagicMock()
-        llm_response = json.dumps([
-            {"title": "Review PR #42", "description": "Review the pull request", "source_email_index": 1},
-            {"title": "Schedule meeting", "description": "Set up team meeting", "source_email_index": 2},
-        ])
+        llm_response = json.dumps(
+            [
+                {
+                    "title": "Review PR #42",
+                    "description": "Review the pull request",
+                    "source_email_index": 1,
+                },
+                {
+                    "title": "Schedule meeting",
+                    "description": "Set up team meeting",
+                    "source_email_index": 2,
+                },
+            ]
+        )
         llm_client.generate.return_value = llm_response
 
         orch = _build_orchestrator_stub()
@@ -348,6 +360,7 @@ class TestExtractTasks:
 # prioritise handler
 # ---------------------------------------------------------------------------
 
+
 class TestPrioritise:
     """Tests for ``_action_todo_refresh_prioritise``."""
 
@@ -379,17 +392,17 @@ class TestPrioritise:
         llm_client.generate.assert_not_called()
 
     def test_large_batch_calls_llm(self):
-        tasks = [
-            {"title": f"Task {i}", "description": f"Do {i}"} for i in range(5)
-        ]
+        tasks = [{"title": f"Task {i}", "description": f"Do {i}"} for i in range(5)]
         llm_client = MagicMock()
-        llm_client.generate.return_value = json.dumps([
-            {"index": 0, "priority": "high"},
-            {"index": 1, "priority": "low"},
-            {"index": 2, "priority": "critical"},
-            {"index": 3, "priority": "medium"},
-            {"index": 4, "priority": "high"},
-        ])
+        llm_client.generate.return_value = json.dumps(
+            [
+                {"index": 0, "priority": "high"},
+                {"index": 1, "priority": "low"},
+                {"index": 2, "priority": "critical"},
+                {"index": 3, "priority": "medium"},
+                {"index": 4, "priority": "high"},
+            ]
+        )
 
         orch = _build_orchestrator_stub()
         req = _make_request(
@@ -425,6 +438,7 @@ class TestPrioritise:
 # ---------------------------------------------------------------------------
 # summarise handler
 # ---------------------------------------------------------------------------
+
 
 class TestSummarise:
     """Tests for ``_action_todo_refresh_summarise``."""
@@ -515,6 +529,7 @@ class TestSummarise:
 # Integration test: full workflow through the engine
 # ---------------------------------------------------------------------------
 
+
 class TestTodoRefreshWorkflowIntegration:
     """Run the full todo_refresh workflow through WorkflowExecutor with mocks."""
 
@@ -528,9 +543,7 @@ class TestTodoRefreshWorkflowIntegration:
             ("todo_refresh.prioritise", orch._action_todo_refresh_prioritise),
             ("todo_refresh.summarise", orch._action_todo_refresh_summarise),
         ):
-            registry.register(
-                ActionSpec(action_id=action_id, handler=handler)
-            )
+            registry.register(ActionSpec(action_id=action_id, handler=handler))
         return registry
 
     @patch("src.backend.services.task_management_service.get_tasks_for_user")
@@ -579,21 +592,29 @@ class TestTodoRefreshWorkflowIntegration:
         # Gateway mocks for Gmail.
         gateway = MagicMock()
         gateway.invoke.side_effect = [
-            _FakeGatewayResult(payload={
-                "messages": [{"id": "m1", "snippet": "Please review the PR"}]
-            }),
-            _FakeGatewayResult(payload={
-                "subject": "PR Review",
-                "from": "bob@example.com",
-                "body": "Please review PR #42 by Friday",
-            }),
+            _FakeGatewayResult(
+                payload={"messages": [{"id": "m1", "snippet": "Please review the PR"}]}
+            ),
+            _FakeGatewayResult(
+                payload={
+                    "subject": "PR Review",
+                    "from": "bob@example.com",
+                    "body": "Please review PR #42 by Friday",
+                }
+            ),
         ]
 
         # LLM mock for extract_tasks (<=3 tasks so prioritise won't call LLM).
         llm_client = MagicMock()
-        llm_client.generate.return_value = json.dumps([
-            {"title": "Review PR #42", "description": "Review by Friday", "source_email_index": 1},
-        ])
+        llm_client.generate.return_value = json.dumps(
+            [
+                {
+                    "title": "Review PR #42",
+                    "description": "Review by Friday",
+                    "source_email_index": 1,
+                },
+            ]
+        )
 
         orch = _build_orchestrator_stub()
         orch._TODO_CACHE_TTL_SECONDS = 3600
@@ -626,9 +647,7 @@ class TestTodoRefreshWorkflowIntegration:
         mock_get_tasks.return_value = []  # No existing tasks -> refresh needed.
 
         gateway = MagicMock()
-        gateway.invoke.return_value = _FakeGatewayResult(
-            payload={"messages": []}
-        )
+        gateway.invoke.return_value = _FakeGatewayResult(payload={"messages": []})
 
         orch = _build_orchestrator_stub()
         registry = self._build_registry(orch)

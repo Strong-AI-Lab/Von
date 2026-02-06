@@ -15,15 +15,16 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 9. Keep changes minimal, well-scoped, and add/update tests and docs where relevant.
 10. Prefer small, composable functions; avoid monolithic helpers.
 11. Always check VS Code Problems panel (or run `get_errors`) after edits and when errors are reported. If the Problems panel is not available, run `pyright` as a proxy.
-12. Enable pre-commit guardrails: `git config core.hooksPath .githooks`.
-13. **STOP**: Never run backend tests against `VON_DB_NAME=von_db`. Always use the test DB (`VON_DB_NAME=test_von_db`) or the `pytest:backend (test db)` task.
-14. Requiring a user choice is almost always dispreferred; prefer LLM reasoning to achieve reliability and only ask the user when ambiguity cannot be resolved safely.
-15. When in doubt, run tests or re-run tests without requiring user confirmation.
-16. In the case that multiple tests are failing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
-17. If you think you've finished implementing a Jira task, read the task again and check.
-18. **DRY first**: Create central helpers FIRST, then replace all usages. See "DRY refactoring discipline" in Workflow section.
-19. **Comment for evolution**: Add comments that guide future modifications. See "Self-Documenting, Evolvable Code" section.
-20. **Proactive hygiene**: Periodically review touched files and their neighbours for inconsistency, duplication, and drift. Fix proactively.
+12. **Pre-commit lint gate**: Before every `git commit`, run `get_errors` (or `pyright`) and fix all outstanding linting/type-checking errors. Do not commit with known unresolved diagnostics.
+13. Enable pre-commit guardrails: `git config core.hooksPath .githooks`.
+14. **STOP**: Never run backend tests against `VON_DB_NAME=von_db`. Always use the test DB (`VON_DB_NAME=test_von_db`) or the `pytest:backend (test db)` task.
+15. Requiring a user choice is almost always dispreferred; prefer LLM reasoning to achieve reliability and only ask the user when ambiguity cannot be resolved safely.
+16. When in doubt, run tests or re-run tests without requiring user confirmation.
+17. In the case that multiple tests are failing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
+18. If you think you've finished implementing a Jira task, read the task again and check.
+19. **DRY first**: Create central helpers FIRST, then replace all usages. See "DRY refactoring discipline" in Workflow section.
+20. **Comment for evolution**: Add comments that guide future modifications. See "Self-Documenting, Evolvable Code" section.
+21. **Proactive hygiene**: Periodically review touched files and their neighbours for inconsistency, duplication, and drift. Fix proactively.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
