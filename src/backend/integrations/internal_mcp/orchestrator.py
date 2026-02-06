@@ -768,7 +768,86 @@ class InternalMCPChatOrchestrator:
                 description="Summariser LLM call; detect chained tool calls.",
             )
         )
+
+        # JVNAUTOSCI-922 Phase 3.1: Fallback handler for Vontology-defined
+        # MCP tool actions.  Any action_id not explicitly registered is
+        # routed through the MCP gateway via _action_mcp_tool_invoke.
+        registry.set_fallback_handler(self._action_mcp_tool_invoke)
         return registry
+
+    # -------------------------------------------------------------------
+    # Generic MCP tool invocation action (Phase 3.1)
+    # -------------------------------------------------------------------
+
+    def _action_mcp_tool_invoke(self, request: Any) -> WorkflowActionResult:
+        """Invoke an MCP tool by name via the gateway.
+
+        JVNAUTOSCI-922 Phase 3.1: Generic fallback handler for
+        Vontology-defined workflow steps whose ``invokes_action`` points
+        to an MCP tool name rather than a registered Python handler.
+
+        The ``action_id`` on the request is used as the MCP tool name.
+        ``request.inputs`` (populated from the step's hasInputMap) are
+        merged with defaults (namespace, gmail_profile) and passed as the
+        gateway payload.
+
+        Outputs on success:
+            mcp_result (dict): The raw payload returned by the gateway.
+            mcp_tool (str): The tool name that was invoked.
+            mcp_duration_ms (float): Execution time in milliseconds.
+            result (Any): Alias of mcp_result for condition evaluation.
+        """
+        tool_name = request.action_id
+        env = request.environment
+        gateway = self._gateway
+
+        if gateway is None or not gateway.enabled:
+            return WorkflowActionResult(
+                status="failed",
+                error=f"gateway_unavailable_for:{tool_name}",
+            )
+
+        # Build payload from inputs + context overrides.
+        payload: dict[str, Any] = dict(request.inputs) if request.inputs else {}
+
+        # Apply standard defaults (namespace, gmail_profile, session_id).
+        try:
+            method_catalogue = gateway.describe_methods()
+            schema = self._tool_schema_for_name(tool_name, method_catalogue)
+        except Exception:
+            schema = None
+
+        self._apply_payload_defaults(
+            tool_name,
+            payload,
+            schema=schema,
+            user_namespace=env.user_namespace,
+            selected_gmail_profile=env.default_gmail_profile,
+            conversation_session_id=request.data.get("conversation_session_id"),
+        )
+
+        try:
+            result = gateway.invoke(tool_name, payload)
+            return WorkflowActionResult(
+                status="success",
+                outputs={
+                    "mcp_result": result.payload,
+                    "mcp_tool": tool_name,
+                    "mcp_duration_ms": result.duration_ms,
+                    "result": result.payload,
+                },
+                duration_ms=result.duration_ms,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "[mcp_orchestrator] Generic MCP invoke failed for %s: %s",
+                tool_name,
+                exc,
+            )
+            return WorkflowActionResult(
+                status="failed",
+                error=f"mcp_invoke_failed:{tool_name}:{exc}",
+            )
 
     @staticmethod
     def _noop_action(request: Any) -> WorkflowActionResult:

@@ -81,7 +81,10 @@ class WorkflowExecutor:
             if state_spec is None:
                 error = f"unknown_state:{current_state}"
                 return WorkflowResult(
-                    data=context, completed=False, final_state=current_state, error=error
+                    data=context,
+                    completed=False,
+                    final_state=current_state,
+                    error=error,
                 )
 
             if trace is not None:

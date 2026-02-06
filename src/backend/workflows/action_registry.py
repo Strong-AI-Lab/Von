@@ -1,9 +1,21 @@
-"""Declarative action catalogue for workflow execution."""
+"""Declarative action catalogue for workflow execution.
+
+SCHEMA DESIGN NOTES
+===================
+Action IDs are plain strings (e.g. ``"narration.render"``, ``"search_concepts"``).
+When a Vontology-defined workflow references an MCP tool name as ``invokes_action``,
+the engine looks up that name in this registry.  If no explicit ``ActionSpec`` is
+registered, the **fallback handler** (if set) routes the call through the MCP
+gateway.  See ``set_fallback_handler`` and JVNAUTOSCI-922 Phase 3.1.
+"""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,6 +73,9 @@ class ActionRegistry:
 
     def __init__(self) -> None:
         self._actions: Dict[str, ActionSpec] = {}
+        self._fallback_handler: Callable[
+            [WorkflowActionRequest], WorkflowActionResult
+        ] | None = None
 
     # --- registration -------------------------------------------------------
 
@@ -96,6 +111,19 @@ class ActionRegistry:
             if overwrite or action_id not in self._actions:
                 self._actions[action_id] = spec
 
+    def set_fallback_handler(
+        self,
+        handler: Callable[[WorkflowActionRequest], WorkflowActionResult],
+    ) -> None:
+        """Set a catch-all handler for action IDs without explicit registration.
+
+        When the engine calls ``execute()`` with an unregistered action ID,
+        this handler is invoked instead of returning an error.  This is the
+        hook used by the orchestrator to route Vontology-defined MCP tool
+        actions through the gateway.  See JVNAUTOSCI-922 Phase 3.1.
+        """
+        self._fallback_handler = handler
+
     # --- lookup -------------------------------------------------------------
 
     def get(self, action_id: str) -> ActionSpec | None:
@@ -119,7 +147,10 @@ class ActionRegistry:
         trace: Any | None = None,
     ) -> WorkflowActionResult:
         spec = self.get(action_id)
-        if spec is None:
+        handler: Callable[[WorkflowActionRequest], WorkflowActionResult] | None = (
+            spec.handler if spec is not None else self._fallback_handler
+        )
+        if handler is None:
             return WorkflowActionResult(
                 status="failed", error=f"action_not_registered:{action_id}"
             )
@@ -131,6 +162,6 @@ class ActionRegistry:
                 data=context,
                 trace=trace,
             )
-            return spec.handler(request)
+            return handler(request)
         except Exception as exc:
             return WorkflowActionResult(status="failed", error=str(exc))

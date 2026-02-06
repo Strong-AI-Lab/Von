@@ -133,9 +133,7 @@ class TestFirstRelationshipTarget:
 
     def test_fallback_to_second_predicate(self):
         rels = {"has_step": "#V#step_a"}
-        assert (
-            _first_relationship_target(rels, ("hasStep", "has_step")) == "#V#step_a"
-        )
+        assert _first_relationship_target(rels, ("hasStep", "has_step")) == "#V#step_a"
 
     def test_none_when_missing(self):
         assert _first_relationship_target({}, ("hasStep",)) is None
