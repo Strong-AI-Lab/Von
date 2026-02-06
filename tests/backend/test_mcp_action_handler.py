@@ -54,6 +54,7 @@ class TestFallbackHandler:
 
     def test_registered_action_takes_precedence(self):
         """Explicitly registered actions must not be bypassed by the fallback."""
+
         def explicit(request: WorkflowActionRequest) -> WorkflowActionResult:
             return WorkflowActionResult(outputs={"via": "explicit"})
 
@@ -86,6 +87,7 @@ class TestFallbackHandler:
 
     def test_fallback_exception_returns_failed(self):
         """If the fallback handler raises, the registry returns a failed result."""
+
         def bad_fallback(request: WorkflowActionRequest) -> WorkflowActionResult:
             raise RuntimeError("gateway exploded")
 
@@ -144,7 +146,9 @@ def _build_mock_orchestrator(
 ):
     """Build a minimal mock orchestrator with _action_mcp_tool_invoke wired up."""
     # Import here to avoid circular issues at module level.
-    from src.backend.integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
+    from src.backend.integrations.internal_mcp.orchestrator import (
+        InternalMCPChatOrchestrator,
+    )
 
     # Create gateway mock.
     gateway = MagicMock()
@@ -162,8 +166,8 @@ def _build_mock_orchestrator(
 
     # Build orchestrator with mocked dependencies.
     with patch.object(InternalMCPChatOrchestrator, "__init__", lambda self: None):
-        orch = InternalMCPChatOrchestrator()
-        orch._gateway = gateway
+        orch = InternalMCPChatOrchestrator()  # type: ignore[call-arg]
+        orch._gateway = gateway  # type: ignore[assignment]
         orch._logger = MagicMock()
         # _apply_payload_defaults and _tool_schema_for_name exist on the
         # class; we don't need to mock them for most tests.
@@ -224,11 +228,13 @@ class TestMCPToolInvoke:
         assert "gateway_unavailable" in (result.error or "")
 
     def test_gateway_none_returns_error(self):
-        from src.backend.integrations.internal_mcp.orchestrator import InternalMCPChatOrchestrator
+        from src.backend.integrations.internal_mcp.orchestrator import (
+            InternalMCPChatOrchestrator,
+        )
 
         with patch.object(InternalMCPChatOrchestrator, "__init__", lambda self: None):
-            orch = InternalMCPChatOrchestrator()
-            orch._gateway = None
+            orch = InternalMCPChatOrchestrator()  # type: ignore[call-arg]
+            orch._gateway = None  # type: ignore[assignment]
             orch._logger = MagicMock()
 
         request = WorkflowActionRequest(

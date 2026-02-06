@@ -160,8 +160,8 @@ def _build_orchestrator_with_gateway(gateway):
     )
 
     with patch.object(InternalMCPChatOrchestrator, "__init__", lambda self: None):
-        orch = InternalMCPChatOrchestrator()
-        orch._gateway = gateway
+        orch = InternalMCPChatOrchestrator()  # type: ignore[call-arg]
+        orch._gateway = gateway  # type: ignore[assignment]
         orch._logger = MagicMock()
     return orch
 
@@ -249,9 +249,7 @@ class TestEndToEndVontologyWorkflow:
 
         # All 3 MCP tools should have been invoked.
         assert gateway.invoke.call_count == 3
-        tool_names_called = [
-            c.args[0] for c in gateway.invoke.call_args_list
-        ]
+        tool_names_called = [c.args[0] for c in gateway.invoke.call_args_list]
         assert tool_names_called == [
             "search_concepts",
             "fetch_concept",

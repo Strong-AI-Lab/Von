@@ -43,7 +43,7 @@ def _make_env(**overrides: Any) -> WorkflowEnvironment:
         default_gmail_profile="test@example.com",
     )
     defaults.update(overrides)
-    return WorkflowEnvironment(**defaults)
+    return WorkflowEnvironment(**defaults)  # type: ignore[arg-type]
 
 
 def _make_request(
@@ -556,7 +556,7 @@ class TestTodoRefreshWorkflowIntegration:
         assert result.final_state == "completed"
         assert result.data.get("todo_refresh_needed") is False
         # Gateway should NOT have been called (skipped Gmail).
-        env.gateway.invoke.assert_not_called()
+        env.gateway.invoke.assert_not_called()  # type: ignore[union-attr]
 
     @patch("src.backend.services.task_management_service.create_task")
     @patch("src.backend.services.task_management_service.get_tasks_for_user")

@@ -73,9 +73,9 @@ class ActionRegistry:
 
     def __init__(self) -> None:
         self._actions: Dict[str, ActionSpec] = {}
-        self._fallback_handler: Callable[
-            [WorkflowActionRequest], WorkflowActionResult
-        ] | None = None
+        self._fallback_handler: (
+            Callable[[WorkflowActionRequest], WorkflowActionResult] | None
+        ) = None
 
     # --- registration -------------------------------------------------------
 
