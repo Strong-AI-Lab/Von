@@ -3449,6 +3449,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 preferred_language=request_language,
                                 progress_tracker=progress_tracker,
                                 conversation_session_id=bg_session_id,
+                                workflow_discovery_result=workflow_discovery_result,
                             )
 
                             # Phase 4: Persist to chat history
@@ -3532,6 +3533,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     preferred_language=request_language,
                     progress_tracker=progress_tracker,
                     conversation_session_id=session_id,
+                    workflow_discovery_result=workflow_discovery_result,
                 )
                 llm_interaction["duration_ms"] = (
                     time.perf_counter() - orchestrator_start_perf

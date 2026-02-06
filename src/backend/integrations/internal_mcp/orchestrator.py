@@ -1266,9 +1266,7 @@ class InternalMCPChatOrchestrator:
         os.environ.get("VON_TODO_CACHE_TTL_SECONDS", "3600")
     )
 
-    def _action_todo_refresh_check_cache(
-        self, request: Any
-    ) -> WorkflowActionResult:
+    def _action_todo_refresh_check_cache(self, request: Any) -> WorkflowActionResult:
         """Check whether the user's task list is fresh enough to skip Gmail.
 
         Looks at the most recently created ``#V#task_specification`` for the
@@ -1279,19 +1277,14 @@ class InternalMCPChatOrchestrator:
         from ...services.task_management_service import get_tasks_for_user
 
         data = request.data
-        user_ns = (
-            data.get("user_namespace")
-            or getattr(request.environment, "user_namespace", None)
+        user_ns = data.get("user_namespace") or getattr(
+            request.environment, "user_namespace", None
         )
 
         if not user_ns:
             # No user context - nothing to cache-check; proceed with refresh.
-            self._logger.debug(
-                "[todo_refresh] No user namespace; skipping cache check"
-            )
-            return WorkflowActionResult(
-                outputs={"todo_refresh_needed": True}
-            )
+            self._logger.debug("[todo_refresh] No user namespace; skipping cache check")
+            return WorkflowActionResult(outputs={"todo_refresh_needed": True})
 
         try:
             existing_tasks = get_tasks_for_user(user_ns)
@@ -1300,14 +1293,10 @@ class InternalMCPChatOrchestrator:
                 "[todo_refresh] Cache check failed: %s - proceeding with refresh",
                 exc,
             )
-            return WorkflowActionResult(
-                outputs={"todo_refresh_needed": True}
-            )
+            return WorkflowActionResult(outputs={"todo_refresh_needed": True})
 
         if not existing_tasks:
-            return WorkflowActionResult(
-                outputs={"todo_refresh_needed": True}
-            )
+            return WorkflowActionResult(outputs={"todo_refresh_needed": True})
 
         # Find most recent updated_at / created_at.
         from datetime import datetime, timezone
@@ -1331,9 +1320,7 @@ class InternalMCPChatOrchestrator:
                         newest_ts = raw
 
         if newest_ts is None:
-            return WorkflowActionResult(
-                outputs={"todo_refresh_needed": True}
-            )
+            return WorkflowActionResult(outputs={"todo_refresh_needed": True})
 
         age_seconds = (now - newest_ts).total_seconds()
         stale = age_seconds > self._TODO_CACHE_TTL_SECONDS
@@ -1343,13 +1330,9 @@ class InternalMCPChatOrchestrator:
             self._TODO_CACHE_TTL_SECONDS,
             "stale" if stale else "fresh",
         )
-        return WorkflowActionResult(
-            outputs={"todo_refresh_needed": stale}
-        )
+        return WorkflowActionResult(outputs={"todo_refresh_needed": stale})
 
-    def _action_todo_refresh_fetch_gmail(
-        self, request: Any
-    ) -> WorkflowActionResult:
+    def _action_todo_refresh_fetch_gmail(self, request: Any) -> WorkflowActionResult:
         """Fetch recent Gmail messages via the MCP gateway.
 
         Retrieves up to 10 recent messages using ``gmail_list_messages`` and
@@ -1358,9 +1341,8 @@ class InternalMCPChatOrchestrator:
         """
         data = request.data
         gateway = request.environment.gateway
-        gmail_profile = (
-            data.get("gmail_profile")
-            or getattr(request.environment, "default_gmail_profile", None)
+        gmail_profile = data.get("gmail_profile") or getattr(
+            request.environment, "default_gmail_profile", None
         )
 
         if not gateway:
@@ -1429,9 +1411,7 @@ class InternalMCPChatOrchestrator:
             }
         )
 
-    def _action_todo_refresh_extract_tasks(
-        self, request: Any
-    ) -> WorkflowActionResult:
+    def _action_todo_refresh_extract_tasks(self, request: Any) -> WorkflowActionResult:
         """Use the LLM to extract actionable tasks from Gmail message bodies.
 
         Reads ``raw_gmail_messages`` from the workflow context, builds a prompt
@@ -1444,14 +1424,14 @@ class InternalMCPChatOrchestrator:
 
         if not raw_messages:
             self._logger.info("[todo_refresh] No messages to extract tasks from")
-            return WorkflowActionResult(
-                outputs={"extracted_tasks": []}
-            )
+            return WorkflowActionResult(outputs={"extracted_tasks": []})
 
         # Build a digest of email contents for the LLM.
         digest_parts: list[str] = []
         for idx, msg in enumerate(raw_messages, 1):
-            subject = msg.get("subject") or msg.get("headers", {}).get("Subject", "(no subject)")
+            subject = msg.get("subject") or msg.get("headers", {}).get(
+                "Subject", "(no subject)"
+            )
             sender = msg.get("from") or msg.get("headers", {}).get("From", "unknown")
             body = msg.get("body") or msg.get("snippet") or ""
             # Truncate very long bodies.
@@ -1503,7 +1483,11 @@ class InternalMCPChatOrchestrator:
         try:
             import json as _json
 
-            text = llm_response.strip() if isinstance(llm_response, str) else str(llm_response).strip()
+            text = (
+                llm_response.strip()
+                if isinstance(llm_response, str)
+                else str(llm_response).strip()
+            )
             # Strip markdown code fences if present.
             if text.startswith("```"):
                 lines = text.split("\n")
@@ -1517,12 +1501,8 @@ class InternalMCPChatOrchestrator:
                         extracted.append(
                             {
                                 "title": str(item["title"]),
-                                "description": str(
-                                    item.get("description", "")
-                                ),
-                                "source_email_index": item.get(
-                                    "source_email_index"
-                                ),
+                                "description": str(item.get("description", "")),
+                                "source_email_index": item.get("source_email_index"),
                             }
                         )
         except Exception as exc:
@@ -1549,9 +1529,7 @@ class InternalMCPChatOrchestrator:
         )
         return WorkflowActionResult(outputs={"extracted_tasks": extracted})
 
-    def _action_todo_refresh_prioritise(
-        self, request: Any
-    ) -> WorkflowActionResult:
+    def _action_todo_refresh_prioritise(self, request: Any) -> WorkflowActionResult:
         """Assign priority (low/medium/high/critical) to extracted tasks.
 
         If there are ≤3 tasks, uses a simple heuristic (all medium).
@@ -1568,16 +1546,20 @@ class InternalMCPChatOrchestrator:
         if len(extracted) <= 3:
             for task in extracted:
                 task.setdefault("priority", "medium")
-            return WorkflowActionResult(
-                outputs={"prioritised_tasks": extracted}
-            )
+            return WorkflowActionResult(outputs={"prioritised_tasks": extracted})
 
         # Use LLM for larger batches.
         import json as _json
 
         task_summaries = _json.dumps(
-            [{"index": i, "title": t["title"], "description": t.get("description", "")}
-             for i, t in enumerate(extracted)],
+            [
+                {
+                    "index": i,
+                    "title": t["title"],
+                    "description": t.get("description", ""),
+                }
+                for i, t in enumerate(extracted)
+            ],
             indent=2,
         )
         prioritise_prompt = (
@@ -1601,7 +1583,11 @@ class InternalMCPChatOrchestrator:
                 ],
                 model=model,
             )
-            text = llm_response.strip() if isinstance(llm_response, str) else str(llm_response).strip()
+            text = (
+                llm_response.strip()
+                if isinstance(llm_response, str)
+                else str(llm_response).strip()
+            )
             if text.startswith("```"):
                 lines = text.split("\n")
                 text = "\n".join(
@@ -1615,7 +1601,10 @@ class InternalMCPChatOrchestrator:
                         idx = item.get("index")
                         prio = item.get("priority", "medium")
                         if isinstance(idx, int) and prio in (
-                            "low", "medium", "high", "critical"
+                            "low",
+                            "medium",
+                            "high",
+                            "critical",
                         ):
                             priority_map[idx] = prio
                 for i, task in enumerate(extracted):
@@ -1630,9 +1619,7 @@ class InternalMCPChatOrchestrator:
 
         return WorkflowActionResult(outputs={"prioritised_tasks": extracted})
 
-    def _action_todo_refresh_summarise(
-        self, request: Any
-    ) -> WorkflowActionResult:
+    def _action_todo_refresh_summarise(self, request: Any) -> WorkflowActionResult:
         """Persist prioritised tasks via the task management service and
         produce a human-readable summary.
 
@@ -1647,9 +1634,8 @@ class InternalMCPChatOrchestrator:
 
         data = request.data
         prioritised: list[dict[str, Any]] = data.get("prioritised_tasks") or []
-        user_ns = (
-            data.get("user_namespace")
-            or getattr(request.environment, "user_namespace", None)
+        user_ns = data.get("user_namespace") or getattr(
+            request.environment, "user_namespace", None
         )
 
         if not prioritised:
@@ -1699,17 +1685,13 @@ class InternalMCPChatOrchestrator:
                 )
 
         # Build human-readable summary.
-        summary_lines = [
-            f"Refreshed to-do list: {len(persisted)} new task(s) created"
-        ]
+        summary_lines = [f"Refreshed to-do list: {len(persisted)} new task(s) created"]
         if skipped:
             summary_lines[0] += f", {skipped} duplicate(s) skipped"
         summary_lines[0] += "."
         for t in persisted:
             prio = t.get("priority", "medium")
-            summary_lines.append(
-                f"  • [{prio.upper()}] {t.get('title', 'Untitled')}"
-            )
+            summary_lines.append(f"  • [{prio.upper()}] {t.get('title', 'Untitled')}")
 
         summary = "\n".join(summary_lines)
         self._logger.info(
@@ -7214,6 +7196,7 @@ class InternalMCPChatOrchestrator:
         preferred_language: str | None = None,
         progress_tracker: ProgressTracker | None = None,
         conversation_session_id: Optional[str] = None,
+        workflow_discovery_result: Mapping[str, Any] | None = None,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
         llm_calls: list[dict[str, Any]] = []
@@ -7721,21 +7704,29 @@ class InternalMCPChatOrchestrator:
                     presenter_mode_requested = True
                     break
 
-        # Workflow selection is currently only used to decide whether to route to
-        # the narration workflow. To avoid interfering with tool-calling flows and
-        # test doubles (which often provide a finite response sequence), we only
-        # invoke the selector for authenticated presenter-mode turns.
-        if (
-            user_namespace
-            and presenter_mode_requested
-            and self._workflow_selector.enabled()
-        ):
+        # ----------------------------------------------------------------
+        # JVNAUTOSCI-922 Phase 1.3 + 2.2: Workflow selection for all turns.
+        # The presenter-mode gate is removed — the selector now runs for
+        # any authenticated turn when enabled.  Discovery results from
+        # discover_workflows_for_turn() are piped into the selector so the
+        # classifier can route to dynamically discovered Vontology workflows.
+        # ----------------------------------------------------------------
+        discovered_matches: list[dict[str, Any]] = []
+        if isinstance(workflow_discovery_result, Mapping):
+            raw_matches = workflow_discovery_result.get("matches")
+            if isinstance(raw_matches, list):
+                discovered_matches = [
+                    dict(m) for m in raw_matches if isinstance(m, Mapping)
+                ]
+
+        if user_namespace and self._workflow_selector.enabled():
             try:
                 classifier_model = _model_for_stage("classifier")
                 selector_selection = self._workflow_selector.select_workflow(
                     llm_client=llm_client,
                     model=classifier_model,
                     turn_text=prompt,
+                    discovered_workflows=discovered_matches or None,
                 )
                 if selector_selection.workflow_id:
                     selected_workflow_id = selector_selection.workflow_id
@@ -7745,6 +7736,9 @@ class InternalMCPChatOrchestrator:
                         "workflow_id": selector_selection.workflow_id,
                         "verdict": selector_selection.verdict,
                         "prompt_id": selector_selection.prompt_id,
+                        "discovered_workflow_ids": list(
+                            selector_selection.discovered_workflow_ids
+                        ),
                     }
                 )
                 if trace_enabled and trace is not None:
@@ -7752,6 +7746,9 @@ class InternalMCPChatOrchestrator:
                         "workflow_id": selector_selection.workflow_id,
                         "verdict": selector_selection.verdict,
                         "prompt_id": selector_selection.prompt_id,
+                        "discovered_workflow_ids": list(
+                            selector_selection.discovered_workflow_ids
+                        ),
                     }
             except Exception:
                 selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
@@ -7824,6 +7821,86 @@ class InternalMCPChatOrchestrator:
                 return screen_text
 
             return screen_text
+
+        # ----------------------------------------------------------------
+        # JVNAUTOSCI-922 Phase 2.2: Route non-standard workflows via
+        # execute_workflow() before falling through to tool-calling.
+        #
+        # Standard verdicts (plain_response, tool_seeking, summarisation,
+        # narration) are handled by the tool-calling workflow + narration
+        # post-processing below.  Discovered Vontology workflows get
+        # their own execute_workflow() dispatch here.
+        # ----------------------------------------------------------------
+        _STANDARD_WORKFLOW_IDS = {
+            CHAT_ASSISTANT_WORKFLOW_ID,
+            TOOL_CALLING_WORKFLOW_ID,
+            CHAT_NARRATION_WORKFLOW_ID,
+        }
+        if selected_workflow_id and selected_workflow_id not in _STANDARD_WORKFLOW_IDS:
+            # Attempt to execute a discovered/non-standard workflow.
+            try:
+                wf_result = self.execute_workflow(
+                    selected_workflow_id,
+                    data={
+                        "prompt": prompt,
+                        "augmented_context": augmented_context,
+                        "user_concept_id": user_concept_id,
+                        "org_concept_id": org_concept_id,
+                        "gmail_profile": gmail_profile or self._default_gmail_profile,
+                        "aux_llm_calls": aux_llm_calls,
+                        "policy_state": policy_state,
+                        "registry_snapshot": registry_snapshot,
+                    },
+                    llm_client=llm_client,
+                    model=model,
+                    user_namespace=user_namespace,
+                    auxiliary_system_prompt=auxiliary_system_prompt,
+                    trace=trace if trace_enabled else None,
+                )
+                if wf_result is not None:
+                    # Build an OrchestratorResult from the workflow output.
+                    wf_response = wf_result.data.get("response_text", "")
+                    if not isinstance(wf_response, str) or not wf_response.strip():
+                        wf_response = wf_result.data.get("summary", "")
+                    if not isinstance(wf_response, str) or not wf_response.strip():
+                        wf_response = (
+                            f"Workflow {selected_workflow_id} completed "
+                            f"(state: {wf_result.final_state})."
+                        )
+                    aux_llm_calls.append(
+                        {
+                            "type": "workflow_execution",
+                            "workflow_id": selected_workflow_id,
+                            "final_state": wf_result.final_state,
+                            "completed": wf_result.completed,
+                        }
+                    )
+                    result = OrchestratorResult(
+                        response_text=wf_response,
+                        extra_messages=(),
+                        tool_invocations=(),
+                        aux_llm_calls=tuple(aux_llm_calls),
+                        llm_calls=tuple(llm_calls),
+                        llm_usage=_aggregate_usage_total(),
+                        orchestrator_duration_ms=_orchestrator_duration_ms(),
+                    )
+                    _persist_trace(status="completed")
+                    return result
+                else:
+                    # Workflow definition not found in registry — fall through
+                    # to tool-calling as a safe default.
+                    self._logger.warning(
+                        "[mcp_orchestrator] Selected workflow %s not in registry; "
+                        "falling through to tool-calling.",
+                        selected_workflow_id,
+                    )
+            except Exception as exc:
+                self._logger.warning(
+                    "[mcp_orchestrator] Non-standard workflow %s failed: %s; "
+                    "falling through to tool-calling.",
+                    selected_workflow_id,
+                    exc,
+                )
 
         # ----------------------------------------------------------------
         # JVNAUTOSCI-922 Phase 2: Route tool calling through the workflow
