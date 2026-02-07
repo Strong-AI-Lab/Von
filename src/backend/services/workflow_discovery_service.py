@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -297,6 +298,24 @@ def _deduplicate_and_rank(
     return unique_matches
 
 
+@lru_cache(maxsize=512)
+def _is_executable_workflow_concept(concept_id: str) -> bool:
+    """Return whether a workflow concept can be loaded into an executable definition."""
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return False
+    try:
+        from ..workflows.vontology_loader import load_workflow_definition_from_vontology
+
+        definition = load_workflow_definition_from_vontology(concept_id)
+        return definition is not None
+    except Exception:
+        return False
+
+
+def _count_executable_matches(matches: List[WorkflowMatch]) -> int:
+    return sum(1 for match in matches if _is_executable_workflow_concept(match.concept_id))
+
+
 def discover_workflows(
     query: str,
     *,
@@ -374,11 +393,25 @@ def discover_workflows(
     # Enrich with descriptions
     ranked_matches = _enrich_workflow_matches(ranked_matches)
 
+    executable_match_count = _count_executable_matches(ranked_matches)
+    try:
+        from ..workflows.workflow_baseline_telemetry import (
+            record_workflow_discovery_observation,
+        )
+
+        record_workflow_discovery_observation(
+            discovered_match_count=len(ranked_matches),
+            executable_match_count=executable_match_count,
+        )
+    except Exception:
+        pass
+
     elapsed_ms = (time.perf_counter() - start_time) * 1000
 
     logger.info(
         f"[workflow_discovery] query='{query[:50]}...' "
-        f"found={len(ranked_matches)} elapsed_ms={elapsed_ms:.1f}"
+        f"found={len(ranked_matches)} executable={executable_match_count} "
+        f"elapsed_ms={elapsed_ms:.1f}"
     )
 
     return WorkflowDiscoveryResult(

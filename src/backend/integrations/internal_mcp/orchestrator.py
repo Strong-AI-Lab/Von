@@ -847,6 +847,14 @@ class InternalMCPChatOrchestrator:
 
         try:
             result = gateway.invoke(tool_name, payload)
+            try:
+                from ...workflows.workflow_baseline_telemetry import (
+                    record_generic_fallback_mcp_invocation,
+                )
+
+                record_generic_fallback_mcp_invocation(success=True)
+            except Exception:
+                pass
             return WorkflowActionResult(
                 status="success",
                 outputs={
@@ -858,6 +866,14 @@ class InternalMCPChatOrchestrator:
                 duration_ms=result.duration_ms,
             )
         except Exception as exc:
+            try:
+                from ...workflows.workflow_baseline_telemetry import (
+                    record_generic_fallback_mcp_invocation,
+                )
+
+                record_generic_fallback_mcp_invocation(success=False)
+            except Exception:
+                pass
             self._logger.warning(
                 "[mcp_orchestrator] Generic MCP invoke failed for %s: %s",
                 tool_name,
@@ -963,6 +979,17 @@ class InternalMCPChatOrchestrator:
             if get_disable_write_tool_conservatism():
                 if not prompt_explicitly_denies_write(prompt):
                     allowed = sorted({str(tool) for tool in requested_tools if tool})
+                    try:
+                        from ...workflows.workflow_baseline_telemetry import (
+                            record_write_policy_decision,
+                        )
+
+                        record_write_policy_decision(
+                            stage="write_policy.decide",
+                            allowed_tools_count=len(allowed),
+                        )
+                    except Exception:
+                        pass
                     return WorkflowActionResult(
                         outputs={
                             "allowed_write_tools": allowed,
@@ -980,6 +1007,17 @@ class InternalMCPChatOrchestrator:
                 str(item) for item in recent_user_prompts if isinstance(item, str)
             ],
         )
+        try:
+            from ...workflows.workflow_baseline_telemetry import (
+                record_write_policy_decision,
+            )
+
+            record_write_policy_decision(
+                stage="write_policy.decide",
+                allowed_tools_count=len(decision.allowed_tools),
+            )
+        except Exception:
+            pass
 
         return WorkflowActionResult(
             outputs={

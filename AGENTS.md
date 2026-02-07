@@ -120,17 +120,42 @@ Do not "hack around" MCP failures with ad-hoc scripts or direct REST calls. Fix 
 - Prefer separate lines over `&&` unless failure short-circuit is required.
 - Large multi-line Python: use a here-string variable and `pdm run python -c $code`, or add a script.
 
+## Command Hang Guardrails
+- Treat simple read commands (`Get-Content -TotalCount`, `rg`, `git status`, `git branch`) as expected to complete quickly; if a run exceeds ~30s with no new output, treat it as potentially hung.
+- Prefer bounded reads and output caps (`-TotalCount`, `Select-Object -First`, targeted `rg`) instead of broad scans.
+- Avoid launching multiple long `Get-Content` calls in parallel; run file reads in smaller batches.
+- When diagnosing shell delay, run a quick sanity probe first:
+  - `pwsh -NoProfile -Command "Get-Content <path> -TotalCount 5"`
+  - If fast manually but slow in agent tooling, assume tooling/transport stall and restart the VS Code window.
+- Use explicit command timeouts for agent-run shell calls, and retry with a minimal command before escalating.
+
+## IDE Host Introspection (Codex/Copilot)
+- **Introspect execution host first** where possible (Codex extension, Copilot agent/chat, CLI, or unknown) before applying host-specific assumptions.
+- If host introspection is available, record the detected host in diagnostics/comments for debugging reproducibility.
+- Use an allowlist for host markers (e.g., `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`, `VSCODE_*`, process chain), and avoid dumping full environment variables.
+- If host cannot be determined reliably, default to conservative behaviour:
+  - use PowerShell-first commands,
+  - bounded output,
+  - explicit timeouts,
+  - restart/retry guidance framed in host-neutral terms (e.g., `Developer: Reload Window`).
+- Do not assume UI labels (e.g., `bash` output block labels) reflect the true underlying shell process.
+
 ## UI Debugging (Missing/Invisible Elements)
 - First check the DOM element exists; then check CSS visibility (display/visibility/opacity), size, positioning, z-index, and overflow.
 - Absolute-positioned elements need a relative parent. Off-screen transforms and `overflow: hidden` are common culprits.
 - If the element exists but looks wrong, capture `outerHTML` and key computed styles before changing JS.
 
-## Copilot Tool Selection Hygiene
+## Copilot Tool Selection Hygiene (when running in Copilot)
 - Authoritative script: `scripts/set_vscode_copilot_selected_tools.ps1`.
 - If you rely on a tool, ensure it stays enabled by updating that script.
+- When not running in Copilot (for example, Codex extension), do not assume Copilot tool-selection state is active.
 
-## Reporting VS Code Copilot Issues
-When encountering Copilot bugs or limitations, the agent can draft an issue for https://github.com/microsoft/vscode-copilot-release/issues using this template:
+## Reporting IDE Agent Issues
+When encountering agent-host bugs or limitations, first include host identification in the report (Codex extension vs Copilot vs other). Then use the host-appropriate path:
+- Copilot issues: https://github.com/microsoft/vscode-copilot-release/issues
+- Codex extension issues: use the current OpenAI/Codex feedback channel configured for this workspace/org.
+
+Copilot issue template:
 
 ```
 - Copilot Chat Extension Version: (run `code-insiders --list-extensions --show-versions | Select-String copilot`)

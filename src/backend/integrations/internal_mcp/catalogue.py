@@ -4964,7 +4964,13 @@ def _check_placeholder_description_output_schema() -> Schema:
 
 def _workflow_list_definitions(**kwargs):
     """List available workflow definitions."""
-    from ...workflows.durable.registry_factory import build_durable_workflow_registry
+    from ...workflows.durable.registry_factory import (
+        build_durable_workflow_registry,
+        get_workflow_registry_inventory_snapshot,
+    )
+    from ...workflows.workflow_baseline_telemetry import (
+        get_workflow_baseline_telemetry_snapshot,
+    )
 
     limit = min(int(kwargs.get("limit", 50)), 200)
 
@@ -4976,10 +4982,13 @@ def _workflow_list_definitions(**kwargs):
         definitions = []
         for wid in ids[:limit]:
             defn = registry.get(wid)
+            description = (
+                defn.purpose if defn is not None and isinstance(defn.purpose, str) else ""
+            )
             definitions.append(
                 {
                     "workflow_id": wid,
-                    "description": defn.purpose if defn.purpose else "",
+                    "description": description,
                     "initial_state": defn.initial_state if defn else "",
                 }
             )
@@ -4988,6 +4997,8 @@ def _workflow_list_definitions(**kwargs):
             "success": True,
             "definitions": definitions,
             "count": len(definitions),
+            "parity_inventory": get_workflow_registry_inventory_snapshot(),
+            "baseline_telemetry": get_workflow_baseline_telemetry_snapshot(),
         }
     except Exception as e:
         return make_error_response(
@@ -8919,7 +8930,12 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             output_schema=Schema(
                 required={"success": bool, "definitions": list, "count": int},
-                optional={"error": str, "error_code": str},
+                optional={
+                    "parity_inventory": dict,
+                    "baseline_telemetry": dict,
+                    "error": str,
+                    "error_code": str,
+                },
                 allow_unknown=True,
                 description="List of workflow definitions.",
             ),
@@ -9000,12 +9016,12 @@ def build_default_catalogue() -> MethodCatalogue:
                     "instance_id": str,
                     "workflow_id": str,
                     "status": str,
-                    "current_state": str,
+                    "current_state": (str, type(None)),
                     "step_index": int,
                     "inputs": dict,
                     "outputs": (dict, type(None)),
-                    "error": str,
-                    "error_code": str,
+                    "error": (str, type(None)),
+                    "error_code": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Full workflow instance details.",
@@ -9030,8 +9046,8 @@ def build_default_catalogue() -> MethodCatalogue:
                 optional={
                     "instance_id": str,
                     "status": str,
-                    "error": str,
-                    "error_code": str,
+                    "error": (str, type(None)),
+                    "error_code": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Cancellation result.",
@@ -9057,8 +9073,8 @@ def build_default_catalogue() -> MethodCatalogue:
                     "instance_id": str,
                     "status": str,
                     "retry_count": int,
-                    "error": str,
-                    "error_code": str,
+                    "error": (str, type(None)),
+                    "error_code": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Retry result.",
@@ -9100,8 +9116,8 @@ def build_default_catalogue() -> MethodCatalogue:
                 optional={
                     "schedule_id": str,
                     "schedule_type": str,
-                    "error": str,
-                    "error_code": str,
+                    "error": (str, type(None)),
+                    "error_code": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Schedule creation result.",
@@ -9156,8 +9172,8 @@ def build_default_catalogue() -> MethodCatalogue:
                     "interval_seconds": (int, type(None)),
                     "next_run_at": (str, type(None)),
                     "last_run_at": (str, type(None)),
-                    "error": str,
-                    "error_code": str,
+                    "error": (str, type(None)),
+                    "error_code": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Full schedule details.",
@@ -9179,8 +9195,8 @@ def build_default_catalogue() -> MethodCatalogue:
                 optional={
                     "schedule_id": str,
                     "enabled": bool,
-                    "error": str,
-                    "error_code": str,
+                    "error": (str, type(None)),
+                    "error_code": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Update result.",
@@ -9202,8 +9218,8 @@ def build_default_catalogue() -> MethodCatalogue:
                 optional={
                     "deleted": bool,
                     "schedule_id": str,
-                    "error": str,
-                    "error_code": str,
+                    "error": (str, type(None)),
+                    "error_code": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Deletion result.",
@@ -9226,8 +9242,8 @@ def build_default_catalogue() -> MethodCatalogue:
                     "instance_id": str,
                     "schedule_id": str,
                     "status": str,
-                    "error": str,
-                    "error_code": str,
+                    "error": (str, type(None)),
+                    "error_code": (str, type(None)),
                 },
                 allow_unknown=True,
                 description="Trigger result with new instance_id.",
