@@ -6,16 +6,12 @@ DurableWorkflowExecutor, and scheduling components.
 
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Enable mock DB for tests
-os.environ["VON_USE_MOCK_DB"] = "1"
 
 from src.backend.workflows.durable.models import (
     WorkflowInstance,
@@ -32,8 +28,9 @@ from src.backend.workflows.durable.scheduler import (
 
 # Module-level setup for mock DB
 @pytest.fixture(autouse=True)
-def reset_mock_db():
+def reset_mock_db(monkeypatch):
     """Reset mock database before each test by clearing workflow collections."""
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
     from src.backend.db.mongo_client import get_db
     from src.backend.workflows.durable import instance_manager
     from src.backend.services import concept_service

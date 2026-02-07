@@ -12,12 +12,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Enable mock DB for tests
-os.environ["VON_USE_MOCK_DB"] = "1"
-
 
 @pytest.fixture(autouse=True)
-def reset_mock_db():
+def reset_mock_db(monkeypatch):
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
     """Reset mock database before each test by clearing workflow collections."""
     from src.backend.db.mongo_client import get_db
     from src.backend.workflows.durable import instance_manager

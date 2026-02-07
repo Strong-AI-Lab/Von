@@ -12,17 +12,25 @@ from src.backend.integrations.internal_mcp.catalogue import _create_concepts
 
 @pytest.fixture(autouse=True)
 def seed_core_concepts():
-    """Seed #V#thing and #V#predicate for create_concepts tests."""
+    """Seed core type hierarchy for create_concepts tests."""
     concepts = ConceptsRepository.collection()
     if concepts is None:
         pytest.skip("MongoDB not configured for this test run")
 
     # Seed core concepts needed for tests
-    concepts.delete_many({"concept_id": {"$in": ["#V#thing", "#V#predicate"]}})
+    concepts.delete_many(
+        {"concept_id": {"$in": ["#V#thing", "#V#abstract_object", "#V#predicate"]}}
+    )
     concepts.insert_one(
         {
             "concept_id": "#V#thing",
             "relationships": {"is_a_type_of": [], "is_an_instance_of": []},
+        }
+    )
+    concepts.insert_one(
+        {
+            "concept_id": "#V#abstract_object",
+            "relationships": {"is_a_type_of": ["#V#thing"], "is_an_instance_of": []},
         }
     )
     concepts.insert_one(
@@ -51,7 +59,7 @@ def test_create_concepts_accepts_namespace_field():
     # Arrange: payload with extra 'namespace' field and unique concept name
     unique_name = f"test_concept_ns_{uuid.uuid4().hex[:8]}"
     payload = {
-        "parent_id": "#V#thing",
+        "parent_id": "#V#abstract_object",
         "namespace": "#V#test_user",  # Extra field that should be ignored
         "concepts": [
             {
@@ -102,7 +110,7 @@ def test_create_concepts_accepts_multiple_unknown_fields():
     """
     # Arrange: payload with multiple extra fields
     payload = {
-        "parent_id": "#V#thing",
+        "parent_id": "#V#abstract_object",
         "namespace": "#V#test_user",
         "session_id": "abc123",
         "user_context": {"name": "Test User"},
@@ -128,7 +136,7 @@ def test_create_concepts_predicate_kind_creates_predicate_instance():
 
     unique_name = f"test_predicate_{uuid.uuid4().hex[:8]}"
     payload = {
-        "parent_id": "#V#thing",
+        "parent_id": "#V#abstract_object",
         "concepts": [
             {
                 "name": unique_name,

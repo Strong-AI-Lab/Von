@@ -13,17 +13,25 @@ from src.backend.integrations.internal_mcp.catalogue import _create_concepts
 
 @pytest.fixture(autouse=True)
 def seed_core_concepts():
-    """Seed #V#thing and #V#predicate for enhanced response tests."""
+    """Seed core type hierarchy for enhanced response tests."""
     concepts = ConceptsRepository.collection()
     if concepts is None:
         pytest.skip("MongoDB not configured for this test run")
 
     # Seed core concepts needed for tests
-    concepts.delete_many({"concept_id": {"$in": ["#V#thing", "#V#predicate"]}})
+    concepts.delete_many(
+        {"concept_id": {"$in": ["#V#thing", "#V#abstract_object", "#V#predicate"]}}
+    )
     concepts.insert_one(
         {
             "concept_id": "#V#thing",
             "relationships": {"is_a_type_of": [], "is_an_instance_of": []},
+        }
+    )
+    concepts.insert_one(
+        {
+            "concept_id": "#V#abstract_object",
+            "relationships": {"is_a_type_of": ["#V#thing"], "is_an_instance_of": []},
         }
     )
     concepts.insert_one(
@@ -50,7 +58,7 @@ def test_create_concepts_already_exists_error_includes_enhanced_info():
 
     # First create a concept
     payload = {
-        "parent_id": "#V#thing",
+        "parent_id": "#V#abstract_object",
         "concepts": [{"name": unique_name, "kind": "type"}],
     }
     result1 = _create_concepts(**payload)
@@ -87,7 +95,7 @@ def test_create_concepts_success_includes_canonical_id():
     full_name = f"{original_name} {unique_suffix}"
 
     payload = {
-        "parent_id": "#V#thing",
+        "parent_id": "#V#abstract_object",
         "concepts": [{"name": full_name, "kind": "type"}],
     }
 
@@ -111,7 +119,7 @@ def test_create_concepts_result_includes_requested_name_and_kind():
     """
     unique_name = f"enhanced_test_{uuid.uuid4().hex[:8]}"
     payload = {
-        "parent_id": "#V#thing",
+        "parent_id": "#V#abstract_object",
         "concepts": [
             {"name": unique_name, "kind": "type", "description": "A type"},
         ],
@@ -132,14 +140,14 @@ def test_create_concepts_summary_includes_all_counts():
     # Create a unique concept first
     existing_name = f"already_exists_{uuid.uuid4().hex[:8]}"
     _create_concepts(
-        parent_id="#V#thing",
+        parent_id="#V#abstract_object",
         concepts=[{"name": existing_name, "kind": "type"}],
     )
 
     # Now try to create multiple concepts including the existing one
     new_name = f"enhanced_test_{uuid.uuid4().hex[:8]}"
     payload = {
-        "parent_id": "#V#thing",
+        "parent_id": "#V#abstract_object",
         "concepts": [
             {"name": existing_name, "kind": "type"},  # Will fail - already exists
             {"name": new_name, "kind": "type"},  # Will succeed
@@ -162,11 +170,11 @@ def test_create_concepts_includes_parent_id_used():
     """
     unique_name = f"enhanced_test_{uuid.uuid4().hex[:8]}"
     payload = {
-        "parent_id": "#V#Thing",  # Mixed case
+        "parent_id": "#V#Abstract_Object",  # Mixed case
         "concepts": [{"name": unique_name, "kind": "type"}],
     }
 
     result = _create_concepts(**payload)
 
     # Assert: parent_id_used is the canonicalised form
-    assert result.get("parent_id_used") == "#V#thing"
+    assert result.get("parent_id_used") == "#V#abstract_object"

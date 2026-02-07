@@ -14,17 +14,23 @@ from src.backend.services.concept_service import get_concept_by_concept_id
 
 @pytest.fixture(autouse=True)
 def seed_and_cleanup():
-    """Seed core concepts and cleanup test concepts after each test."""
+    """Seed core type hierarchy and cleanup test concepts after each test."""
     concepts = ConceptsRepository.collection()
     if concepts is None:
         pytest.skip("MongoDB not configured for this test run")
 
-    # Seed #V#thing as root type
-    concepts.delete_many({"concept_id": "#V#thing"})
+    # Seed #V#thing as root type and #V#abstract_object as usable parent
+    concepts.delete_many({"concept_id": {"$in": ["#V#thing", "#V#abstract_object"]}})
     concepts.insert_one(
         {
             "concept_id": "#V#thing",
             "relationships": {"is_a_type_of": [], "is_an_instance_of": []},
+        }
+    )
+    concepts.insert_one(
+        {
+            "concept_id": "#V#abstract_object",
+            "relationships": {"is_a_type_of": ["#V#thing"], "is_an_instance_of": []},
         }
     )
 
@@ -51,7 +57,7 @@ def test_type_hierarchy_with_variant_ids_subtypes_are_types():
 
     # Step 1: Create parent type
     parent_result = _create_concepts(
-        parent_id="#V#thing",
+        parent_id="#V#abstract_object",
         concepts=[{"name": parent_name, "kind": "type"}],
     )
 
@@ -126,7 +132,7 @@ def test_type_hierarchy_variant_ids_parent_lookup_uses_canonical():
 
     # Create parent type
     parent_result = _create_concepts(
-        parent_id="#V#thing",
+        parent_id="#V#abstract_object",
         concepts=[{"name": parent_name, "kind": "type"}],
     )
     first_result = parent_result["results"][0]
@@ -156,7 +162,7 @@ def test_type_hierarchy_all_subtypes_have_consistent_parent_reference():
 
     # Create parent
     parent_result = _create_concepts(
-        parent_id="#V#thing",
+        parent_id="#V#abstract_object",
         concepts=[{"name": parent_name, "kind": "type"}],
     )
     first_parent = parent_result["results"][0]

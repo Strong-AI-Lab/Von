@@ -1677,11 +1677,19 @@ def get_vontology_node_and_descendant_ids(
 
         # Mongomock (and some other test doubles) can incorrectly return literal
         # field-path strings like "$concept_id" instead of actual values.
+        has_mongomock_artifacts = any(
+            isinstance(cid, str) and cid.startswith("$") for cid in all_concept_ids
+        )
         valid = [
             cid
             for cid in all_concept_ids
             if isinstance(cid, str) and cid.startswith("#V#")
         ]
+        if has_mongomock_artifacts:
+            # Mongomock $concatArrays doesn't resolve field references; the
+            # start node's own concept_id is returned as the literal "$concept_id".
+            # Fall back to manual BFS which doesn't rely on aggregation.
+            return _manual_descendants(start_concept_id)
         if not valid:
             return _manual_descendants(start_concept_id)
 

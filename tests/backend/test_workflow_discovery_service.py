@@ -9,13 +9,9 @@ Validates workflow discovery during conversation turns including:
 
 from __future__ import annotations
 
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Enable mock DB for tests
-os.environ["VON_USE_MOCK_DB"] = "1"
 
 from src.backend.services.workflow_discovery_service import (
     DEFAULT_MAX_RESULTS,
@@ -29,6 +25,12 @@ from src.backend.services.workflow_discovery_service import (
     discover_workflows,
     discover_workflows_for_turn,
 )
+
+
+@pytest.fixture(autouse=True)
+def _use_mock_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Enable mock DB for workflow discovery tests, scoped per-test to avoid env leakage."""
+    monkeypatch.setenv("VON_USE_MOCK_DB", "1")
 
 
 class TestWorkflowMatch:
