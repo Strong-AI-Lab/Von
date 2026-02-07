@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Dict, List
@@ -116,6 +117,16 @@ def _build_workflow_parity_inventory(
         ),
     ]
 
+    diagnostics_reason_codes: list[str] = []
+    if registry_only_ids:
+        diagnostics_reason_codes.append("registry_only")
+    if vontology_only_ids:
+        diagnostics_reason_codes.append("vontology_only")
+    if identity_only_ids:
+        diagnostics_reason_codes.append("identity_only")
+
+    drift_detected = bool(diagnostics_reason_codes)
+
     return {
         "generated_at_utc": _utc_now_iso(),
         "counts": {
@@ -143,7 +154,52 @@ def _build_workflow_parity_inventory(
         },
         "summary_lines": summary_lines,
         "summary_text": "\n".join(summary_lines),
+        "diagnostics": {
+            "drift_detected": drift_detected,
+            "severity": "warning" if drift_detected else "ok",
+            "reason_codes": diagnostics_reason_codes,
+        },
     }
+
+
+def _apply_workflow_parity_policy(inventory_snapshot: Dict[str, Any]) -> None:
+    """Apply warn/fail parity drift policy and annotate inventory diagnostics.
+
+    ``VON_WORKFLOW_PARITY_ENFORCEMENT`` controls behaviour:
+    - ``warn`` (default): log warning on drift
+    - ``fail`` / ``strict`` / ``error``: raise RuntimeError on drift
+    - ``off`` / ``none``: do not warn or fail
+    """
+    mode = os.getenv("VON_WORKFLOW_PARITY_ENFORCEMENT", "warn").strip().lower()
+    diagnostics = inventory_snapshot.get("diagnostics")
+    drift_detected = bool(
+        isinstance(diagnostics, dict) and diagnostics.get("drift_detected")
+    )
+    reason_codes: list[str] = []
+    if isinstance(diagnostics, dict):
+        maybe_reason_codes = diagnostics.get("reason_codes")
+        if isinstance(maybe_reason_codes, list):
+            reason_codes = [item for item in maybe_reason_codes if isinstance(item, str)]
+    reason_suffix = ",".join(reason_codes)
+    summary_text = inventory_snapshot.get("summary_text", "workflow parity snapshot generated")
+    message = f"{summary_text}; drift_reasons={reason_suffix or 'none'}"
+
+    inventory_snapshot["parity_policy"] = {
+        "mode": mode,
+        "drift_detected": drift_detected,
+    }
+
+    if not drift_detected:
+        logger.info("[workflow_parity] %s", summary_text)
+        return
+
+    if mode in {"off", "none"}:
+        logger.info("[workflow_parity] drift detected but policy mode=%s", mode)
+        return
+
+    logger.warning("[workflow_parity] %s", message)
+    if mode in {"fail", "strict", "error"}:
+        raise RuntimeError(f"workflow_parity_drift_detected:{reason_suffix or 'unknown'}")
 
 
 def get_workflow_registry_inventory_snapshot() -> Dict[str, Any]:
@@ -223,17 +279,7 @@ def build_workflow_registry() -> WorkflowRegistry:
         global _last_inventory_snapshot
         _last_inventory_snapshot = inventory_snapshot
 
-    counts = inventory_snapshot.get("counts", {})
-    if counts.get("vontology_only", 0) or counts.get("identity_only", 0):
-        logger.warning(
-            "[workflow_parity] %s",
-            inventory_snapshot.get("summary_text", "workflow parity snapshot generated"),
-        )
-    else:
-        logger.info(
-            "[workflow_parity] %s",
-            inventory_snapshot.get("summary_text", "workflow parity snapshot generated"),
-        )
+    _apply_workflow_parity_policy(inventory_snapshot)
 
     return registry
 
