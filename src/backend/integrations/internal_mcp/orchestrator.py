@@ -68,6 +68,23 @@ from src.backend.services.tool_metadata_service import (
 
 
 @dataclass(frozen=True)
+class WorkflowRoutingInfo:
+    """Transparent record of how a chat turn was routed.
+
+    JVNAUTOSCI-825: Provides traceable reasoning for the routing decision:
+    which workflow was selected, what the classifier verdict was, which
+    discovered workflows were candidates, and how long routing took.
+    """
+
+    workflow_id: str
+    verdict: str
+    prompt_id: str | None
+    discovered_workflow_ids: tuple[str, ...]
+    routing_duration_ms: float | None = None
+    source: str = "selector"  # "selector" | "default" | "presenter_mode"
+
+
+@dataclass(frozen=True)
 class OrchestratorResult:
     """Structured response from a tool-aware chat exchange."""
 
@@ -80,6 +97,8 @@ class OrchestratorResult:
     llm_calls: Sequence[Mapping[str, Any]] = ()
     llm_usage: Mapping[str, Any] | None = None
     orchestrator_duration_ms: float | None = None
+    # JVNAUTOSCI-825: Workflow routing transparency.
+    workflow_routing: WorkflowRoutingInfo | None = None
 
 
 class _ToolCallRequest(TypedDict):
@@ -7784,11 +7803,16 @@ class InternalMCPChatOrchestrator:
                     break
 
         # ----------------------------------------------------------------
-        # JVNAUTOSCI-922 Phase 1.3 + 2.2: Workflow selection for all turns.
-        # The presenter-mode gate is removed — the selector now runs for
-        # any authenticated turn when enabled.  Discovery results from
-        # discover_workflows_for_turn() are piped into the selector so the
-        # classifier can route to dynamically discovered Vontology workflows.
+        # JVNAUTOSCI-825 + 922: Workflow selection for all turns.
+        #
+        # The selector is the primary routing mechanism — it decides
+        # whether to run tool-calling, narration, a discovered workflow,
+        # or a direct plain response (no tool overhead).  Enabled by
+        # default; disable with VON_CHAT_WORKFLOW_SELECTOR_ENABLED=0.
+        #
+        # Discovery results from discover_workflows_for_turn() are piped
+        # into the selector so the classifier can route to dynamically
+        # discovered Vontology workflows.
         # ----------------------------------------------------------------
         discovered_matches: list[dict[str, Any]] = []
         if isinstance(workflow_discovery_result, Mapping):
@@ -7798,7 +7822,10 @@ class InternalMCPChatOrchestrator:
                     dict(m) for m in raw_matches if isinstance(m, Mapping)
                 ]
 
+        routing_info: WorkflowRoutingInfo | None = None
+
         if user_namespace and self._workflow_selector.enabled():
+            selector_start = time.perf_counter()
             try:
                 classifier_model = _model_for_stage("classifier")
                 selector_selection = self._workflow_selector.select_workflow(
@@ -7807,8 +7834,17 @@ class InternalMCPChatOrchestrator:
                     turn_text=prompt,
                     discovered_workflows=discovered_matches or None,
                 )
+                routing_duration_ms = (time.perf_counter() - selector_start) * 1000.0
                 if selector_selection.workflow_id:
                     selected_workflow_id = selector_selection.workflow_id
+                routing_info = WorkflowRoutingInfo(
+                    workflow_id=selector_selection.workflow_id,
+                    verdict=selector_selection.verdict,
+                    prompt_id=selector_selection.prompt_id,
+                    discovered_workflow_ids=selector_selection.discovered_workflow_ids,
+                    routing_duration_ms=routing_duration_ms,
+                    source="selector",
+                )
                 aux_llm_calls.append(
                     {
                         "type": "workflow_selector",
@@ -7818,6 +7854,7 @@ class InternalMCPChatOrchestrator:
                         "discovered_workflow_ids": list(
                             selector_selection.discovered_workflow_ids
                         ),
+                        "routing_duration_ms": routing_duration_ms,
                     }
                 )
                 if trace_enabled and trace is not None:
@@ -7828,9 +7865,17 @@ class InternalMCPChatOrchestrator:
                         "discovered_workflow_ids": list(
                             selector_selection.discovered_workflow_ids
                         ),
+                        "routing_duration_ms": routing_duration_ms,
                     }
             except Exception:
                 selected_workflow_id = CHAT_ASSISTANT_WORKFLOW_ID
+                routing_info = WorkflowRoutingInfo(
+                    workflow_id=CHAT_ASSISTANT_WORKFLOW_ID,
+                    verdict="fallback",
+                    prompt_id=None,
+                    discovered_workflow_ids=(),
+                    source="default",
+                )
 
         def _maybe_apply_narration_routing(screen_text: Any) -> Any:
             if selected_workflow_id != CHAT_NARRATION_WORKFLOW_ID:
@@ -7902,19 +7947,80 @@ class InternalMCPChatOrchestrator:
             return screen_text
 
         # ----------------------------------------------------------------
-        # JVNAUTOSCI-922 Phase 2.2: Route non-standard workflows via
-        # execute_workflow() before falling through to tool-calling.
+        # JVNAUTOSCI-825: Route turns to the appropriate pathway.
         #
-        # Standard verdicts (plain_response, tool_seeking, summarisation,
-        # narration) are handled by the tool-calling workflow + narration
-        # post-processing below.  Discovered Vontology workflows get
-        # their own execute_workflow() dispatch here.
+        # Three routing tiers:
+        #   1. plain_response  — direct LLM call without tool context
+        #   2. Non-standard    — execute_workflow() for discovered/custom
+        #   3. Standard        — tool-calling or narration pipeline
         # ----------------------------------------------------------------
         _STANDARD_WORKFLOW_IDS = {
             CHAT_ASSISTANT_WORKFLOW_ID,
             TOOL_CALLING_WORKFLOW_ID,
             CHAT_NARRATION_WORKFLOW_ID,
         }
+
+        # Tier 1: Plain response — skip tool-calling overhead entirely.
+        # When the classifier says "plain_response", there is no need
+        # to build tool context, inject write-policy, or run the
+        # plan→validate→execute→backfill pipeline.  This saves an LLM
+        # round-trip worth of system prompt tokens and reduces latency.
+        if (
+            selected_workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+            and routing_info is not None
+            and routing_info.verdict == "plain_response"
+        ):
+            planner_model = _model_for_stage("planner")
+            if trace_enabled and trace is not None:
+                llm_step = trace.start_step(
+                    "llm.generate",
+                    inputs={
+                        "prompt": prompt,
+                        "model": planner_model or "default",
+                        "routing": "plain_response",
+                    },
+                )
+            response, planner_model, _ = self._run_llm_with_fallbacks(
+                stage="planner",
+                prompt=prompt,
+                context=augmented_context,
+                default_client=llm_client,
+                default_model=planner_model,
+                policy_state=policy_state,
+                registry_snapshot=registry_snapshot,
+                user_concept_id=user_concept_id,
+                org_concept_id=org_concept_id,
+                llm_calls_log=llm_calls,
+                aux_log=aux_llm_calls,
+                record_llm_call=_record_llm_call,
+            )
+            if trace_enabled and trace is not None:
+                llm_step.finish_success(
+                    {
+                        "response_preview": (
+                            response[:800]
+                            if isinstance(response, str)
+                            else str(response)[:800]
+                        )
+                    }
+                )
+            response_text = response if isinstance(response, str) else str(response)
+            response_text = _maybe_apply_critic(response_text)
+            result = OrchestratorResult(
+                response_text=response_text,
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=tuple(aux_llm_calls),
+                llm_calls=tuple(llm_calls),
+                llm_usage=_aggregate_usage_total(),
+                orchestrator_duration_ms=_orchestrator_duration_ms(),
+                workflow_routing=routing_info,
+            )
+            _persist_trace(status="completed")
+            return result
+
+        # Tier 2: Non-standard workflow — discovered or custom Vontology
+        # workflows get their own execute_workflow() dispatch.
         if selected_workflow_id and selected_workflow_id not in _STANDARD_WORKFLOW_IDS:
             # Attempt to execute a discovered/non-standard workflow.
             try:
@@ -7962,6 +8068,7 @@ class InternalMCPChatOrchestrator:
                         llm_calls=tuple(llm_calls),
                         llm_usage=_aggregate_usage_total(),
                         orchestrator_duration_ms=_orchestrator_duration_ms(),
+                        workflow_routing=routing_info,
                     )
                     _persist_trace(status="completed")
                     return result
@@ -8004,6 +8111,7 @@ class InternalMCPChatOrchestrator:
                 llm_calls=tuple(llm_calls),
                 llm_usage=_aggregate_usage_total(),
                 orchestrator_duration_ms=_orchestrator_duration_ms(),
+                workflow_routing=routing_info,
             )
             _persist_trace(status="completed")
             return result
@@ -8088,6 +8196,7 @@ class InternalMCPChatOrchestrator:
             llm_calls=tuple(llm_calls),
             llm_usage=_aggregate_usage_total(),
             orchestrator_duration_ms=_orchestrator_duration_ms(),
+            workflow_routing=routing_info,
         )
         _persist_trace(status="completed")
         return result
@@ -8097,4 +8206,5 @@ __all__ = [
     "InternalMCPChatOrchestrator",
     "OrchestratorResult",
     "ToolCallParsingError",
+    "WorkflowRoutingInfo",
 ]

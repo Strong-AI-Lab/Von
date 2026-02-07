@@ -6,6 +6,12 @@ JVNAUTOSCI-922 Phase 1.3 + 2.2: Tests cover:
 - Discovered workflow routing
 - Voice hint injection (selector disabled)
 
+JVNAUTOSCI-825: Additional tests cover:
+- Plain response routing (skips tool-calling overhead)
+- WorkflowRoutingInfo presence in results
+- Routing timing telemetry
+- Selector default-on behaviour
+
 These tests construct a minimal orchestrator stub, bypassing DB-dependent
 init to avoid hanging on MongoDB connections.
 """
@@ -20,6 +26,7 @@ import pytest
 from src.backend.integrations.internal_mcp.orchestrator import (
     InternalMCPChatOrchestrator,
     OrchestratorResult,
+    WorkflowRoutingInfo,
 )
 from src.backend.workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
@@ -457,3 +464,187 @@ def test_no_namespace_skips_selector(monkeypatch):
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
     ]
     assert "workflow_selector" not in aux_types
+
+
+# ---------------------------------------------------------------------------
+# JVNAUTOSCI-825: Plain response routing (skips tool-calling overhead).
+# ---------------------------------------------------------------------------
+
+
+def test_plain_response_skips_tool_calling(monkeypatch):
+    """When the classifier returns 'plain_response', the orchestrator should
+    generate a direct LLM response without invoking the tool-calling workflow.
+    This means only 2 LLM calls: selector + planner (no plan handler overhead).
+    """
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    llm = _CapturingLLM(
+        [
+            "plain_response",  # selector verdict
+            "Hello! How can I help?",  # direct planner response
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Hi there",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    # Exactly 2 LLM calls: selector + planner.
+    assert len(llm.calls) == 2
+    assert llm.calls[0]["prompt"] == "Select workflow"
+    # The planner prompt should be the user's prompt, not a tool-call prompt.
+    assert llm.calls[1]["prompt"] == "Hi there"
+
+    assert result.response_text == "Hello! How can I help?"
+    # No tool invocations for a plain response.
+    assert result.tool_invocations == ()
+    assert result.extra_messages == ()
+
+
+def test_plain_response_has_routing_info(monkeypatch):
+    """Plain response should include WorkflowRoutingInfo in the result."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    llm = _CapturingLLM(
+        [
+            "plain_response",  # selector verdict
+            "Just a chat reply.",  # planner response
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Tell me a joke",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.workflow_routing is not None
+    assert isinstance(result.workflow_routing, WorkflowRoutingInfo)
+    assert result.workflow_routing.verdict == "plain_response"
+    assert result.workflow_routing.workflow_id == CHAT_ASSISTANT_WORKFLOW_ID
+    assert result.workflow_routing.source == "selector"
+
+
+# ---------------------------------------------------------------------------
+# JVNAUTOSCI-825: Routing info on tool-calling path.
+# ---------------------------------------------------------------------------
+
+
+def test_tool_seeking_has_routing_info(monkeypatch):
+    """Tool-calling path should also include WorkflowRoutingInfo."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    llm = _CapturingLLM(
+        [
+            "tool_seeking",  # selector verdict
+            "Let me search for that.",  # plan handler response (no tools found)
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Search for transformers papers",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.verdict == "tool_seeking"
+    assert result.workflow_routing.workflow_id == TOOL_CALLING_WORKFLOW_ID
+    assert result.workflow_routing.source == "selector"
+
+
+# ---------------------------------------------------------------------------
+# JVNAUTOSCI-825: Routing timing telemetry.
+# ---------------------------------------------------------------------------
+
+
+def test_routing_duration_ms_in_aux_llm_calls(monkeypatch):
+    """Routing telemetry should include timing in aux_llm_calls."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+
+    llm = _CapturingLLM(
+        [
+            "plain_response",
+            "Quick reply.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Hi",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    selector_entry = next(
+        (
+            e
+            for e in result.aux_llm_calls
+            if isinstance(e, dict) and e.get("type") == "workflow_selector"
+        ),
+        None,
+    )
+    assert selector_entry is not None
+    assert "routing_duration_ms" in selector_entry
+    assert isinstance(selector_entry["routing_duration_ms"], float)
+    assert selector_entry["routing_duration_ms"] >= 0
+
+    # Also check WorkflowRoutingInfo has timing.
+    assert result.workflow_routing is not None
+    assert result.workflow_routing.routing_duration_ms is not None
+    assert result.workflow_routing.routing_duration_ms >= 0
+
+
+# ---------------------------------------------------------------------------
+# JVNAUTOSCI-825: Selector default-on behaviour.
+# ---------------------------------------------------------------------------
+
+
+def test_selector_enabled_by_default(monkeypatch):
+    """Without setting the env var, the selector should be enabled by default."""
+    # Remove the env var entirely so we test the code-level default ("1").
+    monkeypatch.delenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", raising=False)
+
+    selector = WorkflowSelector(
+        registry=MagicMock(),
+        prompt_service=MagicMock(),
+        verdict_mapping={},
+    )
+    assert selector.enabled()
+
+
+def test_selector_can_be_disabled_via_env(monkeypatch):
+    """Setting VON_CHAT_WORKFLOW_SELECTOR_ENABLED=0 should disable the selector."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=False)
+    assert not orchestrator._workflow_selector.enabled()
+
+
+# ---------------------------------------------------------------------------
+# JVNAUTOSCI-825: Routing info absent when selector disabled.
+# ---------------------------------------------------------------------------
+
+
+def test_no_routing_info_when_selector_disabled(monkeypatch):
+    """When the selector is disabled, workflow_routing should be None."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=False)
+
+    llm = _CapturingLLM(["A direct response."])
+
+    result = orchestrator.run(
+        prompt="Hello",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.workflow_routing is None

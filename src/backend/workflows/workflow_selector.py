@@ -75,7 +75,15 @@ class WorkflowSelector:
         self._fallback_prompt = fallback_prompt
 
     def enabled(self) -> bool:
-        value = os.getenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "0").strip().lower()
+        """Check whether the workflow selector is enabled.
+
+        JVNAUTOSCI-825: Defaults to ON.  The selector is the primary
+        routing mechanism for chat turns — it decides whether to run
+        tool-calling, narration, a discovered workflow, or a plain
+        response.  Disable with VON_CHAT_WORKFLOW_SELECTOR_ENABLED=0
+        to fall back to the legacy always-tool-calling path.
+        """
+        value = os.getenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "1").strip().lower()
         return value not in {"0", "false", "off"}
 
     def select_workflow(
