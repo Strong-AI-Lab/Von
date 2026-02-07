@@ -21,6 +21,14 @@ from .considerations_workflow import (
     get_considerations_workflow_registration,
     register_considerations_actions,
 )
+from .enrichment_workflow import (
+    get_enrichment_workflow_registration,
+    register_enrichment_actions,
+)
+from .rumination_workflow import (
+    get_rumination_workflow_registration,
+    register_rumination_actions,
+)
 from ..vontology_loader import (
     discover_workflow_ids,
     load_workflow_definition_from_vontology,
@@ -54,6 +62,8 @@ def build_workflow_registry() -> WorkflowRegistry:
     # 2. Durable-specific workflows
     registry.register(get_rag_sync_workflow_registration())
     registry.register(get_considerations_workflow_registration())
+    registry.register(get_enrichment_workflow_registration())
+    registry.register(get_rumination_workflow_registration())
 
     # 3. Vontology-discovered workflows
     try:
@@ -111,4 +121,6 @@ def build_durable_action_registry() -> ActionRegistry:
     registry = ActionRegistry()
     register_rag_sync_actions(registry)
     register_considerations_actions(registry)
+    register_enrichment_actions(registry)
+    register_rumination_actions(registry)
     return registry

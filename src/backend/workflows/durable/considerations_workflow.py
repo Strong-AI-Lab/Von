@@ -4,6 +4,13 @@ This workflow identifies concepts that lack a 'hasConsiderationsForUse' text rel
 and uses an LLM to generate one based on the concept's description and name.
 It runs as a background durable workflow with checkpointing.
 
+DEPRECATION NOTE (JVNAUTOSCI-923): This single-predicate workflow is superseded
+by the parameterised ``enrichment_workflow`` which can generate any text relation.
+Equivalent invocation:
+    workflow_create_instance(workflow_id="#V#enrichment_workflow",
+        context={"predicate": "#V#has_considerations_for_use", "limit": 50})
+This file is retained for backward compatibility but should not be extended.
+
 JIRA: JVNAUTOSCI-1081
 """
 
@@ -363,7 +370,7 @@ def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResul
 
                 # 3. Generate
                 # Using simple generate for now.
-                response = llm.generate(prompt, max_tokens=300)
+                response = llm.generate(prompt, llm_params={"max_tokens": 300})
                 text = response.text.strip()
 
                 if text:
