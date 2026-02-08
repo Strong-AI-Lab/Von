@@ -10,8 +10,9 @@ emit deterministic diagnostics now and feed stronger inference layers later.
 
 from __future__ import annotations
 
+import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, MutableMapping, Sequence, Tuple
 
 REASON_PRECONDITION_UNSATISFIED = "metadata_precondition_unsatisfied"
@@ -21,6 +22,15 @@ REASON_WRITE_VARIABLE_MISSING = "metadata_write_variable_missing"
 
 WORKFLOW_METADATA_EVENTS_KEY = "workflow_metadata_validation_events"
 LAST_METADATA_EVENT_KEY = "last_metadata_validation"
+METADATA_VALIDATION_MODE_ENV_VAR = "VON_WORKFLOW_METADATA_VALIDATION_MODE"
+METADATA_VALIDATION_MODE_ENFORCE = "enforce"
+METADATA_VALIDATION_MODE_WARN = "warn"
+METADATA_VALIDATION_MODE_OFF = "off"
+_METADATA_VALIDATION_MODES: Tuple[str, ...] = (
+    METADATA_VALIDATION_MODE_ENFORCE,
+    METADATA_VALIDATION_MODE_WARN,
+    METADATA_VALIDATION_MODE_OFF,
+)
 
 _NORMALISE_SYMBOL_RE = re.compile(r"[^0-9A-Za-z_]+")
 _NESTED_CONTEXT_KEYS: Tuple[str, ...] = (
@@ -51,6 +61,8 @@ class MetadataValidationResult:
     failure: MetadataValidationFailure | None = None
     skipped: bool = False
     skip_reason: str | None = None
+    mode: str = METADATA_VALIDATION_MODE_ENFORCE
+    enforced: bool = True
 
     def to_trace_verdict(self) -> Dict[str, Any]:
         verdict: Dict[str, Any] = {
@@ -58,6 +70,8 @@ class MetadataValidationResult:
             "phase": self.phase,
             "ok": self.ok,
             "applied": self.applied,
+            "mode": self.mode,
+            "enforced": self.enforced,
         }
         if self.checks:
             verdict["checks"] = [dict(item) for item in self.checks]
@@ -76,6 +90,49 @@ class MetadataValidationResult:
         event = self.to_trace_verdict()
         event["state_id"] = self.state_id
         return event
+
+
+def resolve_metadata_validation_mode(mode: str | None) -> str:
+    candidate = (
+        mode.strip().lower()
+        if isinstance(mode, str)
+        else METADATA_VALIDATION_MODE_ENFORCE
+    )
+    if candidate in _METADATA_VALIDATION_MODES:
+        return candidate
+    return METADATA_VALIDATION_MODE_ENFORCE
+
+
+def get_metadata_validation_mode() -> str:
+    return resolve_metadata_validation_mode(
+        os.getenv(METADATA_VALIDATION_MODE_ENV_VAR)
+    )
+
+
+def metadata_validation_failures_are_enforced(mode: str | None = None) -> bool:
+    resolved = (
+        get_metadata_validation_mode()
+        if mode is None
+        else resolve_metadata_validation_mode(mode)
+    )
+    return resolved == METADATA_VALIDATION_MODE_ENFORCE
+
+
+def apply_metadata_validation_mode(
+    *,
+    result: MetadataValidationResult,
+    mode: str | None = None,
+) -> MetadataValidationResult:
+    resolved = (
+        get_metadata_validation_mode()
+        if mode is None
+        else resolve_metadata_validation_mode(mode)
+    )
+    return replace(
+        result,
+        mode=resolved,
+        enforced=(resolved == METADATA_VALIDATION_MODE_ENFORCE),
+    )
 
 
 def _normalise_metadata_items(value: Any) -> List[str]:
@@ -388,7 +445,13 @@ def skipped_metadata_validation(
     state_id: str,
     phase: str,
     reason: str,
+    mode: str | None = None,
 ) -> MetadataValidationResult:
+    resolved_mode = (
+        get_metadata_validation_mode()
+        if mode is None
+        else resolve_metadata_validation_mode(mode)
+    )
     return MetadataValidationResult(
         state_id=state_id,
         phase=phase,
@@ -397,6 +460,8 @@ def skipped_metadata_validation(
         checks=(),
         skipped=True,
         skip_reason=reason,
+        mode=resolved_mode,
+        enforced=False,
     )
 
 

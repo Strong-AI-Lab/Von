@@ -1,9 +1,12 @@
+from datetime import datetime, timedelta, timezone
+
 from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.integrations.internal_mcp.workflow_surface_capabilities import (
     tracked_workflow_surface_tool_names,
 )
+from src.backend.workflows.durable.scheduler import WorkflowScheduler
 
 
 def _build_gateway() -> InternalMCPGateway:
@@ -111,3 +114,115 @@ def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
     tracked = set(tracked_workflow_surface_tool_names())
     missing = sorted(tracked - methods)
     assert not missing, f"Tracked workflow surface tools missing from catalogue: {missing}"
+
+
+def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
+    class _InMemoryWorkflowManager:
+        def __init__(self) -> None:
+            self.schedules: dict[str, object] = {}
+            self.instances: list[dict[str, object]] = []
+            self._instance_counter = 0
+
+        def create_schedule(self, schedule):
+            self.schedules[schedule.schedule_id] = schedule
+            return schedule.schedule_id
+
+        def get_schedule(self, schedule_id: str):
+            return self.schedules.get(schedule_id)
+
+        def list_schedules(self, user_id=None, enabled_only=False, limit=50):
+            schedules = list(self.schedules.values())
+            if user_id:
+                schedules = [s for s in schedules if getattr(s, "user_id", None) == user_id]
+            if enabled_only:
+                schedules = [s for s in schedules if bool(getattr(s, "enabled", False))]
+            return schedules[:limit]
+
+        def find_due_schedules(self, limit=50):
+            now = datetime.now(timezone.utc)
+            due = []
+            for schedule in self.schedules.values():
+                next_run_at = getattr(schedule, "next_run_at", None)
+                if not bool(getattr(schedule, "enabled", False)):
+                    continue
+                if isinstance(next_run_at, datetime) and next_run_at <= now:
+                    due.append(schedule)
+            return due[:limit]
+
+        def create_instance(
+            self,
+            workflow_id: str,
+            *,
+            user_id: str,
+            org_id: str,
+            namespace: str,
+            inputs: dict | None = None,
+            schedule_id: str | None = None,
+            **_kwargs,
+        ) -> str:
+            self._instance_counter += 1
+            instance_id = f"#V#instance_{self._instance_counter}"
+            self.instances.append(
+                {
+                    "instance_id": instance_id,
+                    "workflow_id": workflow_id,
+                    "user_id": user_id,
+                    "org_id": org_id,
+                    "namespace": namespace,
+                    "inputs": dict(inputs or {}),
+                    "schedule_id": schedule_id,
+                }
+            )
+            return instance_id
+
+        def update_schedule_after_run(self, schedule_id: str, *, next_run_at=None):
+            schedule = self.schedules.get(schedule_id)
+            if schedule is None:
+                return False
+            schedule.next_run_at = next_run_at
+            schedule.last_run_at = datetime.now(timezone.utc)
+            return True
+
+    manager = _InMemoryWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+
+    gateway = _build_gateway()
+    run_at = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    create_result = gateway.invoke(
+        "workflow_create_schedule",
+        {
+            "workflow_id": "#V#generate_considerations_workflow",
+            "schedule_type": "once",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user/#V#org",
+            "run_at": run_at,
+            "default_inputs": {"task": "e2e"},
+            "description": "WS8 gateway+scheduler integration test",
+        },
+    ).payload
+
+    assert create_result.get("success") is True
+    schedule_id = create_result.get("schedule_id")
+    assert isinstance(schedule_id, str)
+
+    scheduler = WorkflowScheduler(manager, check_interval_seconds=0.01)
+    scheduler._process_due_schedules()
+    metrics = scheduler.get_poll_metrics()
+    assert metrics["due_count"] == 1
+    assert metrics["triggered_count"] == 1
+    assert metrics["due_schedules_seen_total"] == 1
+    assert len(manager.instances) == 1
+    assert manager.instances[0]["schedule_id"] == schedule_id
+
+    trigger_result = gateway.invoke(
+        "workflow_trigger_schedule",
+        {"schedule_id": schedule_id},
+    ).payload
+    assert trigger_result.get("success") is True
+    assert trigger_result.get("schedule_id") == schedule_id
+    assert trigger_result.get("status") == "triggered"
+    assert len(manager.instances) == 2

@@ -51,3 +51,56 @@ and the tool is not exposed on that surface:
   `internal_mcp_only_tool`
 - response includes actionable guidance and this matrix path.
 
+## Stable Telemetry Fields (WS8)
+
+The following diagnostics fields are treated as stable contracts for workflow
+hardening validation and operational troubleshooting.
+
+### `workflow_list_definitions` baseline telemetry
+
+`workflow_list_definitions` returns `baseline_telemetry` with at least:
+
+- `workflow_discovery_executable_checks_total`
+- `workflow_discovery_executable_checks_hit`
+- `workflow_discovery_executable_hit_ratio`
+- `generic_fallback_mcp_invocations_total`
+- `generic_fallback_mcp_invocations_success`
+- `generic_fallback_mcp_invocations_failed`
+- `generic_fallback_mcp_success_ratio`
+
+### Workflow metadata validation events
+
+Workflow engine and durable executor context now records
+`workflow_metadata_validation_events` entries with stable keys:
+
+- `status` (`metadata_validation`)
+- `state_id`
+- `phase` (`pre_action` or `post_action`)
+- `ok`
+- `applied`
+- `mode` (`enforce`, `warn`, `off`)
+- `enforced` (`true` only when failures are fail-fast)
+- optional failure diagnostics (`reason_code`, `message`, `details`)
+- optional skip diagnostics (`skipped`, `skip_reason`)
+
+`last_metadata_validation` mirrors the latest event for quick inspection.
+
+## Rollout Controls and Fallback
+
+High-risk runtime metadata checks are controlled by:
+
+- `VON_WORKFLOW_METADATA_VALIDATION_MODE=enforce|warn|off`
+
+Mode behaviour:
+
+- `enforce` (default): metadata validation failures stop workflow execution.
+- `warn`: failures are recorded in telemetry/events but execution continues.
+- `off`: metadata checks are skipped for states that declare metadata checks.
+
+Suggested rollback sequence:
+
+1. Set `VON_WORKFLOW_METADATA_VALIDATION_MODE=warn` and restart Von.
+2. Confirm diagnostics stream is healthy (`workflow_metadata_validation_events` present).
+3. If workflows still degrade, set `VON_WORKFLOW_METADATA_VALIDATION_MODE=off`.
+4. After remediation, restore to `enforce`.
+

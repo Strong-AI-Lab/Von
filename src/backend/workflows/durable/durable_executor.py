@@ -16,8 +16,12 @@ from ..engine import (
     state_has_on_failure_transition,
 )
 from ..metadata_validation import (
+    METADATA_VALIDATION_MODE_OFF,
+    apply_metadata_validation_mode,
     append_metadata_validation_event,
     format_metadata_validation_error,
+    get_metadata_validation_mode,
+    metadata_validation_failures_are_enforced,
     skipped_metadata_validation,
     validate_state_metadata_post_action,
     validate_state_metadata_pre_action,
@@ -149,6 +153,10 @@ class DurableWorkflowExecutor:
             state_id for state_id, spec in definition.states.items() if spec.terminal
         }
         total_steps = max(1, len(definition.states))
+        validation_mode = get_metadata_validation_mode()
+        enforce_metadata_failures = metadata_validation_failures_are_enforced(
+            validation_mode
+        )
 
         transitions = 0
         while transitions < self._max_transitions:
@@ -200,11 +208,33 @@ class DurableWorkflowExecutor:
                 verdict={"status": "enter"},
             )
 
-            pre_validation = validate_state_metadata_pre_action(
-                state_id=current_state,
-                metadata=state_spec.metadata,
-                context=context,
-            )
+            if validation_mode == METADATA_VALIDATION_MODE_OFF:
+                off_probe = validate_state_metadata_pre_action(
+                    state_id=current_state,
+                    metadata=state_spec.metadata,
+                    context=context,
+                )
+                if off_probe.applied:
+                    pre_validation = skipped_metadata_validation(
+                        state_id=current_state,
+                        phase="pre_action",
+                        reason="disabled_by_rollout_mode",
+                        mode=validation_mode,
+                    )
+                else:
+                    pre_validation = apply_metadata_validation_mode(
+                        result=off_probe,
+                        mode=validation_mode,
+                    )
+            else:
+                pre_validation = apply_metadata_validation_mode(
+                    result=validate_state_metadata_pre_action(
+                        state_id=current_state,
+                        metadata=state_spec.metadata,
+                        context=context,
+                    ),
+                    mode=validation_mode,
+                )
             append_metadata_validation_event(context=context, result=pre_validation)
             if pre_validation.applied:
                 trace.record_state_transition(
@@ -212,7 +242,7 @@ class DurableWorkflowExecutor:
                     current_state,
                     verdict=pre_validation.to_trace_verdict(),
                 )
-            if not pre_validation.ok:
+            if not pre_validation.ok and enforce_metadata_failures:
                 error = format_metadata_validation_error(pre_validation)
                 self._instance_manager.checkpoint(
                     instance_id,
@@ -292,13 +322,36 @@ class DurableWorkflowExecutor:
                     state_id=current_state,
                     phase="post_action",
                     reason="action_failed_with_on_failure_route",
+                    mode=validation_mode,
                 )
-            else:
-                post_validation = validate_state_metadata_post_action(
+            elif validation_mode == METADATA_VALIDATION_MODE_OFF:
+                off_probe = validate_state_metadata_post_action(
                     state_id=current_state,
                     metadata=state_spec.metadata,
                     context_before=context_before_actions,
                     context_after=context,
+                )
+                if off_probe.applied:
+                    post_validation = skipped_metadata_validation(
+                        state_id=current_state,
+                        phase="post_action",
+                        reason="disabled_by_rollout_mode",
+                        mode=validation_mode,
+                    )
+                else:
+                    post_validation = apply_metadata_validation_mode(
+                        result=off_probe,
+                        mode=validation_mode,
+                    )
+            else:
+                post_validation = apply_metadata_validation_mode(
+                    result=validate_state_metadata_post_action(
+                        state_id=current_state,
+                        metadata=state_spec.metadata,
+                        context_before=context_before_actions,
+                        context_after=context,
+                    ),
+                    mode=validation_mode,
                 )
 
             append_metadata_validation_event(context=context, result=post_validation)
@@ -308,7 +361,7 @@ class DurableWorkflowExecutor:
                     current_state,
                     verdict=post_validation.to_trace_verdict(),
                 )
-            if not post_validation.ok:
+            if not post_validation.ok and enforce_metadata_failures:
                 error = format_metadata_validation_error(post_validation)
                 self._instance_manager.checkpoint(
                     instance_id,

@@ -153,3 +153,80 @@ def test_metadata_validation_blocks_missing_write_variable() -> None:
     assert result.error.startswith(
         "metadata_validation_failed:metadata_write_variable_missing:plan:"
     )
+
+
+def test_metadata_validation_warn_mode_records_failure_without_blocking(
+    monkeypatch,
+) -> None:
+    definition = _build_definition()
+    registry = ActionRegistry()
+    calls: Dict[str, int] = {"count": 0}
+
+    def handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        calls["count"] += 1
+        return WorkflowActionResult(outputs={"task_id": "task-1", "task_created": True})
+
+    registry.register(ActionSpec(action_id="task.create", handler=handler))
+    executor = WorkflowExecutor(registry=registry, max_transitions=5)
+    monkeypatch.setenv("VON_WORKFLOW_METADATA_VALIDATION_MODE", "warn")
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "user_authenticated": False,
+            "user_id": "user-1",
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "done"
+    assert result.error is None
+    assert calls["count"] == 1
+
+    events = result.data.get("workflow_metadata_validation_events")
+    assert isinstance(events, list)
+    assert len(events) == 2
+    pre_action = events[0]
+    assert pre_action["phase"] == "pre_action"
+    assert pre_action["ok"] is False
+    assert pre_action["mode"] == "warn"
+    assert pre_action["enforced"] is False
+    assert pre_action["reason_code"] == "metadata_precondition_unsatisfied"
+
+
+def test_metadata_validation_off_mode_skips_checks(monkeypatch) -> None:
+    definition = _build_definition()
+    registry = ActionRegistry()
+    calls: Dict[str, int] = {"count": 0}
+
+    def handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        calls["count"] += 1
+        return WorkflowActionResult(outputs={"task_id": "task-1", "task_created": True})
+
+    registry.register(ActionSpec(action_id="task.create", handler=handler))
+    executor = WorkflowExecutor(registry=registry, max_transitions=5)
+    monkeypatch.setenv("VON_WORKFLOW_METADATA_VALIDATION_MODE", "off")
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={
+            "user_authenticated": False,
+        },
+    )
+
+    assert result.completed is True
+    assert result.final_state == "done"
+    assert result.error is None
+    assert calls["count"] == 1
+
+    events = result.data.get("workflow_metadata_validation_events")
+    assert isinstance(events, list)
+    assert len(events) == 2
+    assert all(event.get("mode") == "off" for event in events)
+    assert all(event.get("enforced") is False for event in events)
+    assert all(event.get("skipped") is True for event in events)
+    assert all(
+        event.get("skip_reason") == "disabled_by_rollout_mode" for event in events
+    )

@@ -125,6 +125,19 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 		- `tests/backend/test_durable_workflow_system.py::TestScheduleManagement::test_find_due_schedules_avoids_concept_list_scan`
 		- `tests/backend/test_durable_workflow_system.py::TestScheduleManagement::test_find_due_schedules_legacy_relation_fallback`
 		- `tests/backend/test_durable_workflow_system.py::TestWorkflowScheduler::test_process_due_schedules_updates_poll_metrics`
+- 2026-02-08: WS8 E2E/docs/rollout controls (JVNAUTOSCI-1093)
+	- Added metadata validation rollout control:
+		- env var `VON_WORKFLOW_METADATA_VALIDATION_MODE` with modes `enforce` (default), `warn`, `off`
+		- shared telemetry fields on validation events: `mode` + `enforced`
+	- If workflow hardening causes unexpected failures in production-like runs:
+		1. set mode to `warn`, restart, inspect `workflow_metadata_validation_events`
+		2. if still unstable, set mode to `off` as temporary fallback
+		3. return to `enforce` after remediation
+	- Regression anchors:
+		- `tests/backend/test_orchestrator_write_tool_guard_gateway_e2e.py`
+		- `tests/backend/test_internal_mcp_workflow_tools.py::test_workflow_schedule_gateway_tools_integrate_with_scheduler`
+		- `tests/backend/test_workflow_metadata_validation.py`
+		- `tests/backend/test_durable_workflow_executor_safety.py`
 
 - 2026-01-06 diary
 	- Swift blob store: improved OpenStack cloud config error message; fixed `openstacksdk` object-store method signature compatibility; added regression tests (JVNAUTOSCI-878).
