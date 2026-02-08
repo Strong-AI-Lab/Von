@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Callable
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import get_texts_for_concept
@@ -13,6 +13,76 @@ from .engine import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Canonical workflow graph predicates with legacy-compatible aliases.
+# The first entry in each tuple is the preferred canonical concept predicate.
+WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "hasInitialStep": (
+        "#V#hasInitialStep",
+        "hasInitialStep",
+        "#V#has_initial_step",
+        "has_initial_step",
+    ),
+    "hasStep": ("#V#hasStep", "hasStep", "#V#has_step", "has_step"),
+    "invokesAction": (
+        "#V#invokesAction",
+        "invokesAction",
+        "#V#invokes_action",
+        "invokes_action",
+    ),
+    "nextStep": ("#V#nextStep", "nextStep", "#V#next_step", "next_step"),
+    "onTrueNextStep": (
+        "#V#onTrueNextStep",
+        "onTrueNextStep",
+        "#V#on_true_next_step",
+        "on_true_next_step",
+    ),
+    "onFalseNextStep": (
+        "#V#onFalseNextStep",
+        "onFalseNextStep",
+        "#V#on_false_next_step",
+        "on_false_next_step",
+    ),
+    "onFailureNextStep": (
+        "#V#onFailureNextStep",
+        "onFailureNextStep",
+        "#V#on_failure_next_step",
+        "on_failure_next_step",
+    ),
+    "hasPrecondition": (
+        "#V#hasPrecondition",
+        "hasPrecondition",
+        "#V#has_precondition",
+        "has_precondition",
+    ),
+    "hasEffect": ("#V#hasEffect", "hasEffect", "#V#has_effect", "has_effect"),
+    "readsVariable": (
+        "#V#readsVariable",
+        "readsVariable",
+        "#V#reads_variable",
+        "reads_variable",
+    ),
+    "writesVariable": (
+        "#V#writesVariable",
+        "writesVariable",
+        "#V#writes_variable",
+        "writes_variable",
+    ),
+    "hasInputMap": (
+        "#V#hasInputMap",
+        "hasInputMap",
+        "#V#has_input_map",
+        "has_input_map",
+    ),
+}
+
+# Preferred roots for workflow type discovery.
+WORKFLOW_DISCOVERY_BASE_TYPE_IDS: Tuple[str, ...] = (
+    "#V#ai_workflow",
+    "#V#durable_workflow",
+    "#V#workflow",
+    "#V#llm_workflow",
+)
 
 
 def _normalise_relationship_targets(value: Any) -> List[str]:
@@ -26,19 +96,41 @@ def _normalise_relationship_targets(value: Any) -> List[str]:
 def _first_relationship_target(
     relationships: Dict[str, Any], candidate_predicates: Iterable[str]
 ) -> Optional[str]:
-    for predicate in candidate_predicates:
-        targets = _normalise_relationship_targets(relationships.get(predicate))
-        if targets:
-            return targets[0]
-    return None
+    target, _ = _first_relationship_target_with_predicate(
+        relationships, candidate_predicates
+    )
+    return target
 
 
 def _all_relationship_targets(
     relationships: Dict[str, Any], candidate_predicates: Iterable[str]
 ) -> List[str]:
-    results: List[str] = []
+    targets, _ = _all_relationship_targets_with_predicates(
+        relationships, candidate_predicates
+    )
+    return targets
+
+
+def _first_relationship_target_with_predicate(
+    relationships: Dict[str, Any], candidate_predicates: Iterable[str]
+) -> Tuple[Optional[str], Optional[str]]:
     for predicate in candidate_predicates:
-        results.extend(_normalise_relationship_targets(relationships.get(predicate)))
+        targets = _normalise_relationship_targets(relationships.get(predicate))
+        if targets:
+            return targets[0], predicate
+    return None, None
+
+
+def _all_relationship_targets_with_predicates(
+    relationships: Dict[str, Any], candidate_predicates: Iterable[str]
+) -> Tuple[List[str], List[str]]:
+    results: List[str] = []
+    matched_predicates: List[str] = []
+    for predicate in candidate_predicates:
+        targets = _normalise_relationship_targets(relationships.get(predicate))
+        if targets:
+            matched_predicates.append(predicate)
+            results.extend(targets)
     # Preserve order but remove duplicates.
     seen: set[str] = set()
     unique: List[str] = []
@@ -47,7 +139,18 @@ def _all_relationship_targets(
             continue
         seen.add(item)
         unique.append(item)
-    return unique
+    return unique, matched_predicates
+
+
+def _record_legacy_alias_use(
+    *,
+    legacy_aliases: set[str],
+    canonical_predicate: str,
+    matched_predicates: Iterable[Optional[str]],
+) -> None:
+    for matched in matched_predicates:
+        if isinstance(matched, str) and matched and matched != canonical_predicate:
+            legacy_aliases.add(matched)
 
 
 def best_effort_workflow_narrative_text(workflow_id: str) -> Optional[str]:
@@ -106,14 +209,9 @@ def build_workflow_process_graph(
 ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     """Build a workflow definition from explicit Vontology relationships.
 
-    Expected (flexible) predicate names:
-    - workflow -> hasInitialStep / has_initial_step
-    - workflow -> hasStep / has_step
-    - step -> invokesAction / invokes_action
-    - step -> nextStep / next_step
-    - step -> onTrueNextStep / on_true_next_step
-    - step -> onFalseNextStep / on_false_next_step
-    - step -> onFailureNextStep / on_failure_next_step
+    Canonical graph predicates are defined in
+    ``WORKFLOW_GRAPH_PREDICATE_ALIASES``. Legacy aliases are still accepted
+    for compatibility and are surfaced as warnings.
     """
 
     warnings: List[str] = []
@@ -129,17 +227,28 @@ def build_workflow_process_graph(
     if not isinstance(relationships, dict):
         relationships = {}
 
-    initial_step = _first_relationship_target(
+    legacy_aliases: set[str] = set()
+
+    initial_step_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"]
+    initial_step, initial_step_predicate = _first_relationship_target_with_predicate(
         relationships,
-        (
-            "hasInitialStep",
-            "has_initial_step",
-            "#V#hasInitialStep",
-            "#V#has_initial_step",
-        ),
+        initial_step_candidates,
     )
-    step_ids = _all_relationship_targets(
-        relationships, ("hasStep", "has_step", "#V#hasStep", "#V#has_step")
+    _record_legacy_alias_use(
+        legacy_aliases=legacy_aliases,
+        canonical_predicate=initial_step_candidates[0],
+        matched_predicates=(initial_step_predicate,),
+    )
+
+    has_step_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["hasStep"]
+    step_ids, step_predicates = _all_relationship_targets_with_predicates(
+        relationships,
+        has_step_candidates,
+    )
+    _record_legacy_alias_use(
+        legacy_aliases=legacy_aliases,
+        canonical_predicate=has_step_candidates[0],
+        matched_predicates=step_predicates,
     )
 
     if initial_step and initial_step not in step_ids:
@@ -170,75 +279,103 @@ def build_workflow_process_graph(
         if not isinstance(step_rels, dict):
             step_rels = {}
 
-        invokes_action = _first_relationship_target(
+        invokes_action_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"]
+        invokes_action, invokes_action_predicate = _first_relationship_target_with_predicate(
             step_rels,
-            (
-                "invokesAction",
-                "invokes_action",
-                "#V#invokesAction",
-                "#V#invokes_action",
-            ),
+            invokes_action_candidates,
         )
-        next_step = _first_relationship_target(
-            step_rels, ("nextStep", "next_step", "#V#nextStep", "#V#next_step")
-        )
-        on_true = _first_relationship_target(
-            step_rels,
-            (
-                "onTrueNextStep",
-                "on_true_next_step",
-                "#V#onTrueNextStep",
-                "#V#on_true_next_step",
-            ),
-        )
-        on_false = _first_relationship_target(
-            step_rels,
-            (
-                "onFalseNextStep",
-                "on_false_next_step",
-                "#V#onFalseNextStep",
-                "#V#on_false_next_step",
-            ),
-        )
-        on_failure = _first_relationship_target(
-            step_rels,
-            (
-                "onFailureNextStep",
-                "on_failure_next_step",
-                "#V#onFailureNextStep",
-                "#V#on_failure_next_step",
-            ),
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=invokes_action_candidates[0],
+            matched_predicates=(invokes_action_predicate,),
         )
 
-        preconditions = _all_relationship_targets(
+        next_step_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["nextStep"]
+        next_step, next_step_predicate = _first_relationship_target_with_predicate(
             step_rels,
-            (
-                "hasPrecondition",
-                "has_precondition",
-                "#V#hasPrecondition",
-                "#V#has_precondition",
-            ),
+            next_step_candidates,
         )
-        effects = _all_relationship_targets(
-            step_rels, ("hasEffect", "has_effect", "#V#hasEffect", "#V#has_effect")
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=next_step_candidates[0],
+            matched_predicates=(next_step_predicate,),
         )
-        reads_vars = _all_relationship_targets(
+
+        on_true_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["onTrueNextStep"]
+        on_true, on_true_predicate = _first_relationship_target_with_predicate(
             step_rels,
-            (
-                "readsVariable",
-                "reads_variable",
-                "#V#readsVariable",
-                "#V#reads_variable",
-            ),
+            on_true_candidates,
         )
-        writes_vars = _all_relationship_targets(
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=on_true_candidates[0],
+            matched_predicates=(on_true_predicate,),
+        )
+
+        on_false_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["onFalseNextStep"]
+        on_false, on_false_predicate = _first_relationship_target_with_predicate(
             step_rels,
-            (
-                "writesVariable",
-                "writes_variable",
-                "#V#writesVariable",
-                "#V#writes_variable",
-            ),
+            on_false_candidates,
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=on_false_candidates[0],
+            matched_predicates=(on_false_predicate,),
+        )
+
+        on_failure_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["onFailureNextStep"]
+        on_failure, on_failure_predicate = _first_relationship_target_with_predicate(
+            step_rels,
+            on_failure_candidates,
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=on_failure_candidates[0],
+            matched_predicates=(on_failure_predicate,),
+        )
+
+        precondition_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["hasPrecondition"]
+        preconditions, precondition_predicates = _all_relationship_targets_with_predicates(
+            step_rels,
+            precondition_candidates,
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=precondition_candidates[0],
+            matched_predicates=precondition_predicates,
+        )
+
+        effect_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["hasEffect"]
+        effects, effect_predicates = _all_relationship_targets_with_predicates(
+            step_rels,
+            effect_candidates,
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=effect_candidates[0],
+            matched_predicates=effect_predicates,
+        )
+
+        reads_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["readsVariable"]
+        reads_vars, reads_predicates = _all_relationship_targets_with_predicates(
+            step_rels,
+            reads_candidates,
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=reads_candidates[0],
+            matched_predicates=reads_predicates,
+        )
+
+        writes_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["writesVariable"]
+        writes_vars, writes_predicates = _all_relationship_targets_with_predicates(
+            step_rels,
+            writes_candidates,
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=writes_candidates[0],
+            matched_predicates=writes_predicates,
         )
 
         step_items.append(
@@ -263,6 +400,11 @@ def build_workflow_process_graph(
         _edge(step_id, "onTrueNextStep", on_true)
         _edge(step_id, "onFalseNextStep", on_false)
         _edge(step_id, "onFailureNextStep", on_failure)
+
+    if legacy_aliases:
+        warnings.append(
+            f"legacy_workflow_predicates_used:{','.join(sorted(legacy_aliases))}"
+        )
 
     definition = {
         "representation": "vontology_process_graph_v1",
@@ -329,12 +471,7 @@ def load_workflow_definition_from_vontology(
             if isinstance(step_rels, dict):
                 raw_inputs = _all_relationship_targets(
                     step_rels,
-                    (
-                        "hasInputMap",
-                        "has_input_map",
-                        "#V#hasInputMap",
-                        "#V#has_input_map",
-                    ),
+                    WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInputMap"],
                 )
                 # Input maps are stored as "key=value" or "key:value" strings.
                 for entry in raw_inputs:
@@ -500,22 +637,23 @@ def discover_workflow_ids() -> List[str]:
 
     Heuristic:
     1. Concepts that define a workflow structure (have 'hasInitialStep').
-    2. Concepts that are subtypes of known workflow types (#V#durable_workflow).
+    2. Concepts that are subtypes of known workflow type roots.
     """
     candidates = set()
 
     # 1. Direct property search (best effort, tolerant of DB query limitations)
     try:
+        direct_initial_step_predicates = [
+            predicate
+            for predicate in WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"]
+            if not predicate.startswith("#V#")
+        ]
+        direct_initial_step_query = [
+            {f"relationships.{predicate}": {"$exists": True}}
+            for predicate in direct_initial_step_predicates
+        ]
         cursor = ConceptsRepository.find(
-            {
-                "$or": [
-                    {"relationships.hasInitialStep": {"$exists": True}},
-                    {"relationships.has_initial_step": {"$exists": True}},
-                    # Note: Queries for keys with '#' (like #V#has_initial_step)
-                    # can be problematic in some MongoDB drivers/versions.
-                    # We rely on step 2 for those cases.
-                ]
-            },
+            {"$or": direct_initial_step_query},
             {"concept_id": 1},
         )
         for doc in cursor:
@@ -525,10 +663,7 @@ def discover_workflow_ids() -> List[str]:
         logger.warning(f"Error querying workflows by property: {e}")
 
     # 2. Type-based discovery (more robust for #V# predicates)
-    # Find all subtypes of #V#durable_workflow and #V#workflow
-    base_types = ["#V#durable_workflow", "#V#workflow"]
-
-    for base in base_types:
+    for base in WORKFLOW_DISCOVERY_BASE_TYPE_IDS:
         subtypes = _get_recursive_subtypes(base)
 
         # Fetch them to check if they actually look like workflows (have steps)
@@ -540,12 +675,7 @@ def discover_workflow_ids() -> List[str]:
                 # Check for initial step predicate in memory (handles #V# correctly)
                 initial_step = _first_relationship_target(
                     rels,
-                    (
-                        "hasInitialStep",
-                        "has_initial_step",
-                        "#V#hasInitialStep",
-                        "#V#has_initial_step",
-                    ),
+                    WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"],
                 )
                 if initial_step:
                     candidates.add(cid)

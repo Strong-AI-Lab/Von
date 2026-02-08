@@ -146,6 +146,45 @@ class TestAllRelationshipTargets:
         assert result == ["#V#a", "#V#b", "#V#c"]
 
 
+class TestWorkflowGraphPredicateCompatibility:
+    def test_build_graph_accepts_legacy_aliases_and_emits_warning(self):
+        workflow_doc = {
+            "concept_id": "#V#legacy_workflow",
+            "relationships": {
+                "has_initial_step": "#V#step_a",
+                "has_step": ["#V#step_a"],
+            },
+        }
+        step_docs = {
+            "#V#step_a": {
+                "concept_id": "#V#step_a",
+                "name": "Step A",
+                "relationships": {
+                    "invokes_action": "tool.call",
+                    "next_step": "#V#step_b",
+                },
+            }
+        }
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            return_value=workflow_doc,
+        ):
+            with patch(
+                "src.backend.workflows.vontology_loader._fetch_concepts_by_id",
+                return_value=step_docs,
+            ):
+                graph, warnings = build_workflow_process_graph("#V#legacy_workflow")
+
+        assert graph is not None
+        assert graph["initial_step"] == "#V#step_a"
+        assert graph["steps"][0]["invokes_action"] == "tool.call"
+        assert any(
+            str(item).startswith("legacy_workflow_predicates_used:")
+            for item in warnings
+        )
+
+
 # ---------------------------------------------------------------------------
 # Key fix: initial_step key (not initial_state).
 # ---------------------------------------------------------------------------

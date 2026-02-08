@@ -40,6 +40,10 @@ from ..vontology_loader import (
     discover_workflow_ids,
     load_workflow_definition_from_vontology,
 )
+from ..workflow_concept_authority_service import (
+    bootstrap_workflow_concepts,
+    build_workflow_concept_authority_report,
+)
 
 logger = logging.getLogger(__name__)
 _inventory_lock = Lock()
@@ -54,6 +58,7 @@ def _build_workflow_parity_inventory(
     *,
     registry: WorkflowRegistry,
     discovered_workflow_ids: List[str],
+    authority_report: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Build a parity/inventory report for workflow registration vs Vontology."""
     registry_ids = sorted(set(registry.all_workflow_ids()))
@@ -117,6 +122,34 @@ def _build_workflow_parity_inventory(
         ),
     ]
 
+    workflow_authority = (
+        authority_report
+        if isinstance(authority_report, dict)
+        else {
+            "drift_detected": False,
+            "counts": {
+                "missing_concepts": 0,
+                "missing_required_type": 0,
+            },
+        }
+    )
+    authority_counts = (
+        workflow_authority.get("counts", {})
+        if isinstance(workflow_authority.get("counts"), dict)
+        else {}
+    )
+    authority_missing_concepts = int(authority_counts.get("missing_concepts", 0))
+    authority_missing_required_type = int(
+        authority_counts.get("missing_required_type", 0)
+    )
+    authority_drift = bool(workflow_authority.get("drift_detected"))
+    summary_lines.append(
+        (
+            f"Workflow authority: missing_concepts={authority_missing_concepts} "
+            f"missing_required_type={authority_missing_required_type}"
+        )
+    )
+
     diagnostics_reason_codes: list[str] = []
     if registry_only_ids:
         diagnostics_reason_codes.append("registry_only")
@@ -124,6 +157,8 @@ def _build_workflow_parity_inventory(
         diagnostics_reason_codes.append("vontology_only")
     if identity_only_ids:
         diagnostics_reason_codes.append("identity_only")
+    if authority_drift:
+        diagnostics_reason_codes.append("workflow_authority")
 
     drift_detected = bool(diagnostics_reason_codes)
 
@@ -137,6 +172,8 @@ def _build_workflow_parity_inventory(
             "vontology_only": len(vontology_only_ids),
             "graph_complete": len(graph_complete_ids),
             "identity_only": len(identity_only_ids),
+            "authority_missing_concepts": authority_missing_concepts,
+            "authority_missing_required_type": authority_missing_required_type,
         },
         "registry_workflow_ids": registry_ids,
         "vontology_discovered_workflow_ids": discovered_ids,
@@ -152,6 +189,7 @@ def _build_workflow_parity_inventory(
             "counts": source_counts,
             "source_by_workflow_id": source_by_workflow_id,
         },
+        "workflow_authority": workflow_authority,
         "summary_lines": summary_lines,
         "summary_text": "\n".join(summary_lines),
         "diagnostics": {
@@ -271,9 +309,41 @@ def build_workflow_registry() -> WorkflowRegistry:
     except Exception as e:
         logger.error("Failed to discover Vontology workflows: %s", e)
 
+    bootstrap_report: Dict[str, Any] = {
+        "counts": {
+            "registry_workflows": len(list(registry.all_workflow_ids())),
+            "created": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "errors": 0,
+        },
+        "required_type_ids": [],
+        "preferred_type_id": None,
+        "created_workflow_ids": [],
+        "updated_workflow_ids": [],
+        "unchanged_workflow_ids": [],
+        "errors_by_workflow_id": {},
+    }
+    bootstrap_enabled = os.getenv("VON_WORKFLOW_CONCEPT_BOOTSTRAP_ENABLE", "1")
+    bootstrap_enabled = bootstrap_enabled.strip().lower() in {"1", "true", "yes", "on"}
+    if bootstrap_enabled:
+        try:
+            bootstrap_report = bootstrap_workflow_concepts(registry=registry)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "workflow_concept_bootstrap_failed: %s",
+                exc,
+            )
+            bootstrap_report["errors_by_workflow_id"] = {"__bootstrap__": str(exc)}
+            bootstrap_report["counts"]["errors"] = 1
+
+    authority_report = build_workflow_concept_authority_report(registry=registry)
+    authority_report["bootstrap"] = bootstrap_report
+
     inventory_snapshot = _build_workflow_parity_inventory(
         registry=registry,
         discovered_workflow_ids=discovered_workflow_ids,
+        authority_report=authority_report,
     )
     with _inventory_lock:
         global _last_inventory_snapshot

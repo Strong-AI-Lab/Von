@@ -13,7 +13,7 @@ Related Issues:
     - JVNAUTOSCI-803: LLM Workflows
 
 Technical Notes:
-    - Workflows are instances of #V#llm_workflow (or subtypes like #V#durable_workflow)
+    - Workflows are instances of #V#ai_workflow (including #V#durable_workflow)
     - Uses semantic search via concept_embedding_service for RAG-based discovery
     - Uses concept_search_service for Vontology-native search
     - Relevance threshold (default 0.70) filters noise from results
@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Workflow type concepts to search for instances
 WORKFLOW_TYPE_IDS = (
+    "#V#ai_workflow",
     "#V#llm_workflow",
     "#V#workflow",
     "#V#durable_workflow",

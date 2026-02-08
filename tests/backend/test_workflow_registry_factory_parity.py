@@ -88,3 +88,34 @@ def test_workflow_parity_policy_no_drift_does_not_raise(monkeypatch):
     policy = inventory.get("parity_policy", {})
     assert policy.get("mode") == "fail"
     assert policy.get("drift_detected") is False
+
+
+def test_workflow_parity_inventory_includes_authority_drift_reason(monkeypatch):
+    monkeypatch.setattr(
+        registry_factory,
+        "build_workflow_process_graph",
+        lambda _workflow_id: (
+            {"initial_step": "#V#step_1", "steps": [{"step_id": "#V#step_1"}]},
+            [],
+        ),
+    )
+    dummy_registry = _DummyRegistry(
+        workflow_ids=["#V#wf_ok"],
+        sources={"#V#wf_ok": "built_in"},
+    )
+    authority_report = {
+        "drift_detected": True,
+        "counts": {"missing_concepts": 1, "missing_required_type": 1},
+    }
+
+    inventory = registry_factory._build_workflow_parity_inventory(
+        registry=dummy_registry,  # type: ignore[arg-type]
+        discovered_workflow_ids=["#V#wf_ok"],
+        authority_report=authority_report,
+    )
+
+    reasons = inventory.get("diagnostics", {}).get("reason_codes", [])
+    assert "workflow_authority" in reasons
+    counts = inventory.get("counts", {})
+    assert counts.get("authority_missing_concepts") == 1
+    assert counts.get("authority_missing_required_type") == 1

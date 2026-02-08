@@ -373,6 +373,7 @@ class TestWorkflowTypeIds:
 
     def test_contains_expected_types(self) -> None:
         """WORKFLOW_TYPE_IDS should contain the expected workflow types."""
+        assert "#V#ai_workflow" in WORKFLOW_TYPE_IDS
         assert "#V#llm_workflow" in WORKFLOW_TYPE_IDS
         assert "#V#workflow" in WORKFLOW_TYPE_IDS
         assert "#V#durable_workflow" in WORKFLOW_TYPE_IDS
