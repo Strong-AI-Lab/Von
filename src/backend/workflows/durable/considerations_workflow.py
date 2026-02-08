@@ -377,7 +377,18 @@ def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResul
                 # 3. Generate
                 # Using simple generate for now.
                 response = llm.generate(prompt, llm_params={"max_tokens": 300})
-                text = response.strip()
+                # LLM adapters are mixed across environments: some return raw
+                # strings while others return response-like objects with `.text`.
+                # Normalise here so workflow behaviour stays stable.
+                if isinstance(response, str):
+                    text = response.strip()
+                else:
+                    response_text = getattr(response, "text", None)
+                    text = (
+                        response_text.strip()
+                        if isinstance(response_text, str)
+                        else str(response).strip()
+                    )
 
                 if text:
                     # 4. Save
