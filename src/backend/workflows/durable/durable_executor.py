@@ -15,6 +15,13 @@ from ..engine import (
     WorkflowDefinition,
     state_has_on_failure_transition,
 )
+from ..metadata_validation import (
+    append_metadata_validation_event,
+    format_metadata_validation_error,
+    skipped_metadata_validation,
+    validate_state_metadata_post_action,
+    validate_state_metadata_pre_action,
+)
 from ..action_registry import ActionRegistry, WorkflowEnvironment
 from ..trace_model import WorkflowExecutionTrace
 from .instance_manager import WorkflowInstanceManager
@@ -193,8 +200,43 @@ class DurableWorkflowExecutor:
                 verdict={"status": "enter"},
             )
 
+            pre_validation = validate_state_metadata_pre_action(
+                state_id=current_state,
+                metadata=state_spec.metadata,
+                context=context,
+            )
+            append_metadata_validation_event(context=context, result=pre_validation)
+            if pre_validation.applied:
+                trace.record_state_transition(
+                    current_state,
+                    current_state,
+                    verdict=pre_validation.to_trace_verdict(),
+                )
+            if not pre_validation.ok:
+                error = format_metadata_validation_error(pre_validation)
+                self._instance_manager.checkpoint(
+                    instance_id,
+                    current_state=current_state,
+                    workflow_data=context,
+                    step_index=step_index,
+                    error=error,
+                    progress_current=step_index,
+                    progress_total=total_steps,
+                    progress_message=current_state,
+                )
+                trace.finish_failed(error)
+                return DurableWorkflowResult(
+                    instance_id=instance_id,
+                    data=context,
+                    completed=False,
+                    final_state=current_state,
+                    error=error,
+                    step_count=step_index,
+                )
+
             # Execute actions
             state_has_failure_route = state_has_on_failure_transition(state_spec)
+            context_before_actions = dict(context)
             for action in state_spec.actions:
                 result = self._registry.execute(
                     action.action_id,
@@ -244,6 +286,49 @@ class DurableWorkflowExecutor:
                     )
 
                 context.update(result.outputs)
+
+            if state_has_failure_route and bool(context.get("last_action_failed")):
+                post_validation = skipped_metadata_validation(
+                    state_id=current_state,
+                    phase="post_action",
+                    reason="action_failed_with_on_failure_route",
+                )
+            else:
+                post_validation = validate_state_metadata_post_action(
+                    state_id=current_state,
+                    metadata=state_spec.metadata,
+                    context_before=context_before_actions,
+                    context_after=context,
+                )
+
+            append_metadata_validation_event(context=context, result=post_validation)
+            if post_validation.applied:
+                trace.record_state_transition(
+                    current_state,
+                    current_state,
+                    verdict=post_validation.to_trace_verdict(),
+                )
+            if not post_validation.ok:
+                error = format_metadata_validation_error(post_validation)
+                self._instance_manager.checkpoint(
+                    instance_id,
+                    current_state=current_state,
+                    workflow_data=context,
+                    step_index=step_index,
+                    error=error,
+                    progress_current=step_index,
+                    progress_total=total_steps,
+                    progress_message=current_state,
+                )
+                trace.finish_failed(error)
+                return DurableWorkflowResult(
+                    instance_id=instance_id,
+                    data=context,
+                    completed=False,
+                    final_state=current_state,
+                    error=error,
+                    step_count=step_index,
+                )
 
             # Check for terminal state
             if current_state in termination_states:

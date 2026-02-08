@@ -6,6 +6,13 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from .action_registry import ActionRegistry, WorkflowActionResult, WorkflowEnvironment
+from .metadata_validation import (
+    append_metadata_validation_event,
+    format_metadata_validation_error,
+    skipped_metadata_validation,
+    validate_state_metadata_post_action,
+    validate_state_metadata_pre_action,
+)
 from .trace_model import WorkflowExecutionTrace
 
 
@@ -103,7 +110,31 @@ class WorkflowExecutor:
                     verdict={"status": "enter"},
                 )
 
+            pre_validation = validate_state_metadata_pre_action(
+                state_id=current_state,
+                metadata=state_spec.metadata,
+                context=context,
+            )
+            append_metadata_validation_event(context=context, result=pre_validation)
+            if trace is not None and pre_validation.applied:
+                trace.record_state_transition(
+                    current_state,
+                    current_state,
+                    verdict=pre_validation.to_trace_verdict(),
+                )
+            if not pre_validation.ok:
+                error = format_metadata_validation_error(pre_validation)
+                if trace is not None:
+                    trace.finish_failed(error)
+                return WorkflowResult(
+                    data=context,
+                    completed=False,
+                    final_state=current_state,
+                    error=error,
+                )
+
             state_has_failure_route = state_has_on_failure_transition(state_spec)
+            context_before_actions = dict(context)
             for action in state_spec.actions:
                 result = self._registry.execute(
                     action.action_id,
@@ -136,6 +167,38 @@ class WorkflowExecutor:
                         error=result.error or "action_failed",
                     )
                 context.update(result.outputs)
+
+            if state_has_failure_route and bool(context.get("last_action_failed")):
+                post_validation = skipped_metadata_validation(
+                    state_id=current_state,
+                    phase="post_action",
+                    reason="action_failed_with_on_failure_route",
+                )
+            else:
+                post_validation = validate_state_metadata_post_action(
+                    state_id=current_state,
+                    metadata=state_spec.metadata,
+                    context_before=context_before_actions,
+                    context_after=context,
+                )
+
+            append_metadata_validation_event(context=context, result=post_validation)
+            if trace is not None and post_validation.applied:
+                trace.record_state_transition(
+                    current_state,
+                    current_state,
+                    verdict=post_validation.to_trace_verdict(),
+                )
+            if not post_validation.ok:
+                error = format_metadata_validation_error(post_validation)
+                if trace is not None:
+                    trace.finish_failed(error)
+                return WorkflowResult(
+                    data=context,
+                    completed=False,
+                    final_state=current_state,
+                    error=error,
+                )
 
             if current_state in termination_states:
                 return WorkflowResult(
