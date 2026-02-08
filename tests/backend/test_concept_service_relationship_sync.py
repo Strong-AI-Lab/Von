@@ -19,6 +19,7 @@ def test_update_concept_reconciles_relationships(monkeypatch):
 
     fake_collection = FakeCollection()
     reconcile_calls = []
+    invalidation_calls = []
 
     monkeypatch.setattr(
         concept_service.ConceptsRepository, "collection", lambda: fake_collection
@@ -34,6 +35,11 @@ def test_update_concept_reconciles_relationships(monkeypatch):
         "reconcile_relationships",
         staticmethod(fake_reconcile),
     )
+    monkeypatch.setattr(
+        concept_service,
+        "_invalidate_concept_mutation_caches",
+        lambda: invalidation_calls.append(True),
+    )
 
     concept_service.update_concept(
         "#V#parent", {"relationships": {"has_subtype": ["#V#child"]}}
@@ -42,3 +48,4 @@ def test_update_concept_reconciles_relationships(monkeypatch):
     assert reconcile_calls == [
         ("#V#parent", {"has_subtype": ["#V#child"]}, {"has_subtype": []})
     ]
+    assert invalidation_calls == [True]

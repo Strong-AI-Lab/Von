@@ -25,6 +25,7 @@ from src.backend.workflows.engine import (
 )
 from src.backend.workflows.vontology_loader import (
     build_workflow_process_graph,
+    discover_workflow_ids,
     load_workflow_definition_from_vontology,
     _normalise_relationship_targets,
     _first_relationship_target,
@@ -569,3 +570,78 @@ class TestFullWorkflowConversion:
         assert defn.states["#V#proceed"].terminal is True
         assert defn.states["#V#abort"].terminal is True
         assert defn.states["#V#retry"].terminal is False
+
+
+class TestDiscoverWorkflowIds:
+    def test_discovers_canonical_initial_step_predicates(self):
+        captured_queries: list[dict[str, Any]] = []
+
+        def _fake_find(query, *_args, **_kwargs):
+            if isinstance(query, dict):
+                captured_queries.append(query)
+
+            if isinstance(query, dict) and isinstance(query.get("$or"), list):
+                if any(
+                    isinstance(item, dict)
+                    and "relationships.#V#hasInitialStep" in item
+                    for item in query["$or"]
+                ):
+                    return [{"concept_id": "#V#wf_canonical"}]
+            return []
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find",
+            side_effect=_fake_find,
+        ), patch(
+            "src.backend.workflows.vontology_loader._discover_workflow_type_family_ids",
+            return_value=set(),
+        ):
+            workflow_ids = discover_workflow_ids()
+
+        assert workflow_ids == ["#V#wf_canonical"]
+        assert any(
+            isinstance(query, dict)
+            and isinstance(query.get("$or"), list)
+            and any(
+                isinstance(item, dict)
+                and "relationships.#V#hasInitialStep" in item
+                for item in query["$or"]
+            )
+            for query in captured_queries
+        )
+
+    def test_discovers_instance_typed_workflows_with_canonical_graph_predicates(self):
+        def _fake_find(query, *_args, **_kwargs):
+            if isinstance(query, dict) and isinstance(query.get("$or"), list):
+                if any(
+                    isinstance(item, dict) and "relationships.is_an_instance_of" in item
+                    for item in query["$or"]
+                ):
+                    return [
+                        {
+                            "concept_id": "#V#wf_zeta",
+                            "relationships": {
+                                "is_an_instance_of": ["#V#workflow_variant"],
+                                "#V#hasInitialStep": "#V#step_z",
+                            },
+                        },
+                        {
+                            "concept_id": "#V#wf_alpha",
+                            "relationships": {
+                                "is_an_instance_of": ["#V#workflow_variant"],
+                                "#V#hasInitialStep": "#V#step_a",
+                            },
+                        },
+                    ]
+            return []
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find",
+            side_effect=_fake_find,
+        ), patch(
+            "src.backend.workflows.vontology_loader._discover_workflow_type_family_ids",
+            return_value={"#V#workflow_variant"},
+        ):
+            workflow_ids = discover_workflow_ids()
+
+        assert workflow_ids == ["#V#wf_alpha", "#V#wf_zeta"]

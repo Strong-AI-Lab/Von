@@ -481,6 +481,18 @@ def _is_executable_workflow_concept(concept_id: str) -> bool:
     return is_executable
 
 
+def invalidate_workflow_discovery_executability_caches() -> None:
+    """Clear cached workflow executability classifications.
+
+    Workflow executability depends on live Vontology graph state. Any concept
+    mutation that edits workflow/step structure should clear these caches so
+    discovery and selector routing can react without process restarts.
+    """
+
+    _classify_workflow_concept_executability.cache_clear()
+    _is_executable_workflow_concept.cache_clear()
+
+
 def _count_executable_matches(matches: List[WorkflowMatch]) -> int:
     return sum(1 for match in matches if bool(match.is_executable))
 
@@ -643,7 +655,15 @@ def discover_workflows_for_turn(
             allow_non_executable=effective_allow_non_executable,
         )
 
-        if not result.matches:
+        # Wrapper contract: only return payload when routing-eligible candidates
+        # exist. Raw candidate matches may include non-executable artefacts that
+        # are intentionally excluded from selector routing.
+        routing_matches = (
+            result.routing_matches
+            if isinstance(result.routing_matches, list)
+            else result.matches
+        )
+        if not routing_matches:
             return None
 
         return result.to_dict()

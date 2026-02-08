@@ -253,17 +253,13 @@ def get_workflow_registry_inventory_snapshot() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def build_workflow_registry() -> WorkflowRegistry:
-    """Build a unified WorkflowRegistry with all workflow sources.
+def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
+    """Build the unified workflow registry.
 
-    Registration order:
-    1. Built-in conversation-turn workflows (definitions.py)
-    2. Durable-specific workflows (rag_sync, considerations)
-    3. Vontology-discovered workflows (skip already-registered IDs)
-
-    This is the single authoritative factory — both the orchestrator and
-    durable subsystem should call this instead of maintaining separate
-    registries.
+    Args:
+        allow_bootstrap:
+            When False, skip concept bootstrap writes and keep this call path
+            read-only for diagnostics/introspection surfaces.
     """
     registry = WorkflowRegistry()
 
@@ -326,7 +322,8 @@ def build_workflow_registry() -> WorkflowRegistry:
     }
     bootstrap_enabled = os.getenv("VON_WORKFLOW_CONCEPT_BOOTSTRAP_ENABLE", "1")
     bootstrap_enabled = bootstrap_enabled.strip().lower() in {"1", "true", "yes", "on"}
-    if bootstrap_enabled:
+    bootstrap_allowed = bool(allow_bootstrap and bootstrap_enabled)
+    if bootstrap_allowed:
         try:
             bootstrap_report = bootstrap_workflow_concepts(registry=registry)
         except Exception as exc:  # pragma: no cover - defensive
@@ -336,6 +333,7 @@ def build_workflow_registry() -> WorkflowRegistry:
             )
             bootstrap_report["errors_by_workflow_id"] = {"__bootstrap__": str(exc)}
             bootstrap_report["counts"]["errors"] = 1
+    bootstrap_report["enabled"] = bootstrap_allowed
 
     authority_report = build_workflow_concept_authority_report(registry=registry)
     authority_report["bootstrap"] = bootstrap_report
@@ -354,8 +352,19 @@ def build_workflow_registry() -> WorkflowRegistry:
     return registry
 
 
+def build_workflow_registry() -> WorkflowRegistry:
+    """Build a unified WorkflowRegistry with mutating bootstrap enabled by policy."""
+    return _build_workflow_registry(allow_bootstrap=True)
+
+
+def build_workflow_registry_read_only() -> WorkflowRegistry:
+    """Build a unified WorkflowRegistry without concept bootstrap side effects."""
+    return _build_workflow_registry(allow_bootstrap=False)
+
+
 # Keep the old name as an alias for backward compatibility.
 build_durable_workflow_registry = build_workflow_registry
+build_durable_workflow_registry_read_only = build_workflow_registry_read_only
 
 
 # ---------------------------------------------------------------------------

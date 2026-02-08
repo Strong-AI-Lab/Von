@@ -87,6 +87,37 @@ logger = logging.getLogger(__name__)
 MongoQuery = Dict[str, Any]
 
 
+def _invalidate_concept_mutation_caches() -> None:
+    """Invalidate caches that may become stale after concept mutations.
+
+    Keep all mutation-side cache invalidation in one helper so create/update/
+    delete paths stay consistent as workflow and ontology caches evolve.
+    """
+
+    try:
+        invalidate_phrase_cache()
+    except Exception:
+        pass
+
+    try:
+        from .workflow_discovery_service import (
+            invalidate_workflow_discovery_executability_caches,
+        )
+
+        invalidate_workflow_discovery_executability_caches()
+    except Exception:
+        pass
+
+    try:
+        from ..workflows.workflow_concept_authority_service import (
+            clear_workflow_type_resolution_cache,
+        )
+
+        clear_workflow_type_resolution_cache()
+    except Exception:
+        pass
+
+
 # REFACTORING_NOTE: Placeholder for potential error/exception classes
 class ConceptServiceError(Exception):
     "Base class for errors in conceptService."
@@ -378,11 +409,7 @@ def create_concept(
             except Exception:
                 # Best-effort; leave name as-is if accessor fails
                 pass
-        # Invalidate phrase cache so new names become eligible for heuristic spans
-        try:
-            invalidate_phrase_cache()
-        except Exception:
-            pass
+        _invalidate_concept_mutation_caches()
         return created_concept if created_concept else {}
 
     except DuplicateKeyError as e:
@@ -979,10 +1006,7 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
                     reconcile_err,
                 )
 
-        try:
-            invalidate_phrase_cache()
-        except Exception:
-            pass
+        _invalidate_concept_mutation_caches()
         return updated_concept_doc
     except ConceptNotFoundError:  # Re-raise specific error
         raise
@@ -1051,10 +1075,7 @@ def delete_concept(concept_id: str) -> bool:
                 raise ConceptNotFoundError(
                     f"concept with ID '{concept_id}' not found for deletion."
                 )
-            try:
-                invalidate_phrase_cache()
-            except Exception:
-                pass
+            _invalidate_concept_mutation_caches()
             return bool(result.acknowledged and result.deleted_count > 0)
 
         # Best-effort: remove text relations (and GC orphaned text_values) before deleting.
@@ -1089,10 +1110,7 @@ def delete_concept(concept_id: str) -> bool:
                 f"Delete failed for concept '{canonical_concept_id}': {delete_report.get('error') or delete_report.get('message') or delete_report}"
             )
 
-        try:
-            invalidate_phrase_cache()
-        except Exception:
-            pass
+        _invalidate_concept_mutation_caches()
 
         logger.info(
             f"[cascade_delete] concept={canonical_concept_id} subject_variants={len(cascade_ids)} removed_relations={total_rel} gc_text_values={total_tv}"

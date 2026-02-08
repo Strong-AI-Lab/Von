@@ -44,6 +44,14 @@ PRED_TRIGGERS_WORKFLOW = "#V#triggers_workflow"  # Usage in linked_to: {"predica
 # Query-optimised relation context keys (WS5 / JVNAUTOSCI-1091).
 CTX_ENABLED_BOOL = "enabled_bool"
 CTX_NEXT_RUN_EPOCH_MS = "next_run_epoch_ms"
+CTX_SCHEDULE_TYPE = "schedule_type"
+
+SCHEDULE_TYPE_IDS = (
+    TYPE_WORKFLOW_SCHEDULE,
+    TYPE_CRON_SCHEDULE,
+    TYPE_INTERVAL_SCHEDULE,
+    TYPE_ONE_TIME_SCHEDULE,
+)
 
 
 class VontologyScheduleRepository:
@@ -118,7 +126,11 @@ class VontologyScheduleRepository:
 
             # Execution Timestamps
             if schedule.next_run_at:
-                self._set_next_run_timestamp(concept_id, schedule.next_run_at)
+                self._set_next_run_timestamp(
+                    concept_id,
+                    schedule.next_run_at,
+                    schedule_type_id=subtype,
+                )
             if schedule.last_run_at:
                 self._set_text(
                     concept_id,
@@ -232,6 +244,7 @@ class VontologyScheduleRepository:
         due_schedule_ids: list[str] = []
         seen_schedule_ids: set[str] = set()
         enabled_cache: dict[str, bool] = {}
+        schedule_type_cache: dict[str, bool] = {}
 
         # Query-first path: this targets schedules with WS5 context metadata and
         # avoids broad concept scans on every scheduler poll.
@@ -240,6 +253,7 @@ class VontologyScheduleRepository:
             {
                 "predicate": PRED_NEXT_RUN,
                 f"context.{CTX_NEXT_RUN_EPOCH_MS}": {"$lte": now_epoch_ms},
+                f"context.{CTX_SCHEDULE_TYPE}": {"$in": list(SCHEDULE_TYPE_IDS)},
             },
             projection={"subject_concept_id": 1},
             sort=[(f"context.{CTX_NEXT_RUN_EPOCH_MS}", 1)],
@@ -258,6 +272,36 @@ class VontologyScheduleRepository:
             if len(due_schedule_ids) >= limit:
                 break
 
+        # Compatibility for WS5 records with epoch metadata but no schedule-type
+        # context. Keep this bounded and verify type by concept lookup.
+        if len(due_schedule_ids) < limit:
+            compatibility_cursor = TextRelationsRepository.find(
+                {
+                    "predicate": PRED_NEXT_RUN,
+                    f"context.{CTX_NEXT_RUN_EPOCH_MS}": {"$lte": now_epoch_ms},
+                    f"context.{CTX_SCHEDULE_TYPE}": {"$exists": False},
+                },
+                projection={"subject_concept_id": 1},
+                sort=[(f"context.{CTX_NEXT_RUN_EPOCH_MS}", 1)],
+                limit=fast_limit,
+            )
+            for relation in compatibility_cursor:
+                schedule_id = str(relation.get("subject_concept_id") or "").strip()
+                if not schedule_id or schedule_id in seen_schedule_ids:
+                    continue
+                if not self._is_workflow_schedule_concept(
+                    schedule_id=schedule_id, schedule_type_cache=schedule_type_cache
+                ):
+                    continue
+                if not self._is_schedule_enabled(
+                    schedule_id=schedule_id, enabled_cache=enabled_cache
+                ):
+                    continue
+                due_schedule_ids.append(schedule_id)
+                seen_schedule_ids.add(schedule_id)
+                if len(due_schedule_ids) >= limit:
+                    break
+
         # Legacy compatibility path: old schedules may not carry context metadata.
         # We still avoid concept list scans by reading only next_run relations.
         if len(due_schedule_ids) < limit:
@@ -271,6 +315,10 @@ class VontologyScheduleRepository:
             ):
                 schedule_id = str(relation.get("subject_concept_id") or "").strip()
                 if not schedule_id or schedule_id in seen_schedule_ids:
+                    continue
+                if not self._is_workflow_schedule_concept(
+                    schedule_id=schedule_id, schedule_type_cache=schedule_type_cache
+                ):
                     continue
                 if not self._is_schedule_enabled(
                     schedule_id=schedule_id, enabled_cache=enabled_cache
@@ -326,7 +374,11 @@ class VontologyScheduleRepository:
             self._set_text(schedule_id, PRED_LAST_RUN, now.isoformat())
 
             if next_run_at:
-                self._set_next_run_timestamp(schedule_id, next_run_at)
+                self._set_next_run_timestamp(
+                    schedule_id,
+                    next_run_at,
+                    schedule_type_id=self._resolve_schedule_type_concept_id(schedule_id),
+                )
             else:
                 # Disable if no next run
                 self._set_enabled_state(schedule_id, False)
@@ -384,14 +436,25 @@ class VontologyScheduleRepository:
             context={CTX_ENABLED_BOOL: bool(enabled)},
         )
 
-    def _set_next_run_timestamp(self, concept_id: str, next_run_at: datetime) -> None:
+    def _set_next_run_timestamp(
+        self,
+        concept_id: str,
+        next_run_at: datetime,
+        *,
+        schedule_type_id: Optional[str] = None,
+    ) -> None:
         """Persist next run timestamp with UTC-normalised text and epoch context."""
         next_run_utc = self._normalise_utc_datetime(next_run_at)
+        relation_context: Dict[str, Any] = {
+            CTX_NEXT_RUN_EPOCH_MS: int(next_run_utc.timestamp() * 1000)
+        }
+        if isinstance(schedule_type_id, str) and schedule_type_id in SCHEDULE_TYPE_IDS:
+            relation_context[CTX_SCHEDULE_TYPE] = schedule_type_id
         self._set_text(
             concept_id,
             PRED_NEXT_RUN,
             next_run_utc.isoformat(),
-            context={CTX_NEXT_RUN_EPOCH_MS: int(next_run_utc.timestamp() * 1000)},
+            context=relation_context,
         )
 
     def _normalise_utc_datetime(self, value: datetime) -> datetime:
@@ -409,6 +472,36 @@ class VontologyScheduleRepository:
         except ValueError:
             return None
         return self._normalise_utc_datetime(parsed)
+
+    def _resolve_schedule_type_concept_id(self, schedule_id: str) -> Optional[str]:
+        """Resolve canonical schedule type for a schedule concept ID."""
+        try:
+            concept = concept_service.get_concept_by_concept_id(schedule_id)
+        except Exception:
+            return None
+        if not isinstance(concept, dict):
+            return None
+
+        relationships = concept.get("relationships") or {}
+        if not isinstance(relationships, dict):
+            return None
+        instances_raw = relationships.get("is_an_instance_of", [])
+        if isinstance(instances_raw, str):
+            instance_type_ids = [instances_raw] if instances_raw else []
+        elif isinstance(instances_raw, list):
+            instance_type_ids = [item for item in instances_raw if isinstance(item, str)]
+        else:
+            instance_type_ids = []
+
+        for type_id in (
+            TYPE_CRON_SCHEDULE,
+            TYPE_INTERVAL_SCHEDULE,
+            TYPE_ONE_TIME_SCHEDULE,
+            TYPE_WORKFLOW_SCHEDULE,
+        ):
+            if type_id in instance_type_ids:
+                return type_id
+        return None
 
     def _get_text_value_for_relation_object(self, object_text_id: Any) -> Optional[str]:
         """Resolve relation object_text_id to raw text value."""
@@ -470,6 +563,24 @@ class VontologyScheduleRepository:
         if enabled_cache is not None:
             enabled_cache[schedule_id] = is_enabled
         return is_enabled
+
+    def _is_workflow_schedule_concept(
+        self,
+        *,
+        schedule_id: str,
+        schedule_type_cache: Optional[dict[str, bool]] = None,
+    ) -> bool:
+        """Return True when schedule_id resolves to a workflow schedule concept."""
+        if schedule_type_cache is not None and schedule_id in schedule_type_cache:
+            return schedule_type_cache[schedule_id]
+
+        schedule_type_id = self._resolve_schedule_type_concept_id(schedule_id)
+        is_schedule = bool(
+            isinstance(schedule_type_id, str) and schedule_type_id in SCHEDULE_TYPE_IDS
+        )
+        if schedule_type_cache is not None:
+            schedule_type_cache[schedule_id] = is_schedule
+        return is_schedule
 
     def _get_text(self, concept_id: str, predicate: str) -> Optional[str]:
         """Helper to get single text value."""

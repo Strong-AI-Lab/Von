@@ -632,52 +632,72 @@ def _get_recursive_subtypes(root_type_id: str, max_depth: int = 3) -> set[str]:
     return found
 
 
+def _discover_workflow_type_family_ids() -> set[str]:
+    """Return workflow base types plus discovered subtypes."""
+
+    type_ids: set[str] = set()
+    for base_type_id in WORKFLOW_DISCOVERY_BASE_TYPE_IDS:
+        if isinstance(base_type_id, str) and base_type_id:
+            type_ids.add(base_type_id)
+            type_ids.update(_get_recursive_subtypes(base_type_id))
+    return type_ids
+
+
 def discover_workflow_ids() -> List[str]:
     """Find all potential Vontology-defined workflows.
 
     Heuristic:
-    1. Concepts that define a workflow structure (have 'hasInitialStep').
-    2. Concepts that are subtypes of known workflow type roots.
+    1. Concepts that define a workflow structure (have hasInitialStep aliases).
+    2. Concepts typed under known workflow roots (instance or subtype paths)
+       that define an initial step.
     """
     candidates = set()
 
-    # 1. Direct property search (best effort, tolerant of DB query limitations)
+    # 1. Direct property search (best effort, includes canonical and legacy aliases)
     try:
-        direct_initial_step_predicates = [
-            predicate
-            for predicate in WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"]
-            if not predicate.startswith("#V#")
-        ]
         direct_initial_step_query = [
             {f"relationships.{predicate}": {"$exists": True}}
-            for predicate in direct_initial_step_predicates
+            for predicate in WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"]
         ]
         cursor = ConceptsRepository.find(
             {"$or": direct_initial_step_query},
             {"concept_id": 1},
         )
         for doc in cursor:
-            if "concept_id" in doc:
-                candidates.add(doc["concept_id"])
+            concept_id = doc.get("concept_id")
+            if isinstance(concept_id, str) and concept_id.strip():
+                candidates.add(concept_id.strip())
     except Exception as e:
         logger.warning(f"Error querying workflows by property: {e}")
 
-    # 2. Type-based discovery (more robust for #V# predicates)
-    for base in WORKFLOW_DISCOVERY_BASE_TYPE_IDS:
-        subtypes = _get_recursive_subtypes(base)
-
-        # Fetch them to check if they actually look like workflows (have steps)
-        # This filters out abstract categories that don't have steps.
-        if subtypes:
-            subtype_docs = _fetch_concepts_by_id(list(subtypes))
-            for cid, doc in subtype_docs.items():
+    # 2. Type-based discovery over workflow type families. This catches
+    # instance-typed workflow concepts that use canonical #V# graph predicates.
+    workflow_type_ids = sorted(_discover_workflow_type_family_ids())
+    if workflow_type_ids:
+        try:
+            typed_cursor = ConceptsRepository.find(
+                {
+                    "$or": [
+                        {"relationships.is_an_instance_of": {"$in": workflow_type_ids}},
+                        {"relationships.is_a_type_of": {"$in": workflow_type_ids}},
+                    ]
+                },
+                {"concept_id": 1, "relationships": 1},
+            )
+            for doc in typed_cursor:
+                concept_id = doc.get("concept_id")
+                if not isinstance(concept_id, str) or not concept_id.strip():
+                    continue
                 rels = doc.get("relationships") or {}
-                # Check for initial step predicate in memory (handles #V# correctly)
+                if not isinstance(rels, dict):
+                    continue
                 initial_step = _first_relationship_target(
                     rels,
                     WORKFLOW_GRAPH_PREDICATE_ALIASES["hasInitialStep"],
                 )
                 if initial_step:
-                    candidates.add(cid)
+                    candidates.add(concept_id.strip())
+        except Exception as e:
+            logger.warning(f"Error querying workflows by type: {e}")
 
-    return list(candidates)
+    return sorted(candidates)

@@ -22,11 +22,14 @@ from src.backend.services.workflow_discovery_service import (
     WORKFLOW_TYPE_IDS,
     WorkflowDiscoveryResult,
     WorkflowMatch,
+    _classify_workflow_concept_executability,
     _deduplicate_and_rank,
     _get_workflow_description,
     _get_workflow_name,
+    _is_executable_workflow_concept,
     discover_workflows,
     discover_workflows_for_turn,
+    invalidate_workflow_discovery_executability_caches,
 )
 
 
@@ -441,6 +444,27 @@ class TestDiscoverWorkflowsForTurn:
         assert result is None
 
     @patch("src.backend.services.workflow_discovery_service.discover_workflows")
+    def test_returns_none_when_only_non_routing_candidates_exist(
+        self, mock_discover: MagicMock
+    ) -> None:
+        """Wrapper should suppress payloads when routing-eligible matches are empty."""
+        mock_discover.return_value = WorkflowDiscoveryResult(
+            matches=[
+                WorkflowMatch(
+                    "#V#wf_graph",
+                    "Graph Incomplete",
+                    relevance_score=0.92,
+                    is_executable=False,
+                    executability_reason=EXECUTABILITY_GRAPH_INCOMPLETE,
+                )
+            ],
+            routing_matches=[],
+        )
+
+        result = discover_workflows_for_turn("test query input")
+        assert result is None
+
+    @patch("src.backend.services.workflow_discovery_service.discover_workflows")
     def test_returns_dict_when_matches_found(self, mock_discover: MagicMock) -> None:
         """Should return dict with matches when workflows found."""
         mock_discover.return_value = WorkflowDiscoveryResult(
@@ -476,3 +500,26 @@ class TestWorkflowTypeIds:
         """Default constants should have reasonable values."""
         assert DEFAULT_RELEVANCE_THRESHOLD == 0.70
         assert DEFAULT_MAX_RESULTS == 3
+
+
+def test_invalidate_workflow_discovery_executability_caches_clears_lru_state() -> None:
+    _classify_workflow_concept_executability.cache_clear()
+    _is_executable_workflow_concept.cache_clear()
+
+    with patch(
+        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+        return_value=(None, ["workflow_has_no_steps"]),
+    ), patch(
+        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+        return_value=None,
+    ):
+        _classify_workflow_concept_executability("#V#wf_cache_probe")
+        _is_executable_workflow_concept("#V#wf_cache_probe")
+
+    assert _classify_workflow_concept_executability.cache_info().currsize > 0
+    assert _is_executable_workflow_concept.cache_info().currsize > 0
+
+    invalidate_workflow_discovery_executability_caches()
+
+    assert _classify_workflow_concept_executability.cache_info().currsize == 0
+    assert _is_executable_workflow_concept.cache_info().currsize == 0

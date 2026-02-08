@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from typing import Any
+from unittest.mock import patch
 
 from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
@@ -76,6 +78,17 @@ def test_workflow_list_definitions_gateway_invoke_success_path():
     assert "capability_matrix" in payload
 
 
+def test_workflow_list_definitions_skips_bootstrap_writes():
+    with patch(
+        "src.backend.workflows.durable.registry_factory.bootstrap_workflow_concepts",
+        side_effect=AssertionError("workflow_list_definitions should be read-only"),
+    ):
+        handler = build_default_catalogue().get("workflow_list_definitions").handler
+        result = handler(limit=10)
+
+    assert result.get("success") is True
+
+
 def test_workflow_list_instances_gateway_invoke_error_path():
     gateway = _build_gateway()
     result = gateway.invoke("workflow_list_instances", {"status": "invalid-status"})
@@ -119,7 +132,7 @@ def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
 def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     class _InMemoryWorkflowManager:
         def __init__(self) -> None:
-            self.schedules: dict[str, object] = {}
+            self.schedules: dict[str, Any] = {}
             self.instances: list[dict[str, object]] = []
             self._instance_counter = 0
 
@@ -209,7 +222,7 @@ def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     schedule_id = create_result.get("schedule_id")
     assert isinstance(schedule_id, str)
 
-    scheduler = WorkflowScheduler(manager, check_interval_seconds=0.01)
+    scheduler = WorkflowScheduler(manager, check_interval_seconds=0.01)  # type: ignore[arg-type]
     scheduler._process_due_schedules()
     metrics = scheduler.get_poll_metrics()
     assert metrics["due_count"] == 1

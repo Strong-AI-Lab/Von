@@ -4968,7 +4968,7 @@ def _check_placeholder_description_output_schema() -> Schema:
 def _workflow_list_definitions(**kwargs):
     """List available workflow definitions."""
     from ...workflows.durable.registry_factory import (
-        build_durable_workflow_registry,
+        build_durable_workflow_registry_read_only,
         get_workflow_registry_inventory_snapshot,
     )
     from ...workflows.workflow_baseline_telemetry import (
@@ -4978,7 +4978,9 @@ def _workflow_list_definitions(**kwargs):
     limit = min(int(kwargs.get("limit", 50)), 200)
 
     try:
-        registry = build_durable_workflow_registry()
+        # Diagnostics should be read-only: avoid bootstrap writes on introspection
+        # pathways such as workflow_list_definitions and health checks.
+        registry = build_durable_workflow_registry_read_only()
         ids = sorted(list(registry.all_workflow_ids()))
 
         # Enriched descriptions

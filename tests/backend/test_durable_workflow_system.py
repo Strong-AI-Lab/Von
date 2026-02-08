@@ -26,6 +26,8 @@ from src.backend.workflows.durable.scheduler import (
     WorkflowScheduler,
 )
 from src.backend.workflows.durable.vontology_schedule_repository import (
+    CTX_ENABLED_BOOL,
+    CTX_NEXT_RUN_EPOCH_MS,
     PRED_ENABLED,
     PRED_NEXT_RUN,
 )
@@ -931,6 +933,49 @@ class TestScheduleManagement:
 
         due = manager.find_due_schedules(limit=10)
         assert any(s.schedule_id == created_id for s in due)
+
+    def test_find_due_schedules_ignores_non_schedule_due_relations(self) -> None:
+        """Fast-path lookup should not include non-schedule concepts."""
+        from src.backend.services import concept_service, text_value_service
+
+        manager = WorkflowInstanceManager()
+        past_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+        due_schedule = WorkflowSchedule.create_once(
+            "#V#test_workflow",
+            run_at=past_time,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        due_schedule.next_run_at = past_time
+        created_id = manager.create_schedule(due_schedule)
+
+        marker_id = "#V#non_schedule_due_marker"
+        concept_service.create_concept(
+            concept_id=marker_id,
+            name="Non Schedule Due Marker",
+        )
+        text_value_service.upsert_singleton_text_relation(
+            subject_concept_id=marker_id,
+            predicate=PRED_ENABLED,
+            text="true",
+            policy="replace_others",
+            lang="en",
+            context={CTX_ENABLED_BOOL: True},
+        )
+        text_value_service.upsert_singleton_text_relation(
+            subject_concept_id=marker_id,
+            predicate=PRED_NEXT_RUN,
+            text=past_time.isoformat(),
+            policy="replace_others",
+            lang="en",
+            context={CTX_NEXT_RUN_EPOCH_MS: int(past_time.timestamp() * 1000)},
+        )
+
+        due = manager.find_due_schedules(limit=10)
+        due_ids = {item.schedule_id for item in due}
+        assert created_id in due_ids
+        assert marker_id not in due_ids
 
     def test_find_due_schedules_with_load_like_fixture(self) -> None:
         """Due lookup should remain correct with many non-due schedules present."""
