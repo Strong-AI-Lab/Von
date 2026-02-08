@@ -7689,6 +7689,7 @@ def _chat_introspect(
     gateway_enabled = None
     orchestrator_max_tool_invocations = None
     orchestrator_tool_batch_cap = None
+    orchestrator_missing_tool_call_retry_cap = None
     if include_runtime_status:
         try:
             from flask import current_app
@@ -7700,10 +7701,16 @@ def _chat_introspect(
                 orchestrator, "_max_tool_invocations", None
             )
             orchestrator_tool_batch_cap = getattr(orchestrator, "_tool_batch_cap", None)
+            orchestrator_missing_tool_call_retry_cap = getattr(
+                orchestrator,
+                "_max_missing_tool_call_retries_per_turn",
+                None,
+            )
         except Exception:
             gateway_enabled = None
             orchestrator_max_tool_invocations = None
             orchestrator_tool_batch_cap = None
+            orchestrator_missing_tool_call_retry_cap = None
 
     # Tool-guidance fingerprint (stable-ish) without dumping full text by default
     tool_guidance_text = ""
@@ -7771,6 +7778,7 @@ def _chat_introspect(
         "gateway_enabled": gateway_enabled,
         "orchestrator_max_tool_invocations": orchestrator_max_tool_invocations,
         "orchestrator_tool_batch_cap": orchestrator_tool_batch_cap,
+        "orchestrator_missing_tool_call_retry_cap": orchestrator_missing_tool_call_retry_cap,
     }
 
 
@@ -8184,6 +8192,7 @@ def build_default_catalogue() -> MethodCatalogue:
                     "gateway_enabled": (bool, type(None)),
                     "orchestrator_max_tool_invocations": (int, type(None)),
                     "orchestrator_tool_batch_cap": (int, type(None)),
+                    "orchestrator_missing_tool_call_retry_cap": (int, type(None)),
                 },
                 optional={
                     "error": str,

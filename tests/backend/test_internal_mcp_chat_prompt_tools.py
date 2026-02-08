@@ -178,6 +178,7 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
     assert result["tool_guidance_hash"], "expected a tool guidance hash"
     assert "gateway_enabled" in result
     assert "orchestrator_max_tool_invocations" in result
+    assert "orchestrator_missing_tool_call_retry_cap" in result
 
 
 def test_chat_introspect_gateway_invoke_success_path(monkeypatch):

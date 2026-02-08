@@ -441,6 +441,16 @@ class InternalMCPChatOrchestrator:
         self._logger = logger or logging.getLogger(__name__)
         self._max_tool_invocations = max(0, int(max_tool_invocations))
         self._tool_batch_cap = max(1, int(tool_batch_cap))
+        # Per-turn retry budget for missing-tool-call recovery.
+        # Keep this bounded to avoid retry thrashing when multiple malformed
+        # tool-call responses occur in the same turn.
+        self._max_missing_tool_call_retries_per_turn = self._coerce_int(
+            None,
+            env_var="VON_MCP_MAX_MISSING_TOOL_CALL_RETRIES_PER_TURN",
+            default=2,
+            min_value=0,
+            max_value=20,
+        )
         self._default_gmail_profile = default_gmail_profile
 
         # Optional progress callback for UI telemetry (JVNAUTOSCI-942).
@@ -524,6 +534,7 @@ class InternalMCPChatOrchestrator:
         *,
         max_tool_invocations: int | None = None,
         tool_batch_cap: int | None = None,
+        max_missing_tool_call_retries_per_turn: int | None = None,
     ) -> None:
         """Update execution caps in-place.
 
@@ -546,10 +557,20 @@ class InternalMCPChatOrchestrator:
                 coerced = self._tool_batch_cap
             self._tool_batch_cap = max(1, min(50, coerced))
 
+        if max_missing_tool_call_retries_per_turn is not None:
+            self._max_missing_tool_call_retries_per_turn = self._coerce_non_negative_int(
+                max_missing_tool_call_retries_per_turn,
+                default=self._max_missing_tool_call_retries_per_turn,
+                max_value=20,
+            )
+
     def get_execution_caps(self) -> dict[str, int]:
         return {
             "max_tool_invocations": int(self._max_tool_invocations),
             "tool_batch_cap": int(self._tool_batch_cap),
+            "max_missing_tool_call_retries_per_turn": int(
+                self._max_missing_tool_call_retries_per_turn
+            ),
         }
 
     def set_progress_callback(
@@ -653,6 +674,23 @@ class InternalMCPChatOrchestrator:
         if value is None:
             value = default
         return max(min_value, min(max_value, int(value)))
+
+    @staticmethod
+    def _coerce_non_negative_int(
+        value: Any,
+        *,
+        default: int = 0,
+        max_value: int | None = None,
+    ) -> int:
+        """Coerce arbitrary numeric-like input into a bounded non-negative int."""
+        try:
+            coerced = int(value)
+        except Exception:
+            coerced = int(default)
+        coerced = max(0, coerced)
+        if max_value is not None:
+            coerced = min(int(max_value), coerced)
+        return coerced
 
     def _build_action_registry(self) -> ActionRegistry:
         """Build a unified action registry for all workflow execution.
@@ -897,6 +935,20 @@ class InternalMCPChatOrchestrator:
                 status="failed", error="missing_assessor_callable"
             )
 
+        retry_attempts = self._coerce_non_negative_int(
+            data.get("missing_tool_call_retry_attempts"),
+            default=0,
+            max_value=20,
+        )
+        retry_budget = self._coerce_non_negative_int(
+            data.get("missing_tool_call_retry_budget"),
+            default=self._max_missing_tool_call_retries_per_turn,
+            max_value=20,
+        )
+        retries_remaining_before = max(0, retry_budget - retry_attempts)
+        data["missing_tool_call_retry_attempts"] = retry_attempts
+        data["missing_tool_call_retry_budget"] = retry_budget
+
         assessment = cast(
             _MissingToolCallAssessment,
             assessor(
@@ -936,15 +988,40 @@ class InternalMCPChatOrchestrator:
                         if assessment.tool_call_parse_error is not None
                         else ""
                     ),
+                    "retry_attempts": retry_attempts,
+                    "retry_budget": retry_budget,
+                    "retries_remaining": retries_remaining_before,
                 }
             )
         except Exception:
             pass
 
+        retry_needed = bool(assessment.retry_reason) and retries_remaining_before > 0
+        retry_suppressed = bool(assessment.retry_reason) and not retry_needed
+        if retry_suppressed:
+            try:
+                aux_log.append(
+                    {
+                        "type": "missing_tool_call_retry",
+                        "mechanism": "budget",
+                        "stage": "skipped",
+                        "retry_reason": assessment.retry_reason or "",
+                        "retry_attempts": retry_attempts,
+                        "retry_budget": retry_budget,
+                        "retries_remaining": retries_remaining_before,
+                    }
+                )
+            except Exception:
+                pass
+
         outputs = {
             "missing_tool_call_assessment": asdict(assessment),
-            "missing_tool_call_retry_needed": bool(assessment.retry_reason),
+            "missing_tool_call_retry_needed": retry_needed,
             "missing_tool_call_retry_reason": assessment.retry_reason,
+            "missing_tool_call_retry_attempts": retry_attempts,
+            "missing_tool_call_retry_budget": retry_budget,
+            "missing_tool_call_retry_remaining": retries_remaining_before,
+            "missing_tool_call_retry_suppressed": retry_suppressed,
             "tool_call_parse_error": data.get("tool_call_parse_error"),
         }
 
@@ -954,6 +1031,10 @@ class InternalMCPChatOrchestrator:
                 {
                     "retry_reason": assessment.retry_reason,
                     "classifier_verdict": assessment.classifier_verdict,
+                    "retry_attempts": retry_attempts,
+                    "retry_budget": retry_budget,
+                    "retries_remaining": retries_remaining_before,
+                    "retry_suppressed": retry_suppressed,
                 }
             )
 
@@ -1031,6 +1112,60 @@ class InternalMCPChatOrchestrator:
         aux_log = data.setdefault("aux_llm_calls", [])
         augmented_context = data.get("augmented_context") or []
         record_llm_call = data.get("record_llm_call")
+        llm_calls_log = data.get("llm_calls")
+        calling_path = "legacy"
+        assessment = data.get("missing_tool_call_assessment")
+        if isinstance(assessment, dict) and isinstance(assessment.get("path"), str):
+            calling_path = str(assessment.get("path") or "legacy")
+
+        retry_attempts = self._coerce_non_negative_int(
+            data.get("missing_tool_call_retry_attempts"),
+            default=0,
+            max_value=20,
+        )
+        retry_budget = self._coerce_non_negative_int(
+            data.get("missing_tool_call_retry_budget"),
+            default=self._max_missing_tool_call_retries_per_turn,
+            max_value=20,
+        )
+        retries_remaining_before = max(0, retry_budget - retry_attempts)
+        data["missing_tool_call_retry_attempts"] = retry_attempts
+        data["missing_tool_call_retry_budget"] = retry_budget
+
+        if retries_remaining_before <= 0:
+            try:
+                aux_log.append(
+                    {
+                        "type": "missing_tool_call_retry",
+                        "path": calling_path,
+                        "mechanism": "budget",
+                        "stage": "skipped",
+                        "retry_reason": data.get("missing_tool_call_retry_reason")
+                        or "",
+                        "retry_attempts": retry_attempts,
+                        "retry_budget": retry_budget,
+                        "retries_remaining": retries_remaining_before,
+                    }
+                )
+            except Exception:
+                pass
+            return WorkflowActionResult(
+                outputs={
+                    "response_text": data.get("response_text"),
+                    "tool_calls": data.get("tool_calls"),
+                    "missing_tool_call_retry_success": False,
+                    "tool_call_parse_error": data.get("tool_call_parse_error"),
+                    "missing_tool_call_retry_attempts": retry_attempts,
+                    "missing_tool_call_retry_budget": retry_budget,
+                    "missing_tool_call_retry_remaining": 0,
+                    "missing_tool_call_retry_suppressed": True,
+                },
+                duration_ms=0.0,
+            )
+
+        retry_attempts += 1
+        retries_remaining_after = max(0, retry_budget - retry_attempts)
+        data["missing_tool_call_retry_attempts"] = retry_attempts
 
         forced = self._infer_missing_tool_call_retry_tool_calls(
             augmented_context,
@@ -1043,11 +1178,14 @@ class InternalMCPChatOrchestrator:
                 aux_log.append(
                     {
                         "type": "missing_tool_call_retry",
-                        "path": "forced",
+                        "path": calling_path,
                         "mechanism": "heuristic",
                         "stage": "response",
                         "retry_reason": data.get("missing_tool_call_retry_reason")
                         or "",
+                        "retry_attempts": retry_attempts,
+                        "retry_budget": retry_budget,
+                        "retries_remaining": retries_remaining_after,
                         "response_preview": "(forced tool call)",
                     }
                 )
@@ -1064,14 +1202,13 @@ class InternalMCPChatOrchestrator:
                     "tool_calls": forced,
                     "missing_tool_call_retry_success": True,
                     "tool_call_parse_error": None,
+                    "missing_tool_call_retry_attempts": retry_attempts,
+                    "missing_tool_call_retry_budget": retry_budget,
+                    "missing_tool_call_retry_remaining": retries_remaining_after,
+                    "missing_tool_call_retry_suppressed": False,
                 },
                 duration_ms=0.0,
             )
-
-        calling_path = "legacy"
-        assessment = data.get("missing_tool_call_assessment")
-        if isinstance(assessment, dict) and isinstance(assessment.get("path"), str):
-            calling_path = str(assessment.get("path") or "legacy")
 
         rendered_prompt = self._prompt_templates.render_prompt(
             self._MISSING_TOOL_RETRY_PROMPTS,
@@ -1099,6 +1236,9 @@ class InternalMCPChatOrchestrator:
                     "mechanism": "workflow",
                     "stage": "prompt",
                     "retry_reason": data.get("missing_tool_call_retry_reason") or "",
+                    "retry_attempts": retry_attempts,
+                    "retry_budget": retry_budget,
+                    "retries_remaining": retries_remaining_after,
                     "prompt_preview": prompt_text[:800],
                 }
             )
@@ -1138,7 +1278,11 @@ class InternalMCPChatOrchestrator:
                 org_concept_id=(
                     org_concept_id if isinstance(org_concept_id, str) else None
                 ),
-                llm_calls_log=data.get("llm_calls_log") or [],
+                llm_calls_log=(
+                    llm_calls_log
+                    if isinstance(llm_calls_log, list)
+                    else data.get("llm_calls_log") or []
+                ),
                 aux_log=aux_log,
                 record_llm_call=record_llm_call,
             )
@@ -1168,6 +1312,9 @@ class InternalMCPChatOrchestrator:
                     "mechanism": "workflow",
                     "stage": "response",
                     "retry_reason": data.get("missing_tool_call_retry_reason") or "",
+                    "retry_attempts": retry_attempts,
+                    "retry_budget": retry_budget,
+                    "retries_remaining": retries_remaining_after,
                     "response_preview": (
                         retry_response[:800]
                         if isinstance(retry_response, str)
@@ -1192,6 +1339,10 @@ class InternalMCPChatOrchestrator:
             "tool_calls": retry_calls,
             "missing_tool_call_retry_success": success,
             "tool_call_parse_error": parse_error or data.get("tool_call_parse_error"),
+            "missing_tool_call_retry_attempts": retry_attempts,
+            "missing_tool_call_retry_budget": retry_budget,
+            "missing_tool_call_retry_remaining": retries_remaining_after,
+            "missing_tool_call_retry_suppressed": False,
         }
 
         return WorkflowActionResult(
@@ -1892,6 +2043,19 @@ class InternalMCPChatOrchestrator:
         aux_llm_calls = data["aux_llm_calls"]
         llm_calls = data["llm_calls"]
         gmail_profile = data.get("gmail_profile") or env.default_gmail_profile
+        missing_tool_call_retry_attempts = self._coerce_non_negative_int(
+            data.get("missing_tool_call_retry_attempts"),
+            default=0,
+            max_value=20,
+        )
+        missing_tool_call_retry_budget = self._coerce_non_negative_int(
+            data.get("missing_tool_call_retry_budget"),
+            default=self._max_missing_tool_call_retries_per_turn,
+            max_value=20,
+        )
+        missing_tool_call_retry_suppressed = bool(
+            data.get("missing_tool_call_retry_suppressed")
+        )
 
         # Emit planning phase.
         if callable(emit_phase_transition):
@@ -2008,6 +2172,8 @@ class InternalMCPChatOrchestrator:
                     "registry_snapshot": registry_snapshot,
                     "user_concept_id": user_concept_id,
                     "org_concept_id": org_concept_id,
+                    "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                    "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
                 }
                 recovery_model = model_for_stage("tool_recovery")
                 recovery_env = WorkflowEnvironment(
@@ -2033,7 +2199,35 @@ class InternalMCPChatOrchestrator:
                 tool_call_parse_error = workflow_result.data.get(
                     "tool_call_parse_error", tool_call_parse_error
                 )
+                missing_tool_call_retry_attempts = self._coerce_non_negative_int(
+                    workflow_result.data.get(
+                        "missing_tool_call_retry_attempts",
+                        missing_tool_call_retry_attempts,
+                    ),
+                    default=missing_tool_call_retry_attempts,
+                    max_value=20,
+                )
+                missing_tool_call_retry_budget = self._coerce_non_negative_int(
+                    workflow_result.data.get(
+                        "missing_tool_call_retry_budget",
+                        missing_tool_call_retry_budget,
+                    ),
+                    default=missing_tool_call_retry_budget,
+                    max_value=20,
+                )
+                missing_tool_call_retry_suppressed = bool(
+                    workflow_result.data.get("missing_tool_call_retry_suppressed")
+                )
                 has_valid_tool_call = bool(tool_calls)
+
+        data["missing_tool_call_retry_attempts"] = missing_tool_call_retry_attempts
+        data["missing_tool_call_retry_budget"] = missing_tool_call_retry_budget
+        data["missing_tool_call_retry_suppressed"] = (
+            missing_tool_call_retry_suppressed
+        )
+        missing_tool_call_retry_remaining = max(
+            0, missing_tool_call_retry_budget - missing_tool_call_retry_attempts
+        )
 
         # Determine next state.
         if has_valid_tool_call:
@@ -2045,6 +2239,10 @@ class InternalMCPChatOrchestrator:
                     "tool_calls": tool_calls,
                     "use_structured": use_structured,
                     "tool_call_model": tool_call_model,
+                    "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                    "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                    "missing_tool_call_retry_remaining": missing_tool_call_retry_remaining,
+                    "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
                 }
             )
 
@@ -2058,6 +2256,10 @@ class InternalMCPChatOrchestrator:
                         "tool_calls_present": False,
                         "direct_response": True,
                         "orchestrator_result": error_result,
+                        "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                        "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                        "missing_tool_call_retry_remaining": missing_tool_call_retry_remaining,
+                        "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
                     }
                 )
 
@@ -2068,6 +2270,10 @@ class InternalMCPChatOrchestrator:
                 "final_response": (
                     response if isinstance(response, str) else str(response)
                 ),
+                "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                "missing_tool_call_retry_remaining": missing_tool_call_retry_remaining,
+                "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
             }
         )
 
@@ -2488,6 +2694,19 @@ class InternalMCPChatOrchestrator:
         llm_calls = data["llm_calls"]
         iteration_count = data.get("iteration_count", 0)
         max_tool_invocations = env.max_tool_invocations or 8
+        missing_tool_call_retry_attempts = self._coerce_non_negative_int(
+            data.get("missing_tool_call_retry_attempts"),
+            default=0,
+            max_value=20,
+        )
+        missing_tool_call_retry_budget = self._coerce_non_negative_int(
+            data.get("missing_tool_call_retry_budget"),
+            default=self._max_missing_tool_call_retries_per_turn,
+            max_value=20,
+        )
+        missing_tool_call_retry_suppressed = bool(
+            data.get("missing_tool_call_retry_suppressed")
+        )
 
         # If there are overflow tool calls from batch capping, return them
         # directly as chained calls (no summariser LLM call needed).
@@ -2500,6 +2719,14 @@ class InternalMCPChatOrchestrator:
                     "tool_calls_validated": False,
                     "tool_calls": remaining,
                     "remaining_tool_calls": [],
+                    "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                    "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                    "missing_tool_call_retry_remaining": max(
+                        0,
+                        missing_tool_call_retry_budget
+                        - missing_tool_call_retry_attempts,
+                    ),
+                    "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
                 }
             )
 
@@ -2537,6 +2764,14 @@ class InternalMCPChatOrchestrator:
                         "tool_calls": interpretation.tool_calls,
                         "current_response": current_response,
                         "remaining_tool_calls": [],
+                        "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                        "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                        "missing_tool_call_retry_remaining": max(
+                            0,
+                            missing_tool_call_retry_budget
+                            - missing_tool_call_retry_attempts,
+                        ),
+                        "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
                     }
                 )
 
@@ -2568,6 +2803,8 @@ class InternalMCPChatOrchestrator:
                         "registry_snapshot": registry_snapshot,
                         "user_concept_id": user_concept_id,
                         "org_concept_id": org_concept_id,
+                        "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                        "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
                     }
                     recovery_model = model_for_stage("tool_recovery")
                     recovery_env = WorkflowEnvironment(
@@ -2590,6 +2827,34 @@ class InternalMCPChatOrchestrator:
                     )
                     recovered_calls = workflow_result.data.get("tool_calls")
                     exc = workflow_result.data.get("tool_call_parse_error", exc)
+                    missing_tool_call_retry_attempts = self._coerce_non_negative_int(
+                        workflow_result.data.get(
+                            "missing_tool_call_retry_attempts",
+                            missing_tool_call_retry_attempts,
+                        ),
+                        default=missing_tool_call_retry_attempts,
+                        max_value=20,
+                    )
+                    missing_tool_call_retry_budget = self._coerce_non_negative_int(
+                        workflow_result.data.get(
+                            "missing_tool_call_retry_budget",
+                            missing_tool_call_retry_budget,
+                        ),
+                        default=missing_tool_call_retry_budget,
+                        max_value=20,
+                    )
+                    missing_tool_call_retry_suppressed = bool(
+                        workflow_result.data.get("missing_tool_call_retry_suppressed")
+                    )
+                    data["missing_tool_call_retry_attempts"] = (
+                        missing_tool_call_retry_attempts
+                    )
+                    data["missing_tool_call_retry_budget"] = (
+                        missing_tool_call_retry_budget
+                    )
+                    data["missing_tool_call_retry_suppressed"] = (
+                        missing_tool_call_retry_suppressed
+                    )
                     if recovered_calls:
                         return WorkflowActionResult(
                             outputs={
@@ -2599,6 +2864,14 @@ class InternalMCPChatOrchestrator:
                                 "tool_calls": recovered_calls,
                                 "current_response": current_response,
                                 "remaining_tool_calls": [],
+                                "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                                "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                                "missing_tool_call_retry_remaining": max(
+                                    0,
+                                    missing_tool_call_retry_budget
+                                    - missing_tool_call_retry_attempts,
+                                ),
+                                "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
                             }
                         )
 
@@ -2614,6 +2887,14 @@ class InternalMCPChatOrchestrator:
                     return WorkflowActionResult(
                         outputs={
                             "orchestrator_result": error_result,
+                            "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                            "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                            "missing_tool_call_retry_remaining": max(
+                                0,
+                                missing_tool_call_retry_budget
+                                - missing_tool_call_retry_attempts,
+                            ),
+                            "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
                         }
                     )
 
@@ -2650,6 +2931,13 @@ class InternalMCPChatOrchestrator:
                 "tool_calls_present": False,
                 "final_response": current_response,
                 "current_response": current_response,
+                "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                "missing_tool_call_retry_remaining": max(
+                    0,
+                    missing_tool_call_retry_budget - missing_tool_call_retry_attempts,
+                ),
+                "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
             }
         )
 
@@ -8282,6 +8570,12 @@ class InternalMCPChatOrchestrator:
             # Inter-handler state initialised here; handlers override.
             "iteration_count": 0,
             "allowed_write_tools": set(),
+            # Shared missing-tool-call retry budget for the full turn across
+            # both planning and backfill recovery passes.
+            "missing_tool_call_retry_attempts": 0,
+            "missing_tool_call_retry_budget": int(
+                self._max_missing_tool_call_retries_per_turn
+            ),
         }
 
         tc_result = self._workflow_executor.run(

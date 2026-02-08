@@ -100,8 +100,13 @@ def test_orchestrator_configure_execution_caps_clamps():
         tool_batch_cap=10,
     )
 
-    orchestrator.configure_execution_caps(max_tool_invocations=999, tool_batch_cap=0)
+    orchestrator.configure_execution_caps(
+        max_tool_invocations=999,
+        tool_batch_cap=0,
+        max_missing_tool_call_retries_per_turn=999,
+    )
 
     caps = orchestrator.get_execution_caps()
     assert caps["max_tool_invocations"] == 50
     assert caps["tool_batch_cap"] == 1
+    assert caps["max_missing_tool_call_retries_per_turn"] == 20

@@ -809,3 +809,63 @@ def test_run_surfaces_late_turn_parse_error_when_retry_also_invalid():
         for inv in result.tool_invocations
     )
     assert any(inv.get("tool") == "test" for inv in result.tool_invocations)
+
+
+def test_run_applies_missing_tool_retry_budget_across_plan_and_backfill():
+    """Retry budget is per-turn, not per-phase (plan/backfill)."""
+
+    gateway = _DummyGateway()
+    llm = _RecorderLLM(
+        [
+            # Plan response: malformed tool call -> consumes retry budget.
+            '{"action":"call_tool","tool":"test","payload":{"x":"oops}',
+            # Plan retry response: valid tool call.
+            '{"action":"call_tool","tool":"test","payload":{}}',
+            # Backfill response: malformed chained tool call.
+            '{"action":"call_tool","tool":"test","payload":{"y":"oops}',
+            # Should not be consumed when budget enforcement works.
+            '{"action":"call_tool","tool":"test","payload":{}}',
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=2,
+    )
+    orchestrator.configure_execution_caps(max_missing_tool_call_retries_per_turn=1)
+
+    result = orchestrator.run(
+        prompt="hello",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert len(gateway.calls) == 1
+    assert (
+        "Tool call was not executed due to an MCP serialisation error"
+        in result.response_text
+    )
+
+    retry_responses = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "missing_tool_call_retry"
+        and entry.get("stage") == "response"
+    ]
+    assert len(retry_responses) == 1
+
+    retry_skips = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "missing_tool_call_retry"
+        and entry.get("stage") == "skipped"
+        and entry.get("mechanism") == "budget"
+    ]
+    assert retry_skips
+
+    # The fourth scripted response remains unused when no second retry occurs.
+    assert len(llm.calls) == 3
