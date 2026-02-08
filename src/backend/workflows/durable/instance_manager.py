@@ -12,7 +12,7 @@ from typing import Any
 
 from pymongo import ASCENDING, DESCENDING
 from pymongo.collection import Collection
-from pymongo.errors import OperationFailure
+from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from ...db.mongo_client import get_db
 from .models import (
@@ -85,6 +85,26 @@ def _ensure_indexes() -> None:
             instances_coll.create_index(
                 [("schedule_id", ASCENDING), ("created_at", DESCENDING)],
                 name="schedule_created",
+            )
+
+        # Event-driven observability: find workflow instances for a source event.
+        if "source_event_lookup" not in existing:
+            instances_coll.create_index(
+                [
+                    ("source_event_type", ASCENDING),
+                    ("source_event_id", ASCENDING),
+                    ("created_at", DESCENDING),
+                ],
+                name="source_event_lookup",
+            )
+
+        # Idempotency for event-triggered launches.
+        if "event_idempotency_key_unique" not in existing:
+            instances_coll.create_index(
+                [("event_idempotency_key", ASCENDING)],
+                unique=True,
+                name="event_idempotency_key_unique",
+                partialFilterExpression={"event_idempotency_key": {"$exists": True}},
             )
 
         # TTL for completed instances (30 days)
@@ -181,6 +201,9 @@ class WorkflowInstanceManager:
         inputs: dict[str, Any] | None = None,
         schedule_id: str | None = None,
         max_retries: int = 3,
+        source_event_type: str | None = None,
+        source_event_id: str | None = None,
+        event_idempotency_key: str | None = None,
     ) -> str:
         """Create a new workflow instance.
 
@@ -192,6 +215,9 @@ class WorkflowInstanceManager:
             inputs: Initial workflow inputs.
             schedule_id: Optional reference to triggering schedule.
             max_retries: Maximum retry attempts on failure.
+            source_event_type: Optional canonical event type that triggered launch.
+            source_event_id: Optional source event identifier.
+            event_idempotency_key: Optional idempotency key for event replay safety.
 
         Returns:
             The generated instance_id.
@@ -211,6 +237,9 @@ class WorkflowInstanceManager:
             inputs=inputs,
             schedule_id=schedule_id,
             max_retries=max_retries,
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            event_idempotency_key=event_idempotency_key,
         )
 
         coll.insert_one(instance.to_doc())
@@ -221,6 +250,55 @@ class WorkflowInstanceManager:
         )
         self._broadcast_instance(instance)
         return instance.instance_id
+
+    def create_instance_for_event(
+        self,
+        workflow_id: str,
+        *,
+        user_id: str,
+        org_id: str,
+        namespace: str,
+        event_idempotency_key: str,
+        source_event_type: str,
+        source_event_id: str,
+        inputs: dict[str, Any] | None = None,
+        schedule_id: str | None = None,
+        max_retries: int = 3,
+    ) -> tuple[str, bool]:
+        """Create an event-triggered instance with idempotency protection.
+
+        Returns:
+            (instance_id, created_new)
+        """
+        coll = self._get_instances_collection()
+        if coll is None:
+            raise RuntimeError("Database unavailable for workflow instance creation")
+
+        key = event_idempotency_key.strip()
+        existing = coll.find_one({"event_idempotency_key": key}, {"instance_id": 1})
+        if existing and isinstance(existing.get("instance_id"), str):
+            return existing["instance_id"], False
+
+        try:
+            instance_id = self.create_instance(
+                workflow_id,
+                user_id=user_id,
+                org_id=org_id,
+                namespace=namespace,
+                inputs=inputs,
+                schedule_id=schedule_id,
+                max_retries=max_retries,
+                source_event_type=source_event_type,
+                source_event_id=source_event_id,
+                event_idempotency_key=key,
+            )
+            return instance_id, True
+        except DuplicateKeyError:
+            # Another caller may have inserted concurrently for the same event key.
+            existing = coll.find_one({"event_idempotency_key": key}, {"instance_id": 1})
+            if existing and isinstance(existing.get("instance_id"), str):
+                return existing["instance_id"], False
+            raise
 
     def get_instance(self, instance_id: str) -> WorkflowInstance | None:
         """Load a workflow instance by ID.
@@ -246,6 +324,8 @@ class WorkflowInstanceManager:
         namespace: str | None = None,
         status: WorkflowInstanceStatus | str | None = None,
         workflow_id: str | None = None,
+        source_event_type: str | None = None,
+        source_event_id: str | None = None,
         limit: int = 50,
     ) -> list[WorkflowInstance]:
         """List workflow instances with optional filters.
@@ -279,6 +359,10 @@ class WorkflowInstanceManager:
             query["status"] = status_val
         if workflow_id:
             query["workflow_id"] = workflow_id
+        if source_event_type:
+            query["source_event_type"] = source_event_type
+        if source_event_id:
+            query["source_event_id"] = source_event_id
 
         cursor = coll.find(query).sort("created_at", -1).limit(limit)
         return [WorkflowInstance.from_doc(doc) for doc in cursor]

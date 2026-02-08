@@ -160,6 +160,8 @@ def api_list_workflow_instances():
     - namespace: Filter by namespace
     - status: Filter by status (pending, running, completed, failed, cancelled, paused)
     - workflow_id: Filter by workflow definition
+    - source_event_type: Filter by triggering event type
+    - source_event_id: Filter by triggering event ID
     - limit: Maximum results (default 50)
     """
     user_id = request.args.get("user_id")
@@ -167,6 +169,8 @@ def api_list_workflow_instances():
     namespace = request.args.get("namespace")
     status_str = request.args.get("status")
     workflow_id = request.args.get("workflow_id")
+    source_event_type = request.args.get("source_event_type")
+    source_event_id = request.args.get("source_event_id")
     limit = min(int(request.args.get("limit", "50")), 200)
 
     status: WorkflowInstanceStatus | None = None
@@ -183,6 +187,8 @@ def api_list_workflow_instances():
         namespace=namespace,
         status=status,
         workflow_id=workflow_id,
+        source_event_type=source_event_type,
+        source_event_id=source_event_id,
         limit=limit,
     )
 

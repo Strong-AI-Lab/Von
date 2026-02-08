@@ -206,6 +206,42 @@ class TestWorkflowInstance:
         assert "created_at" in status_dict
         assert status_dict["has_outputs"] is False
 
+    def test_event_fields_roundtrip(self) -> None:
+        """Event linkage fields should survive model serialisation."""
+        instance = WorkflowInstance.create(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            source_event_type="task.created",
+            source_event_id="#V#task_abc",
+            event_idempotency_key="evt:task.created:abc123",
+        )
+
+        doc = instance.to_doc()
+        assert doc["source_event_type"] == "task.created"
+        assert doc["source_event_id"] == "#V#task_abc"
+        assert doc["event_idempotency_key"] == "evt:task.created:abc123"
+
+        restored = WorkflowInstance.from_doc(doc)
+        assert restored.source_event_type == "task.created"
+        assert restored.source_event_id == "#V#task_abc"
+        assert restored.event_idempotency_key == "evt:task.created:abc123"
+
+    def test_to_doc_omits_empty_event_fields(self) -> None:
+        """Empty event linkage fields should not be persisted as null placeholders."""
+        instance = WorkflowInstance.create(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        doc = instance.to_doc()
+        assert "source_event_type" not in doc
+        assert "source_event_id" not in doc
+        assert "event_idempotency_key" not in doc
+
 
 class TestWorkflowSchedule:
     """Unit tests for WorkflowSchedule model."""
@@ -549,6 +585,79 @@ class TestWorkflowInstanceManager:
 
         assert id1 in completed_ids
         assert id2 in pending_ids
+
+    def test_create_instance_for_event_reuses_existing(self) -> None:
+        """create_instance_for_event() should deduplicate by idempotency key."""
+        manager = WorkflowInstanceManager()
+
+        instance_id_1, created_new_1 = manager.create_instance_for_event(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            event_idempotency_key="evt:test:event-1",
+            source_event_type="task.created",
+            source_event_id="event-1",
+            inputs={"payload": "first"},
+        )
+        instance_id_2, created_new_2 = manager.create_instance_for_event(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            event_idempotency_key="evt:test:event-1",
+            source_event_type="task.created",
+            source_event_id="event-1",
+            inputs={"payload": "second"},
+        )
+
+        assert created_new_1 is True
+        assert created_new_2 is False
+        assert instance_id_1 == instance_id_2
+
+        stored = manager.get_instance(instance_id_1)
+        assert stored is not None
+        assert stored.source_event_type == "task.created"
+        assert stored.source_event_id == "event-1"
+        assert stored.event_idempotency_key == "evt:test:event-1"
+
+    def test_list_instances_by_source_event_filters(self) -> None:
+        """list_instances() should support source event filters."""
+        manager = WorkflowInstanceManager()
+
+        id1, _ = manager.create_instance_for_event(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            event_idempotency_key="evt:test:task-created-1",
+            source_event_type="task.created",
+            source_event_id="task-created-1",
+        )
+        id2, _ = manager.create_instance_for_event(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+            event_idempotency_key="evt:test:message-created-1",
+            source_event_type="message.direct_created",
+            source_event_id="message-created-1",
+        )
+
+        task_instances = manager.list_instances(source_event_type="task.created")
+        message_instances = manager.list_instances(
+            source_event_type="message.direct_created",
+        )
+        event_id_instances = manager.list_instances(source_event_id="task-created-1")
+
+        task_ids = {instance.instance_id for instance in task_instances}
+        message_ids = {instance.instance_id for instance in message_instances}
+        event_id_filtered_ids = {instance.instance_id for instance in event_id_instances}
+
+        assert id1 in task_ids
+        assert id1 in event_id_filtered_ids
+        assert id2 in message_ids
+        assert id2 not in task_ids
 
     def test_find_and_claim_instance(self) -> None:
         """find_and_claim_instance() should atomically claim a pending instance."""

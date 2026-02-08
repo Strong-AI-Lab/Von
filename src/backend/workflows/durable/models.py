@@ -98,6 +98,11 @@ class WorkflowInstance:
     # Scheduling reference
     schedule_id: str | None = None
 
+    # Event-driven trigger linkage (WS6 / JVNAUTOSCI-1090).
+    source_event_type: str | None = None
+    source_event_id: str | None = None
+    event_idempotency_key: str | None = None
+
     # Tracing
     execution_trace_id: str | None = None
 
@@ -112,6 +117,9 @@ class WorkflowInstance:
         inputs: dict[str, Any] | None = None,
         schedule_id: str | None = None,
         max_retries: int = 3,
+        source_event_type: str | None = None,
+        source_event_id: str | None = None,
+        event_idempotency_key: str | None = None,
     ) -> WorkflowInstance:
         """Create a new workflow instance with generated ID."""
         return cls(
@@ -125,6 +133,9 @@ class WorkflowInstance:
             inputs=inputs or {},
             schedule_id=schedule_id,
             max_retries=max_retries,
+            source_event_type=source_event_type,
+            source_event_id=source_event_id,
+            event_idempotency_key=event_idempotency_key,
             progress_current=0,
             progress_message="queued",
             progress_updated_at=datetime.now(timezone.utc),
@@ -132,7 +143,7 @@ class WorkflowInstance:
 
     def to_doc(self) -> dict[str, Any]:
         """Convert to MongoDB document format."""
-        return {
+        doc: dict[str, Any] = {
             "instance_id": self.instance_id,
             "workflow_id": self.workflow_id,
             "user_id": self.user_id,
@@ -160,6 +171,16 @@ class WorkflowInstance:
             "schedule_id": self.schedule_id,
             "execution_trace_id": self.execution_trace_id,
         }
+
+        # Persist event linkage fields only when present so sparse/partial indexes
+        # can enforce idempotency without collisions on null placeholder values.
+        if self.source_event_type is not None:
+            doc["source_event_type"] = self.source_event_type
+        if self.source_event_id is not None:
+            doc["source_event_id"] = self.source_event_id
+        if self.event_idempotency_key is not None:
+            doc["event_idempotency_key"] = self.event_idempotency_key
+        return doc
 
     @classmethod
     def from_doc(cls, doc: dict[str, Any]) -> WorkflowInstance:
@@ -190,6 +211,9 @@ class WorkflowInstance:
             retry_count=doc.get("retry_count", 0),
             max_retries=doc.get("max_retries", 3),
             schedule_id=doc.get("schedule_id"),
+            source_event_type=doc.get("source_event_type"),
+            source_event_id=doc.get("source_event_id"),
+            event_idempotency_key=doc.get("event_idempotency_key"),
             execution_trace_id=doc.get("execution_trace_id"),
         )
 
@@ -220,6 +244,9 @@ class WorkflowInstance:
             "has_outputs": self.outputs is not None,
             "retry_count": self.retry_count,
             "max_retries": self.max_retries,
+            "source_event_type": self.source_event_type,
+            "source_event_id": self.source_event_id,
+            "event_idempotency_key": self.event_idempotency_key,
         }
 
 

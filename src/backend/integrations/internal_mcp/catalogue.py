@@ -5143,6 +5143,8 @@ def _workflow_list_instances(**kwargs):
     org_id = kwargs.get("org_id")
     status_str = kwargs.get("status")
     workflow_id = kwargs.get("workflow_id")
+    source_event_type = kwargs.get("source_event_type")
+    source_event_id = kwargs.get("source_event_id")
     limit = min(int(kwargs.get("limit", 50)), 200)
 
     status = None
@@ -5161,6 +5163,8 @@ def _workflow_list_instances(**kwargs):
         org_id=org_id,
         status=status,
         workflow_id=workflow_id,
+        source_event_type=source_event_type,
+        source_event_id=source_event_id,
         limit=limit,
     )
 
@@ -9111,6 +9115,8 @@ def build_default_catalogue() -> MethodCatalogue:
                     "org_id": (str, type(None)),
                     "status": (str, type(None)),
                     "workflow_id": (str, type(None)),
+                    "source_event_type": (str, type(None)),
+                    "source_event_id": (str, type(None)),
                     "limit": int,
                 },
                 allow_unknown=True,
@@ -9125,6 +9131,7 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "List durable workflow instances. Filter by user, org, status, or workflow_id. "
+                "Supports source_event_type/source_event_id filters for event-to-workflow traceability. "
                 "Valid statuses: pending, running, completed, failed, cancelled, paused."
             ),
         ),

@@ -67,8 +67,12 @@ class TestCreateTask:
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch(
+        "src.backend.services.task_management_service.maybe_launch_task_created_workflow"
+    )
     def test_create_task_with_minimal_params(
         self,
+        mock_launch_workflow: MagicMock,
         mock_upsert: MagicMock,
         mock_repo: MagicMock,
     ) -> None:
@@ -85,12 +89,17 @@ class TestCreateTask:
         assert result["priority"] == PRIORITY_MEDIUM
         assert "task_concept_id" in result
         assert result["task_concept_id"].startswith("#V#task_")
+        mock_launch_workflow.assert_called_once()
 
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.upsert_text_for_concept")
     @patch("src.backend.services.conversation_concept_service.get_or_create_conversation_concept")
+    @patch(
+        "src.backend.services.task_management_service.maybe_launch_task_created_workflow"
+    )
     def test_create_task_with_all_params(
         self,
+        mock_launch_workflow: MagicMock,
         mock_conv_service: MagicMock,
         mock_upsert: MagicMock,
         mock_repo: MagicMock,
@@ -114,6 +123,7 @@ class TestCreateTask:
         assert result["status"] == TASK_STATUS_PENDING
         assert result["priority"] == "high"
         assert result["assignee_concept_id"] == "#V#user_alice"
+        mock_launch_workflow.assert_called_once()
 
     def test_create_task_invalid_title(self) -> None:
         """create_task() with empty title should raise InvalidTaskDataError."""
@@ -198,10 +208,16 @@ class TestUpdateTaskStatus:
 
     @patch("src.backend.services.task_management_service.get_task")
     @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
     @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch(
+        "src.backend.services.task_management_service.maybe_launch_task_status_workflow"
+    )
     def test_update_status_valid(
         self,
+        mock_launch_workflow: MagicMock,
         mock_upsert: MagicMock,
+        mock_get_texts: MagicMock,
         mock_repo: MagicMock,
         mock_get_task: MagicMock,
     ) -> None:
@@ -209,16 +225,50 @@ class TestUpdateTaskStatus:
         mock_repo.find_one.return_value = {
             "concept_id": "#V#task_abc",
             "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            "metadata": {},
         }
+        mock_get_texts.return_value = [
+            {"predicate": "#V#hasTaskStatus", "text": "pending"},
+        ]
         mock_get_task.return_value = {
             "task_concept_id": "#V#task_abc",
             "status": "in_progress",
+            "updated_at": datetime.now(timezone.utc),
         }
 
         result = update_task_status("#V#task_abc", "in_progress")
 
         assert result["status"] == "in_progress"
         mock_upsert.assert_called()
+        mock_launch_workflow.assert_called_once()
+
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    @patch("src.backend.services.task_management_service.get_texts_for_concept")
+    @patch("src.backend.services.task_management_service.upsert_text_for_concept")
+    @patch(
+        "src.backend.services.task_management_service.maybe_launch_task_status_workflow"
+    )
+    def test_update_status_unchanged_skips_write_and_event(
+        self,
+        mock_launch_workflow: MagicMock,
+        mock_upsert: MagicMock,
+        mock_get_texts: MagicMock,
+        mock_repo: MagicMock,
+    ) -> None:
+        mock_repo.find_one.return_value = {
+            "concept_id": "#V#task_abc",
+            "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            "metadata": {},
+        }
+        mock_get_texts.return_value = [
+            {"predicate": "#V#hasTaskStatus", "text": "in_progress"},
+        ]
+
+        result = update_task_status("#V#task_abc", "in_progress")
+
+        assert result["status"] == "in_progress"
+        mock_upsert.assert_not_called()
+        mock_launch_workflow.assert_not_called()
 
     def test_update_status_invalid(self) -> None:
         """update_task_status() with invalid status should raise error."""

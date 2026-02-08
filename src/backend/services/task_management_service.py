@@ -22,6 +22,10 @@ from ..utils.concept_id_utils import (
     canonicalise_vontology_concept_id,
     ensure_v_concept_prefix,
 )
+from .workflow_event_integration_service import (
+    maybe_launch_task_created_workflow,
+    maybe_launch_task_status_workflow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +272,7 @@ def create_task(
         except Exception as e:
             logger.warning(f"Failed to store task due date: {e}")
 
-    return {
+    result = {
         "task_concept_id": task_concept_id,
         "title": title,
         "description": description,
@@ -281,6 +285,22 @@ def create_task(
         "organisation_concept_id": organisation_concept_id,
         "created_at": now.isoformat(),
     }
+
+    # Event-driven workflow launch is best-effort and must not block task writes.
+    try:
+        maybe_launch_task_created_workflow(
+            task_concept_id=task_concept_id,
+            created_by_concept_id=created_by_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            title=title,
+            priority=priority,
+        )
+    except Exception as e:
+        logger.warning(
+            "Task-created workflow launch skipped for %s: %s", task_concept_id, e
+        )
+
+    return result
 
 
 def get_task(task_concept_id: str) -> Dict[str, Any]:
@@ -435,6 +455,12 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
     if not doc:
         raise TaskNotFoundError(f"Task not found: {task_concept_id}")
 
+    existing_task = _build_task_response(doc)
+    previous_status = existing_task.get("status")
+    if isinstance(previous_status, str) and previous_status == status:
+        # No state transition occurred, so skip duplicate writes/events.
+        return existing_task
+
     # Update status text relation
     try:
         upsert_text_for_concept(
@@ -450,11 +476,42 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
     now = datetime.now(timezone.utc)
     ConceptsRepository.update_one(
         {"concept_id": task_concept_id},
-        {"$set": {"updated_at": now}},
+        {
+            "$set": {"updated_at": now},
+            "$inc": {"metadata.task_status_transition_count": 1},
+        },
     )
 
     logger.info(f"Updated task {task_concept_id} status to {status}")
-    return get_task(task_concept_id)
+    updated_task = get_task(task_concept_id)
+
+    try:
+        updated_at = updated_task.get("updated_at")
+        if isinstance(updated_at, datetime):
+            updated_at_iso: str | None = updated_at.isoformat()
+        elif updated_at is not None:
+            updated_at_iso = str(updated_at)
+        else:
+            updated_at_iso = None
+
+        maybe_launch_task_status_workflow(
+            task_concept_id=task_concept_id,
+            previous_status=previous_status if isinstance(previous_status, str) else None,
+            new_status=status,
+            updated_at_iso=updated_at_iso,
+            created_by_concept_id=updated_task.get("created_by_concept_id"),
+            organisation_concept_id=updated_task.get("organisation_concept_id"),
+        )
+    except Exception as e:
+        logger.warning(
+            "Task-status workflow launch skipped for %s (%s -> %s): %s",
+            task_concept_id,
+            previous_status,
+            status,
+            e,
+        )
+
+    return updated_task
 
 
 def assign_task(task_concept_id: str, assignee_concept_id: str) -> Dict[str, Any]:

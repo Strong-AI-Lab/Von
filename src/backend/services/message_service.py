@@ -15,6 +15,9 @@ from typing import Any, Dict, List, Optional
 from ..db.mongo_client import get_concepts_collection
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import upsert_text_for_concept
+from .workflow_event_integration_service import (
+    maybe_launch_direct_message_workflow,
+)
 from ..security.access_control import (
     apply_concept_query_filter,
     get_effective_user_concept_id,
@@ -148,6 +151,17 @@ def create_message(
         _log.warning(f"Failed to store message content as text relation: {e}")
         # Fall back to storing in concept_data
         concept_doc["concept_data"]["content_fallback"] = content
+
+    # Event-driven workflow launch is best-effort and must not block messaging.
+    try:
+        maybe_launch_direct_message_workflow(
+            message_concept_id=concept_id,
+            sender_id=sender_id,
+            recipient_ids=recipient_ids,
+            org_id=org_id,
+        )
+    except Exception as e:
+        _log.warning("Direct-message workflow launch skipped for %s: %s", concept_id, e)
 
     _log.info(f"Created message {concept_id} from {sender_id} to {recipient_ids}")
 

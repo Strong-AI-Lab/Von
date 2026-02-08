@@ -52,8 +52,10 @@ class TestCreateMessage:
     @patch("src.backend.services.message_service.get_concepts_collection")
     @patch("src.backend.services.message_service.ConceptsRepository")
     @patch("src.backend.services.message_service.upsert_text_for_concept")
+    @patch("src.backend.services.message_service.maybe_launch_direct_message_workflow")
     def test_create_message_with_single_recipient(
         self,
+        mock_launch_workflow: MagicMock,
         mock_upsert: MagicMock,
         mock_repo: MagicMock,
         mock_get_coll: MagicMock,
@@ -73,12 +75,15 @@ class TestCreateMessage:
         assert "#V#user_bob" in result["relationships"]["specific_to_user"]
         assert result["relationships"][PREDICATE_SENDER] == ["#V#user_alice"]
         assert result["relationships"][PREDICATE_RECIPIENT] == ["#V#user_bob"]
+        mock_launch_workflow.assert_called_once()
 
     @patch("src.backend.services.message_service.get_concepts_collection")
     @patch("src.backend.services.message_service.ConceptsRepository")
     @patch("src.backend.services.message_service.upsert_text_for_concept")
+    @patch("src.backend.services.message_service.maybe_launch_direct_message_workflow")
     def test_create_message_with_multiple_recipients(
         self,
+        mock_launch_workflow: MagicMock,
         mock_upsert: MagicMock,
         mock_repo: MagicMock,
         mock_get_coll: MagicMock,
@@ -97,12 +102,15 @@ class TestCreateMessage:
         assert "#V#user_alice" in visibility
         assert "#V#user_bob" in visibility
         assert "#V#user_charlie" in visibility
+        mock_launch_workflow.assert_called_once()
 
     @patch("src.backend.services.message_service.get_concepts_collection")
     @patch("src.backend.services.message_service.ConceptsRepository")
     @patch("src.backend.services.message_service.upsert_text_for_concept")
+    @patch("src.backend.services.message_service.maybe_launch_direct_message_workflow")
     def test_create_message_with_org_scoping(
         self,
+        mock_launch_workflow: MagicMock,
         mock_upsert: MagicMock,
         mock_repo: MagicMock,
         mock_get_coll: MagicMock,
@@ -119,12 +127,15 @@ class TestCreateMessage:
         )
 
         assert result["relationships"]["specific_to_org"] == ["#V#nao_institute"]
+        mock_launch_workflow.assert_called_once()
 
     @patch("src.backend.services.message_service.get_concepts_collection")
     @patch("src.backend.services.message_service.ConceptsRepository")
     @patch("src.backend.services.message_service.upsert_text_for_concept")
+    @patch("src.backend.services.message_service.maybe_launch_direct_message_workflow")
     def test_create_message_with_subject(
         self,
+        mock_launch_workflow: MagicMock,
         mock_upsert: MagicMock,
         mock_repo: MagicMock,
         mock_get_coll: MagicMock,
@@ -141,6 +152,7 @@ class TestCreateMessage:
         )
 
         assert result["concept_data"]["subject"] == "Important Update"
+        mock_launch_workflow.assert_called_once()
 
     def test_create_message_empty_sender(self) -> None:
         """create_message() with empty sender should raise ValueError."""
