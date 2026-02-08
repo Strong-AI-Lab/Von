@@ -94,6 +94,9 @@ from src.backend.services.settings_service import (
 from src.backend.integrations.internal_mcp.catalogue import _add_relationship
 from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
 from src.backend.integrations.internal_mcp.schemas import make_error_response
+from src.backend.integrations.internal_mcp.workflow_surface_capabilities import (
+    classify_stdio_missing_tool,
+)
 from src.backend.integrations.internal_mcp.arxiv_proxy import (
     get_arxiv_proxy,
     ArxivProxyError,
@@ -1501,15 +1504,24 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
 
     handler = _TOOL_HANDLERS.get(name)
     if not handler:
+        surface_diagnostic = classify_stdio_missing_tool(name)
+        details: dict[str, Any] = {"requested_tool": name}
+        suggestions = [
+            "Use list_tools to see available MCP tools",
+            "Check tool name spelling (common: search_concepts, create_concepts, fetch_concept)",
+        ]
+        if isinstance(surface_diagnostic, dict):
+            details["surface_diagnostic"] = surface_diagnostic
+            diagnostic_suggestions = surface_diagnostic.get("suggestions")
+            if isinstance(diagnostic_suggestions, list) and diagnostic_suggestions:
+                suggestions = [str(item) for item in diagnostic_suggestions]
+
         return [
             _json_error(
                 f"Unknown tool: {name}",
                 error_code="unknown_tool",
-                details={"requested_tool": name},
-                suggestions=[
-                    "Use list_tools to see available MCP tools",
-                    "Check tool name spelling (common: search_concepts, create_concepts, fetch_concept)",
-                ],
+                details=details,
+                suggestions=suggestions,
             )
         ]
 

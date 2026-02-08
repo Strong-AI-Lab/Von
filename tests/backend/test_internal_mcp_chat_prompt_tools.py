@@ -10,6 +10,16 @@ from src.backend.integrations.internal_mcp.catalogue import (
     _chat_introspect,
     _settings_get_public,
 )
+from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+
+
+def _build_gateway() -> InternalMCPGateway:
+    return InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
 
 
 def test_chat_prompt_tool_registered_in_catalogue():
@@ -168,6 +178,62 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
     assert result["tool_guidance_hash"], "expected a tool guidance hash"
     assert "gateway_enabled" in result
     assert "orchestrator_max_tool_invocations" in result
+
+
+def test_chat_introspect_gateway_invoke_success_path(monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
+        lambda _namespace, **kwargs: (
+            [{"concept_id": "#V#prompt_a", "content": "Alpha"}]
+            if kwargs.get("prompt_types")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
+            else []
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_auxiliary_prompt_service.build_user_specific_system_prompt",
+        lambda _namespace, **kwargs: (
+            "Alpha"
+            if kwargs.get("prompt_types")
+            == (
+                "#V#von_chat_behaviour_prompt",
+                "#V#von_chat_behavior_prompt",
+                "#V#von_llm_prompt",
+            )
+            else ""
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_active_model_name",
+        lambda: "test-model",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_llm_setting",
+        lambda **_kwargs: {"provider": "resolved", "model": "resolved-model"},
+    )
+
+    gateway = _build_gateway()
+    result = gateway.invoke(
+        "chat_introspect",
+        {"namespace": "#V#michael_witbrock", "organisation_concept_id": "#V#uoa"},
+    )
+    payload = result.payload
+    assert payload.get("success") is True
+    assert payload.get("active_model_name") == "test-model"
+    assert "behaviour_prompt_concept_ids" in payload
+    assert "narration_prompt_concept_ids" in payload
+
+
+def test_chat_introspect_gateway_invoke_handler_error_path():
+    gateway = _build_gateway()
+    result = gateway.invoke("chat_introspect", {"namespace": "   "})
+    payload = result.payload
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "missing_parameter"
 
 
 def test_settings_get_public_returns_settings(monkeypatch):

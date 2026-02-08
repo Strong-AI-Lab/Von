@@ -30,6 +30,9 @@ from typing import Any, List
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema, make_error_response
 from .orchestrator import InternalMCPChatOrchestrator
+from .workflow_surface_capabilities import (
+    build_workflow_surface_capability_matrix,
+)
 from src.backend.services.prompt_template_service import PromptTemplateService
 
 
@@ -4993,18 +4996,103 @@ def _workflow_list_definitions(**kwargs):
                 }
             )
 
+        # Resolve capabilities from the authoritative internal catalogue so
+        # diagnostics stay correct as tools are added/removed over time.
+        capability_matrix = build_workflow_surface_capability_matrix(
+            internal_method_names=build_default_catalogue().list_methods()
+        )
+
         return {
             "success": True,
             "definitions": definitions,
             "count": len(definitions),
             "parity_inventory": get_workflow_registry_inventory_snapshot(),
             "baseline_telemetry": get_workflow_baseline_telemetry_snapshot(),
+            "capability_matrix": capability_matrix,
         }
     except Exception as e:
         return make_error_response(
             "list_failed",
             f"Failed to list workflow definitions: {e}",
         )
+
+
+def _workflow_mcp_health_check(**kwargs):
+    """Run lightweight gateway-path health checks for core workflow MCP tools."""
+
+    from time import perf_counter
+    from .gateway import InternalMCPGateway
+    from .transport import InternalMCPTransport
+
+    include_introspection = kwargs.get("include_introspection", True)
+    if not isinstance(include_introspection, bool):
+        include_introspection = bool(include_introspection)
+
+    namespace = kwargs.get("namespace")
+    if not isinstance(namespace, str) or not namespace.strip():
+        namespace = "#V#workflow_health_check"
+
+    checks_to_run: list[tuple[str, dict[str, Any]]] = [
+        ("workflow_list_definitions", {"limit": 5}),
+        ("workflow_list_instances", {"limit": 5}),
+        ("workflow_list_schedules", {"limit": 5}),
+    ]
+    if include_introspection:
+        checks_to_run.extend(
+            [
+                ("settings_get_public", {}),
+                ("chat_introspect", {"namespace": namespace}),
+            ]
+        )
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+    capability_matrix = build_workflow_surface_capability_matrix(
+        internal_method_names=gateway.describe_methods().keys()
+    )
+
+    checks: list[dict[str, Any]] = []
+    failed_tools: list[str] = []
+    for tool_name, payload in checks_to_run:
+        started = perf_counter()
+        try:
+            result = gateway.invoke(tool_name, payload)
+            response_payload = result.payload if isinstance(result.payload, dict) else {}
+            ok = bool(response_payload.get("success"))
+            error_code = response_payload.get("error_code")
+            error = response_payload.get("error")
+        except Exception as exc:
+            ok = False
+            error_code = "exception"
+            error = str(exc)
+            response_payload = {"exception_type": type(exc).__name__}
+
+        if not ok:
+            failed_tools.append(tool_name)
+
+        checks.append(
+            {
+                "tool": tool_name,
+                "ok": ok,
+                "latency_ms": round((perf_counter() - started) * 1000.0, 2),
+                "error_code": error_code,
+                "error": error,
+                "details": response_payload.get("error_details")
+                if isinstance(response_payload, dict)
+                else None,
+            }
+        )
+
+    return {
+        "success": len(failed_tools) == 0,
+        "checked_tools": [tool_name for tool_name, _ in checks_to_run],
+        "checks": checks,
+        "failed_tools": failed_tools,
+        "capability_matrix": capability_matrix,
+    }
 
 
 def _workflow_create_instance(**kwargs):
@@ -7655,6 +7743,8 @@ def _chat_introspect(
     except Exception:
         tool_guidance_hash = None
 
+    # Keep these keys aligned with the MethodDefinition output_schema for
+    # chat_introspect: InternalMCPGateway validates success payloads end-to-end.
     return {
         "success": True,
         "namespace": namespace,
@@ -8089,8 +8179,15 @@ def build_default_catalogue() -> MethodCatalogue:
                     "orchestrator_max_tool_invocations": (int, type(None)),
                     "orchestrator_tool_batch_cap": (int, type(None)),
                 },
-                optional={"error": str},
-                allow_unknown=False,
+                optional={
+                    "error": str,
+                    # Introspection diagnostics evolve over time; keep these
+                    # explicit for discoverability while allowing forward fields.
+                    "behaviour_prompt_concept_ids": list,
+                    "narration_prompt_concept_ids": list,
+                    "narration_prompt_concepts": list,
+                },
+                allow_unknown=True,
                 description="Chat context introspection snapshot (safe, no secrets).",
             ),
             category="read",
@@ -8933,6 +9030,7 @@ def build_default_catalogue() -> MethodCatalogue:
                 optional={
                     "parity_inventory": dict,
                     "baseline_telemetry": dict,
+                    "capability_matrix": dict,
                     "error": str,
                     "error_code": str,
                 },
@@ -8941,6 +9039,35 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             category="read",
             description="List available workflow definitions (IDs, descriptions) that can be instantiated.",
+        ),
+        MethodDefinition(
+            name="workflow_mcp_health_check",
+            handler=_workflow_mcp_health_check,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "include_introspection": bool,
+                },
+                allow_unknown=True,
+                description="Run read-only health checks for core workflow MCP tools.",
+            ),
+            output_schema=Schema(
+                required={"success": bool, "checked_tools": list, "checks": list},
+                optional={
+                    "failed_tools": list,
+                    "capability_matrix": dict,
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Workflow MCP health-check result with per-tool diagnostics.",
+            ),
+            category="read",
+            description=(
+                "Run lightweight workflow/introspection MCP health checks through "
+                "InternalMCPGateway.invoke() and return actionable diagnostics."
+            ),
         ),
         MethodDefinition(
             name="workflow_create_instance",

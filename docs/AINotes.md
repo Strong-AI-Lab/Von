@@ -94,6 +94,22 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 	- Regression anchors:
 		- `tests/backend/test_workflow_discovery_service.py`
 		- `tests/backend/test_orchestrator_workflow_selector_routing.py`
+- 2026-02-08: WS4 MCP introspection reliability (JVNAUTOSCI-1089)
+	- Root cause found: `chat_introspect` handler returned fields not declared in its MCP `output_schema`, causing `InternalMCPGateway.invoke("chat_introspect", ...)` to fail with `SchemaValidationError`.
+	- Fix pattern:
+		- keep `chat_introspect` output schema aligned with handler payload keys
+		- allow forward-compatible diagnostics fields for introspection snapshots
+		- expose workflow/introspection surface matrix in tool responses (`workflow_list_definitions`) and docs (`docs/engineering/workflow_mcp_capability_matrix.md`)
+		- provide actionable `unknown_tool` diagnostics on `mcp_stdio_server` for `workflow_*` and chat introspection tools (classification: `internal_mcp_only_tool`)
+		- keep workflow/introspection surface tool names centralised in `workflow_surface_capabilities.py` and validated by tests to prevent drift
+		- add `workflow_mcp_health_check` for read-only gateway-path checks of core workflow MCP tools
+	- Regression anchors (gateway path, not direct handler only):
+		- `tests/backend/test_internal_mcp_chat_prompt_tools.py::test_chat_introspect_gateway_invoke_success_path`
+		- `tests/backend/test_internal_mcp_chat_prompt_tools.py::test_chat_introspect_gateway_invoke_handler_error_path`
+		- `tests/backend/test_internal_mcp_workflow_tools.py::test_workflow_list_definitions_gateway_invoke_success_path`
+		- `tests/backend/test_internal_mcp_workflow_tools.py::test_workflow_list_instances_gateway_invoke_error_path`
+		- `tests/backend/test_internal_mcp_workflow_tools.py::test_workflow_mcp_health_check_gateway_invoke_success_path`
+		- `tests/backend/test_mcp_stdio_unknown_tool_diagnostics.py`
 
 - 2026-01-06 diary
 	- Swift blob store: improved OpenStack cloud config error message; fixed `openstacksdk` object-store method signature compatibility; added regression tests (JVNAUTOSCI-878).
