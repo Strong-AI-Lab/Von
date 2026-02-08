@@ -16,6 +16,9 @@ import pytest
 from src.backend.services.workflow_discovery_service import (
     DEFAULT_MAX_RESULTS,
     DEFAULT_RELEVANCE_THRESHOLD,
+    EXECUTABILITY_EXECUTABLE_NOW,
+    EXECUTABILITY_GRAPH_INCOMPLETE,
+    EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
     WORKFLOW_TYPE_IDS,
     WorkflowDiscoveryResult,
     WorkflowMatch,
@@ -112,6 +115,7 @@ class TestWorkflowDiscoveryResult:
         assert output["query"] == "test query"
         assert output["threshold"] == 0.7
         assert output["match_count"] == 2
+        assert output["candidate_count"] == 2
         assert output["errors"] == ["minor warning"]
 
     def test_to_dict_errors_none_when_empty(self) -> None:
@@ -324,6 +328,96 @@ class TestDiscoverWorkflows:
                 result = discover_workflows("test query")
 
         assert result.search_time_ms > 0
+
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
+    )
+    def test_mixed_candidates_expose_reason_codes_and_routing_subset(
+        self,
+        mock_classify: MagicMock,
+        mock_vontology: MagicMock,
+        mock_semantic: MagicMock,
+    ) -> None:
+        """Discovery should retain mixed candidates while routing only executable ones."""
+        mock_semantic.return_value = [
+            WorkflowMatch("#V#wf_exec", "Executable", relevance_score=0.8),
+            WorkflowMatch("#V#wf_graph", "Graph Incomplete", relevance_score=0.9),
+        ]
+        mock_vontology.return_value = [
+            WorkflowMatch("#V#wf_design", "Design Artefact", relevance_score=0.85),
+        ]
+
+        def _classify(concept_id: str):
+            if concept_id == "#V#wf_exec":
+                return (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+            if concept_id == "#V#wf_graph":
+                return (False, EXECUTABILITY_GRAPH_INCOMPLETE, "missing_step_concepts")
+            return (
+                False,
+                EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
+                "workflow_has_no_steps",
+            )
+
+        mock_classify.side_effect = _classify
+
+        with patch(
+            "src.backend.services.workflow_discovery_service._enrich_workflow_matches",
+            side_effect=lambda x: x,
+        ):
+            result = discover_workflows("test query", max_results=3)
+
+        assert len(result.matches) == 3
+        reasons = {m.concept_id: m.executability_reason for m in result.matches}
+        assert reasons["#V#wf_exec"] == EXECUTABILITY_EXECUTABLE_NOW
+        assert reasons["#V#wf_graph"] == EXECUTABILITY_GRAPH_INCOMPLETE
+        assert (
+            reasons["#V#wf_design"]
+            == EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT
+        )
+        assert len(result.routing_matches or []) == 1
+        assert (result.routing_matches or [])[0].concept_id == "#V#wf_exec"
+
+    @patch("src.backend.services.workflow_discovery_service._search_workflows_semantic")
+    @patch(
+        "src.backend.services.workflow_discovery_service._search_workflows_vontology"
+    )
+    @patch(
+        "src.backend.services.workflow_discovery_service._classify_workflow_concept_executability"
+    )
+    def test_allow_non_executable_override_keeps_mixed_routing_candidates(
+        self,
+        mock_classify: MagicMock,
+        mock_vontology: MagicMock,
+        mock_semantic: MagicMock,
+    ) -> None:
+        """Explicit override should keep non-executable candidates in routing matches."""
+        mock_semantic.return_value = [
+            WorkflowMatch("#V#wf_exec", "Executable", relevance_score=0.8),
+        ]
+        mock_vontology.return_value = [
+            WorkflowMatch("#V#wf_graph", "Graph Incomplete", relevance_score=0.79),
+        ]
+        mock_classify.side_effect = [
+            (True, EXECUTABILITY_EXECUTABLE_NOW, None),
+            (False, EXECUTABILITY_GRAPH_INCOMPLETE, "missing_step_concepts"),
+        ]
+
+        with patch(
+            "src.backend.services.workflow_discovery_service._enrich_workflow_matches",
+            side_effect=lambda x: x,
+        ):
+            result = discover_workflows(
+                "test query",
+                max_results=3,
+                allow_non_executable=True,
+            )
+
+        assert len(result.matches) == 2
+        assert len(result.routing_matches or []) == 2
 
 
 class TestDiscoverWorkflowsForTurn:

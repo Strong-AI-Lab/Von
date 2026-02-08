@@ -23,10 +23,11 @@ Technical Notes:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,17 @@ DEFAULT_MAX_RESULTS = 3
 # Search timeout in seconds
 SEARCH_TIMEOUT_SECONDS = 0.5
 
+# Executability reason codes (JVNAUTOSCI-1088).
+EXECUTABILITY_EXECUTABLE_NOW = "executable_now"
+EXECUTABILITY_GRAPH_INCOMPLETE = "graph_incomplete"
+EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT = "non_executable_design_artifact"
+
+_EXECUTABILITY_REASON_PRIORITY = {
+    EXECUTABILITY_EXECUTABLE_NOW: 2,
+    EXECUTABILITY_GRAPH_INCOMPLETE: 1,
+    EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT: 0,
+}
+
 
 @dataclass
 class WorkflowMatch:
@@ -57,6 +69,13 @@ class WorkflowMatch:
     description: Optional[str] = None
     relevance_score: float = 0.0
     match_source: str = "unknown"  # "semantic", "vontology", "combined"
+    is_executable: bool = False
+    executability_reason: str = EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT
+    executability_detail: Optional[str] = None
+    confidence_score: float = 0.0
+    is_policy_safe: bool = False
+    routing_eligible: bool = False
+    routing_exclusion_reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialisation."""
@@ -66,6 +85,13 @@ class WorkflowMatch:
             "description": self.description,
             "relevance_score": round(self.relevance_score, 3),
             "match_source": self.match_source,
+            "is_executable": self.is_executable,
+            "executability_reason": self.executability_reason,
+            "executability_detail": self.executability_detail,
+            "confidence_score": round(self.confidence_score, 3),
+            "is_policy_safe": self.is_policy_safe,
+            "routing_eligible": self.routing_eligible,
+            "routing_exclusion_reason": self.routing_exclusion_reason,
         }
 
 
@@ -74,6 +100,7 @@ class WorkflowDiscoveryResult:
     """Result of workflow discovery search."""
 
     matches: List[WorkflowMatch] = field(default_factory=list)
+    routing_matches: Optional[List[WorkflowMatch]] = None
     search_time_ms: float = 0.0
     query: str = ""
     threshold: float = DEFAULT_RELEVANCE_THRESHOLD
@@ -81,12 +108,25 @@ class WorkflowDiscoveryResult:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialisation."""
+        candidate_payload = [m.to_dict() for m in self.matches]
+        # Backward compatibility: if routing_matches is omitted by callers/tests,
+        # treat candidates as routing matches.
+        routing_source = (
+            self.routing_matches if isinstance(self.routing_matches, list) else self.matches
+        )
+        routing_payload = [m.to_dict() for m in routing_source]
         return {
-            "matches": [m.to_dict() for m in self.matches],
+            # Backwards-compatible key used by selector/orchestrator pathways:
+            # "matches" now means routing-eligible candidates by default.
+            "matches": routing_payload,
+            # Full candidate set for traceability.
+            "candidates": candidate_payload,
+            "routing_matches": routing_payload,
             "search_time_ms": round(self.search_time_ms, 2),
             "query": self.query,
             "threshold": self.threshold,
-            "match_count": len(self.matches),
+            "match_count": len(routing_payload),
+            "candidate_count": len(candidate_payload),
             "errors": self.errors if self.errors else None,
         }
 
@@ -280,41 +320,169 @@ def _deduplicate_and_rank(
     max_results: int,
 ) -> List[WorkflowMatch]:
     """Deduplicate matches by concept_id and rank by relevance."""
-    seen_ids: set[str] = set()
-    unique_matches: List[WorkflowMatch] = []
+    unique_by_id: dict[str, WorkflowMatch] = {}
+    ordered_ids: list[str] = []
 
-    # Sort by score descending
+    # Sort by score descending so first insert is highest score for each concept.
     sorted_matches = sorted(matches, key=lambda m: -m.relevance_score)
 
     for match in sorted_matches:
-        if match.concept_id in seen_ids:
+        cid = match.concept_id.strip() if isinstance(match.concept_id, str) else ""
+        if not cid or match.relevance_score < threshold:
             continue
-        if match.relevance_score < threshold:
-            continue
-        seen_ids.add(match.concept_id)
-        unique_matches.append(match)
-        if len(unique_matches) >= max_results:
-            break
 
-    return unique_matches
+        existing = unique_by_id.get(cid)
+        if existing is None:
+            # Normalise concept_id value to avoid duplicate keys with whitespace.
+            match.concept_id = cid
+            unique_by_id[cid] = match
+            ordered_ids.append(cid)
+        else:
+            # Merge source confidence across search pathways.
+            if existing.match_source != match.match_source:
+                existing.match_source = "combined"
+            if match.relevance_score > existing.relevance_score:
+                existing.relevance_score = match.relevance_score
+            if not existing.description and match.description:
+                existing.description = match.description
+            if existing.name == "Unknown" and match.name and match.name != "Unknown":
+                existing.name = match.name
+
+    deduped = [unique_by_id[cid] for cid in ordered_ids]
+    deduped.sort(key=lambda m: -m.relevance_score)
+    return deduped[: max(1, int(max_results))]
+
+
+@lru_cache(maxsize=1024)
+def _classify_workflow_concept_executability(
+    concept_id: str,
+) -> Tuple[bool, str, Optional[str]]:
+    """Classify whether a concept is executable and provide a reason code."""
+    if not isinstance(concept_id, str) or not concept_id.strip():
+        return (
+            False,
+            EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
+            "invalid_concept_id",
+        )
+
+    try:
+        from ..workflows.vontology_loader import (
+            build_workflow_process_graph,
+            load_workflow_definition_from_vontology,
+        )
+
+        graph, warnings = build_workflow_process_graph(concept_id)
+        warning_items = [
+            str(item).strip()
+            for item in (warnings or [])
+            if isinstance(item, str) and item.strip()
+        ]
+
+        definition = load_workflow_definition_from_vontology(concept_id)
+        if definition is not None:
+            return (True, EXECUTABILITY_EXECUTABLE_NOW, None)
+
+        if isinstance(graph, dict):
+            detail = warning_items[0] if warning_items else "workflow_graph_not_loadable"
+            return (False, EXECUTABILITY_GRAPH_INCOMPLETE, detail)
+
+        if "workflow_has_no_steps" in warning_items:
+            return (
+                False,
+                EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
+                "workflow_has_no_steps",
+            )
+
+        if "workflow_concept_not_found" in warning_items:
+            return (False, EXECUTABILITY_GRAPH_INCOMPLETE, "workflow_concept_not_found")
+
+        detail = warning_items[0] if warning_items else "no_workflow_graph_structure"
+        return (False, EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT, detail)
+    except Exception as exc:
+        return (
+            False,
+            EXECUTABILITY_GRAPH_INCOMPLETE,
+            f"classification_error:{type(exc).__name__}",
+        )
+
+
+def _compute_candidate_confidence(match: WorkflowMatch) -> float:
+    """Compute a bounded confidence score from relevance + evidence signals."""
+    score = max(0.0, min(1.0, float(match.relevance_score)))
+    source = (match.match_source or "").strip().lower()
+    if source == "combined":
+        score += 0.08
+    elif source == "semantic":
+        score += 0.03
+    if isinstance(match.description, str) and match.description.strip():
+        score += 0.02
+    if match.is_executable:
+        score += 0.05
+    return min(1.0, round(score, 3))
+
+
+def _annotate_and_rank_candidates(
+    matches: List[WorkflowMatch],
+    *,
+    max_results: int,
+) -> List[WorkflowMatch]:
+    """Attach executability/confidence metadata and rank candidates for routing."""
+    annotated: list[WorkflowMatch] = []
+    for match in matches:
+        is_executable, reason, detail = _classify_workflow_concept_executability(
+            match.concept_id
+        )
+        match.is_executable = bool(is_executable)
+        match.executability_reason = reason
+        match.executability_detail = detail
+        # Discovery-level policy baseline: only executable candidates are
+        # considered safe before orchestrator-level policy checks are applied.
+        match.is_policy_safe = bool(is_executable)
+        match.routing_eligible = bool(is_executable)
+        match.routing_exclusion_reason = None if is_executable else reason
+        match.confidence_score = _compute_candidate_confidence(match)
+        annotated.append(match)
+
+    annotated.sort(
+        key=lambda m: (
+            -_EXECUTABILITY_REASON_PRIORITY.get(m.executability_reason, -1),
+            -m.confidence_score,
+            -m.relevance_score,
+            m.concept_id,
+        )
+    )
+    return annotated[: max(1, int(max_results))]
+
+
+def _filter_routing_candidates(
+    matches: List[WorkflowMatch], *, allow_non_executable: bool
+) -> List[WorkflowMatch]:
+    """Return candidates eligible for selector context by policy defaults."""
+    if allow_non_executable:
+        for match in matches:
+            if not match.routing_eligible:
+                match.routing_eligible = True
+                match.routing_exclusion_reason = None
+        return list(matches)
+    return [m for m in matches if m.routing_eligible]
+
+
+def _env_allow_non_executable_default() -> bool:
+    value = os.getenv("VON_WORKFLOW_SELECTOR_ALLOW_NON_EXECUTABLE", "0")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @lru_cache(maxsize=512)
 def _is_executable_workflow_concept(concept_id: str) -> bool:
     """Return whether a workflow concept can be loaded into an executable definition."""
-    if not isinstance(concept_id, str) or not concept_id.strip():
-        return False
-    try:
-        from ..workflows.vontology_loader import load_workflow_definition_from_vontology
-
-        definition = load_workflow_definition_from_vontology(concept_id)
-        return definition is not None
-    except Exception:
-        return False
+    is_executable, _reason, _detail = _classify_workflow_concept_executability(
+        concept_id
+    )
+    return is_executable
 
 
 def _count_executable_matches(matches: List[WorkflowMatch]) -> int:
-    return sum(1 for match in matches if _is_executable_workflow_concept(match.concept_id))
+    return sum(1 for match in matches if bool(match.is_executable))
 
 
 def discover_workflows(
@@ -323,6 +491,7 @@ def discover_workflows(
     relevance_threshold: float = DEFAULT_RELEVANCE_THRESHOLD,
     max_results: int = DEFAULT_MAX_RESULTS,
     timeout_seconds: float = SEARCH_TIMEOUT_SECONDS,
+    allow_non_executable: bool = False,
 ) -> WorkflowDiscoveryResult:
     """Discover workflows relevant to user input.
 
@@ -384,15 +553,24 @@ def discover_workflows(
             errors.append(f"vontology_search_error: {e}")
             logger.warning(f"Vontology workflow discovery failed: {e}")
 
-    # Deduplicate and rank
+    # Deduplicate and rank (keep a larger pre-limit for executability-aware
+    # ranking to avoid early relevance-only truncation).
     ranked_matches = _deduplicate_and_rank(
         all_matches,
         threshold=relevance_threshold,
-        max_results=max_results,
+        max_results=max(max_results * 4, max_results),
     )
 
     # Enrich with descriptions
     ranked_matches = _enrich_workflow_matches(ranked_matches)
+    ranked_matches = _annotate_and_rank_candidates(
+        ranked_matches,
+        max_results=max_results,
+    )
+    routing_matches = _filter_routing_candidates(
+        ranked_matches,
+        allow_non_executable=allow_non_executable,
+    )
 
     executable_match_count = _count_executable_matches(ranked_matches)
     try:
@@ -411,12 +589,14 @@ def discover_workflows(
 
     logger.info(
         f"[workflow_discovery] query='{query[:50]}...' "
-        f"found={len(ranked_matches)} executable={executable_match_count} "
+        f"candidates={len(ranked_matches)} eligible={len(routing_matches)} "
+        f"executable={executable_match_count} "
         f"elapsed_ms={elapsed_ms:.1f}"
     )
 
     return WorkflowDiscoveryResult(
         matches=ranked_matches,
+        routing_matches=routing_matches,
         search_time_ms=elapsed_ms,
         query=query,
         threshold=relevance_threshold,
@@ -430,6 +610,7 @@ def discover_workflows_for_turn(
     namespace: Optional[str] = None,
     relevance_threshold: float = DEFAULT_RELEVANCE_THRESHOLD,
     max_results: int = DEFAULT_MAX_RESULTS,
+    allow_non_executable: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     """Convenience wrapper for workflow discovery during conversation turns.
 
@@ -450,10 +631,16 @@ def discover_workflows_for_turn(
         return None
 
     try:
+        effective_allow_non_executable = (
+            _env_allow_non_executable_default()
+            if allow_non_executable is None
+            else bool(allow_non_executable)
+        )
         result = discover_workflows(
             user_input,
             relevance_threshold=relevance_threshold,
             max_results=max_results,
+            allow_non_executable=effective_allow_non_executable,
         )
 
         if not result.matches:

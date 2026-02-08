@@ -77,6 +77,23 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 		- `tests/backend/test_e2e_vontology_workflow.py::TestBranchingWorkflowWithMCP::test_on_failure_routes_to_recovery_tool`
 		- `tests/backend/test_durable_workflow_executor_safety.py`
 		- `tests/backend/test_mcp_action_handler.py::TestActionOutcomeEnvelope`
+- 2026-02-08: WS3 executable discovery/routing hardening (JVNAUTOSCI-1088)
+	- Discovery now annotates each workflow candidate with:
+		- `is_executable`
+		- `executability_reason` (`executable_now` / `graph_incomplete` / `non_executable_design_artifact`)
+		- confidence + routing eligibility fields
+	- Discovery payload now separates:
+		- `candidates` (full ranked set, with reasons)
+		- `matches` / `routing_matches` (selector-eligible set)
+	- Orchestrator selector filtering defaults:
+		- drop non-executable candidates
+		- drop policy-unsafe candidates (not in current workflow registry)
+	- Explicit overrides:
+		- `VON_WORKFLOW_SELECTOR_ALLOW_NON_EXECUTABLE=1`
+		- `VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE=1`
+	- Regression anchors:
+		- `tests/backend/test_workflow_discovery_service.py`
+		- `tests/backend/test_orchestrator_workflow_selector_routing.py`
 
 - 2026-01-06 diary
 	- Swift blob store: improved OpenStack cloud config error message; fixed `openstacksdk` object-store method signature compatibility; added regression tests (JVNAUTOSCI-878).

@@ -7319,6 +7319,88 @@ class InternalMCPChatOrchestrator:
             trace=trace,
         )
 
+    @staticmethod
+    def _env_flag_enabled(name: str, *, default: str = "0") -> bool:
+        value = os.getenv(name, default)
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _extract_discovery_candidates(
+        workflow_discovery_result: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Extract discovery candidates with backward-compatible key handling."""
+        raw_candidates = workflow_discovery_result.get("candidates")
+        if not isinstance(raw_candidates, list):
+            raw_candidates = workflow_discovery_result.get("matches")
+        if not isinstance(raw_candidates, list):
+            return []
+        return [dict(item) for item in raw_candidates if isinstance(item, Mapping)]
+
+    def _prepare_selector_discovered_matches(
+        self,
+        workflow_discovery_result: Mapping[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Filter discovered workflows to executable + policy-safe defaults.
+
+        JVNAUTOSCI-1088:
+        - Non-executable discovered concepts are excluded from selector context
+          unless explicitly overridden.
+        - Policy-safe defaults to "registered workflow concept ID" so the
+          selector only routes into workflow IDs known to this process.
+        """
+
+        allow_non_executable = self._env_flag_enabled(
+            "VON_WORKFLOW_SELECTOR_ALLOW_NON_EXECUTABLE"
+        )
+        allow_policy_unsafe = self._env_flag_enabled(
+            "VON_WORKFLOW_SELECTOR_ALLOW_POLICY_UNSAFE"
+        )
+        registry_ids = {str(item) for item in self._workflow_registry.all_workflow_ids()}
+
+        included: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = []
+        for candidate in self._extract_discovery_candidates(workflow_discovery_result):
+            concept_id = str(candidate.get("concept_id") or "").strip()
+            if not concept_id:
+                continue
+
+            is_policy_safe = concept_id in registry_ids
+            raw_reason = candidate.get("executability_reason")
+            raw_is_executable = candidate.get("is_executable")
+            if raw_reason is None and raw_is_executable is None:
+                # Legacy discovery payloads did not expose executability metadata.
+                # Use registry membership as a conservative executable default.
+                is_executable = is_policy_safe
+                reason = "executable_now" if is_executable else "graph_incomplete"
+            else:
+                reason = str(raw_reason or "non_executable_design_artifact").strip()
+                is_executable = bool(
+                    raw_is_executable or reason == "executable_now"
+                )
+
+            item = dict(candidate)
+            item["concept_id"] = concept_id
+            item["is_executable"] = is_executable
+            item["executability_reason"] = reason
+            item["is_policy_safe"] = is_policy_safe
+            item["routing_eligible"] = True
+            item["routing_exclusion_reason"] = None
+
+            if not is_executable and not allow_non_executable:
+                item["routing_eligible"] = False
+                item["routing_exclusion_reason"] = f"non_executable:{reason}"
+                excluded.append(item)
+                continue
+            if not is_policy_safe and not allow_policy_unsafe:
+                item["routing_eligible"] = False
+                item["routing_exclusion_reason"] = "policy_unsafe_not_registered"
+                excluded.append(item)
+                continue
+
+            included.append(item)
+
+        return included, excluded
+
     def run(
         self,
         *,
@@ -7853,12 +7935,11 @@ class InternalMCPChatOrchestrator:
         # discovered Vontology workflows.
         # ----------------------------------------------------------------
         discovered_matches: list[dict[str, Any]] = []
+        excluded_discovered_matches: list[dict[str, Any]] = []
         if isinstance(workflow_discovery_result, Mapping):
-            raw_matches = workflow_discovery_result.get("matches")
-            if isinstance(raw_matches, list):
-                discovered_matches = [
-                    dict(m) for m in raw_matches if isinstance(m, Mapping)
-                ]
+            discovered_matches, excluded_discovered_matches = (
+                self._prepare_selector_discovered_matches(workflow_discovery_result)
+            )
 
         routing_info: WorkflowRoutingInfo | None = None
 
@@ -7892,6 +7973,9 @@ class InternalMCPChatOrchestrator:
                         "discovered_workflow_ids": list(
                             selector_selection.discovered_workflow_ids
                         ),
+                        "discovery_candidate_count": len(discovered_matches)
+                        + len(excluded_discovered_matches),
+                        "discovery_excluded_count": len(excluded_discovered_matches),
                         "routing_duration_ms": routing_duration_ms,
                     }
                 )
@@ -7903,6 +7987,14 @@ class InternalMCPChatOrchestrator:
                         "discovered_workflow_ids": list(
                             selector_selection.discovered_workflow_ids
                         ),
+                        "discovery_candidate_count": len(discovered_matches)
+                        + len(excluded_discovered_matches),
+                        "discovery_excluded_count": len(excluded_discovered_matches),
+                        "excluded_discovered_workflow_ids": [
+                            str(item.get("concept_id"))
+                            for item in excluded_discovered_matches
+                            if isinstance(item.get("concept_id"), str)
+                        ],
                         "routing_duration_ms": routing_duration_ms,
                     }
             except Exception:

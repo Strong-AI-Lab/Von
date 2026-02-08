@@ -290,7 +290,7 @@ def test_selector_fires_without_presenter_mode(monkeypatch):
 
 
 def test_selector_receives_discovered_workflows(monkeypatch):
-    """Discovered workflow IDs should be valid selector responses."""
+    """Policy-unsafe discovered workflows should be excluded from selector context."""
 
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
 
@@ -335,14 +335,127 @@ def test_selector_receives_discovered_workflows(monkeypatch):
         None,
     )
     assert selector_entry is not None
-    assert "#V#custom_analysis_workflow" in selector_entry.get(
-        "discovered_workflow_ids", []
-    )
+    assert selector_entry.get("discovered_workflow_ids", []) == []
+    assert selector_entry.get("discovery_candidate_count") == 1
+    assert selector_entry.get("discovery_excluded_count") == 1
 
     # Since the workflow is not in the registry, execute_workflow returns None
     # and we fall through to tool-calling.  The response should come from the
     # plan handler (second LLM call).
     assert "Falling back" in result.response_text or result.response_text
+
+
+def test_non_executable_discovered_workflow_filtered_by_default(monkeypatch):
+    """Non-executable discovered workflows should not reach selector candidates by default."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_NON_EXECUTABLE", "0")
+
+    llm = _CapturingLLM(
+        [
+            TODO_REFRESH_WORKFLOW_ID.lower(),  # selector verdict (ignored)
+            "Fallback response.",
+        ]
+    )
+
+    discovery_result = {
+        "candidates": [
+            {
+                "concept_id": TODO_REFRESH_WORKFLOW_ID,
+                "name": "Todo Refresh Workflow",
+                "description": "Refreshes user's todo list from Jira.",
+                "is_executable": False,
+                "executability_reason": "graph_incomplete",
+            }
+        ],
+        "candidate_count": 1,
+    }
+
+    result = orchestrator.run(
+        prompt="Refresh my todo list",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result=discovery_result,
+    )
+
+    selector_entry = next(
+        (
+            e
+            for e in result.aux_llm_calls
+            if isinstance(e, dict) and e.get("type") == "workflow_selector"
+        ),
+        None,
+    )
+    assert selector_entry is not None
+    assert selector_entry.get("discovered_workflow_ids", []) == []
+    assert selector_entry.get("discovery_excluded_count") == 1
+
+    execution_entry = next(
+        (
+            e
+            for e in result.aux_llm_calls
+            if isinstance(e, dict) and e.get("type") == "workflow_execution"
+        ),
+        None,
+    )
+    assert execution_entry is None
+
+
+def test_non_executable_discovered_workflow_can_be_overridden(monkeypatch):
+    """Explicit override should allow non-executable discovered workflows into selector context."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_WORKFLOW_SELECTOR_ALLOW_NON_EXECUTABLE", "1")
+
+    llm = _CapturingLLM(
+        [
+            TODO_REFRESH_WORKFLOW_ID.lower(),  # selector verdict
+        ]
+    )
+
+    discovery_result = {
+        "candidates": [
+            {
+                "concept_id": TODO_REFRESH_WORKFLOW_ID,
+                "name": "Todo Refresh Workflow",
+                "description": "Refreshes user's todo list from Jira.",
+                "is_executable": False,
+                "executability_reason": "graph_incomplete",
+            }
+        ],
+        "candidate_count": 1,
+    }
+
+    result = orchestrator.run(
+        prompt="Refresh my todo list",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+        workflow_discovery_result=discovery_result,
+    )
+
+    selector_entry = next(
+        (
+            e
+            for e in result.aux_llm_calls
+            if isinstance(e, dict) and e.get("type") == "workflow_selector"
+        ),
+        None,
+    )
+    assert selector_entry is not None
+    assert TODO_REFRESH_WORKFLOW_ID in selector_entry.get("discovered_workflow_ids", [])
+
+    execution_entry = next(
+        (
+            e
+            for e in result.aux_llm_calls
+            if isinstance(e, dict) and e.get("type") == "workflow_execution"
+        ),
+        None,
+    )
+    assert execution_entry is not None
+    assert execution_entry["workflow_id"] == TODO_REFRESH_WORKFLOW_ID
 
 
 # ---------------------------------------------------------------------------
