@@ -11,6 +11,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from bson import ObjectId
+from bson.errors import InvalidId
+
+from ...db.repositories.text_value_repository import (
+    TextRelationsRepository,
+    TextValuesRepository,
+)
 from ...services import concept_service, text_value_service
 from .models import WorkflowSchedule, ScheduleType
 
@@ -33,6 +40,10 @@ PRED_DESCRIPTION = "hasDescription"
 
 # Predicates (Concept Relationships)
 PRED_TRIGGERS_WORKFLOW = "#V#triggers_workflow"  # Usage in linked_to: {"predicate": "triggers workflow", "target_id": "#V#..."}
+
+# Query-optimised relation context keys (WS5 / JVNAUTOSCI-1091).
+CTX_ENABLED_BOOL = "enabled_bool"
+CTX_NEXT_RUN_EPOCH_MS = "next_run_epoch_ms"
 
 
 class VontologyScheduleRepository:
@@ -92,7 +103,7 @@ class VontologyScheduleRepository:
         # 3. Add Text Relations (properties)
         try:
             # Enabled
-            self._set_text(concept_id, PRED_ENABLED, str(schedule.enabled).lower())
+            self._set_enabled_state(concept_id, schedule.enabled)
 
             # Schedule specific properties
             if schedule.schedule_type == ScheduleType.CRON and schedule.cron_expression:
@@ -107,12 +118,12 @@ class VontologyScheduleRepository:
 
             # Execution Timestamps
             if schedule.next_run_at:
-                self._set_text(
-                    concept_id, PRED_NEXT_RUN, schedule.next_run_at.isoformat()
-                )
+                self._set_next_run_timestamp(concept_id, schedule.next_run_at)
             if schedule.last_run_at:
                 self._set_text(
-                    concept_id, PRED_LAST_RUN, schedule.last_run_at.isoformat()
+                    concept_id,
+                    PRED_LAST_RUN,
+                    self._normalise_utc_datetime(schedule.last_run_at).isoformat(),
                 )
 
             # Inputs
@@ -213,55 +224,93 @@ class VontologyScheduleRepository:
         Returns:
             List of schedules where next_run_at <= now.
         """
-        # 1. Fetch all schedule concepts
-        # We assume the number of active schedules is manageable (< 1000s) for now.
-        concepts, _ = concept_service.list_concepts(
-            concept_id=TYPE_WORKFLOW_SCHEDULE,
-            include_descendants=True,
-            per_page=1000,
-        )
+        if limit <= 0:
+            return []
 
-        due_schedules = []
         now = datetime.now(timezone.utc)
+        now_epoch_ms = int(now.timestamp() * 1000)
+        due_schedule_ids: list[str] = []
+        seen_schedule_ids: set[str] = set()
+        enabled_cache: dict[str, bool] = {}
 
-        for concept in concepts:
-            try:
-                con_id = concept.get("concept_id")
-                if not con_id:
+        # Query-first path: this targets schedules with WS5 context metadata and
+        # avoids broad concept scans on every scheduler poll.
+        fast_limit = max(limit * 4, 100)
+        fast_cursor = TextRelationsRepository.find(
+            {
+                "predicate": PRED_NEXT_RUN,
+                f"context.{CTX_NEXT_RUN_EPOCH_MS}": {"$lte": now_epoch_ms},
+            },
+            projection={"subject_concept_id": 1},
+            sort=[(f"context.{CTX_NEXT_RUN_EPOCH_MS}", 1)],
+            limit=fast_limit,
+        )
+        for relation in fast_cursor:
+            schedule_id = str(relation.get("subject_concept_id") or "").strip()
+            if not schedule_id or schedule_id in seen_schedule_ids:
+                continue
+            if not self._is_schedule_enabled(
+                schedule_id=schedule_id, enabled_cache=enabled_cache
+            ):
+                continue
+            due_schedule_ids.append(schedule_id)
+            seen_schedule_ids.add(schedule_id)
+            if len(due_schedule_ids) >= limit:
+                break
+
+        # Legacy compatibility path: old schedules may not carry context metadata.
+        # We still avoid concept list scans by reading only next_run relations.
+        if len(due_schedule_ids) < limit:
+            for relation in TextRelationsRepository.find(
+                {
+                    "predicate": PRED_NEXT_RUN,
+                    f"context.{CTX_NEXT_RUN_EPOCH_MS}": {"$exists": False},
+                },
+                projection={"subject_concept_id": 1, "object_text_id": 1},
+                limit=max(limit * 20, 1000),
+            ):
+                schedule_id = str(relation.get("subject_concept_id") or "").strip()
+                if not schedule_id or schedule_id in seen_schedule_ids:
+                    continue
+                if not self._is_schedule_enabled(
+                    schedule_id=schedule_id, enabled_cache=enabled_cache
+                ):
                     continue
 
-                # Manual filtering based on predicates
-                # Ideally we would query this efficiently, but for now we iterate.
-
-                # Check Enabled
-                enabled_text = self._get_text(con_id, PRED_ENABLED)
-                if enabled_text != "true":
+                next_run_text = self._get_text_value_for_relation_object(
+                    relation.get("object_text_id")
+                )
+                next_run = self._parse_iso_datetime(next_run_text)
+                if next_run is None or next_run > now:
                     continue
 
-                # Check Next Run
-                next_run_str = self._get_text(con_id, PRED_NEXT_RUN)
-                if not next_run_str:
-                    continue
-
-                try:
-                    next_run = datetime.fromisoformat(next_run_str)
-                except ValueError:
-                    continue
-
-                # Compare timestamps (ensure timezone awareness)
-                if next_run <= now:
-                    schedule = self._map_concept_to_schedule(concept)
-                    if schedule:
-                        due_schedules.append(schedule)
-
-                if len(due_schedules) >= limit:
+                due_schedule_ids.append(schedule_id)
+                seen_schedule_ids.add(schedule_id)
+                if len(due_schedule_ids) >= limit:
                     break
 
+        due_schedules: list[WorkflowSchedule] = []
+        for schedule_id in due_schedule_ids:
+            try:
+                concept = concept_service.get_concept_by_concept_id(schedule_id)
+                if not concept:
+                    continue
+                schedule = self._map_concept_to_schedule(concept)
+                if schedule is None or not schedule.enabled:
+                    continue
+                if schedule.next_run_at and self._normalise_utc_datetime(
+                    schedule.next_run_at
+                ) <= now:
+                    due_schedules.append(schedule)
             except Exception as e:
                 logger.warning(
-                    f"Error processing schedule candidate {concept.get('concept_id')}: {e}"
+                    "Error loading due schedule %s: %s",
+                    schedule_id,
+                    e,
                 )
-                continue
+
+            if len(due_schedules) >= limit:
+                break
 
         return due_schedules
 
@@ -277,10 +326,10 @@ class VontologyScheduleRepository:
             self._set_text(schedule_id, PRED_LAST_RUN, now.isoformat())
 
             if next_run_at:
-                self._set_text(schedule_id, PRED_NEXT_RUN, next_run_at.isoformat())
+                self._set_next_run_timestamp(schedule_id, next_run_at)
             else:
                 # Disable if no next run
-                self._set_text(schedule_id, PRED_ENABLED, "false")
+                self._set_enabled_state(schedule_id, False)
                 # Also unset next_run? We just leave it as old value or set to empty string?
                 # Setting to "None" string or similar might be confusing.
                 # Just marking disabled is typically enough.
@@ -293,8 +342,7 @@ class VontologyScheduleRepository:
     def set_schedule_enabled(self, schedule_id: str, enabled: bool) -> bool:
         """Enable or disable a schedule."""
         try:
-            val = "true" if enabled else "false"
-            self._set_text(schedule_id, PRED_ENABLED, val)
+            self._set_enabled_state(schedule_id, enabled)
             return True
         except Exception as e:
             logger.error(f"Failed to set enabled={enabled} for {schedule_id}: {e}")
@@ -309,7 +357,14 @@ class VontologyScheduleRepository:
 
     # --- Helpers ---
 
-    def _set_text(self, concept_id: str, predicate: str, text: str):
+    def _set_text(
+        self,
+        concept_id: str,
+        predicate: str,
+        text: str,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ):
         """Helper to upsert a singleton text relation."""
         text_value_service.upsert_singleton_text_relation(
             subject_concept_id=concept_id,
@@ -317,7 +372,104 @@ class VontologyScheduleRepository:
             text=text,
             policy="replace_others",
             lang="en",  # specific lang not critical for logic values, default to en
+            context=context,
         )
+
+    def _set_enabled_state(self, concept_id: str, enabled: bool) -> None:
+        """Persist enabled flag with queryable context metadata."""
+        self._set_text(
+            concept_id,
+            PRED_ENABLED,
+            "true" if enabled else "false",
+            context={CTX_ENABLED_BOOL: bool(enabled)},
+        )
+
+    def _set_next_run_timestamp(self, concept_id: str, next_run_at: datetime) -> None:
+        """Persist next run timestamp with UTC-normalised text and epoch context."""
+        next_run_utc = self._normalise_utc_datetime(next_run_at)
+        self._set_text(
+            concept_id,
+            PRED_NEXT_RUN,
+            next_run_utc.isoformat(),
+            context={CTX_NEXT_RUN_EPOCH_MS: int(next_run_utc.timestamp() * 1000)},
+        )
+
+    def _normalise_utc_datetime(self, value: datetime) -> datetime:
+        """Normalise a datetime to timezone-aware UTC."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def _parse_iso_datetime(self, raw: Optional[str]) -> Optional[datetime]:
+        """Parse an ISO timestamp string to a UTC-aware datetime."""
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        return self._normalise_utc_datetime(parsed)
+
+    def _get_text_value_for_relation_object(self, object_text_id: Any) -> Optional[str]:
+        """Resolve relation object_text_id to raw text value."""
+        if object_text_id is None:
+            return None
+
+        if isinstance(object_text_id, ObjectId):
+            return self._get_text_value_for_object_id(object_text_id)
+        if isinstance(object_text_id, str):
+            try:
+                return self._get_text_value_for_object_id(ObjectId(object_text_id))
+            except (InvalidId, TypeError):
+                doc = TextValuesRepository.find_one({"_id": object_text_id})
+                if doc:
+                    text = doc.get("text")
+                    return text if isinstance(text, str) else None
+        return None
+
+    def _get_text_value_for_object_id(self, object_id: ObjectId) -> Optional[str]:
+        doc = TextValuesRepository.find_one({"_id": object_id}, {"text": 1})
+        if not doc:
+            return None
+        text = doc.get("text")
+        return text if isinstance(text, str) else None
+
+    def _is_schedule_enabled(
+        self,
+        *,
+        schedule_id: str,
+        enabled_cache: Optional[dict[str, bool]] = None,
+    ) -> bool:
+        """Resolve enabled state using context metadata first, then text fallback."""
+        if enabled_cache is not None and schedule_id in enabled_cache:
+            return enabled_cache[schedule_id]
+
+        relation = TextRelationsRepository.find_one(
+            {
+                "subject_concept_id": schedule_id,
+                "predicate": PRED_ENABLED,
+            },
+            projection={"context": 1, "object_text_id": 1},
+        )
+        if not relation:
+            if enabled_cache is not None:
+                enabled_cache[schedule_id] = False
+            return False
+
+        context = relation.get("context")
+        if isinstance(context, dict) and isinstance(context.get(CTX_ENABLED_BOOL), bool):
+            is_enabled = bool(context.get(CTX_ENABLED_BOOL))
+            if enabled_cache is not None:
+                enabled_cache[schedule_id] = is_enabled
+            return is_enabled
+
+        enabled_text = self._get_text_value_for_relation_object(
+            relation.get("object_text_id")
+        )
+        is_enabled = isinstance(enabled_text, str) and enabled_text.strip().lower() == "true"
+        if enabled_cache is not None:
+            enabled_cache[schedule_id] = is_enabled
+        return is_enabled
 
     def _get_text(self, concept_id: str, predicate: str) -> Optional[str]:
         """Helper to get single text value."""
@@ -374,19 +526,8 @@ class VontologyScheduleRepository:
             logger.warning(f"Schedule {concept_id} has no linked workflow")
 
         # Timestamps
-        next_run_at = None
-        if next_run_s:
-            try:
-                next_run_at = datetime.fromisoformat(next_run_s)
-            except ValueError:
-                pass
-
-        last_run_at = None
-        if last_run_s:
-            try:
-                last_run_at = datetime.fromisoformat(last_run_s)
-            except ValueError:
-                pass
+        next_run_at = self._parse_iso_datetime(next_run_s)
+        last_run_at = self._parse_iso_datetime(last_run_s)
 
         # Inputs
         default_inputs = {}
@@ -408,7 +549,7 @@ class VontologyScheduleRepository:
             schedule_type=sched_type,
             interval_seconds=int(has_interval) if has_interval else None,
             cron_expression=has_cron,
-            enabled=(enabled_s == "true"),
+            enabled=(enabled_s or "").strip().lower() == "true",
             next_run_at=next_run_at,
             last_run_at=last_run_at,
             default_inputs=default_inputs,

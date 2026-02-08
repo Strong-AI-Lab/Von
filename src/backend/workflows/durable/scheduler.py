@@ -133,6 +133,17 @@ class WorkflowScheduler:
         self._on_schedule_triggered: Callable[[WorkflowSchedule, str], None] | None = (
             None
         )
+        self._poll_count = 0
+        self._due_schedules_seen_total = 0
+        self._last_poll_metrics: dict[str, Any] = {
+            "poll_count": 0,
+            "due_schedules_seen_total": 0,
+            "due_count": 0,
+            "triggered_count": 0,
+            "lookup_ms": 0.0,
+            "total_ms": 0.0,
+            "polled_at": None,
+        }
 
     def set_callbacks(
         self,
@@ -150,6 +161,10 @@ class WorkflowScheduler:
     def is_running(self) -> bool:
         """Return True if the scheduler is running."""
         return self._running
+
+    def get_poll_metrics(self) -> dict[str, Any]:
+        """Return latest schedule polling telemetry snapshot."""
+        return dict(self._last_poll_metrics)
 
     def start(self) -> None:
         """Start the scheduler in the current thread (blocking)."""
@@ -191,18 +206,45 @@ class WorkflowScheduler:
 
     def _process_due_schedules(self) -> None:
         """Find and trigger due schedules."""
+        poll_started = time.perf_counter()
+        lookup_started = time.perf_counter()
         due_schedules = self._instance_manager.find_due_schedules(limit=50)
+        lookup_ms = (time.perf_counter() - lookup_started) * 1000.0
         now = datetime.now(timezone.utc)
+        triggered_count = 0
 
         for schedule in due_schedules:
             try:
                 self._trigger_schedule(schedule, now)
+                triggered_count += 1
             except Exception as e:
                 logger.exception(
                     "[scheduler] Failed to trigger schedule %s: %s",
                     schedule.schedule_id,
                     e,
                 )
+
+        total_ms = (time.perf_counter() - poll_started) * 1000.0
+        self._poll_count += 1
+        self._due_schedules_seen_total += len(due_schedules)
+        self._last_poll_metrics = {
+            "poll_count": self._poll_count,
+            "due_schedules_seen_total": self._due_schedules_seen_total,
+            "due_count": len(due_schedules),
+            "triggered_count": triggered_count,
+            "lookup_ms": round(lookup_ms, 3),
+            "total_ms": round(total_ms, 3),
+            "polled_at": now.isoformat(),
+        }
+
+        if due_schedules:
+            logger.info(
+                "[scheduler] Poll metrics: due_count=%s triggered=%s lookup_ms=%.3f total_ms=%.3f",
+                len(due_schedules),
+                triggered_count,
+                lookup_ms,
+                total_ms,
+            )
 
     def _trigger_schedule(self, schedule: WorkflowSchedule, now: datetime) -> None:
         """Trigger a single schedule.

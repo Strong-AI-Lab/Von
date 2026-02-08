@@ -23,6 +23,11 @@ from src.backend.workflows.durable.instance_manager import WorkflowInstanceManag
 from src.backend.workflows.durable.scheduler import (
     _parse_cron_expression,
     _calculate_next_cron_run,
+    WorkflowScheduler,
+)
+from src.backend.workflows.durable.vontology_schedule_repository import (
+    PRED_ENABLED,
+    PRED_NEXT_RUN,
 )
 
 
@@ -846,22 +851,8 @@ class TestScheduleManagement:
         # Check against the created_id, not original schedule.schedule_id
         assert any(s.schedule_id == created_id for s in schedules)
 
-    @patch(
-        "src.backend.workflows.durable.vontology_schedule_repository.concept_service.list_concepts"
-    )
-    def test_find_due_schedules(self, mock_list_concepts) -> None:
+    def test_find_due_schedules(self) -> None:
         """find_due_schedules() should return schedules due to run."""
-
-        # Mock simple list behavior because mongomock graph lookup is flaky
-        def side_effect(*args, **kwargs):
-            from src.backend.db.repositories.concepts_repository import (
-                ConceptsRepository,
-            )
-
-            all_docs = list(ConceptsRepository.find({}))
-            return all_docs, len(all_docs)
-
-        mock_list_concepts.side_effect = side_effect
 
         manager = WorkflowInstanceManager()
 
@@ -882,6 +873,99 @@ class TestScheduleManagement:
 
         assert len(due) >= 1
         assert any(s.schedule_id == created_id for s in due)
+
+    @patch(
+        "src.backend.workflows.durable.vontology_schedule_repository.concept_service.list_concepts"
+    )
+    def test_find_due_schedules_avoids_concept_list_scan(
+        self, mock_list_concepts: MagicMock
+    ) -> None:
+        """Due lookup should not require broad list_concepts scans on the hot path."""
+        mock_list_concepts.side_effect = AssertionError(
+            "find_due_schedules should not call list_concepts"
+        )
+
+        manager = WorkflowInstanceManager()
+        past_time = datetime.now(timezone.utc) - timedelta(minutes=5)
+        schedule = WorkflowSchedule.create_once(
+            "#V#test_workflow",
+            run_at=past_time,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        schedule.next_run_at = past_time
+        created_id = manager.create_schedule(schedule)
+
+        due = manager.find_due_schedules(limit=10)
+
+        assert any(s.schedule_id == created_id for s in due)
+        mock_list_concepts.assert_not_called()
+
+    def test_find_due_schedules_legacy_relation_fallback(self) -> None:
+        """Due lookup should still work for relations without WS5 context metadata."""
+        from src.backend.db.repositories.text_value_repository import (
+            TextRelationsRepository,
+        )
+
+        manager = WorkflowInstanceManager()
+        past_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+        schedule = WorkflowSchedule.create_once(
+            "#V#test_workflow",
+            run_at=past_time,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        schedule.next_run_at = past_time
+        created_id = manager.create_schedule(schedule)
+
+        # Simulate pre-WS5 records that don't include relation context metadata.
+        TextRelationsRepository.update_many(
+            {
+                "subject_concept_id": created_id,
+                "predicate": {"$in": [PRED_ENABLED, PRED_NEXT_RUN]},
+            },
+            {"$unset": {"context": ""}},
+        )
+
+        due = manager.find_due_schedules(limit=10)
+        assert any(s.schedule_id == created_id for s in due)
+
+    def test_find_due_schedules_with_load_like_fixture(self) -> None:
+        """Due lookup should remain correct with many non-due schedules present."""
+        manager = WorkflowInstanceManager()
+        now = datetime.now(timezone.utc)
+
+        # Seed a moderate backlog of future schedules to emulate production-like
+        # queue shape without making the unit test slow/flaky.
+        for i in range(120):
+            future_schedule = WorkflowSchedule.create_once(
+                "#V#test_workflow",
+                run_at=now + timedelta(hours=2 + i),
+                user_id="user-1",
+                org_id="org-1",
+                namespace="user-1/org-1",
+            )
+            future_schedule.next_run_at = now + timedelta(hours=2 + i)
+            manager.create_schedule(future_schedule)
+
+        due_ids: set[str] = set()
+        for i in range(3):
+            due_schedule = WorkflowSchedule.create_once(
+                "#V#test_workflow",
+                run_at=now - timedelta(minutes=10 + i),
+                user_id="user-1",
+                org_id="org-1",
+                namespace="user-1/org-1",
+            )
+            due_schedule.next_run_at = now - timedelta(minutes=10 + i)
+            due_ids.add(manager.create_schedule(due_schedule))
+
+        due = manager.find_due_schedules(limit=10)
+        returned_ids = {schedule.schedule_id for schedule in due}
+
+        assert due_ids.issubset(returned_ids)
 
     def test_set_schedule_enabled(self) -> None:
         """set_schedule_enabled() should toggle the enabled flag."""
@@ -931,3 +1015,54 @@ class TestScheduleManagement:
 
         assert success is True
         assert manager.get_schedule(schedule_id) is None
+
+
+class TestWorkflowScheduler:
+    """Unit tests for scheduler polling telemetry."""
+
+    def test_process_due_schedules_updates_poll_metrics(self) -> None:
+        manager = MagicMock(spec=WorkflowInstanceManager)
+        now = datetime.now(timezone.utc)
+        due_schedule = WorkflowSchedule.create_once(
+            "#V#test_workflow",
+            run_at=now,
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+        due_schedule.schedule_id = "#V#schedule_test_due_1"
+        due_schedule.default_inputs = {"foo": "bar"}
+        due_schedule.next_run_at = now
+
+        manager.find_due_schedules.return_value = [due_schedule]
+        manager.create_instance.return_value = "instance-1"
+        manager.update_schedule_after_run.return_value = True
+
+        scheduler = WorkflowScheduler(manager)
+        scheduler._process_due_schedules()
+
+        metrics = scheduler.get_poll_metrics()
+        assert metrics["poll_count"] == 1
+        assert metrics["due_schedules_seen_total"] == 1
+        assert metrics["due_count"] == 1
+        assert metrics["triggered_count"] == 1
+        assert metrics["lookup_ms"] >= 0.0
+        assert metrics["total_ms"] >= metrics["lookup_ms"]
+        assert isinstance(metrics["polled_at"], str)
+
+        manager.find_due_schedules.assert_called_once_with(limit=50)
+        manager.create_instance.assert_called_once()
+        manager.update_schedule_after_run.assert_called_once()
+
+    def test_process_due_schedules_records_empty_poll(self) -> None:
+        manager = MagicMock(spec=WorkflowInstanceManager)
+        manager.find_due_schedules.return_value = []
+
+        scheduler = WorkflowScheduler(manager)
+        scheduler._process_due_schedules()
+
+        metrics = scheduler.get_poll_metrics()
+        assert metrics["poll_count"] == 1
+        assert metrics["due_schedules_seen_total"] == 0
+        assert metrics["due_count"] == 0
+        assert metrics["triggered_count"] == 0

@@ -110,6 +110,21 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 		- `tests/backend/test_internal_mcp_workflow_tools.py::test_workflow_list_instances_gateway_invoke_error_path`
 		- `tests/backend/test_internal_mcp_workflow_tools.py::test_workflow_mcp_health_check_gateway_invoke_success_path`
 		- `tests/backend/test_mcp_stdio_unknown_tool_diagnostics.py`
+- 2026-02-08: WS5 durable schedule scalability/correctness (JVNAUTOSCI-1091)
+	- Replaced broad due-schedule concept scans with a query-first path over `text_relations`:
+		- primary due filter uses `predicate=#V#next_run_scheduled_for` + relation context `next_run_epoch_ms`
+		- enabled filter uses `predicate=#V#is_schedule_enabled` + relation context `enabled_bool`
+	- Write path now persists those context fields when schedules are created/updated (`_set_next_run_timestamp`, `_set_enabled_state`), with UTC-normalised timestamps.
+	- Kept compatibility fallback for legacy relations that lack context metadata.
+	- Added scheduler poll telemetry snapshot (`WorkflowScheduler.get_poll_metrics`) including:
+		- due-set size
+		- triggered count
+		- due-lookup latency
+		- total poll latency
+	- Regression anchors:
+		- `tests/backend/test_durable_workflow_system.py::TestScheduleManagement::test_find_due_schedules_avoids_concept_list_scan`
+		- `tests/backend/test_durable_workflow_system.py::TestScheduleManagement::test_find_due_schedules_legacy_relation_fallback`
+		- `tests/backend/test_durable_workflow_system.py::TestWorkflowScheduler::test_process_due_schedules_updates_poll_metrics`
 
 - 2026-01-06 diary
 	- Swift blob store: improved OpenStack cloud config error message; fixed `openstacksdk` object-store method signature compatibility; added regression tests (JVNAUTOSCI-878).

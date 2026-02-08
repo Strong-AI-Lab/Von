@@ -767,6 +767,22 @@ def get_text_relations_collection() -> Collection | None:
                     unique=True,
                 )
 
+            # WS5: query-first due schedule scans use next_run epoch metadata on
+            # schedule relations. This avoids broad in-memory concept scans.
+            if "schedule_due_lookup" not in existing_indexes:
+                coll.create_index(
+                    [
+                        ("predicate", ASCENDING),
+                        ("context.next_run_epoch_ms", ASCENDING),
+                        ("subject_concept_id", ASCENDING),
+                    ],
+                    name="schedule_due_lookup",
+                    partialFilterExpression={
+                        "predicate": "#V#next_run_scheduled_for",
+                        "context.next_run_epoch_ms": {"$exists": True},
+                    },
+                )
+
             # Timestamps
             if "created_at_-1" not in existing_indexes:
                 coll.create_index([("created_at", DESCENDING)], name="created_at_-1")
