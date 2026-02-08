@@ -41,6 +41,12 @@ Do not auto-start the server as part of automation unless explicitly requested.
 When merging feature branches: **commit → push → checkout main → pull → merge → push main → delete branch**.
 Push the feature branch before merging so the remote tracking ref exists; otherwise `git branch -d` warns "not fully merged".
 
+### Subtask branch base guardrail
+- For Jira subtasks, branch from the parent issue branch, not directly from `main`.
+- Example: for `JVNAUTOSCI-1087` (subtask of `JVNAUTOSCI-1084`), create/switch with `git checkout -b JVNAUTOSCI-1087-... JVNAUTOSCI-1084/main`.
+- Verify ancestry before coding: `git merge-base --is-ancestor JVNAUTOSCI-1084/main HEAD` (exit code must be `0`).
+- If the base is wrong and there are no local commits yet: `git rebase JVNAUTOSCI-1084/main`.
+
 ## High-signal references
 - Agent rules: `AGENTS.md`
 - User-facing overview: `USER_GUIDE.md`
