@@ -53,6 +53,15 @@ class WorkflowResult:
     error: str | None = None
 
 
+def state_has_on_failure_transition(state_spec: WorkflowStateSpec) -> bool:
+    """Return True when a state declares an explicit `on_failure` route."""
+    for transition in state_spec.transitions:
+        reason = transition.reason
+        if isinstance(reason, str) and reason.strip().lower() == "on_failure":
+            return True
+    return False
+
+
 class WorkflowExecutor:
     """Execute a workflow definition using a registry of declarative actions."""
 
@@ -94,6 +103,7 @@ class WorkflowExecutor:
                     verdict={"status": "enter"},
                 )
 
+            state_has_failure_route = state_has_on_failure_transition(state_spec)
             for action in state_spec.actions:
                 result = self._registry.execute(
                     action.action_id,
@@ -113,6 +123,10 @@ class WorkflowExecutor:
                         duration_ms=result.duration_ms,
                     )
                 if not result.ok:
+                    if state_has_failure_route:
+                        # Safety envelope (JVNAUTOSCI-1087): preserve the failure
+                        # in context and let transition rules decide recovery.
+                        break
                     if trace is not None:
                         trace.finish_failed(result.error or "action_failed")
                     return WorkflowResult(

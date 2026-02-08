@@ -131,6 +131,81 @@ class TestFallbackHandler:
         assert req.environment is env
 
 
+class TestActionOutcomeEnvelope:
+    """WS2 safety envelope: action outcomes should always stamp context flags."""
+
+    def test_success_stamps_context_outcome_fields(self):
+        def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+            return WorkflowActionResult(
+                status="success",
+                outputs={"ok": True},
+                call_id="call-1",
+                duration_ms=12.5,
+            )
+
+        registry = ActionRegistry()
+        registry.register(ActionSpec(action_id="ok.action", handler=handler))
+        context: dict[str, Any] = {}
+
+        result = registry.execute(
+            "ok.action",
+            inputs={},
+            context=context,
+            env=WorkflowEnvironment(llm_client=None),
+        )
+
+        assert result.ok
+        assert context["last_action_id"] == "ok.action"
+        assert context["last_action_status"] == "success"
+        assert context["last_action_failed"] is False
+        assert context["last_step_ok"] is True
+        assert context["last_action_error"] is None
+        assert context["last_action_call_id"] == "call-1"
+        assert context["last_action_duration_ms"] == 12.5
+
+    def test_failure_stamps_context_outcome_fields(self):
+        def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+            return WorkflowActionResult(status="failed", error="boom")
+
+        registry = ActionRegistry()
+        registry.register(ActionSpec(action_id="fail.action", handler=handler))
+        context: dict[str, Any] = {}
+
+        result = registry.execute(
+            "fail.action",
+            inputs={},
+            context=context,
+            env=WorkflowEnvironment(llm_client=None),
+        )
+
+        assert not result.ok
+        assert context["last_action_id"] == "fail.action"
+        assert context["last_action_status"] == "failed"
+        assert context["last_action_failed"] is True
+        assert context["last_step_ok"] is False
+        assert context["last_action_error"] == "boom"
+
+    def test_invalid_handler_result_fails_closed(self):
+        def bad_handler(request: WorkflowActionRequest) -> Any:
+            return {"not": "a WorkflowActionResult"}
+
+        registry = ActionRegistry()
+        registry.register(ActionSpec(action_id="bad.action", handler=bad_handler))
+        context: dict[str, Any] = {}
+
+        result = registry.execute(
+            "bad.action",
+            inputs={},
+            context=context,
+            env=WorkflowEnvironment(llm_client=None),
+        )
+
+        assert not result.ok
+        assert "invalid_action_result_type:bad.action:dict" == (result.error or "")
+        assert context["last_action_failed"] is True
+        assert context["last_step_ok"] is False
+
+
 # ---------------------------------------------------------------------------
 # _action_mcp_tool_invoke tests (via orchestrator).
 # ---------------------------------------------------------------------------

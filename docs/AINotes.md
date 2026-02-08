@@ -70,6 +70,13 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 		- `jira_get_myself`: returns user profile.
 		- `jira_get_issue` (`JVNAUTOSCI-1086`): returns issue payload (`status=Done`).
 	- If this regresses: rotate token -> update `.env` -> restart Von -> re-run `jira_get_myself`.
+- 2026-02-08: WS2 workflow safety envelope (JVNAUTOSCI-1087)
+	- `ActionRegistry.execute()` now stamps canonical action outcome keys in context (`last_action_failed`, `last_step_ok`, `last_action_error`, etc.) on both success and failure.
+	- `WorkflowExecutor` and `DurableWorkflowExecutor` now honour explicit `on_failure` transitions instead of always failing fast on action errors.
+	- Regression anchors:
+		- `tests/backend/test_e2e_vontology_workflow.py::TestBranchingWorkflowWithMCP::test_on_failure_routes_to_recovery_tool`
+		- `tests/backend/test_durable_workflow_executor_safety.py`
+		- `tests/backend/test_mcp_action_handler.py::TestActionOutcomeEnvelope`
 
 - 2026-01-06 diary
 	- Swift blob store: improved OpenStack cloud config error message; fixed `openstacksdk` object-store method signature compatibility; added regression tests (JVNAUTOSCI-878).

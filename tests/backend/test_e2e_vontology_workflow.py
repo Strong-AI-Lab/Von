@@ -445,30 +445,6 @@ class TestBranchingWorkflowWithMCP:
         gateway.invoke.side_effect = selective_invoke
         orch = _build_orchestrator_with_gateway(gateway)
 
-        # The fallback returns a failed result on exception, which the
-        # engine treats as an action failure.  But the engine itself
-        # stops on action failure — it doesn't check on_failure transitions.
-        #
-        # For on_failure transitions to work, the action must succeed but
-        # set last_action_failed in context.  The current engine stops on
-        # action failure.  This is a known limitation; we test the
-        # simpler happy-path case here.
-        #
-        # For now, test that recovery_tool is reachable when risky_tool
-        # succeeds but sets a falsy result (so on_true doesn't fire).
-
-        # Reset to non-failing gateway.
-        def succeeding_invoke(tool_name, payload=None):
-            result = MagicMock()
-            if tool_name == "risky_tool":
-                result.payload = {}  # Falsy result.
-            else:
-                result.payload = {"recovered": True}
-            result.duration_ms = 5.0
-            return result
-
-        gateway.invoke.side_effect = succeeding_invoke
-
         registry = ActionRegistry()
         registry.set_fallback_handler(orch._action_mcp_tool_invoke)
 
@@ -477,7 +453,9 @@ class TestBranchingWorkflowWithMCP:
 
         result = executor.run(defn, environment=env)
 
-        # With a successful risky_tool (falsy result), the next_step
-        # transition fires (unconditional) → done_step (terminal).
         assert result.completed
-        assert result.final_state == "#V#done_step"
+        assert result.final_state == "#V#recovery_step"
+        assert [call.args[0] for call in gateway.invoke.call_args_list] == [
+            "risky_tool",
+            "recovery_tool",
+        ]

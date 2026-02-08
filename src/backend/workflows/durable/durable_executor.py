@@ -13,8 +13,7 @@ from typing import Any
 
 from ..engine import (
     WorkflowDefinition,
-    WorkflowResult,
-    WorkflowStateSpec,
+    state_has_on_failure_transition,
 )
 from ..action_registry import ActionRegistry, WorkflowEnvironment
 from ..trace_model import WorkflowExecutionTrace
@@ -195,6 +194,7 @@ class DurableWorkflowExecutor:
             )
 
             # Execute actions
+            state_has_failure_route = state_has_on_failure_transition(state_spec)
             for action in state_spec.actions:
                 result = self._registry.execute(
                     action.action_id,
@@ -215,6 +215,11 @@ class DurableWorkflowExecutor:
                 )
 
                 if not result.ok:
+                    if state_has_failure_route:
+                        # Safety envelope (JVNAUTOSCI-1087): if the state defines
+                        # an explicit on_failure branch, do not fail-fast here.
+                        # Keep failure markers in context and evaluate transitions.
+                        break
                     error = result.error or "action_failed"
                     # Checkpoint the failure state
                     self._instance_manager.checkpoint(

@@ -63,6 +63,27 @@ class ActionSpec:
     side_effects: str | None = None
 
 
+def _apply_action_outcome_context(
+    *,
+    context: Dict[str, Any],
+    action_id: str,
+    result: WorkflowActionResult,
+) -> None:
+    """Stamp canonical action outcome flags into workflow context.
+
+    JVNAUTOSCI-1087: `on_failure` transitions depend on `last_action_failed`.
+    Keep these keys centralised here so every execution path (conversation-turn
+    and durable) observes identical post-action state.
+    """
+    context["last_action_id"] = action_id
+    context["last_action_status"] = result.status
+    context["last_action_failed"] = not result.ok
+    context["last_step_ok"] = result.ok
+    context["last_action_error"] = result.error
+    context["last_action_call_id"] = result.call_id
+    context["last_action_duration_ms"] = result.duration_ms
+
+
 class ActionRegistry:
     """Registry of declarative workflow actions.
 
@@ -151,9 +172,15 @@ class ActionRegistry:
             spec.handler if spec is not None else self._fallback_handler
         )
         if handler is None:
-            return WorkflowActionResult(
+            result = WorkflowActionResult(
                 status="failed", error=f"action_not_registered:{action_id}"
             )
+            _apply_action_outcome_context(
+                context=context,
+                action_id=action_id,
+                result=result,
+            )
+            return result
         try:
             request = WorkflowActionRequest(
                 action_id=action_id,
@@ -162,6 +189,23 @@ class ActionRegistry:
                 data=context,
                 trace=trace,
             )
-            return handler(request)
+            raw_result = handler(request)
+            if isinstance(raw_result, WorkflowActionResult):
+                result = raw_result
+            else:
+                result = WorkflowActionResult(
+                    status="failed",
+                    error=(
+                        "invalid_action_result_type:"
+                        f"{action_id}:{type(raw_result).__name__}"
+                    ),
+                )
         except Exception as exc:
-            return WorkflowActionResult(status="failed", error=str(exc))
+            result = WorkflowActionResult(status="failed", error=str(exc))
+
+        _apply_action_outcome_context(
+            context=context,
+            action_id=action_id,
+            result=result,
+        )
+        return result
