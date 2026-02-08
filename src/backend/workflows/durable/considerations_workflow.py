@@ -275,8 +275,9 @@ def _handle_collect_candidates(request: WorkflowActionRequest) -> WorkflowAction
         limit = int(ctx.get("limit", DEFAULT_CANDIDATE_LIMIT))
 
         # If user provided specific IDs, use them
-        if ctx.get("force_concept_ids"):
-            candidates = ctx.get("force_concept_ids")
+        forced_ids = ctx.get("force_concept_ids")
+        if isinstance(forced_ids, list) and forced_ids:
+            candidates = [str(cid) for cid in forced_ids if str(cid).strip()]
         else:
             candidates = _find_concepts_missing_predicate(PREDICATE_ID, limit)
 
@@ -302,7 +303,12 @@ def _handle_prepare_batch(request: WorkflowActionRequest) -> WorkflowActionResul
     """Slice next batch."""
     try:
         ctx = request.data
-        candidates = ctx.get("candidate_ids", [])
+        candidates_raw = ctx.get("candidate_ids", [])
+        candidates = (
+            [str(cid) for cid in candidates_raw if str(cid).strip()]
+            if isinstance(candidates_raw, list)
+            else []
+        )
         batch_index = ctx.get("batch_index", 0)
         batch_size = int(ctx.get("batch_size", DEFAULT_BATCH_SIZE))
 
@@ -371,7 +377,7 @@ def _handle_process_batch(request: WorkflowActionRequest) -> WorkflowActionResul
                 # 3. Generate
                 # Using simple generate for now.
                 response = llm.generate(prompt, llm_params={"max_tokens": 300})
-                text = response.text.strip()
+                text = response.strip()
 
                 if text:
                     # 4. Save

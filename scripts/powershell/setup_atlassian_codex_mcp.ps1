@@ -38,7 +38,7 @@ mcp_oauth_credentials_store = "file"
 
 [mcp_servers.atlassian]
 command = "npx"
-args = ["-y", "mcp-remote", "https://mcp.atlassian.com/v1/sse"]
+args = ["-y", "mcp-remote", "https://mcp.atlassian.com/v1/mcp"]
 startup_timeout_sec = $StartupTimeoutSec
 "@
 

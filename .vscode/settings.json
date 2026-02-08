@@ -317,7 +317,7 @@
   },
   "editor.renderWhitespace": "selection",
   "github.copilot.nextEditSuggestions.enabled": true,
-  "chatgpt.openOnStartup": false,
+  "chatgpt.openOnStartup": true,
   "python.editor.formatOnSave": true,
   "search.exclude": {
     "**/coverage": true,
@@ -347,6 +347,10 @@
     },
     "Global in Code - Insiders: atlassian": {
       "allowedModels": [
+        "copilot/auto",
+        "copilot/claude-sonnet-4",
+        "copilot/gemini-2.5-pro",
+        "copilot/gpt-5",
         "copilot/gpt-5-mini"
       ]
     }

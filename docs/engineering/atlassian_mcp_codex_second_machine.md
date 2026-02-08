@@ -28,7 +28,7 @@ mcp_oauth_credentials_store = "file"
 
 [mcp_servers.atlassian]
 command = "npx"
-args = ["-y", "mcp-remote", "https://mcp.atlassian.com/v1/sse"]
+args = ["-y", "mcp-remote", "https://mcp.atlassian.com/v1/mcp"]
 startup_timeout_sec = 60
 ```
 
@@ -64,8 +64,15 @@ codex exec -s read-only "List my open Jira issues in project JVNAUTOSCI assigned
   - Retry: `codex mcp logout atlassian`, then `codex mcp login atlassian`.
 - MCP startup timeout:
   - Increase `startup_timeout_sec` (e.g. 90).
-- MCP 404 errors against `/v1/sse`:
-  - Use `npx mcp-remote` via the `command/args` config above. That is the supported workaround.
+- MCP 404 errors:
+  - Atlassian MCP endpoint has moved; use `https://mcp.atlassian.com/v1/mcp` (not `/v1/sse`).
+  - Ensure every config surface is aligned:
+    - `C:\Users\<you>\.codex\config.toml`
+    - `<workspace>\.vscode\mcp.json`
+    - `C:\Users\<you>\AppData\Roaming\Code\User\mcp.json` (and Insiders equivalent if present)
+- Atlassian tools only appear on some Copilot models:
+  - Check `chat.mcp.serverSampling` for Atlassian in user/workspace settings.
+  - If `allowedModels` is too narrow (for example only `copilot/gpt-5-mini`), broaden it to include the models you actually use.
 - No Jira access:
   - Confirm the Atlassian account you authorised can access `https://naoinstitute.atlassian.net`.
 

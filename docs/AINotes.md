@@ -7,7 +7,7 @@ Rules of thumb:
 - Prefer pointers over prose.
 - When something is no longer relevant, delete it (or move it to the archive).
 
-Last updated: 2026-01-10
+Last updated: 2026-02-08
 
 ---
 
@@ -49,6 +49,21 @@ Push the feature branch before merging so the remote tracking ref exists; otherw
 
 ## Recent decisions / changes worth remembering
 - Presenter “spoken vs screen” behaviour is documented in Jira (JVNAUTOSCI-894); avoid duplicating the write-up here.
+- 2026-02-08: Atlassian MCP reliability fix
+	- Root cause: mixed MCP endpoints and overly narrow Copilot model sampling.
+	- Canonical Atlassian MCP endpoint is now `https://mcp.atlassian.com/v1/mcp` (not `/v1/sse`).
+	- Keep these aligned when debugging Jira MCP:
+		- `~/.codex/config.toml` (`[mcp_servers.atlassian].url`)
+		- workspace `.vscode/mcp.json` (`servers.atlassian.url`)
+		- VS Code user MCP config (`%APPDATA%\\Code\\User\\mcp.json`, and Insiders equivalent if present)
+	- If Atlassian tools only appear on some models, widen `chat.mcp.serverSampling` for Atlassian in both workspace and user settings.
+- 2026-02-08: Von internal Jira proxy health check
+	- Internal Jira path (`jira_proxy_mcp.py` -> `mcp_server.py`) uses `ATLASSIAN_EMAIL` + `ATLASSIAN_API_TOKEN` (Basic auth), not Atlassian MCP OAuth.
+	- Initial symptom was `jira_get_myself` `401`; resolved by rotating `ATLASSIAN_API_TOKEN`, updating `.env`, and restarting Von.
+	- Current verified state (via `InternalMCPGateway.invoke()`):
+		- `jira_get_myself`: returns user profile.
+		- `jira_get_issue` (`JVNAUTOSCI-1086`): returns issue payload (`status=Done`).
+	- If this regresses: rotate token -> update `.env` -> restart Von -> re-run `jira_get_myself`.
 
 - 2026-01-06 diary
 	- Swift blob store: improved OpenStack cloud config error message; fixed `openstacksdk` object-store method signature compatibility; added regression tests (JVNAUTOSCI-878).
