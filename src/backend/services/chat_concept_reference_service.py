@@ -34,6 +34,8 @@ _CARTOUCHE_ATTR_RE = re.compile(
 
 _DEFAULT_MAX_CONCEPTS = 24
 _DEFAULT_MAX_SUPERTYPES = 4
+_DEFAULT_INCLUDE_STATS = True
+_DEFAULT_STATS_REBUILD_IF_NEEDED = False
 
 
 def _bounded_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
@@ -77,6 +79,20 @@ def _max_supertypes_default() -> int:
 def _include_supertypes_default() -> bool:
     return _bool_from_any(
         os.getenv("VON_CONTEXT_CONCEPT_METADATA_INCLUDE_SUPERTYPES"), True
+    )
+
+
+def _include_stats_default() -> bool:
+    return _bool_from_any(
+        os.getenv("VON_CONTEXT_CONCEPT_METADATA_INCLUDE_STATS"),
+        _DEFAULT_INCLUDE_STATS,
+    )
+
+
+def _stats_rebuild_if_needed_default() -> bool:
+    return _bool_from_any(
+        os.getenv("VON_CONTEXT_CONCEPT_METADATA_STATS_REBUILD_IF_NEEDED"),
+        _DEFAULT_STATS_REBUILD_IF_NEEDED,
     )
 
 
@@ -319,6 +335,8 @@ def build_context_concept_reference_metadata(
     max_concepts: int | None = None,
     include_direct_supertypes: bool | None = None,
     max_direct_supertypes: int | None = None,
+    include_stats: bool | None = None,
+    stats_rebuild_if_needed: bool | None = None,
 ) -> dict[str, Any]:
     """Build bounded concept metadata for references in message context."""
 
@@ -334,6 +352,14 @@ def build_context_concept_reference_metadata(
         _max_supertypes_default()
         if max_direct_supertypes is None
         else max_direct_supertypes
+    )
+    effective_include_stats = (
+        _include_stats_default() if include_stats is None else include_stats
+    )
+    effective_stats_rebuild_if_needed = (
+        _stats_rebuild_if_needed_default()
+        if stats_rebuild_if_needed is None
+        else stats_rebuild_if_needed
     )
 
     bounded_max_concepts = _bounded_int(
@@ -408,6 +434,37 @@ def build_context_concept_reference_metadata(
                 for parent_id in parent_ids
             ]
 
+    stats_status = None
+    if effective_include_stats and concept_ids:
+        try:
+            from .vontology_concept_stats_service import get_vontology_concept_stats
+
+            stats_payload = get_vontology_concept_stats(
+                concept_ids,
+                rebuild_if_needed=bool(effective_stats_rebuild_if_needed),
+                include_stale_values=False,
+            )
+            if isinstance(stats_payload, Mapping):
+                stats_status = stats_payload.get("stats_status")
+                raw_stats = stats_payload.get("concept_stats")
+                concept_stats_map = raw_stats if isinstance(raw_stats, Mapping) else {}
+            else:
+                concept_stats_map = {}
+        except Exception:
+            concept_stats_map = {}
+            stats_status = "failed"
+    else:
+        concept_stats_map = {}
+
+    if concept_stats_map:
+        for entry in entries:
+            concept_id = entry.get("concept_id")
+            if not isinstance(concept_id, str):
+                continue
+            concept_stats = concept_stats_map.get(concept_id)
+            if isinstance(concept_stats, Mapping):
+                entry["stats"] = dict(concept_stats)
+
     return {
         "source": source,
         "metadata_version": 1,
@@ -418,5 +475,8 @@ def build_context_concept_reference_metadata(
         "max_concepts": bounded_max_concepts,
         "include_direct_supertypes": bool(effective_include_supertypes),
         "max_direct_supertypes": bounded_max_supertypes,
+        "include_stats": bool(effective_include_stats),
+        "stats_rebuild_if_needed": bool(effective_stats_rebuild_if_needed),
+        "stats_status": stats_status,
         "concepts": entries,
     }

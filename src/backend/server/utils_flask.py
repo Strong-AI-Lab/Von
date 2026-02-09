@@ -1815,6 +1815,9 @@ def create_flask_app(
         counts_cache = {}
         try:
             from .routes.vontology_routes import _INSTANCE_COUNTS_CACHE  # type: ignore
+            from ..services.vontology_concept_stats_service import (
+                get_vontology_concept_stats_cache_summary,
+            )
 
             ttl_env = os.getenv("VONTOLOGY_COUNTS_TTL")
             size = (
@@ -1822,9 +1825,11 @@ def create_flask_app(
                 if isinstance(_INSTANCE_COUNTS_CACHE, dict)
                 else None
             )
+            summary = get_vontology_concept_stats_cache_summary()
             counts_cache = {
                 "size": size,
                 "ttl_sec": int(ttl_env) if ttl_env and ttl_env.isdigit() else None,
+                "stats_cache": summary,
             }
         except Exception:
             counts_cache = {"error": "unavailable"}

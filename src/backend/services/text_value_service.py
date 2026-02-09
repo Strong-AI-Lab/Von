@@ -29,6 +29,24 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _invalidate_stats_for_predicate_change(predicate: str | None) -> None:
+    """Best-effort stats invalidation for ontology predicate extent changes."""
+
+    if not isinstance(predicate, str) or not predicate.startswith("#V#"):
+        return
+    try:
+        from .vontology_concept_stats_service import (
+            invalidate_vontology_concept_stats_cache,
+        )
+
+        invalidate_vontology_concept_stats_cache(
+            reason="predicate_extent_mutation",
+            affected_concepts=[predicate],
+        )
+    except Exception:
+        pass
+
+
 def _normalize_text(raw: str) -> str:
     """Normalise text for fingerprint/dedup purposes.
 
@@ -184,6 +202,9 @@ def upsert_text_for_concept(
             )
         except Exception:
             pass  # Best effort - don't fail the main operation
+
+    if relation_created:
+        _invalidate_stats_for_predicate_change(predicate)
 
     relation_doc = None
     if relation_id:
@@ -439,6 +460,7 @@ def delete_text_relation_by_predicate_and_text(
 
     # Delete the relation
     TextRelationsRepository.delete_one({"_id": ObjectId(relation_id)})
+    _invalidate_stats_for_predicate_change(predicate)
 
     # Check if the text value is now orphaned
     orphaned = False
@@ -477,7 +499,9 @@ def delete_text_relation(
     if rel.get("subject_concept_id") != subject_concept_id:
         raise ValueError("Relation subject mismatch")
     tv_id = rel.get("object_text_id")
+    predicate = rel.get("predicate")
     TextRelationsRepository.delete_one({"_id": ObjectId(relation_id)})
+    _invalidate_stats_for_predicate_change(predicate if isinstance(predicate, str) else None)
     orphaned = False
     if tv_id and garbage_collect:
         # Check if any other relation references this text value

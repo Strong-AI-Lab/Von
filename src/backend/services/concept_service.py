@@ -117,6 +117,15 @@ def _invalidate_concept_mutation_caches() -> None:
     except Exception:
         pass
 
+    try:
+        from .vontology_concept_stats_service import (
+            invalidate_vontology_concept_stats_cache,
+        )
+
+        invalidate_vontology_concept_stats_cache(reason="concept_mutation")
+    except Exception:
+        pass
+
 
 # REFACTORING_NOTE: Placeholder for potential error/exception classes
 class ConceptServiceError(Exception):

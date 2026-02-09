@@ -116,3 +116,63 @@ def test_build_context_concept_reference_metadata_enforces_concept_cap(monkeypat
         "#V#one",
         "#V#two",
     ]
+
+
+def test_build_context_concept_reference_metadata_attaches_stats_when_available(
+    monkeypatch,
+):
+    def _stub_node_content(concept_id: str, *, reconstruct_md: bool = True):
+        return {
+            "concept_id": concept_id,
+            "display_name": concept_id,
+            "kind": "type",
+            "is_a_type_of": [],
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.chat_concept_reference_service.get_vontology_node_content",
+        _stub_node_content,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_concept_reference_service.get_texts_for_concept",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_concept_reference_service.ConceptsRepository.find",
+        lambda *_args, **_kwargs: [],
+    )
+
+    def _stub_stats(concept_ids, **_kwargs):
+        return {
+            "stats_status": "available",
+            "concept_stats": {
+                concept_id: {
+                    "kind": "type",
+                    "stats_status": "available",
+                    "stats_generated_at": "2026-02-10T08:00:00Z",
+                    "direct_instance_count": 1,
+                    "total_instance_count_in_subtree": 1,
+                    "has_any_instances_in_subtree": True,
+                    "direct_subtype_count": 0,
+                    "total_subtype_count_in_subtree": 0,
+                }
+                for concept_id in concept_ids
+            },
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.vontology_concept_stats_service.get_vontology_concept_stats",
+        _stub_stats,
+    )
+
+    payload = build_context_concept_reference_metadata(
+        [{"role": "assistant", "content": "#V#one"}],
+        max_concepts=10,
+        include_direct_supertypes=False,
+        include_stats=True,
+        stats_rebuild_if_needed=False,
+    )
+    by_id = {entry["concept_id"]: entry for entry in payload["concepts"]}
+
+    assert by_id["#V#one"]["stats"]["stats_status"] == "available"
+    assert by_id["#V#one"]["stats"]["direct_instance_count"] == 1

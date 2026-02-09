@@ -49,3 +49,17 @@ def test_update_concept_reconciles_relationships(monkeypatch):
         ("#V#parent", {"has_subtype": ["#V#child"]}, {"has_subtype": []})
     ]
     assert invalidation_calls == [True]
+
+
+def test_invalidate_concept_mutation_caches_marks_vontology_stats_stale(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "src.backend.services.vontology_concept_stats_service.invalidate_vontology_concept_stats_cache",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(concept_service, "invalidate_phrase_cache", lambda: None)
+
+    concept_service._invalidate_concept_mutation_caches()
+
+    assert calls
+    assert calls[0]["reason"] == "concept_mutation"

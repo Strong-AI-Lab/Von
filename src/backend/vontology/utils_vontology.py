@@ -4333,6 +4333,19 @@ def invalidate_vontology_caches(
         except (ImportError, NameError):
             logger.debug("Salient cache not available for clearing")
 
+        # Invalidate JVNAUTOSCI-959 concept stats cache (versioned stale marker).
+        try:
+            from ..services.vontology_concept_stats_service import (
+                invalidate_vontology_concept_stats_cache,
+            )
+
+            invalidate_vontology_concept_stats_cache(
+                reason=f"vontology_cache_invalidation:{correlation_id}",
+                affected_concepts=affected_concepts,
+            )
+        except Exception:
+            logger.debug("Concept stats cache not available for invalidation")
+
         logger.info(
             f"Invalidated vontology caches for {len(affected_concepts)} affected concepts, correlation_id: {correlation_id}"
         )

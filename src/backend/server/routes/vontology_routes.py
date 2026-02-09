@@ -7,6 +7,7 @@ import uuid
 import time
 import logging
 from collections import defaultdict
+from typing import Any
 
 try:
     from bson import ObjectId  # type: ignore
@@ -661,6 +662,32 @@ def get_node_content_route():
                 return jsonify({**data, "not_found": True}), 200
             status = 404 if "not found" in data["error"].lower() else 400
             return jsonify(data), status
+
+        concept_stats = None
+        try:
+            concept_id = data.get("concept_id")
+            if isinstance(concept_id, str) and concept_id.startswith("#V#"):
+                from ...services.vontology_concept_stats_service import (
+                    get_vontology_concept_stats,
+                )
+
+                stats_payload = get_vontology_concept_stats(
+                    [concept_id],
+                    rebuild_if_needed=False,
+                    include_stale_values=False,
+                )
+                concept_stats_map = (
+                    stats_payload.get("concept_stats")
+                    if isinstance(stats_payload, dict)
+                    else None
+                )
+                if isinstance(concept_stats_map, dict):
+                    stat = concept_stats_map.get(concept_id)
+                    if isinstance(stat, dict):
+                        concept_stats = stat
+        except Exception:
+            concept_stats = None
+
         if raw_only:
             # Provide a trimmed payload emphasizing raw_doc. Keep concept_id and display_name for context.
             # Avoid leaking rendered HTML/derived md_content when raw_only requested.
@@ -671,6 +698,8 @@ def get_node_content_route():
                 "computed_kind": data.get("computed_kind"),
                 "raw_doc": data.get("raw_doc"),
             }
+            if isinstance(concept_stats, dict):
+                trimmed["concept_stats"] = concept_stats
             # Preserve description only if it exists inside preserved_fields but not elsewhere
             if "description" in data:
                 trimmed["description"] = data["description"]
@@ -722,6 +751,9 @@ def get_node_content_route():
                         f"Failed to enrich names for {concept_id}: {e}"
                     )
             return jsonify(trimmed), 200
+
+        if isinstance(concept_stats, dict):
+            data["concept_stats"] = concept_stats
         return jsonify(data), 200
     except Exception as e:  # pragma: no cover
         current_app.logger.error(
@@ -933,6 +965,24 @@ def create_concept_route():
         # Normalize response for frontend convenience: surface concept_id and id at top-level
         if result.get("success") and isinstance(result.get("concept"), dict):
             concept_doc = result["concept"]
+            try:
+                from ...vontology.utils_vontology import invalidate_vontology_caches
+
+                affected = []
+                created_id = concept_doc.get("concept_id")
+                if isinstance(created_id, str):
+                    affected.append(created_id)
+                if isinstance(parent_id, str) and parent_id.startswith("#V#"):
+                    affected.append(parent_id)
+                invalidate_vontology_caches(
+                    affected,
+                    correlation_id=str(uuid.uuid4()),
+                )
+            except Exception:
+                current_app.logger.debug(
+                    "Create concept cache invalidation failed",
+                    exc_info=True,
+                )
             response_body = {
                 **result,
                 "concept_id": concept_doc.get("concept_id"),
@@ -1235,6 +1285,31 @@ def import_nodes_route():
                 result = import_ontology_nodes(nodes_to_import, progress_callback=_cb)
                 store[job_id]["result"] = result
                 store[job_id]["status"] = "completed"
+                if isinstance(result, dict) and result.get("success"):
+                    try:
+                        from ...vontology.utils_vontology import (
+                            invalidate_vontology_caches,
+                        )
+
+                        affected_ids = []
+                        for node in nodes_to_import:
+                            if not isinstance(node, dict):
+                                continue
+                            concept_id = node.get("concept_id")
+                            if isinstance(concept_id, str) and concept_id.startswith(
+                                "#V#"
+                            ):
+                                affected_ids.append(concept_id)
+
+                        invalidate_vontology_caches(
+                            affected_ids,
+                            correlation_id=str(uuid.uuid4()),
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).debug(
+                            "Async import cache invalidation failed",
+                            exc_info=True,
+                        )
             except Exception as e:
                 store[job_id]["status"] = "error"
                 store[job_id]["error"] = str(e)
@@ -1273,6 +1348,26 @@ def import_nodes_route():
         current_app.logger.info(f"Successfully processed import: {success_msg}")
         enhanced_result = result.copy()
         enhanced_result["message"] = success_msg
+        try:
+            from ...vontology.utils_vontology import invalidate_vontology_caches
+
+            affected_ids = []
+            for node in nodes_to_import:
+                if not isinstance(node, dict):
+                    continue
+                concept_id = node.get("concept_id")
+                if isinstance(concept_id, str) and concept_id.startswith("#V#"):
+                    affected_ids.append(concept_id)
+
+            invalidate_vontology_caches(
+                affected_ids,
+                correlation_id=str(uuid.uuid4()),
+            )
+        except Exception:
+            current_app.logger.debug(
+                "Import cache invalidation failed",
+                exc_info=True,
+            )
         if safe_cycles_flag:
             # Ensure cycle_info present (utils now always returns but keep defensive mapping)
             cb = enhanced_result.get("cycle_breaking") or {}
@@ -2235,8 +2330,15 @@ def get_instance_counts():
 
     Query params:
       ids: comma-separated list of concept_id strings (e.g. #V#Person,#V#Organization)
+      rebuild: optional bool (default true). If true, rebuild stats snapshot when stale/missing.
+      include_stale_values: optional bool (default false). If true, returns stale cached values
+          when available, still marked with stats_status=stale.
 
-    Returns JSON mapping concept_id -> { direct: int, indirect: int, total: int }
+    Returns JSON mapping concept_id -> {
+        direct, indirect, total, descendant_count,
+        has_any_instances_in_subtree, direct_subtype_count, total_subtype_count_in_subtree,
+        stats_status, stats_generated_at
+    }
     """
     current_app.logger.info("Received request for /api/vontology/instance_counts")
 
@@ -2249,129 +2351,164 @@ def get_instance_counts():
         if not type_ids:
             return jsonify({"error": "No valid ids provided."}), 400
 
-        repo = ConceptsRepository
-        results = {}
+        rebuild_if_needed = (request.args.get("rebuild") or "1").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        include_stale_values = (request.args.get("include_stale_values") or "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
-        # For each provided type id, compute direct and indirect instance counts
-        from ...vontology.utils_vontology import get_vontology_node_and_descendant_ids
+        from ...services.vontology_concept_stats_service import (
+            STATS_STATUS_AVAILABLE,
+            get_vontology_concept_stats,
+        )
 
-        # Normalize cache key by sorting ids and including access scope to avoid cross-user leaks
-        cache_scope = cache_scope_key()
-        cache_key = f"{cache_scope}|{','.join(sorted(type_ids))}"
-        now_ts = int(time.time())
+        stats_payload = get_vontology_concept_stats(
+            type_ids,
+            rebuild_if_needed=rebuild_if_needed,
+            include_stale_values=include_stale_values,
+        )
+        concept_stats = stats_payload.get("concept_stats") or {}
+        scope_status = stats_payload.get("stats_status")
 
-        # Cache hit check
-        cached = _INSTANCE_COUNTS_CACHE.get(cache_key)
-        if cached:
-            ts, payload = cached
-            if now_ts - ts < _INSTANCE_COUNTS_CACHE_TTL_SECONDS:
-                current_app.logger.debug(
-                    f"/instance_counts cache hit for key: {cache_key}"
-                )
-                return jsonify({"instance_counts": payload})
-            else:
-                # Stale; remove
-                _INSTANCE_COUNTS_CACHE.pop(cache_key, None)
-
+        results: dict[str, dict[str, Any]] = {}
         for tid in type_ids:
-            try:
-                # Resolve descendant ids (includes the tid itself)
-                descendant_ids = get_vontology_node_and_descendant_ids(tid) or [tid]
+            stat = concept_stats.get(tid) if isinstance(concept_stats, dict) else None
+            stat = stat if isinstance(stat, dict) else {}
+            kind = stat.get("kind")
+            stats_status = stat.get("stats_status", scope_status)
 
-                # Direct instances: documents that list tid specifically in relationships.is_an_instance_of
-                # Build a proper query that matches documents which list tid as an instance
-                # and exclude documents that are collections/types. Use $and with nested $or
-                # to avoid overwriting keys in the dict.
-                direct_query = {
-                    "$and": [
-                        {
-                            "$or": [
-                                {"relationships.is_an_instance_of": tid},
-                                {"relationships.is_an_instance_of": {"$in": [tid]}},
-                            ]
-                        },
-                        {
-                            "$or": [
-                                {"metadata.concept_type": {"$exists": False}},
-                                {"metadata.concept_type": {"$ne": "collection"}},
-                            ]
-                        },
-                    ]
-                }
-                direct_count = repo.count_documents(direct_query)
+            direct_raw = stat.get("direct_instance_count")
+            total_raw = stat.get("total_instance_count_in_subtree")
+            subtype_total_raw = stat.get("total_subtype_count_in_subtree")
 
-                # Indirect instances: instances of descendant types excluding direct instances of tid
-                # Some repositories or test doubles (DummyRepo) may interpret a single $in query
-                # in a way that doesn't sum counts per-member; to be robust, sum counts per descendant id.
-                try:
-                    descendant_total = 0
-                    for did in descendant_ids:
-                        # Build same direct-style query but for each descendant id
-                        per_desc_query = {
-                            "$and": [
-                                {
-                                    "$or": [
-                                        {"relationships.is_an_instance_of": did},
-                                        {
-                                            "relationships.is_an_instance_of": {
-                                                "$in": [did]
-                                            }
-                                        },
-                                    ]
-                                },
-                                {
-                                    "$or": [
-                                        {"metadata.concept_type": {"$exists": False}},
-                                        {
-                                            "metadata.concept_type": {
-                                                "$ne": "collection"
-                                            }
-                                        },
-                                    ]
-                                },
-                            ]
-                        }
-                        descendant_total += int(repo.count_documents(per_desc_query))
-
-                    indirect_total = descendant_total
-                    # Instances that are only indirect (i.e., instances of descendants but not direct instances of tid)
-                    indirect_count = max(0, indirect_total - direct_count)
-                except Exception:
-                    # Fallback: single $in query if per-id counting fails
-                    indirect_query = {
-                        "relationships.is_an_instance_of": {"$in": descendant_ids}
-                    }
-                    indirect_total = repo.count_documents(indirect_query)
-                    indirect_count = max(0, indirect_total - direct_count)
-
-                results[tid] = {
-                    "direct": int(direct_count),
-                    "indirect": int(indirect_count),
-                    "total": int(direct_count + indirect_count),
-                    "descendant_count": int(len(descendant_ids)),
-                }
-            except Exception as e:
-                current_app.logger.error(
-                    f"Error computing counts for {tid}: {e}", exc_info=True
-                )
-                results[tid] = {"error": str(e)}
-
-        # Store in cache
-        try:
-            _INSTANCE_COUNTS_CACHE[cache_key] = (now_ts, results)
-        except Exception:
-            # Non-fatal if cache write fails
-            current_app.logger.debug(
-                "Failed to write to instance_counts cache; continuing without caching"
+            direct = int(direct_raw) if isinstance(direct_raw, int) else None
+            total = int(total_raw) if isinstance(total_raw, int) else None
+            indirect = (total - direct) if (isinstance(total, int) and isinstance(direct, int)) else None
+            descendant_count = (
+                int(subtype_total_raw) + 1 if isinstance(subtype_total_raw, int) else None
             )
 
-        return jsonify({"instance_counts": results})
+            result_row: dict[str, Any] = {
+                "direct": direct,
+                "indirect": indirect,
+                "total": total,
+                "descendant_count": descendant_count,
+                "has_any_instances_in_subtree": stat.get("has_any_instances_in_subtree"),
+                "direct_subtype_count": stat.get("direct_subtype_count"),
+                "total_subtype_count_in_subtree": stat.get(
+                    "total_subtype_count_in_subtree"
+                ),
+                "stats_status": stats_status,
+                "stats_generated_at": stat.get("stats_generated_at"),
+            }
+
+            if kind != "type":
+                result_row["stats_reason"] = (
+                    "not_a_type_concept"
+                    if stats_status == STATS_STATUS_AVAILABLE
+                    else stat.get("stats_reason")
+                )
+            elif stats_status != STATS_STATUS_AVAILABLE:
+                result_row["stats_reason"] = stat.get("stats_reason")
+            elif stat.get("stats_unavailable"):
+                result_row["stats_reason"] = stat.get("stats_reason")
+
+            if isinstance(stat.get("stats_error"), str):
+                result_row["stats_error"] = stat.get("stats_error")
+
+            results[tid] = result_row
+
+        # Retain lightweight endpoint-local cache for diagnostics compatibility.
+        try:
+            cache_scope = cache_scope_key()
+            cache_key = f"{cache_scope}|{','.join(sorted(type_ids))}"
+            _INSTANCE_COUNTS_CACHE[cache_key] = (int(time.time()), results)
+        except Exception:
+            current_app.logger.debug(
+                "Failed to write compatibility instance_counts cache entry",
+                exc_info=True,
+            )
+
+        return jsonify(
+            {
+                "instance_counts": results,
+                "stats_status": stats_payload.get("stats_status"),
+                "stats_generated_at": stats_payload.get("stats_generated_at"),
+            }
+        )
     except Exception as e:
         current_app.logger.error(f"Error in /instance_counts: {e}", exc_info=True)
         return (
             jsonify(
                 {
                     "error": "Failed to compute instance counts due to an internal server error."
+                }
+            ),
+            500,
+        )
+
+
+@vontology_bp.route("/concept_stats", methods=["GET"])
+def get_concept_stats_route():
+    """Return status-aware cached stats for one or more concept IDs.
+
+    Query params:
+      ids: comma-separated concept IDs (preferred)
+      id: single concept ID (fallback)
+      rebuild: optional bool, default false
+      include_stale_values: optional bool, default false
+    """
+    ids_param = request.args.get("ids", "")
+    id_param = request.args.get("id", "")
+    if not ids_param and not id_param:
+        return jsonify({"error": "Missing 'ids' or 'id' query parameter."}), 400
+
+    concept_ids = []
+    if ids_param:
+        concept_ids.extend([i.strip() for i in ids_param.split(",") if i.strip()])
+    if id_param:
+        concept_ids.append(id_param.strip())
+    concept_ids = list(dict.fromkeys([c for c in concept_ids if c]))
+    if not concept_ids:
+        return jsonify({"error": "No valid concept IDs provided."}), 400
+
+    rebuild_if_needed = (request.args.get("rebuild") or "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    include_stale_values = (
+        (request.args.get("include_stale_values") or "0").lower()
+        in ("1", "true", "yes", "on")
+    )
+
+    try:
+        from ...services.vontology_concept_stats_service import (
+            get_vontology_concept_stats,
+        )
+
+        payload = get_vontology_concept_stats(
+            concept_ids,
+            rebuild_if_needed=rebuild_if_needed,
+            include_stale_values=include_stale_values,
+        )
+        return jsonify(payload), 200
+    except Exception as exc:
+        current_app.logger.error(
+            "Error in /concept_stats: %s", exc, exc_info=True
+        )
+        return (
+            jsonify(
+                {
+                    "error": "Failed to compute concept stats due to an internal server error."
                 }
             ),
             500,
@@ -3263,6 +3400,19 @@ def add_relationship_route():
             inv_kind, inv_src, inv_tgt = inverse_map[kind]
             _ensure_array_and_add(inv_src, inv_kind, inv_tgt)
 
+        try:
+            from ...vontology.utils_vontology import invalidate_vontology_caches
+
+            invalidate_vontology_caches(
+                [source_id, target_id],
+                correlation_id=str(uuid.uuid4()),
+            )
+        except Exception:
+            current_app.logger.debug(
+                "Relationship add cache invalidation failed",
+                exc_info=True,
+            )
+
         return jsonify({"success": True, "message": "Relationship added."}), 200
     except Exception as e:
         current_app.logger.error(f"Error adding relationship: {e}", exc_info=True)
@@ -4074,6 +4224,19 @@ def remove_relationship_route():
             }
             inv_kind, inv_src, inv_tgt = inverse_map[kind]
             _ensure_array_and_remove(inv_src, inv_kind, inv_tgt)
+
+        try:
+            from ...vontology.utils_vontology import invalidate_vontology_caches
+
+            invalidate_vontology_caches(
+                [source_id, target_id],
+                correlation_id=str(uuid.uuid4()),
+            )
+        except Exception:
+            current_app.logger.debug(
+                "Relationship remove cache invalidation failed",
+                exc_info=True,
+            )
 
         return jsonify({"success": True, "message": "Relationship removed."}), 200
     except Exception as e:
