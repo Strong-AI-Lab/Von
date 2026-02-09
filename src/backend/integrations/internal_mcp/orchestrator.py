@@ -424,6 +424,30 @@ class InternalMCPChatOrchestrator:
     _MISSING_TOOL_CLASSIFIER_PROMPTS = ("#V#missing_tool_call_classifier_prompt",)
     _MISSING_TOOL_RETRY_PROMPTS = ("#V#missing_tool_call_retry_prompt",)
     _TURN_SELECTOR_PROMPTS = ("#V#chat_turn_classifier_prompt",)
+    # Completion-claim validation guardrails (JVNAUTOSCI-940).
+    # Keep this bounded and deterministic so we avoid extra LLM traffic while
+    # still surfacing when the assistant claims work is already complete.
+    _COMPLETION_CLAIM_MAX_CANDIDATES = 8
+    _COMPLETION_CLAIM_MAX_TEXT_CHARS = 16_000
+    _COMPLETION_CLAIM_VERB_PATTERN = re.compile(
+        r"\b(i|we)\s+(?:have\s+|had\s+)?(?:successfully\s+)?"
+        r"(completed|finished|implemented|created|added|updated|deleted|removed|linked|"
+        r"merged|pushed|committed|commented|transitioned|assigned|validated|verified|"
+        r"executed|ran|invoked|called|retrieved|fetched|searched|resolved|fixed|closed)\b",
+        flags=re.IGNORECASE,
+    )
+    _COMPLETION_CLAIM_LINE_START_PATTERN = re.compile(
+        r"^(completed|finished|implemented|created|added|updated|deleted|removed|"
+        r"linked|merged|pushed|committed|commented|transitioned|assigned|validated|"
+        r"verified|executed|ran|invoked|called|retrieved|fetched|searched|"
+        r"resolved|fixed|closed)\b",
+        flags=re.IGNORECASE,
+    )
+    _COMPLETION_CLAIM_INTENT_PATTERN = re.compile(
+        r"\b(i will|i'll|we will|we'll|i am going to|i'm going to|we are going to|"
+        r"we're going to|let me|about to)\b",
+        flags=re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -3593,6 +3617,398 @@ class InternalMCPChatOrchestrator:
         telemetry = self._last_base_system_prompt_telemetry
         self._last_base_system_prompt_telemetry = None
         return telemetry
+
+    @staticmethod
+    def _strip_fenced_code_blocks(text: str) -> tuple[str, bool]:
+        """Strip markdown fenced code blocks for safer claim detection."""
+
+        if not isinstance(text, str) or not text:
+            return "", False
+        # Handles both closed and unterminated fences by treating the
+        # remainder as code content.
+        stripped, substitutions = re.subn(
+            r"```[\w+\-]*\n.*?(?:```|$)",
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+        return stripped, substitutions > 0
+
+    @classmethod
+    def _extract_completion_claim_candidates(
+        cls,
+        response_text: str,
+        *,
+        max_claims: int | None = None,
+    ) -> tuple[list[str], Mapping[str, Any]]:
+        """Extract likely completion claims from assistant prose.
+
+        Claims inside markdown code fences are ignored by design.
+        """
+
+        if not isinstance(response_text, str) or not response_text.strip():
+            return (
+                [],
+                {
+                    "code_fence_stripped": False,
+                    "text_chars_considered": 0,
+                    "segment_count": 0,
+                    "claim_count": 0,
+                    "claim_cap": 0,
+                },
+            )
+
+        claim_cap = cls._COMPLETION_CLAIM_MAX_CANDIDATES
+        if max_claims is not None:
+            try:
+                claim_cap = int(max_claims)
+            except Exception:
+                claim_cap = cls._COMPLETION_CLAIM_MAX_CANDIDATES
+        claim_cap = max(1, min(20, claim_cap))
+
+        stripped_text, stripped_any_fence = cls._strip_fenced_code_blocks(
+            response_text
+        )
+        searchable = stripped_text[: cls._COMPLETION_CLAIM_MAX_TEXT_CHARS]
+        segments: list[str] = []
+        for raw_line in searchable.splitlines():
+            line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s*", "", raw_line).strip()
+            if not line:
+                continue
+            parts = re.split(r"(?<=[.!?])\s+", line)
+            for part in parts:
+                sentence = " ".join(part.strip().split())
+                if sentence:
+                    segments.append(sentence)
+
+        claims: list[str] = []
+        seen_claims: set[str] = set()
+        for segment in segments:
+            lowered = segment.lower()
+            if len(lowered) < 12:
+                continue
+            if cls._COMPLETION_CLAIM_INTENT_PATTERN.search(lowered):
+                continue
+            if not (
+                cls._COMPLETION_CLAIM_VERB_PATTERN.search(lowered)
+                or cls._COMPLETION_CLAIM_LINE_START_PATTERN.search(lowered)
+            ):
+                continue
+            key = lowered[:400]
+            if key in seen_claims:
+                continue
+            seen_claims.add(key)
+            claims.append(segment[:400])
+            if len(claims) >= claim_cap:
+                break
+
+        return (
+            claims,
+            {
+                "code_fence_stripped": stripped_any_fence,
+                "text_chars_considered": len(searchable),
+                "segment_count": len(segments),
+                "claim_count": len(claims),
+                "claim_cap": claim_cap,
+            },
+        )
+
+    @staticmethod
+    def _summarise_tool_invocation_outcomes(
+        tool_invocations: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[str], list[str]]:
+        """Return (successful_tools, failed_tools) preserving first-seen order."""
+
+        successful: list[str] = []
+        failed: list[str] = []
+        seen_success: set[str] = set()
+        seen_failed: set[str] = set()
+
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_name = invocation.get("tool")
+            if not isinstance(raw_name, str):
+                continue
+            tool_name = raw_name.strip()
+            if not tool_name or tool_name.startswith("__"):
+                continue
+
+            error_value = invocation.get("error")
+            payload = invocation.get("payload")
+            status_value = ""
+            if isinstance(payload, Mapping):
+                raw_status = payload.get("status")
+                if isinstance(raw_status, str):
+                    status_value = raw_status.strip().lower()
+
+            failed_invocation = bool(
+                (isinstance(error_value, str) and error_value.strip())
+                or status_value in {"error", "failed", "failure"}
+            )
+            lowered = tool_name.lower()
+            if failed_invocation:
+                if lowered not in seen_failed:
+                    failed.append(tool_name)
+                    seen_failed.add(lowered)
+                continue
+            if lowered not in seen_success:
+                successful.append(tool_name)
+                seen_success.add(lowered)
+
+        return successful, failed
+
+    @classmethod
+    def _validate_completion_claims(
+        cls,
+        *,
+        claims: Sequence[str],
+        tool_invocations: Sequence[Mapping[str, Any]],
+        tool_messages: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        """Validate completion claims against observed tool execution evidence."""
+
+        successful_tools, failed_tools = cls._summarise_tool_invocation_outcomes(
+            tool_invocations
+        )
+        all_tools = list(successful_tools)
+        for tool_name in failed_tools:
+            if tool_name.lower() not in {item.lower() for item in all_tools}:
+                all_tools.append(tool_name)
+
+        action_hint_map: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+            (("create", "created", "add", "added", "new"), ("create", "add", "insert")),
+            (
+                ("update", "updated", "edit", "edited", "modify", "modified", "rename"),
+                ("update", "edit", "modify", "rename", "set"),
+            ),
+            (("delete", "deleted", "remove", "removed", "drop"), ("delete", "remove", "drop")),
+            (
+                ("search", "searched", "fetch", "fetched", "retrieve", "retrieved", "list", "listed"),
+                ("search", "fetch", "get", "read", "list"),
+            ),
+            (("comment", "commented"), ("comment",)),
+            (("transition", "transitioned", "status", "moved"), ("transition", "status", "move")),
+            (("assign", "assigned"), ("assign",)),
+            (("merge", "merged"), ("merge",)),
+            (("push", "pushed", "commit", "committed"), ("push", "commit")),
+        )
+
+        successful_lookup = {tool.lower(): tool for tool in successful_tools}
+        validated: list[dict[str, Any]] = []
+        verified: list[dict[str, Any]] = []
+        not_verified: list[dict[str, Any]] = []
+
+        for claim in claims:
+            lowered_claim = claim.lower()
+
+            mentioned_tools = [
+                tool for tool in all_tools if tool.lower() in lowered_claim
+            ]
+
+            hinted_tools: list[str] = []
+            for claim_tokens, tool_tokens in action_hint_map:
+                if not any(token in lowered_claim for token in claim_tokens):
+                    continue
+                for tool_name in all_tools:
+                    lowered_tool = tool_name.lower()
+                    if any(token in lowered_tool for token in tool_tokens):
+                        hinted_tools.append(tool_name)
+
+            candidate_tools: list[str] = []
+            for tool_name in mentioned_tools + hinted_tools:
+                if tool_name.lower() not in {t.lower() for t in candidate_tools}:
+                    candidate_tools.append(tool_name)
+
+            if mentioned_tools:
+                strategy = "explicit_tool_name_match"
+            elif candidate_tools:
+                strategy = "tool_name_hint_match"
+            else:
+                strategy = "any_successful_tool"
+
+            matched_success = [
+                successful_lookup.get(tool_name.lower())
+                for tool_name in candidate_tools
+                if tool_name.lower() in successful_lookup
+            ]
+            matched_success = [item for item in matched_success if isinstance(item, str)]
+
+            if strategy == "any_successful_tool":
+                if successful_tools:
+                    evidence_tools = successful_tools[:2]
+                    record = {
+                        "claim": claim,
+                        "status": "verified",
+                        "strategy": strategy,
+                        "evidence": f"Observed successful tool call(s): {', '.join(evidence_tools)}.",
+                    }
+                    verified.append(record)
+                else:
+                    record = {
+                        "claim": claim,
+                        "status": "not_verified",
+                        "strategy": strategy,
+                        "reason": "No successful tool invocations were recorded for this response.",
+                    }
+                    not_verified.append(record)
+                validated.append(record)
+                continue
+
+            if matched_success:
+                record = {
+                    "claim": claim,
+                    "status": "verified",
+                    "strategy": strategy,
+                    "candidate_tools": list(candidate_tools),
+                    "evidence": "Matched successful tool invocation: "
+                    + ", ".join(matched_success[:2])
+                    + ".",
+                }
+                verified.append(record)
+                validated.append(record)
+                continue
+
+            if candidate_tools:
+                reason = (
+                    "No successful invocation matched the expected tool(s): "
+                    + ", ".join(candidate_tools[:3])
+                    + "."
+                )
+            else:
+                reason = "No matching tool invocation evidence was found."
+            record = {
+                "claim": claim,
+                "status": "not_verified",
+                "strategy": strategy,
+                "candidate_tools": list(candidate_tools),
+                "reason": reason,
+            }
+            not_verified.append(record)
+            validated.append(record)
+
+        return {
+            "validated": validated,
+            "verified": verified,
+            "not_verified": not_verified,
+            "successful_tools": successful_tools,
+            "failed_tools": failed_tools,
+            "tool_messages_observed": len(tool_messages),
+        }
+
+    @staticmethod
+    def _render_completion_claim_validation_summary(
+        *,
+        verified: Sequence[Mapping[str, Any]],
+        not_verified: Sequence[Mapping[str, Any]],
+    ) -> str:
+        if not verified and not not_verified:
+            return ""
+
+        lines = ["Completion claim validation summary:", "Verified:"]
+        if verified:
+            for item in verified:
+                claim = str(item.get("claim") or "").strip()
+                evidence = str(item.get("evidence") or "").strip()
+                if claim and evidence:
+                    lines.append(f"- {claim} ({evidence})")
+                elif claim:
+                    lines.append(f"- {claim}")
+        else:
+            lines.append("- None")
+
+        lines.append("Not verified:")
+        if not_verified:
+            for item in not_verified:
+                claim = str(item.get("claim") or "").strip()
+                reason = str(item.get("reason") or "").strip()
+                if claim and reason:
+                    lines.append(f"- {claim} ({reason})")
+                elif claim:
+                    lines.append(f"- {claim}")
+        else:
+            lines.append("- None")
+
+        return "\n".join(lines)
+
+    def _apply_completion_claim_validation(
+        self,
+        response_text: str,
+        *,
+        tool_invocations: Sequence[Mapping[str, Any]],
+        tool_messages: Sequence[Mapping[str, Any]],
+        aux_log: list[Mapping[str, Any]] | None,
+    ) -> str:
+        """Append a verified/not-verified summary for likely completion claims."""
+
+        if not isinstance(response_text, str) or not response_text.strip():
+            return response_text if isinstance(response_text, str) else str(response_text)
+
+        try:
+            claims, detection = self._extract_completion_claim_candidates(response_text)
+
+            if isinstance(aux_log, list):
+                aux_log.append(
+                    {
+                        "type": "completion_claim_detection",
+                        "claim_count": len(claims),
+                        **dict(detection),
+                    }
+                )
+
+            if not claims:
+                return response_text
+
+            validation = self._validate_completion_claims(
+                claims=claims,
+                tool_invocations=tool_invocations,
+                tool_messages=tool_messages,
+            )
+            verified = cast(
+                Sequence[Mapping[str, Any]], validation.get("verified") or []
+            )
+            not_verified = cast(
+                Sequence[Mapping[str, Any]], validation.get("not_verified") or []
+            )
+
+            if isinstance(aux_log, list):
+                aux_log.append(
+                    {
+                        "type": "completion_claim_validation",
+                        "claim_count": len(claims),
+                        "verified_count": len(verified),
+                        "not_verified_count": len(not_verified),
+                        "successful_tools": list(validation.get("successful_tools") or []),
+                        "failed_tools": list(validation.get("failed_tools") or []),
+                        "tool_messages_observed": int(
+                            validation.get("tool_messages_observed") or 0
+                        ),
+                    }
+                )
+
+            summary = self._render_completion_claim_validation_summary(
+                verified=verified,
+                not_verified=not_verified,
+            )
+            if not summary:
+                return response_text
+
+            base = response_text.rstrip()
+            if not base:
+                return summary
+            return f"{base}\n\n{summary}"
+        except Exception as exc:
+            if isinstance(aux_log, list):
+                try:
+                    aux_log.append(
+                        {
+                            "type": "completion_claim_validation",
+                            "error": str(exc),
+                        }
+                    )
+                except Exception:
+                    pass
+            return response_text
 
     @staticmethod
     def _looks_like_missing_tool_call(response: str) -> bool:
@@ -8093,6 +8509,19 @@ class InternalMCPChatOrchestrator:
             )
             return response_text
 
+        def _maybe_append_completion_claim_validation(
+            response_text: str,
+            *,
+            tool_invocations_for_validation: Sequence[Mapping[str, Any]] = (),
+            tool_messages_for_validation: Sequence[Mapping[str, Any]] = (),
+        ) -> str:
+            return self._apply_completion_claim_validation(
+                response_text,
+                tool_invocations=tool_invocations_for_validation,
+                tool_messages=tool_messages_for_validation,
+                aux_log=aux_llm_calls,
+            )
+
         if not self._gateway.enabled or self._max_tool_invocations <= 0:
             planner_model = _model_for_stage("planner")
             if trace_enabled and trace is not None:
@@ -8154,6 +8583,7 @@ class InternalMCPChatOrchestrator:
                     return result
             response_text = response if isinstance(response, str) else str(response)
             response_text = _maybe_apply_critic(response_text)
+            response_text = _maybe_append_completion_claim_validation(response_text)
             result = OrchestratorResult(
                 response_text=response_text,
                 extra_messages=(),
@@ -8424,6 +8854,7 @@ class InternalMCPChatOrchestrator:
                 )
             response_text = response if isinstance(response, str) else str(response)
             response_text = _maybe_apply_critic(response_text)
+            response_text = _maybe_append_completion_claim_validation(response_text)
             result = OrchestratorResult(
                 response_text=response_text,
                 extra_messages=(),
@@ -8470,6 +8901,7 @@ class InternalMCPChatOrchestrator:
                             f"Workflow {selected_workflow_id} completed "
                             f"(state: {wf_result.final_state})."
                         )
+                    wf_response = _maybe_append_completion_claim_validation(wf_response)
                     aux_llm_calls.append(
                         {
                             "type": "workflow_execution",
@@ -8601,6 +9033,11 @@ class InternalMCPChatOrchestrator:
         final_response_text = _maybe_apply_narration_routing(final_response)
         final_response_text = _maybe_apply_critic(
             final_response_text, tool_messages_for_critic=tool_messages
+        )
+        final_response_text = _maybe_append_completion_claim_validation(
+            final_response_text,
+            tool_invocations_for_validation=tuple(invocations),
+            tool_messages_for_validation=tuple(tool_messages),
         )
 
         # JVNAUTOSCI-984: Emit completed phase transition.

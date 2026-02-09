@@ -429,6 +429,20 @@ def test_looks_like_missing_tool_call_ignores_long_prose():
     assert not orchestrator._looks_like_missing_tool_call(text)
 
 
+def test_extract_completion_claim_candidates_ignores_markdown_code_fences():
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    text = (
+        "```text\n"
+        "I completed the migration and merged the branch.\n"
+        "```\n"
+        "This is only a draft note for discussion."
+    )
+
+    claims, telemetry = orchestrator._extract_completion_claim_candidates(text)
+    assert claims == []
+    assert telemetry["code_fence_stripped"] is True
+
+
 def test_llm_detector_returns_true_on_yes():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     orchestrator._missing_tool_call_detector_loaded = True
@@ -869,3 +883,73 @@ def test_run_applies_missing_tool_retry_budget_across_plan_and_backfill():
 
     # The fourth scripted response remains unused when no second retry occurs.
     assert len(llm.calls) == 3
+
+
+def test_run_appends_completion_claim_validation_for_unverified_claims():
+    llm = _RecorderLLM(
+        [
+            "I completed the task and merged the branch.",
+        ]
+    )
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+        max_tool_invocations=1,
+    )
+
+    result = orchestrator.run(
+        prompt="What happened?",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert "Completion claim validation summary:" in result.response_text
+    assert "Not verified:" in result.response_text
+    assert "I completed the task and merged the branch." in result.response_text
+
+    aux_types = [
+        entry.get("type")
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+    ]
+    assert "completion_claim_detection" in aux_types
+    assert "completion_claim_validation" in aux_types
+
+
+def test_run_skips_completion_claim_validation_for_non_claim_responses():
+    llm = _RecorderLLM(
+        [
+            "Here are two options for next steps, and I can apply either approach.",
+        ]
+    )
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_DummyGateway(),  # type: ignore[arg-type]
+        max_tool_invocations=1,
+    )
+
+    result = orchestrator.run(
+        prompt="What next?",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert "Completion claim validation summary:" not in result.response_text
+
+    detection_entries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "completion_claim_detection"
+    ]
+    assert detection_entries
+    assert detection_entries[0].get("claim_count") == 0
+    assert all(
+        not (
+            isinstance(entry, dict)
+            and entry.get("type") == "completion_claim_validation"
+        )
+        for entry in result.aux_llm_calls
+    )
