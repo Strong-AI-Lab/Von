@@ -71,6 +71,10 @@ class SearchProxyConfig:
     api_key: str
     command: str = "npx"
     timeout_sec: float = 30.0
+    # Keep retry bounded to avoid tool-call thrashing while still covering
+    # transient transport/server flakiness (e.g., TaskGroup upstream errors).
+    max_transient_retries: int = 1
+    retry_backoff_sec: float = 0.35
 
 
 @dataclass
@@ -86,6 +90,8 @@ class SearchProxyErrorDetails:
     timestamp_utc: Optional[str] = None
     underlying_error: Optional[str] = None
     suggestions: List[str] = field(default_factory=list)
+    retry_attempt: Optional[int] = None
+    retry_max: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {
@@ -106,6 +112,10 @@ class SearchProxyErrorDetails:
             d["underlying_error"] = self.underlying_error
         if self.suggestions:
             d["suggestions"] = self.suggestions
+        if self.retry_attempt is not None:
+            d["retry_attempt"] = self.retry_attempt
+        if self.retry_max is not None:
+            d["retry_max"] = self.retry_max
         return d
 
 
@@ -146,6 +156,74 @@ class SearchMCPProxy:
         )
         return MCPStdIOClient(config)
 
+    @staticmethod
+    def _classify_error(error_str: str) -> tuple[str, list[str]]:
+        """Classify proxy errors and provide actionable suggestions."""
+        lowered = error_str.lower()
+        if "timeout" in lowered:
+            return (
+                "timeout",
+                [
+                    "The Tavily API is slow or unresponsive",
+                    "Check your network connection",
+                    "Try again in a few moments",
+                ],
+            )
+        if "connection refused" in lowered:
+            return (
+                "connection_refused",
+                [
+                    "The Tavily MCP subprocess failed to start",
+                    "Ensure Node.js and npx are installed",
+                    "Check TAVILY_API_KEY is valid",
+                ],
+            )
+        if "api" in lowered and "key" in lowered:
+            return (
+                "api_key_error",
+                [
+                    "TAVILY_API_KEY may be invalid or expired",
+                    "Check your Tavily account status",
+                ],
+            )
+        if "rate" in lowered or "limit" in lowered:
+            return (
+                "rate_limit",
+                [
+                    "Tavily API rate limit reached",
+                    "Wait before retrying",
+                    "Consider upgrading your Tavily plan",
+                ],
+            )
+        return (
+            "mcp_tool_error",
+            [
+                "Check the URL is accessible",
+                "The target site may block automated requests",
+                "Try a different URL or use web search as fallback",
+            ],
+        )
+
+    @staticmethod
+    def _is_transient_error(error_type: str, error_str: str) -> bool:
+        """Detect failure classes worth one bounded retry."""
+        if error_type in {"timeout", "connection_refused", "rate_limit"}:
+            return True
+        lowered = error_str.lower()
+        # TaskGroup and related transport issues are usually transient in practice.
+        transient_markers = (
+            "taskgroup",
+            "temporar",
+            "connection reset",
+            "server disconnected",
+            "broken pipe",
+            "econnreset",
+            "503",
+            "502",
+            "504",
+        )
+        return any(marker in lowered for marker in transient_markers)
+
     async def _call_tool(
         self,
         tool_name: str,
@@ -170,90 +248,74 @@ class SearchMCPProxy:
         Raises:
             SearchProxyError: If tool call fails (with detailed diagnostics)
         """
-        start_time = time.perf_counter()
-        timestamp_utc = datetime.now(timezone.utc).isoformat()
+        # Only apply Tavily's formatted-text parser to `tavily-search`.
+        # `tavily-extract` frequently returns JSON; forcing the search parser can
+        # incorrectly yield empty results (e.g., {"results": []}) and mask the
+        # underlying content.
+        text_parser = _parse_tavily_text_response if tool_name == "tavily-search" else None
+        retry_max = max(0, int(self._config.max_transient_retries))
+        retry_attempt = 0
 
-        try:
-            # Only apply Tavily's formatted-text parser to `tavily-search`.
-            # `tavily-extract` frequently returns JSON; forcing the search parser can
-            # incorrectly yield empty results (e.g., {"results": []}) and mask the
-            # underlying content.
-            text_parser = (
-                _parse_tavily_text_response if tool_name == "tavily-search" else None
-            )
-            result = await self._client.call_tool(
-                tool_name,
-                arguments,
-                text_parser=text_parser,
-            )
-            return result
-        except MCPToolClientError as exc:
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            error_str = str(exc)
+        while True:
+            start_time = time.perf_counter()
+            timestamp_utc = datetime.now(timezone.utc).isoformat()
+            try:
+                return await self._client.call_tool(
+                    tool_name,
+                    arguments,
+                    text_parser=text_parser,
+                )
+            except MCPToolClientError as exc:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                error_str = str(exc)
+                error_type, suggestions = self._classify_error(error_str)
+                is_transient = self._is_transient_error(error_type, error_str)
 
-            # Classify error and provide actionable suggestions
-            suggestions = []
-            error_type = "mcp_tool_error"
+                if is_transient and retry_attempt < retry_max:
+                    retry_attempt += 1
+                    backoff_sec = max(0.0, float(self._config.retry_backoff_sec)) * retry_attempt
+                    logger.warning(
+                        "%s %s transient failure (attempt %d/%d) after %.1fms: [%s] %s; retrying in %.2fs",
+                        _LOG_TAG,
+                        tool_name,
+                        retry_attempt,
+                        retry_max,
+                        duration_ms,
+                        error_type,
+                        error_str,
+                        backoff_sec,
+                    )
+                    if backoff_sec > 0:
+                        await asyncio.sleep(backoff_sec)
+                    continue
 
-            if "timeout" in error_str.lower():
-                error_type = "timeout"
-                suggestions = [
-                    "The Tavily API is slow or unresponsive",
-                    "Check your network connection",
-                    "Try again in a few moments",
-                ]
-            elif "connection refused" in error_str.lower():
-                error_type = "connection_refused"
-                suggestions = [
-                    "The Tavily MCP subprocess failed to start",
-                    "Ensure Node.js and npx are installed",
-                    "Check TAVILY_API_KEY is valid",
-                ]
-            elif "api" in error_str.lower() and "key" in error_str.lower():
-                error_type = "api_key_error"
-                suggestions = [
-                    "TAVILY_API_KEY may be invalid or expired",
-                    "Check your Tavily account status",
-                ]
-            elif "rate" in error_str.lower() or "limit" in error_str.lower():
-                error_type = "rate_limit"
-                suggestions = [
-                    "Tavily API rate limit reached",
-                    "Wait before retrying",
-                    "Consider upgrading your Tavily plan",
-                ]
-            else:
-                suggestions = [
-                    "Check the URL is accessible",
-                    "The target site may block automated requests",
-                    "Try a different URL or use web search as fallback",
-                ]
+                details = SearchProxyErrorDetails(
+                    error_type=error_type,
+                    message=f"Tavily {tool_name} failed",
+                    tool_name=tool_name,
+                    url=context_url,
+                    query=context_query,
+                    duration_ms=duration_ms,
+                    timestamp_utc=timestamp_utc,
+                    underlying_error=error_str[:500],  # Truncate long errors
+                    suggestions=suggestions,
+                    retry_attempt=retry_attempt,
+                    retry_max=retry_max,
+                )
 
-            details = SearchProxyErrorDetails(
-                error_type=error_type,
-                message=f"Tavily {tool_name} failed",
-                tool_name=tool_name,
-                url=context_url,
-                query=context_query,
-                duration_ms=duration_ms,
-                timestamp_utc=timestamp_utc,
-                underlying_error=error_str[:500],  # Truncate long errors
-                suggestions=suggestions,
-            )
+                logger.error(
+                    "%s %s failed after %.1fms: [%s] %s",
+                    _LOG_TAG,
+                    tool_name,
+                    duration_ms,
+                    error_type,
+                    error_str,
+                )
 
-            logger.error(
-                "%s %s failed after %.1fms: [%s] %s",
-                _LOG_TAG,
-                tool_name,
-                duration_ms,
-                error_type,
-                error_str,
-            )
-
-            raise SearchProxyError(
-                f"Request failed: {exc}",
-                details=details,
-            ) from exc
+                raise SearchProxyError(
+                    f"Request failed: {exc}",
+                    details=details,
+                ) from exc
 
     async def search(
         self,

@@ -1,8 +1,12 @@
 import asyncio
 
+import pytest
+
+from src.backend.integrations.internal_mcp.mcp_proxy_base import MCPToolClientError
 from src.backend.integrations.internal_mcp.search_proxy_mcp import (
     SearchMCPProxy,
     SearchProxyConfig,
+    SearchProxyError,
 )
 
 
@@ -54,6 +58,70 @@ def test_search_uses_search_text_parser():
 
     assert proxy._client.calls[0]["tool_name"] == "tavily-search"  # type: ignore[attr-defined]
     assert proxy._client.calls[0]["text_parser_is_none"] is False  # type: ignore[attr-defined]
+
+
+def test_search_retries_once_on_transient_taskgroup_error():
+    class _RetryThenSuccessClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def call_tool(self, tool_name, arguments, *, text_parser=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise MCPToolClientError(
+                    "unhandled errors in a TaskGroup (1 sub-exception)"
+                )
+            return {
+                "results": [
+                    {
+                        "title": "Recovered",
+                        "url": "https://example.com",
+                        "content": "ok",
+                    }
+                ]
+            }
+
+    proxy = SearchMCPProxy(
+        SearchProxyConfig(
+            api_key="dummy",
+            max_transient_retries=1,
+            retry_backoff_sec=0.0,
+        )
+    )
+    proxy._client = _RetryThenSuccessClient()  # type: ignore[attr-defined]
+
+    result = asyncio.run(proxy.search(query="hello"))
+
+    assert proxy._client.calls == 2  # type: ignore[attr-defined]
+    assert result.get("results")
+
+
+def test_search_does_not_retry_non_transient_error():
+    class _AlwaysBadRequestClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def call_tool(self, tool_name, arguments, *, text_parser=None):
+            self.calls += 1
+            raise MCPToolClientError("invalid request payload shape")
+
+    proxy = SearchMCPProxy(
+        SearchProxyConfig(
+            api_key="dummy",
+            max_transient_retries=1,
+            retry_backoff_sec=0.0,
+        )
+    )
+    proxy._client = _AlwaysBadRequestClient()  # type: ignore[attr-defined]
+
+    with pytest.raises(SearchProxyError) as exc_info:
+        asyncio.run(proxy.search(query="hello"))
+
+    assert proxy._client.calls == 1  # type: ignore[attr-defined]
+    details = exc_info.value.details.to_dict()
+    assert details.get("error_type") == "mcp_tool_error"
+    assert details.get("retry_attempt") == 0
+    assert details.get("retry_max") == 1
 
 
 def test_catalogue_extract_url_works_inside_running_event_loop(monkeypatch):
