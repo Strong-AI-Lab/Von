@@ -1,4 +1,5 @@
 import {
+    __testOnly_buildWorkflowStatusQuery,
     __testOnly_buildLlmDebugMetadata,
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
     __testOnly_convertQuotedInstructionBlockquotesToButtons,
@@ -14,16 +15,33 @@ import {
 // Mock dependencies to avoid import errors
 jest.mock('../apiService.js', () => ({
     annotateTurn: jest.fn(),
-    getUserContext: jest.fn()
+    getUserContext: jest.fn(),
+    getWindowSessionId: jest.fn(() => 'test-window-session'),
+    postJson: jest.fn(),
+    WINDOW_SESSION_HEADER: 'X-Window-Session-ID'
 }));
 jest.mock('../domUtils.js', () => ({
     elements: {},
+    getCurrentUserConceptId: jest.fn(),
     renderSpanSuggestions: jest.fn()
+}));
+jest.mock('../utils/sessionScopedStorage.js', () => ({
+    getSessionScopedNamespace: jest.fn(),
+    getSessionScopedOrgContext: jest.fn()
 }));
 jest.mock('../utils/textDecorator.js', () => ({
     annotateElementText: jest.fn(),
+    applyCartoucheAppearance: jest.fn(),
     cartouchifyElementText: jest.fn(),
-    cartouchifyVontologyTokensInElement: jest.fn()
+    cartouchifyVontologyTokensInElement: jest.fn(),
+    getCartoucheAppearanceSettings: jest.fn(() => ({
+        useShortestName: false,
+        showName: true,
+        showId: true,
+        showKind: true,
+        kindAsBackground: false
+    })),
+    linkifyVontologyTokensInElement: jest.fn()
 }));
 
 describe('formatChatTimestamp', () => {
@@ -68,6 +86,63 @@ describe('formatChatTimestamp', () => {
         expect(result).not.toContain('Yesterday');
         const month = tenDaysAgo.toLocaleString([], { month: 'short' });
         expect(result).toContain(month);
+    });
+});
+
+describe('workflow status query scoping', () => {
+    beforeEach(() => {
+        const { getCurrentUserConceptId } = require('../domUtils.js');
+        const {
+            getSessionScopedNamespace,
+            getSessionScopedOrgContext
+        } = require('../utils/sessionScopedStorage.js');
+
+        getCurrentUserConceptId.mockReset();
+        getSessionScopedNamespace.mockReset();
+        getSessionScopedOrgContext.mockReset();
+    });
+
+    test('uses namespace-only scoping when namespace is present', () => {
+        const { getCurrentUserConceptId } = require('../domUtils.js');
+        const {
+            getSessionScopedNamespace,
+            getSessionScopedOrgContext
+        } = require('../utils/sessionScopedStorage.js');
+
+        getSessionScopedNamespace.mockReturnValue('#V#michael_witbrock');
+        getSessionScopedOrgContext.mockReturnValue({
+            concept_id: '#V#university_of_auckland_strong_ai_lab'
+        });
+        getCurrentUserConceptId.mockReturnValue('#V#michael_witbrock');
+
+        const query = __testOnly_buildWorkflowStatusQuery({ includeStatusFilter: true });
+        const params = new URLSearchParams(query);
+
+        expect(params.get('namespace')).toBe('#V#michael_witbrock');
+        expect(params.get('status')).toContain('running');
+        expect(params.has('org_id')).toBe(false);
+        expect(params.has('user_id')).toBe(false);
+    });
+
+    test('falls back to user/org filters when namespace is unavailable', () => {
+        const { getCurrentUserConceptId } = require('../domUtils.js');
+        const {
+            getSessionScopedNamespace,
+            getSessionScopedOrgContext
+        } = require('../utils/sessionScopedStorage.js');
+
+        getSessionScopedNamespace.mockReturnValue('');
+        getSessionScopedOrgContext.mockReturnValue({
+            concept_id: '#V#university_of_auckland_strong_ai_lab'
+        });
+        getCurrentUserConceptId.mockReturnValue('#V#michael_witbrock');
+
+        const query = __testOnly_buildWorkflowStatusQuery();
+        const params = new URLSearchParams(query);
+
+        expect(params.has('namespace')).toBe(false);
+        expect(params.get('org_id')).toBe('#V#university_of_auckland_strong_ai_lab');
+        expect(params.get('user_id')).toBe('#V#michael_witbrock');
     });
 });
 
@@ -135,7 +210,7 @@ describe('chat abort behaviour', () => {
         const sendPromise = sendMessage();
 
         expect(document.getElementById('sendButton').disabled).toBe(true);
-        expect(document.getElementById('abortButton').style.display).toBe('inline-flex');
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
 
         document.getElementById('abortButton').click();
 
@@ -145,7 +220,7 @@ describe('chat abort behaviour', () => {
         expect(generateSignal).not.toBeNull();
         expect(generateSignal.aborted).toBe(true);
         expect(document.getElementById('sendButton').disabled).toBe(false);
-        expect(document.getElementById('abortButton').style.display).toBe('none');
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('true');
         expect(promptInput.value).toBe("since we'\n");
 
         // Ensure the sendMessage promise resolves without throwing

@@ -7923,11 +7923,17 @@ function buildWorkflowStatusQuery({ includeStatusFilter } = {}) {
     const orgContext = getSessionScopedOrgContext();
     const userId = getCurrentUserConceptId();
 
-    if (namespace) params.set('namespace', namespace);
-    if (orgContext?.concept_id || orgContext?.id) {
-        params.set('org_id', orgContext.concept_id || orgContext.id);
+    if (namespace) {
+        // Namespace is the authoritative partition key for workflow data.
+        // Some valid instances were created with placeholder user/org fields
+        // (e.g. anonymous/default); filtering by user/org would hide them.
+        params.set('namespace', namespace);
+    } else {
+        if (orgContext?.concept_id || orgContext?.id) {
+            params.set('org_id', orgContext.concept_id || orgContext.id);
+        }
+        if (userId) params.set('user_id', userId);
     }
-    if (userId) params.set('user_id', userId);
     if (includeStatusFilter) {
         params.set('status', Array.from(WORKFLOW_STATUS_ACTIVE).join(','));
     }
@@ -10201,6 +10207,9 @@ export const setLlmDebugDataForTurn = (turnId, debugData) => {
 // Export for testing
 export const __test_only__rehydrateHistory = rehydrateHistory;
 export const __test_only__renderChatSessionMetadataPanel = _renderChatSessionMetadataPanel;
+export function __testOnly_buildWorkflowStatusQuery(opts = {}) {
+    return buildWorkflowStatusQuery(opts).toString();
+}
 
 // Export for testing.
 export function __testOnly_resetChatTtsState() {
