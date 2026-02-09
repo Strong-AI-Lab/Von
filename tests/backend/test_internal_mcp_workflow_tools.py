@@ -19,6 +19,116 @@ def _build_gateway() -> InternalMCPGateway:
     )
 
 
+class _StubStatus:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+class _StubInstance:
+    def __init__(
+        self,
+        *,
+        instance_id: str,
+        workflow_id: str,
+        user_id: str,
+        org_id: str,
+        namespace: str,
+        inputs: dict[str, object],
+        max_retries: int,
+    ) -> None:
+        self.instance_id = instance_id
+        self.workflow_id = workflow_id
+        self.status = _StubStatus("pending")
+        self.current_state = None
+        self.step_index = 0
+        self.inputs = inputs
+        self.outputs = None
+        self.user_id = user_id
+        self.org_id = org_id
+        self.namespace = namespace
+        self.error = None
+        self.error_step = None
+        self.schedule_id = None
+        self.workflow_data = {}
+        self.retry_count = 0
+        self.max_retries = max_retries
+        self.source_event_type = None
+        self.source_event_id = None
+
+    def to_status_dict(self) -> dict[str, object]:
+        return {
+            "instance_id": self.instance_id,
+            "workflow_id": self.workflow_id,
+            "status": self.status.value,
+            "current_state": self.current_state,
+            "step_index": self.step_index,
+            "error": self.error,
+        }
+
+
+class _StubWorkflowManager:
+    def __init__(self) -> None:
+        self.instances: dict[str, _StubInstance] = {}
+        self._counter = 0
+
+    def create_instance(
+        self,
+        workflow_id: str,
+        *,
+        user_id: str,
+        org_id: str,
+        namespace: str,
+        inputs: dict[str, object] | None = None,
+        max_retries: int = 3,
+        **_kwargs,
+    ) -> str:
+        self._counter += 1
+        instance_id = f"#V#wf_instance_{self._counter}"
+        self.instances[instance_id] = _StubInstance(
+            instance_id=instance_id,
+            workflow_id=workflow_id,
+            user_id=user_id,
+            org_id=org_id,
+            namespace=namespace,
+            inputs=dict(inputs or {}),
+            max_retries=max_retries,
+        )
+        return instance_id
+
+    def list_instances(
+        self,
+        *,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        namespace: str | None = None,
+        status: object | None = None,
+        workflow_id: str | None = None,
+        source_event_type: str | None = None,
+        source_event_id: str | None = None,
+        limit: int = 50,
+    ) -> list[_StubInstance]:
+        status_value = getattr(status, "value", status)
+        instances = list(self.instances.values())
+        filtered = [
+            inst
+            for inst in instances
+            if (user_id is None or inst.user_id == user_id)
+            and (org_id is None or inst.org_id == org_id)
+            and (namespace is None or inst.namespace == namespace)
+            and (status_value is None or inst.status.value == status_value)
+            and (workflow_id is None or inst.workflow_id == workflow_id)
+            and (
+                source_event_type is None
+                or inst.source_event_type == source_event_type
+            )
+            and (source_event_id is None or inst.source_event_id == source_event_id)
+        ]
+        return filtered[:limit]
+
+    def get_instance(self, instance_id: str) -> _StubInstance | None:
+        return self.instances.get(instance_id)
+
+
 def test_workflow_list_definitions_exists_and_returns_data():
     catalogue = build_default_catalogue()
     methods = catalogue.list_methods()
@@ -95,6 +205,81 @@ def test_workflow_list_instances_gateway_invoke_error_path():
     payload = result.payload
     assert payload.get("success") is False
     assert payload.get("error_code") == "invalid_status"
+
+
+def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
+    manager = _StubWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#test_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "inputs": {"seed": "value"},
+        },
+    ).payload
+    assert created.get("success") is True
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+
+    listed = gateway.invoke(
+        "workflow_list_instances",
+        {
+            "namespace": "#V#user/#V#org",
+            "status": "pending",
+            "limit": 10,
+        },
+    ).payload
+    assert listed.get("success") is True
+    assert listed.get("count") == 1
+    assert listed["instances"][0]["instance_id"] == instance_id
+
+    detail = gateway.invoke(
+        "workflow_get_instance",
+        {"instance_id": instance_id},
+    ).payload
+    assert detail.get("success") is True
+    assert detail.get("instance_id") == instance_id
+    assert detail.get("workflow_id") == "#V#test_workflow"
+    assert detail.get("namespace") == "#V#user/#V#org"
+    assert detail.get("inputs") == {"seed": "value"}
+
+
+def test_workflow_create_instance_normalises_inputs(monkeypatch):
+    manager = _StubWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#test_workflow",
+            "user_id": "   ",
+            "org_id": "  ",
+            "namespace": " #V#explicit_ns ",
+            "inputs": None,
+            "max_retries": 999,
+        },
+    ).payload
+    assert created.get("success") is True
+    instance_id = created.get("instance_id")
+    assert isinstance(instance_id, str)
+
+    instance = manager.instances[instance_id]
+    assert instance.user_id == "anonymous"
+    assert instance.org_id == "default"
+    assert instance.namespace == "#V#explicit_ns"
+    assert instance.inputs == {}
+    assert instance.max_retries == 50
 
 
 def test_workflow_mcp_health_check_exists_and_runs():

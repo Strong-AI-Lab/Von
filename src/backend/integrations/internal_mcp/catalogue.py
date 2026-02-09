@@ -5109,11 +5109,33 @@ def _workflow_create_instance(**kwargs):
             details={"missing": ["workflow_id"]},
         )
 
-    user_id = kwargs.get("user_id", "anonymous")
-    org_id = kwargs.get("org_id", "default")
-    namespace = kwargs.get("namespace", f"{user_id}/{org_id}")
-    inputs = kwargs.get("inputs", {})
-    max_retries = kwargs.get("max_retries", 3)
+    user_id_raw = kwargs.get("user_id", "anonymous")
+    org_id_raw = kwargs.get("org_id", "default")
+    namespace_raw = kwargs.get("namespace")
+    inputs_raw = kwargs.get("inputs", {})
+    max_retries_raw = kwargs.get("max_retries", 3)
+
+    user_id = (
+        user_id_raw.strip()
+        if isinstance(user_id_raw, str) and user_id_raw.strip()
+        else "anonymous"
+    )
+    org_id = (
+        org_id_raw.strip()
+        if isinstance(org_id_raw, str) and org_id_raw.strip()
+        else "default"
+    )
+    namespace = (
+        namespace_raw.strip()
+        if isinstance(namespace_raw, str) and namespace_raw.strip()
+        else f"{user_id}/{org_id}"
+    )
+    inputs = inputs_raw if isinstance(inputs_raw, dict) else {}
+    try:
+        max_retries = int(max_retries_raw)
+    except (TypeError, ValueError):
+        max_retries = 3
+    max_retries = max(0, min(max_retries, 50))
 
     try:
         manager = WorkflowInstanceManager()
@@ -5143,11 +5165,21 @@ def _workflow_list_instances(**kwargs):
 
     user_id = kwargs.get("user_id")
     org_id = kwargs.get("org_id")
+    namespace_raw = kwargs.get("namespace")
     status_str = kwargs.get("status")
     workflow_id = kwargs.get("workflow_id")
     source_event_type = kwargs.get("source_event_type")
     source_event_id = kwargs.get("source_event_id")
-    limit = min(int(kwargs.get("limit", 50)), 200)
+    namespace = (
+        namespace_raw.strip()
+        if isinstance(namespace_raw, str) and namespace_raw.strip()
+        else None
+    )
+    try:
+        limit = int(kwargs.get("limit", 50))
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 200))
 
     status = None
     if status_str:
@@ -5163,6 +5195,7 @@ def _workflow_list_instances(**kwargs):
     instances = manager.list_instances(
         user_id=user_id,
         org_id=org_id,
+        namespace=namespace,
         status=status,
         workflow_id=workflow_id,
         source_event_type=source_event_type,
@@ -9280,6 +9313,7 @@ def build_default_catalogue() -> MethodCatalogue:
                 optional={
                     "user_id": (str, type(None)),
                     "org_id": (str, type(None)),
+                    "namespace": (str, type(None)),
                     "status": (str, type(None)),
                     "workflow_id": (str, type(None)),
                     "source_event_type": (str, type(None)),
@@ -9297,7 +9331,7 @@ def build_default_catalogue() -> MethodCatalogue:
             ),
             category="read",
             description=(
-                "List durable workflow instances. Filter by user, org, status, or workflow_id. "
+                "List durable workflow instances. Filter by user, org, namespace, status, or workflow_id. "
                 "Supports source_event_type/source_event_id filters for event-to-workflow traceability. "
                 "Valid statuses: pending, running, completed, failed, cancelled, paused."
             ),
