@@ -32,6 +32,9 @@ from ...services.settings_service import (
     get_show_tool_use_during_thinking,
     get_buttonify_model_enabled,
 )
+from ...services.chat_concept_reference_service import (
+    build_context_concept_reference_metadata,
+)
 from ...services.prompt_template_service import PromptTemplateService
 from ...workflows import (
     CHAT_NARRATION_WORKFLOW_ID,
@@ -4527,6 +4530,34 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         # Calculate tool statistics if tools were used
         tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
 
+        # JVNAUTOSCI-958: cartouche-style concept metadata for references that appear
+        # in the context actually sent to the model (prior user/assistant turns).
+        # This makes reference status inspectable in the ensuing turn's debug payload.
+        try:
+            context_concept_references = build_context_concept_reference_metadata(
+                sent_context_stats_messages,
+                source="sent_context_user_assistant",
+            )
+        except Exception as exc:
+            current_app.logger.debug(
+                "Failed to build context concept-reference metadata: %s",
+                exc,
+                exc_info=True,
+            )
+            context_concept_references = {
+                "source": "sent_context_user_assistant",
+                "metadata_version": 1,
+                "message_roles": ["user", "assistant"],
+                "messages_scanned": 0,
+                "concept_count": 0,
+                "concept_count_capped": False,
+                "max_concepts": None,
+                "include_direct_supertypes": False,
+                "max_direct_supertypes": 0,
+                "concepts": [],
+                "error": str(exc),
+            }
+
         # Capture a compact summary of the tool catalogue that the agent was shown.
         # This improves trace transparency without storing the full system prompt.
         tool_catalogue_summary = None
@@ -4615,6 +4646,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "sent_to_llm": context_stats,  # What was actually sent this turn
                 "stored_context": current_context_stats,  # Current state after this turn
             },
+            "context_concept_references": context_concept_references,
             "tool_stats": tool_stats,  # MCP tool result statistics
             "tool_invocations": (
                 [
