@@ -7582,14 +7582,81 @@ def _chat_introspect(
     """
 
     import hashlib
+    import os
 
     from src.backend.integrations.internal_mcp.orchestrator import (
         InternalMCPChatOrchestrator,
     )
     from src.backend.languagemodels.llm_interface import get_active_model_name
     from src.backend.services.settings_service import (
+        get_setting,
         resolve_llm_setting,
     )
+
+    def _env_flag(name: str, *, default: str = "0") -> bool:
+        value = os.getenv(name, default)
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _is_sensitive_key_name(key_name: str) -> bool:
+        lowered = key_name.strip().lower()
+        if not lowered:
+            return False
+        if "env_var" in lowered:
+            return False
+        if lowered in {
+            "provider",
+            "model",
+            "scope",
+            "user_concept_id",
+            "organisation_concept_id",
+            "organization_concept_id",
+        }:
+            return False
+        sensitive_markers = (
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "api_key",
+            "apikey",
+            "private_key",
+            "credential",
+            "cookie",
+            "bearer",
+        )
+        return any(marker in lowered for marker in sensitive_markers)
+
+    def _to_presence_bool(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value) > 0
+        return bool(value)
+
+    def _sanitise_for_introspection(value: Any, *, depth: int = 0) -> Any:
+        """Redact sensitive values by converting them to presence booleans."""
+        if depth >= 8:
+            return None
+        if isinstance(value, dict):
+            cleaned: dict[str, Any] = {}
+            for key, item in value.items():
+                key_str = str(key)
+                if _is_sensitive_key_name(key_str):
+                    cleaned[key_str] = _to_presence_bool(item)
+                else:
+                    cleaned[key_str] = _sanitise_for_introspection(
+                        item, depth=depth + 1
+                    )
+            return cleaned
+        if isinstance(value, list):
+            return [_sanitise_for_introspection(item, depth=depth + 1) for item in value]
+        if isinstance(value, tuple):
+            return tuple(
+                _sanitise_for_introspection(item, depth=depth + 1) for item in value
+            )
+        return value
 
     if not namespace or not isinstance(namespace, str) or not namespace.strip():
         return make_error_response(
@@ -7685,6 +7752,39 @@ def _chat_introspect(
         )
     except Exception:
         resolved_llm = None
+    resolved_llm = _sanitise_for_introspection(resolved_llm)
+
+    configured_openai_api_key_env_var = None
+    try:
+        configured_openai_api_key_env_var = get_setting("openai_api_key_env_var")
+        if not isinstance(configured_openai_api_key_env_var, str):
+            configured_openai_api_key_env_var = None
+    except Exception:
+        configured_openai_api_key_env_var = None
+
+    sensitive_env_keys = {
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "MISTRAL_API_KEY",
+        "GROQ_API_KEY",
+        "XAI_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "JIRA_API_TOKEN",
+        "ATLASSIAN_API_TOKEN",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "FLASK_SECRET_KEY",
+        "MONGO_URI",
+        "VON_MONGO_URI",
+    }
+    if configured_openai_api_key_env_var:
+        sensitive_env_keys.add(configured_openai_api_key_env_var)
+    sensitive_env_presence = {
+        key: bool(os.getenv(key)) for key in sorted(k for k in sensitive_env_keys if k)
+    }
+    sensitive_env_present_count = sum(
+        1 for is_present in sensitive_env_presence.values() if is_present
+    )
 
     gateway_enabled = None
     orchestrator_max_tool_invocations = None
@@ -7711,6 +7811,45 @@ def _chat_introspect(
             orchestrator_max_tool_invocations = None
             orchestrator_tool_batch_cap = None
             orchestrator_missing_tool_call_retry_cap = None
+
+    workflow_selector_enabled = _env_flag(
+        "VON_CHAT_WORKFLOW_SELECTOR_ENABLED", default="1"
+    )
+    workflow_trace_enabled = _env_flag("VON_WORKFLOWS_TRACE_ENABLED", default="0")
+    critic_enabled = _env_flag("VON_CRITIC_ENABLE", default="0")
+    deterministic_introspection_enabled = _env_flag(
+        "VON_DETERMINISTIC_INTROSPECTION", default="0"
+    )
+    workflow_model_policy_enabled = _env_flag(
+        "VON_WORKFLOW_MODEL_POLICY_ENABLE", default="0"
+    )
+    write_tools_enabled = _env_flag("VON_MCP_ALLOW_WRITES", default="0")
+    jira_execute_mode_enabled = _env_flag(
+        "VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", default="0"
+    )
+
+    if gateway_enabled is False:
+        inferred_runtime_mode = "llm_only"
+    elif (
+        isinstance(orchestrator_max_tool_invocations, int)
+        and orchestrator_max_tool_invocations <= 0
+    ):
+        inferred_runtime_mode = "llm_only"
+    elif workflow_selector_enabled:
+        inferred_runtime_mode = "workflow_routed_tool_calling"
+    else:
+        inferred_runtime_mode = "legacy_tool_calling"
+
+    workflow_mode = {
+        "runtime_mode": inferred_runtime_mode,
+        "workflow_selector_enabled": workflow_selector_enabled,
+        "deterministic_introspection_enabled": deterministic_introspection_enabled,
+        "workflow_trace_enabled": workflow_trace_enabled,
+        "critic_enabled": critic_enabled,
+        "workflow_model_policy_enabled": workflow_model_policy_enabled,
+        "write_tools_enabled": write_tools_enabled,
+        "jira_execute_mode_enabled": jira_execute_mode_enabled,
+    }
 
     # Tool-guidance fingerprint (stable-ish) without dumping full text by default
     tool_guidance_text = ""
@@ -7760,10 +7899,11 @@ def _chat_introspect(
     # chat_introspect: InternalMCPGateway validates success payloads end-to-end.
     return {
         "success": True,
+        "introspection_version": "v2",
         "namespace": namespace,
         "organisation_concept_id": organisation_concept_id,
         "active_model_name": active_model_name,
-        "active_llm": resolved_llm,  # Now uses resolved_llm (user > org precedence, no global)
+        "active_llm": resolved_llm,  # Resolved LLM shape with sensitive keys redacted to booleans.
         "resolved_llm": resolved_llm,
         # Backwards-compatible fields.
         "prompt_concept_ids": list(behaviour_prompt_concept_ids),
@@ -7779,6 +7919,16 @@ def _chat_introspect(
         "orchestrator_max_tool_invocations": orchestrator_max_tool_invocations,
         "orchestrator_tool_batch_cap": orchestrator_tool_batch_cap,
         "orchestrator_missing_tool_call_retry_cap": orchestrator_missing_tool_call_retry_cap,
+        "workflow_mode": workflow_mode,
+        "configured_openai_api_key_env_var": configured_openai_api_key_env_var,
+        "configured_openai_api_key_env_var_present": (
+            bool(
+                configured_openai_api_key_env_var
+                and os.getenv(configured_openai_api_key_env_var)
+            )
+        ),
+        "sensitive_env_presence": sensitive_env_presence,
+        "sensitive_env_present_count": sensitive_env_present_count,
     }
 
 
@@ -8179,6 +8329,7 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=Schema(
                 required={
                     "success": bool,
+                    "introspection_version": str,
                     "namespace": str,
                     "organisation_concept_id": (str, type(None)),
                     "active_model_name": (str, type(None)),
@@ -8201,6 +8352,11 @@ def build_default_catalogue() -> MethodCatalogue:
                     "behaviour_prompt_concept_ids": list,
                     "narration_prompt_concept_ids": list,
                     "narration_prompt_concepts": list,
+                    "workflow_mode": dict,
+                    "configured_openai_api_key_env_var": (str, type(None)),
+                    "configured_openai_api_key_env_var_present": bool,
+                    "sensitive_env_presence": dict,
+                    "sensitive_env_present_count": int,
                 },
                 allow_unknown=True,
                 description="Chat context introspection snapshot (safe, no secrets).",

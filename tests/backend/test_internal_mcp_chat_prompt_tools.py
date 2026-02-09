@@ -13,12 +13,35 @@ from src.backend.integrations.internal_mcp.catalogue import (
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 
+_BEHAVIOUR_PROMPT_TYPES = (
+    "#V#von_chat_behaviour_prompt",
+    "#V#von_chat_behavior_prompt",
+    "#V#von_llm_prompt",
+)
+
 
 def _build_gateway() -> InternalMCPGateway:
     return InternalMCPGateway(
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
         enabled=True,
+    )
+
+
+def _patch_prompt_services(monkeypatch, *, behaviour_fragments, behaviour_prompt_text):
+    monkeypatch.setattr(
+        "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
+        lambda _namespace, **kwargs: (
+            behaviour_fragments if kwargs.get("prompt_types") == _BEHAVIOUR_PROMPT_TYPES else []
+        ),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.chat_auxiliary_prompt_service.build_user_specific_system_prompt",
+        lambda _namespace, **kwargs: (
+            behaviour_prompt_text
+            if kwargs.get("prompt_types") == _BEHAVIOUR_PROMPT_TYPES
+            else ""
+        ),
     )
 
 
@@ -43,35 +66,13 @@ def test_chat_introspect_requires_namespace():
 
 
 def test_chat_get_prompt_context_returns_prompt_metadata(monkeypatch):
-    # Patch service imports used inside handler
-    monkeypatch.setattr(
-        "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _namespace, **kwargs: (
-            [
-                {"concept_id": "#V#prompt_a", "content": "Alpha"},
-                {"concept_id": "#V#prompt_b", "content": "Beta"},
-            ]
-            if kwargs.get("prompt_types")
-            == (
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            )
-            else []
-        ),
-    )
-    monkeypatch.setattr(
-        "src.backend.services.chat_auxiliary_prompt_service.build_user_specific_system_prompt",
-        lambda _namespace, **kwargs: (
-            "Alpha\n\nBeta"
-            if kwargs.get("prompt_types")
-            == (
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            )
-            else ""
-        ),
+    _patch_prompt_services(
+        monkeypatch,
+        behaviour_fragments=[
+            {"concept_id": "#V#prompt_a", "content": "Alpha"},
+            {"concept_id": "#V#prompt_b", "content": "Beta"},
+        ],
+        behaviour_prompt_text="Alpha\n\nBeta",
     )
 
     result = _chat_get_prompt_context(
@@ -91,31 +92,10 @@ def test_chat_get_prompt_context_returns_prompt_metadata(monkeypatch):
 
 
 def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
-    monkeypatch.setattr(
-        "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _namespace, **kwargs: (
-            [{"concept_id": "#V#prompt_a", "content": "Alpha"}]
-            if kwargs.get("prompt_types")
-            == (
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            )
-            else []
-        ),
-    )
-    monkeypatch.setattr(
-        "src.backend.services.chat_auxiliary_prompt_service.build_user_specific_system_prompt",
-        lambda _namespace, **kwargs: (
-            "Alpha"
-            if kwargs.get("prompt_types")
-            == (
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            )
-            else ""
-        ),
+    _patch_prompt_services(
+        monkeypatch,
+        behaviour_fragments=[{"concept_id": "#V#prompt_a", "content": "Alpha"}],
+        behaviour_prompt_text="Alpha",
     )
 
     result = _chat_get_prompt_context(
@@ -128,31 +108,10 @@ def test_chat_get_prompt_context_includes_content_when_requested(monkeypatch):
 
 
 def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
-    monkeypatch.setattr(
-        "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _namespace, **kwargs: (
-            [{"concept_id": "#V#prompt_a", "content": "Alpha"}]
-            if kwargs.get("prompt_types")
-            == (
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            )
-            else []
-        ),
-    )
-    monkeypatch.setattr(
-        "src.backend.services.chat_auxiliary_prompt_service.build_user_specific_system_prompt",
-        lambda _namespace, **kwargs: (
-            "Alpha"
-            if kwargs.get("prompt_types")
-            == (
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            )
-            else ""
-        ),
+    _patch_prompt_services(
+        monkeypatch,
+        behaviour_fragments=[{"concept_id": "#V#prompt_a", "content": "Alpha"}],
+        behaviour_prompt_text="Alpha",
     )
     monkeypatch.setattr(
         "src.backend.languagemodels.llm_interface.get_active_model_name",
@@ -181,32 +140,11 @@ def test_chat_introspect_returns_model_and_prompt_fingerprint(monkeypatch):
     assert "orchestrator_missing_tool_call_retry_cap" in result
 
 
-def test_chat_introspect_gateway_invoke_success_path(monkeypatch):
-    monkeypatch.setattr(
-        "src.backend.services.chat_auxiliary_prompt_service.get_user_specific_prompt_fragments",
-        lambda _namespace, **kwargs: (
-            [{"concept_id": "#V#prompt_a", "content": "Alpha"}]
-            if kwargs.get("prompt_types")
-            == (
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            )
-            else []
-        ),
-    )
-    monkeypatch.setattr(
-        "src.backend.services.chat_auxiliary_prompt_service.build_user_specific_system_prompt",
-        lambda _namespace, **kwargs: (
-            "Alpha"
-            if kwargs.get("prompt_types")
-            == (
-                "#V#von_chat_behaviour_prompt",
-                "#V#von_chat_behavior_prompt",
-                "#V#von_llm_prompt",
-            )
-            else ""
-        ),
+def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypatch):
+    _patch_prompt_services(
+        monkeypatch,
+        behaviour_fragments=[{"concept_id": "#V#prompt_a", "content": "Alpha"}],
+        behaviour_prompt_text="Alpha",
     )
     monkeypatch.setattr(
         "src.backend.languagemodels.llm_interface.get_active_model_name",
@@ -214,7 +152,64 @@ def test_chat_introspect_gateway_invoke_success_path(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.services.settings_service.resolve_llm_setting",
-        lambda **_kwargs: {"provider": "resolved", "model": "resolved-model"},
+        lambda **_kwargs: {
+            "provider": "resolved",
+            "model": "resolved-model",
+            "api_key": "sk-test",
+            "nested": {
+                "access_token": "secret-token",
+                "safe_label": "keep-me",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.get_setting",
+        lambda name: "OPENAI_API_KEY" if name == "openai_api_key_env_var" else None,
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-live")
+    monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", "1")
+    monkeypatch.setenv("VON_DETERMINISTIC_INTROSPECTION", "1")
+    monkeypatch.setenv("VON_WORKFLOWS_TRACE_ENABLED", "0")
+    monkeypatch.setenv("VON_CRITIC_ENABLE", "0")
+    monkeypatch.setenv("VON_WORKFLOW_MODEL_POLICY_ENABLE", "1")
+    monkeypatch.setenv("VON_MCP_ALLOW_WRITES", "0")
+    monkeypatch.setenv("VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", "0")
+
+    result = _chat_introspect(
+        namespace="#V#michael_witbrock", organisation_concept_id="#V#uoa"
+    )
+
+    assert result.get("success") is True
+    assert result["introspection_version"] == "v2"
+    assert result["resolved_llm"]["api_key"] is True
+    assert result["resolved_llm"]["nested"]["access_token"] is True
+    assert result["resolved_llm"]["nested"]["safe_label"] == "keep-me"
+    assert result["configured_openai_api_key_env_var"] == "OPENAI_API_KEY"
+    assert result["configured_openai_api_key_env_var_present"] is True
+    assert result["sensitive_env_presence"]["OPENAI_API_KEY"] is True
+    assert result["workflow_mode"]["workflow_selector_enabled"] is True
+    assert result["workflow_mode"]["deterministic_introspection_enabled"] is True
+    assert result["workflow_mode"]["workflow_model_policy_enabled"] is True
+    assert result["workflow_mode"]["runtime_mode"] == "workflow_routed_tool_calling"
+
+
+def test_chat_introspect_gateway_invoke_success_path(monkeypatch):
+    _patch_prompt_services(
+        monkeypatch,
+        behaviour_fragments=[{"concept_id": "#V#prompt_a", "content": "Alpha"}],
+        behaviour_prompt_text="Alpha",
+    )
+    monkeypatch.setattr(
+        "src.backend.languagemodels.llm_interface.get_active_model_name",
+        lambda: "test-model",
+    )
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_llm_setting",
+        lambda **_kwargs: {
+            "provider": "resolved",
+            "model": "resolved-model",
+            "api_token": "token-value",
+        },
     )
 
     gateway = _build_gateway()
@@ -224,9 +219,11 @@ def test_chat_introspect_gateway_invoke_success_path(monkeypatch):
     )
     payload = result.payload
     assert payload.get("success") is True
+    assert payload.get("introspection_version") == "v2"
     assert payload.get("active_model_name") == "test-model"
     assert "behaviour_prompt_concept_ids" in payload
     assert "narration_prompt_concept_ids" in payload
+    assert payload["resolved_llm"]["api_token"] is True
 
 
 def test_chat_introspect_gateway_invoke_handler_error_path():
