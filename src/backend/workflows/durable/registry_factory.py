@@ -18,7 +18,7 @@ from threading import Lock
 from typing import Any, Dict, List
 
 from .. import WorkflowRegistry, register_default_workflows
-from ..action_registry import ActionRegistry
+from ..action_registry import ActionRegistry, WorkflowActionResult
 from .rag_sync_workflow import (
     get_rag_sync_workflow_registration,
     register_rag_sync_actions,
@@ -48,10 +48,128 @@ from ..workflow_concept_authority_service import (
 logger = logging.getLogger(__name__)
 _inventory_lock = Lock()
 _last_inventory_snapshot: Dict[str, Any] | None = None
+_durable_mcp_gateway_lock = Lock()
+_durable_mcp_gateway: Any | None = None
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def register_workflow_from_vontology(
+    *,
+    registry: WorkflowRegistry,
+    workflow_id: str,
+) -> tuple[bool, str | None]:
+    """Try to register a single Vontology-defined workflow into ``registry``.
+
+    Returns:
+        (registered_or_already_present, error_code_or_none)
+    """
+
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return False, "invalid_workflow_id"
+
+    workflow_id = workflow_id.strip()
+    if workflow_id in set(registry.all_workflow_ids()):
+        return True, None
+
+    definition = load_workflow_definition_from_vontology(workflow_id)
+    if definition is None:
+        return False, "definition_not_loadable"
+
+    from ..workflow_registry import WorkflowRegistration
+
+    registration = WorkflowRegistration(
+        workflow_id=definition.workflow_id,
+        definition=definition,
+        purpose=definition.purpose,
+        source="vontology",
+    )
+    registered = registry.register_if_absent(registration)
+    return registered, None
+
+
+def _get_or_build_durable_mcp_gateway():
+    """Return a lazy singleton internal MCP gateway for durable fallback actions."""
+
+    global _durable_mcp_gateway
+    if _durable_mcp_gateway is not None:
+        return _durable_mcp_gateway
+
+    with _durable_mcp_gateway_lock:
+        if _durable_mcp_gateway is not None:
+            return _durable_mcp_gateway
+
+        from ...integrations.internal_mcp.catalogue import build_default_catalogue
+        from ...integrations.internal_mcp.gateway import InternalMCPGateway
+        from ...integrations.internal_mcp.transport import InternalMCPTransport
+
+        _durable_mcp_gateway = InternalMCPGateway(
+            catalogue=build_default_catalogue(),
+            transport=InternalMCPTransport(),
+            enabled=True,
+        )
+        return _durable_mcp_gateway
+
+
+def _durable_mcp_fallback_action(request: Any) -> WorkflowActionResult:
+    """Invoke unregistered durable workflow actions as internal MCP tools.
+
+    This mirrors the orchestrator fallback behaviour so Vontology-authored
+    durable workflows (including newly authored workflow-creation outputs) can
+    execute MCP tool actions without requiring explicit Python action wiring.
+    """
+
+    tool_name = str(getattr(request, "action_id", "") or "").strip()
+    if not tool_name:
+        return WorkflowActionResult(status="failed", error="missing_action_id")
+
+    payload = dict(getattr(request, "inputs", {}) or {})
+    environment = getattr(request, "environment", None)
+    user_namespace = getattr(environment, "user_namespace", None)
+    if isinstance(user_namespace, str) and user_namespace.strip():
+        payload.setdefault("namespace", user_namespace.strip())
+
+    try:
+        gateway = _get_or_build_durable_mcp_gateway()
+        result = gateway.invoke(tool_name, payload)
+        try:
+            from ..workflow_baseline_telemetry import (
+                record_generic_fallback_mcp_invocation,
+            )
+
+            record_generic_fallback_mcp_invocation(success=True)
+        except Exception:
+            pass
+        return WorkflowActionResult(
+            status="success",
+            outputs={
+                "mcp_result": result.payload,
+                "mcp_tool": tool_name,
+                "mcp_duration_ms": result.duration_ms,
+                "result": result.payload,
+            },
+            duration_ms=result.duration_ms,
+        )
+    except Exception as exc:
+        try:
+            from ..workflow_baseline_telemetry import (
+                record_generic_fallback_mcp_invocation,
+            )
+
+            record_generic_fallback_mcp_invocation(success=False)
+        except Exception:
+            pass
+        logger.warning(
+            "[durable_workflow] MCP fallback invoke failed for %s: %s",
+            tool_name,
+            exc,
+        )
+        return WorkflowActionResult(
+            status="failed",
+            error=f"mcp_invoke_failed:{tool_name}:{exc}",
+        )
 
 
 def _build_workflow_parity_inventory(
@@ -287,18 +405,18 @@ def _build_workflow_registry(*, allow_bootstrap: bool) -> WorkflowRegistry:
                 continue
 
             try:
-                definition = load_workflow_definition_from_vontology(wf_id)
-                if definition:
-                    from ..workflow_registry import WorkflowRegistration
-
-                    reg = WorkflowRegistration(
-                        workflow_id=definition.workflow_id,
-                        definition=definition,
-                        purpose=definition.purpose,
-                        source="vontology",
-                    )
-                    registry.register(reg)
+                registered, error_code = register_workflow_from_vontology(
+                    registry=registry,
+                    workflow_id=wf_id,
+                )
+                if registered:
                     logger.info("Registered Vontology workflow: %s", wf_id)
+                elif error_code:
+                    logger.debug(
+                        "Skipping Vontology workflow %s (%s)",
+                        wf_id,
+                        error_code,
+                    )
             except Exception as e:
                 logger.warning("Failed to load Vontology workflow %s: %s", wf_id, e)
 
@@ -386,4 +504,7 @@ def build_durable_action_registry() -> ActionRegistry:
     register_considerations_actions(registry)
     register_enrichment_actions(registry)
     register_rumination_actions(registry)
+    # Keep durable action routing aligned with orchestrator routing: if an
+    # action ID is not explicitly registered, treat it as an MCP tool name.
+    registry.set_fallback_handler(_durable_mcp_fallback_action)
     return registry

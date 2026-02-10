@@ -198,3 +198,110 @@ def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_cli
     assert any(
         edge["predicate"] == "onFalseNextStep" for edge in data["definition"]["edges"]
     )
+
+
+def test_create_workflow_instance_route_rejects_unrunnable_workflow(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    from src.backend.workflows.durable.workflow_instance_submission_service import (
+        WorkflowInstanceSubmissionResult,
+    )
+
+    manager = object()
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    def _fake_submit_verified_workflow_instance(**kwargs):
+        assert kwargs.get("manager") is manager
+        assert kwargs.get("workflow_id") == "#V#non_runnable_workflow"
+        return WorkflowInstanceSubmissionResult(
+            success=False,
+            workflow_id="#V#non_runnable_workflow",
+            status="rejected_preflight",
+            instance_id=None,
+            error_code="workflow_not_runnable",
+            error="workflow not runnable",
+            verification={
+                "preflight": {"errors": ["workflow_definition_not_registered"]},
+            },
+        )
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "submit_verified_workflow_instance",
+        _fake_submit_verified_workflow_instance,
+    )
+
+    response = app_client.post(
+        "/api/workflows/instances",
+        json={
+            "workflow_id": "#V#non_runnable_workflow",
+            "user_id": "user-1",
+            "org_id": "org-1",
+            "namespace": "user-1/org-1",
+            "inputs": {"seed": "value"},
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["success"] is False
+    assert payload["status"] == "rejected_preflight"
+    assert payload["error_code"] == "workflow_not_runnable"
+    assert "workflow_definition_not_registered" in payload["verification"]["preflight"][
+        "errors"
+    ]
+
+
+def test_trigger_workflow_schedule_route_rejects_unrunnable_workflow(
+    monkeypatch, app_client
+):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    from src.backend.workflows.durable.workflow_instance_submission_service import (
+        WorkflowInstanceSubmissionResult,
+    )
+
+    schedule = types.SimpleNamespace(
+        schedule_id="#V#schedule_test_1",
+        workflow_id="#V#non_runnable_workflow",
+        user_id="user-1",
+        org_id="org-1",
+        namespace="user-1/org-1",
+        default_inputs={"seed": "value"},
+    )
+
+    manager = types.SimpleNamespace(get_schedule=lambda _: schedule)
+    monkeypatch.setattr(workflows_routes, "_get_instance_manager", lambda: manager)
+
+    def _fake_submit_verified_workflow_instance(**kwargs):
+        assert kwargs.get("manager") is manager
+        assert kwargs.get("workflow_id") == "#V#non_runnable_workflow"
+        return WorkflowInstanceSubmissionResult(
+            success=False,
+            workflow_id="#V#non_runnable_workflow",
+            status="rejected_preflight",
+            instance_id=None,
+            error_code="workflow_not_runnable",
+            error="workflow not runnable",
+            verification={
+                "preflight": {"errors": ["workflow_definition_not_registered"]},
+            },
+        )
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "submit_verified_workflow_instance",
+        _fake_submit_verified_workflow_instance,
+    )
+
+    response = app_client.post(
+        "/api/workflows/schedules/%23V%23schedule_test_1/trigger",
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["success"] is False
+    assert payload["schedule_id"] == "#V#schedule_test_1"
+    assert payload["status"] == "rejected_preflight"
+    assert payload["error_code"] == "workflow_not_runnable"
+    assert "workflow_definition_not_registered" in payload["verification"]["preflight"][
+        "errors"
+    ]

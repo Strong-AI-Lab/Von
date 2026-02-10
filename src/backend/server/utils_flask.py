@@ -100,11 +100,38 @@ def _get_durable_definition_loader():
 
     if _durable_workflow_registry is None:
         _durable_workflow_registry = _build_durable_workflow_registry()
-
-    registry = _durable_workflow_registry  # Local reference for closure
+    registry = _durable_workflow_registry
 
     def loader(workflow_id: str):
-        return registry.get(workflow_id)
+        if registry is None:
+            return None
+        # Primary lookup: existing in-memory registry.
+        definition = registry.get(workflow_id)
+        if definition is not None:
+            return definition
+
+        # Runtime bridge (JVNAUTOSCI-1106): lazily register newly authored
+        # Vontology workflows when a worker first encounters them, so UI/chat
+        # workflow authoring does not require a process restart.
+        try:
+            from ..workflows.durable.registry_factory import (
+                register_workflow_from_vontology,
+            )
+
+            registered, _error_code = register_workflow_from_vontology(
+                registry=registry,
+                workflow_id=workflow_id,
+            )
+            if registered:
+                return registry.get(workflow_id)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "[durable_workflows] Runtime workflow registration failed for %s: %s",
+                workflow_id,
+                exc,
+            )
+
+        return None
 
     return loader
 

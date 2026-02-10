@@ -145,6 +145,10 @@ class ActionRegistry:
         """
         self._fallback_handler = handler
 
+    def has_fallback_handler(self) -> bool:
+        """Return True when an unregistered-action fallback is configured."""
+        return self._fallback_handler is not None
+
     # --- lookup -------------------------------------------------------------
 
     def get(self, action_id: str) -> ActionSpec | None:

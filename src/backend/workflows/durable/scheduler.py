@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from .instance_manager import WorkflowInstanceManager
 from .models import WorkflowSchedule, ScheduleType
+from .workflow_instance_submission_service import submit_verified_workflow_instance
 
 logger = logging.getLogger(__name__)
 
@@ -253,15 +254,22 @@ class WorkflowScheduler:
             schedule: The schedule to trigger.
             now: Current timestamp.
         """
-        # Create workflow instance
-        instance_id = self._instance_manager.create_instance(
-            schedule.workflow_id,
+        # Create workflow instance via canonical verification pipeline.
+        submission = submit_verified_workflow_instance(
+            manager=self._instance_manager,
+            workflow_id=schedule.workflow_id,
             user_id=schedule.user_id,
             org_id=schedule.org_id,
             namespace=schedule.namespace,
             inputs=schedule.default_inputs,
             schedule_id=schedule.schedule_id,
         )
+        if not submission.success or not submission.instance_id:
+            raise RuntimeError(
+                "schedule_trigger_workflow_not_runnable:"
+                f"{schedule.workflow_id}:{submission.error_code or 'unknown'}"
+            )
+        instance_id = submission.instance_id
 
         logger.info(
             "[scheduler] Triggered schedule %s: created instance %s",

@@ -19,6 +19,9 @@ from ...workflows.durable import (
     ScheduleType,
     WorkflowInstanceManager,
 )
+from ...workflows.durable.workflow_instance_submission_service import (
+    submit_verified_workflow_instance,
+)
 from ...workflows.vontology_loader import (
     build_workflow_process_graph,
     best_effort_workflow_narrative_text,
@@ -136,15 +139,18 @@ def api_create_workflow_instance():
 
     try:
         manager = _get_instance_manager()
-        instance_id = manager.create_instance(
-            workflow_id,
+        submission = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id=workflow_id,
             user_id=user_id,
             org_id=org_id,
             namespace=namespace,
             inputs=inputs,
             max_retries=max_retries,
         )
-        return jsonify({"instance_id": instance_id, "status": "pending"}), 201
+        payload = submission.to_dict()
+        status_code = 201 if submission.success else 400
+        return jsonify(payload), status_code
     except Exception as e:
         logger.exception("Failed to create workflow instance")
         return jsonify({"error": str(e)}), 500
@@ -677,22 +683,22 @@ def api_trigger_workflow_schedule(schedule_id: str):
         )
 
     try:
-        instance_id = manager.create_instance(
-            schedule.workflow_id,
+        submission = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id=schedule.workflow_id,
             user_id=schedule.user_id,
             org_id=schedule.org_id,
             namespace=schedule.namespace,
             inputs=schedule.default_inputs,
             schedule_id=schedule.schedule_id,
         )
+        payload = submission.to_dict()
+        payload["schedule_id"] = schedule_id
+        if not submission.success:
+            return jsonify(payload), 400
+        payload["status"] = "triggered"
         return (
-            jsonify(
-                {
-                    "instance_id": instance_id,
-                    "schedule_id": schedule_id,
-                    "status": "triggered",
-                }
-            ),
+            jsonify(payload),
             201,
         )
     except Exception as e:

@@ -5118,6 +5118,9 @@ def _workflow_mcp_health_check(**kwargs):
 def _workflow_create_instance(**kwargs):
     """Create a new durable workflow instance."""
     from ...workflows.durable import WorkflowInstanceManager
+    from ...workflows.durable.workflow_instance_submission_service import (
+        submit_verified_workflow_instance,
+    )
 
     workflow_id = kwargs.get("workflow_id")
     if not isinstance(workflow_id, str) or not workflow_id.strip():
@@ -5157,19 +5160,16 @@ def _workflow_create_instance(**kwargs):
 
     try:
         manager = WorkflowInstanceManager()
-        instance_id = manager.create_instance(
-            workflow_id.strip(),
+        submission = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id=workflow_id.strip(),
             user_id=user_id,
             org_id=org_id,
             namespace=namespace,
             inputs=inputs if isinstance(inputs, dict) else {},
-            max_retries=int(max_retries),
+            max_retries=max_retries,
         )
-        return {
-            "success": True,
-            "instance_id": instance_id,
-            "status": "pending",
-        }
+        return submission.to_dict()
     except Exception as e:
         return make_error_response(
             "create_failed",
@@ -5592,6 +5592,9 @@ def _workflow_delete_schedule(**kwargs):
 def _workflow_trigger_schedule(**kwargs):
     """Manually trigger a workflow schedule immediately."""
     from ...workflows.durable import WorkflowInstanceManager
+    from ...workflows.durable.workflow_instance_submission_service import (
+        submit_verified_workflow_instance,
+    )
 
     schedule_id = kwargs.get("schedule_id")
     if not isinstance(schedule_id, str) or not schedule_id.strip():
@@ -5611,20 +5614,20 @@ def _workflow_trigger_schedule(**kwargs):
         )
 
     try:
-        instance_id = manager.create_instance(
-            schedule.workflow_id,
+        submission = submit_verified_workflow_instance(
+            manager=manager,
+            workflow_id=schedule.workflow_id,
             user_id=schedule.user_id,
             org_id=schedule.org_id,
             namespace=schedule.namespace,
             inputs=schedule.default_inputs,
             schedule_id=schedule.schedule_id,
         )
-        return {
-            "success": True,
-            "instance_id": instance_id,
-            "schedule_id": schedule_id,
-            "status": "triggered",
-        }
+        payload = submission.to_dict()
+        payload["schedule_id"] = schedule_id
+        if submission.success:
+            payload["status"] = "triggered"
+        return payload
     except Exception as e:
         return make_error_response(
             "trigger_failed",

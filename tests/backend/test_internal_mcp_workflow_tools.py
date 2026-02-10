@@ -129,6 +129,73 @@ class _StubWorkflowManager:
         return self.instances.get(instance_id)
 
 
+class _InMemoryScheduleWorkflowManager:
+    def __init__(self) -> None:
+        self.schedules: dict[str, Any] = {}
+        self.instances: list[dict[str, object]] = []
+        self._instance_counter = 0
+
+    def create_schedule(self, schedule):
+        self.schedules[schedule.schedule_id] = schedule
+        return schedule.schedule_id
+
+    def get_schedule(self, schedule_id: str):
+        return self.schedules.get(schedule_id)
+
+    def list_schedules(self, user_id=None, enabled_only=False, limit=50):
+        schedules = list(self.schedules.values())
+        if user_id:
+            schedules = [s for s in schedules if getattr(s, "user_id", None) == user_id]
+        if enabled_only:
+            schedules = [s for s in schedules if bool(getattr(s, "enabled", False))]
+        return schedules[:limit]
+
+    def find_due_schedules(self, limit=50):
+        now = datetime.now(timezone.utc)
+        due = []
+        for schedule in self.schedules.values():
+            next_run_at = getattr(schedule, "next_run_at", None)
+            if not bool(getattr(schedule, "enabled", False)):
+                continue
+            if isinstance(next_run_at, datetime) and next_run_at <= now:
+                due.append(schedule)
+        return due[:limit]
+
+    def create_instance(
+        self,
+        workflow_id: str,
+        *,
+        user_id: str,
+        org_id: str,
+        namespace: str,
+        inputs: dict | None = None,
+        schedule_id: str | None = None,
+        **_kwargs,
+    ) -> str:
+        self._instance_counter += 1
+        instance_id = f"#V#instance_{self._instance_counter}"
+        self.instances.append(
+            {
+                "instance_id": instance_id,
+                "workflow_id": workflow_id,
+                "user_id": user_id,
+                "org_id": org_id,
+                "namespace": namespace,
+                "inputs": dict(inputs or {}),
+                "schedule_id": schedule_id,
+            }
+        )
+        return instance_id
+
+    def update_schedule_after_run(self, schedule_id: str, *, next_run_at=None):
+        schedule = self.schedules.get(schedule_id)
+        if schedule is None:
+            return False
+        schedule.next_run_at = next_run_at
+        schedule.last_run_at = datetime.now(timezone.utc)
+        return True
+
+
 def test_workflow_list_definitions_exists_and_returns_data():
     catalogue = build_default_catalogue()
     methods = catalogue.list_methods()
@@ -209,6 +276,7 @@ def test_workflow_list_instances_gateway_invoke_error_path():
 
 def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
     manager = _StubWorkflowManager()
+    workflow_id = "#V#generate_considerations_workflow"
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -218,7 +286,7 @@ def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
     created = gateway.invoke(
         "workflow_create_instance",
         {
-            "workflow_id": "#V#test_workflow",
+            "workflow_id": workflow_id,
             "user_id": "#V#user",
             "org_id": "#V#org",
             "inputs": {"seed": "value"},
@@ -246,13 +314,14 @@ def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
     ).payload
     assert detail.get("success") is True
     assert detail.get("instance_id") == instance_id
-    assert detail.get("workflow_id") == "#V#test_workflow"
+    assert detail.get("workflow_id") == workflow_id
     assert detail.get("namespace") == "#V#user/#V#org"
     assert detail.get("inputs") == {"seed": "value"}
 
 
 def test_workflow_create_instance_normalises_inputs(monkeypatch):
     manager = _StubWorkflowManager()
+    workflow_id = "#V#generate_considerations_workflow"
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -262,7 +331,7 @@ def test_workflow_create_instance_normalises_inputs(monkeypatch):
     created = gateway.invoke(
         "workflow_create_instance",
         {
-            "workflow_id": "#V#test_workflow",
+            "workflow_id": workflow_id,
             "user_id": "   ",
             "org_id": "  ",
             "namespace": " #V#explicit_ns ",
@@ -280,6 +349,32 @@ def test_workflow_create_instance_normalises_inputs(monkeypatch):
     assert instance.namespace == "#V#explicit_ns"
     assert instance.inputs == {}
     assert instance.max_retries == 50
+
+
+def test_workflow_create_instance_rejects_unrunnable_workflow(monkeypatch):
+    manager = _StubWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#definitely_missing_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "inputs": {"seed": "value"},
+        },
+    ).payload
+    assert created.get("success") is False
+    assert created.get("status") == "rejected_preflight"
+    assert created.get("error_code") == "workflow_not_runnable"
+    verification = created.get("verification") or {}
+    preflight = verification.get("preflight") or {}
+    assert "workflow_definition_not_registered" in (preflight.get("errors") or [])
+    assert manager.instances == {}
 
 
 def test_workflow_mcp_health_check_exists_and_runs():
@@ -315,73 +410,7 @@ def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
 
 
 def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
-    class _InMemoryWorkflowManager:
-        def __init__(self) -> None:
-            self.schedules: dict[str, Any] = {}
-            self.instances: list[dict[str, object]] = []
-            self._instance_counter = 0
-
-        def create_schedule(self, schedule):
-            self.schedules[schedule.schedule_id] = schedule
-            return schedule.schedule_id
-
-        def get_schedule(self, schedule_id: str):
-            return self.schedules.get(schedule_id)
-
-        def list_schedules(self, user_id=None, enabled_only=False, limit=50):
-            schedules = list(self.schedules.values())
-            if user_id:
-                schedules = [s for s in schedules if getattr(s, "user_id", None) == user_id]
-            if enabled_only:
-                schedules = [s for s in schedules if bool(getattr(s, "enabled", False))]
-            return schedules[:limit]
-
-        def find_due_schedules(self, limit=50):
-            now = datetime.now(timezone.utc)
-            due = []
-            for schedule in self.schedules.values():
-                next_run_at = getattr(schedule, "next_run_at", None)
-                if not bool(getattr(schedule, "enabled", False)):
-                    continue
-                if isinstance(next_run_at, datetime) and next_run_at <= now:
-                    due.append(schedule)
-            return due[:limit]
-
-        def create_instance(
-            self,
-            workflow_id: str,
-            *,
-            user_id: str,
-            org_id: str,
-            namespace: str,
-            inputs: dict | None = None,
-            schedule_id: str | None = None,
-            **_kwargs,
-        ) -> str:
-            self._instance_counter += 1
-            instance_id = f"#V#instance_{self._instance_counter}"
-            self.instances.append(
-                {
-                    "instance_id": instance_id,
-                    "workflow_id": workflow_id,
-                    "user_id": user_id,
-                    "org_id": org_id,
-                    "namespace": namespace,
-                    "inputs": dict(inputs or {}),
-                    "schedule_id": schedule_id,
-                }
-            )
-            return instance_id
-
-        def update_schedule_after_run(self, schedule_id: str, *, next_run_at=None):
-            schedule = self.schedules.get(schedule_id)
-            if schedule is None:
-                return False
-            schedule.next_run_at = next_run_at
-            schedule.last_run_at = datetime.now(timezone.utc)
-            return True
-
-    manager = _InMemoryWorkflowManager()
+    manager = _InMemoryScheduleWorkflowManager()
     monkeypatch.setattr(
         "src.backend.workflows.durable.WorkflowInstanceManager",
         lambda: manager,
@@ -424,3 +453,44 @@ def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):
     assert trigger_result.get("schedule_id") == schedule_id
     assert trigger_result.get("status") == "triggered"
     assert len(manager.instances) == 2
+
+
+def test_workflow_trigger_schedule_rejects_unrunnable_workflow(monkeypatch):
+    manager = _InMemoryScheduleWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+
+    gateway = _build_gateway()
+    run_at = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    create_result = gateway.invoke(
+        "workflow_create_schedule",
+        {
+            "workflow_id": "#V#definitely_missing_workflow",
+            "schedule_type": "once",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user/#V#org",
+            "run_at": run_at,
+            "default_inputs": {"task": "e2e"},
+            "description": "WS8 gateway schedule rejection test",
+        },
+    ).payload
+
+    assert create_result.get("success") is True
+    schedule_id = create_result.get("schedule_id")
+    assert isinstance(schedule_id, str)
+
+    trigger_result = gateway.invoke(
+        "workflow_trigger_schedule",
+        {"schedule_id": schedule_id},
+    ).payload
+    assert trigger_result.get("success") is False
+    assert trigger_result.get("schedule_id") == schedule_id
+    assert trigger_result.get("status") != "triggered"
+    assert trigger_result.get("error_code") == "workflow_not_runnable"
+    verification = trigger_result.get("verification") or {}
+    preflight = verification.get("preflight") or {}
+    assert "workflow_definition_not_registered" in (preflight.get("errors") or [])
+    assert len(manager.instances) == 0

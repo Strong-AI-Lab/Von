@@ -1069,7 +1069,7 @@ class TestWorkflowScheduler:
         manager = MagicMock(spec=WorkflowInstanceManager)
         now = datetime.now(timezone.utc)
         due_schedule = WorkflowSchedule.create_once(
-            "#V#test_workflow",
+            "#V#generate_considerations_workflow",
             run_at=now,
             user_id="user-1",
             org_id="org-1",
