@@ -80,6 +80,9 @@ from src.backend.services.text_value_service import (
     delete_text_relation,
     delete_text_relation_by_predicate_and_text,
 )
+from src.backend.services.create_concepts_parent_resolution_service import (
+    resolve_parent_for_create_concepts,
+)
 from src.backend.services.rag_text_relation_change_hook_service import (
     maybe_delete_text_relation_doc_from_rag,
     maybe_sync_concept_text_relations_to_rag,
@@ -1608,12 +1611,51 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
                     ]
                 },
                 suggestions=[
-                    "Specify parent_id (e.g., '#V#thing' for top-level concepts)",
+                    "Specify parent_id (e.g., '#V#person' or '#V#abstract_object')",
                     "Provide concepts array with at least one {name: '...'} object",
                     "Use search_concepts to find existing parent concepts",
                 ],
             )
         ]
+
+    parent_resolution = resolve_parent_for_create_concepts(str(parent_id))
+    if not parent_resolution.success:
+        canonical_parent = parent_resolution.canonical_parent_id
+        related_ids = [
+            cid
+            for cid in [
+                canonical_parent,
+                *parent_resolution.fallback_candidates_checked,
+            ]
+            if cid
+        ]
+        suggestions = [
+            "Create the parent concept first",
+            "Search for similar concepts using search_concepts",
+        ]
+        if parent_resolution.fallback_candidates_checked:
+            suggestions.append(
+                "For workflow concepts, prefer an existing workflow supertype "
+                f"({', '.join(parent_resolution.fallback_candidates_checked)})"
+            )
+        return [
+            _json_error(
+                f"Parent concept '{canonical_parent}' not found. Create it first or check the ID.",
+                error_code="parent_not_found",
+                details={
+                    "canonical_parent_id": canonical_parent,
+                    "original_parent_id": parent_id,
+                    "fallback_candidates_checked": list(
+                        parent_resolution.fallback_candidates_checked
+                    ),
+                },
+                suggestions=suggestions,
+                related_concept_ids=related_ids,
+            )
+        ]
+
+    assert parent_resolution.resolved_parent_id is not None
+    resolved_parent_id = parent_resolution.resolved_parent_id
 
     results = []
     for concept_data in concepts:
@@ -1631,7 +1673,7 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
 
         create_as_instance = kind == "instance"
         result = create_vontology_concept(
-            parent_id=parent_id,
+            parent_id=resolved_parent_id,
             new_concept_name=name_val,
             create_as_instance=create_as_instance,
             description=description,
@@ -1644,6 +1686,8 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
         "results": results,
         "total": len(concepts),
         "successful": sum(1 for r in results if r.get("success")),
+        "parent_id_used": resolved_parent_id,
+        "parent_resolution": parent_resolution.to_dict(),
     }
     return [_json_text(payload)]
 

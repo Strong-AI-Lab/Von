@@ -219,8 +219,9 @@ def _get_paper_metadata(**kwargs):
 def _create_concepts(**kwargs):
     from ...vontology.utils_vontology import create_vontology_concept
     from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
-    from ...db.repositories.concepts_repository import ConceptsRepository
-    from ...utils.concept_id_utils import canonicalise_vontology_concept_id
+    from ...services.create_concepts_parent_resolution_service import (
+        resolve_parent_for_create_concepts,
+    )
 
     parent_id: str | None = kwargs.get("parent_id")
     concepts = kwargs.get("concepts", [])
@@ -286,25 +287,41 @@ def _create_concepts(**kwargs):
             suggestions=suggestions,
         )
 
-    # Validate and canonicalise parent_id
-    canonical_parent = canonicalise_vontology_concept_id(parent_id)
-    if not canonical_parent or not ConceptsRepository.find_one(
-        {"concept_id": canonical_parent}
-    ):
+    parent_resolution = resolve_parent_for_create_concepts(parent_id)
+    if not parent_resolution.success:
+        canonical_parent = parent_resolution.canonical_parent_id
+        related_ids = [
+            cid
+            for cid in [
+                canonical_parent,
+                *parent_resolution.fallback_candidates_checked,
+            ]
+            if cid
+        ]
+        suggestions = [
+            "Create the parent concept first",
+            "Search for similar concepts using search_concepts",
+        ]
+        if parent_resolution.fallback_candidates_checked:
+            suggestions.append(
+                "For workflow concepts, prefer an existing workflow supertype "
+                f"({', '.join(parent_resolution.fallback_candidates_checked)})"
+            )
         return make_error_response(
             "parent_not_found",
             f"Parent concept '{canonical_parent}' not found. Create it first or check the ID.",
             details={
                 "canonical_parent_id": canonical_parent,
                 "original_parent_id": parent_id,
+                "fallback_candidates_checked": list(
+                    parent_resolution.fallback_candidates_checked
+                ),
             },
-            suggestions=[
-                "Create the parent concept first",
-                "Search for similar concepts using search_concepts",
-            ],
-            related_concept_ids=[canonical_parent] if canonical_parent else [],
+            suggestions=suggestions,
+            related_concept_ids=related_ids,
         )
-    validated_parent_id: str = canonical_parent  # Type-narrowed to str
+    assert parent_resolution.resolved_parent_id is not None
+    validated_parent_id: str = parent_resolution.resolved_parent_id
     if not concepts or not isinstance(concepts, list):
         return make_error_response(
             "missing_parameter",
@@ -368,6 +385,7 @@ def _create_concepts(**kwargs):
         "already_existed": already_exists,
         "failed": len(concepts) - successful - already_exists,
         "parent_id_used": validated_parent_id,  # Canonicalised parent ID that was actually used
+        "parent_resolution": parent_resolution.to_dict(),
     }
 
 
