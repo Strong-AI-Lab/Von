@@ -258,6 +258,9 @@ const DEFAULT_THINKING_TEXT = 'Thinking...';
 let showToolUseDuringThinkingSetting = true;
 let lastToolUseSettingRefreshMs = 0;
 const TOOL_USE_SETTING_REFRESH_COOLDOWN_MS = 30_000;
+const THINKING_STATUS_ACTIVE = 'active';
+const THINKING_STATUS_WAITING = 'waiting';
+const THINKING_STATUS_STALLED = 'stalled';
 
 function getLoadingIndicatorTextEl() {
     const loadingIndicator = document.getElementById('loadingIndicator');
@@ -462,33 +465,147 @@ async function refreshToolUseDuringThinkingSetting(force = false) {
     return showToolUseDuringThinkingSetting;
 }
 
-function formatToolUseProgressText(progress, request = null) {
+function toTitleCaseWords(value) {
+    const text = String(value ?? '').trim();
+    if (!text) {
+        return '';
+    }
+    return text
+        .split(/[_\s]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+}
+
+function normaliseThinkingLivenessState(progress) {
+    const value = (progress && typeof progress.liveness_state === 'string')
+        ? progress.liveness_state.trim().toLowerCase()
+        : '';
+    if (value === THINKING_STATUS_STALLED) {
+        return THINKING_STATUS_STALLED;
+    }
+    if (value === THINKING_STATUS_WAITING) {
+        return THINKING_STATUS_WAITING;
+    }
+    return THINKING_STATUS_ACTIVE;
+}
+
+function thinkingLivenessLabel(state) {
+    if (state === THINKING_STATUS_STALLED) return 'Stalled';
+    if (state === THINKING_STATUS_WAITING) return 'Waiting';
+    return 'Active';
+}
+
+function formatLastActivityText(progress) {
     if (!progress || typeof progress !== 'object') {
-        return DEFAULT_THINKING_TEXT;
+        return null;
     }
 
-    const phase = typeof progress.phase === 'string' ? progress.phase : null;
-    const phaseLabel = typeof progress.phase_label === 'string' ? progress.phase_label : null;
-
-    // Use phase label as the primary text - simplified for card header
-    let primaryText = DEFAULT_THINKING_TEXT;
-    if (phaseLabel) {
-        primaryText = phaseLabel;
-        // Add ellipsis for in-progress phases
-        if (phase && phase !== 'completed' && phase !== 'error') {
-            primaryText += '...';
+    let idleMs = null;
+    if (Number.isFinite(progress.activity_idle_ms)) {
+        idleMs = Number(progress.activity_idle_ms);
+    } else if (Number.isFinite(progress.idle_ms)) {
+        idleMs = Number(progress.idle_ms);
+    } else if (typeof progress.last_activity_at_utc === 'string' && progress.last_activity_at_utc.trim()) {
+        const parsed = Date.parse(progress.last_activity_at_utc);
+        if (Number.isFinite(parsed)) {
+            idleMs = Date.now() - parsed;
         }
     }
 
-    return primaryText;
+    if (!Number.isFinite(idleMs)) {
+        return null;
+    }
+
+    const safeIdleMs = Math.max(0, Number(idleMs));
+    return `Last activity ${formatThinkingDuration(safeIdleMs)} ago`;
+}
+
+function buildThinkingProgressPresentation(progress, request = null) {
+    const livenessState = normaliseThinkingLivenessState(progress);
+    const livenessLabel = thinkingLivenessLabel(livenessState);
+
+    if (!progress || typeof progress !== 'object') {
+        return {
+            livenessState,
+            livenessLabel,
+            stageText: DEFAULT_THINKING_TEXT,
+            lastActivityText: null
+        };
+    }
+
+    const stage = (typeof progress.stage === 'string' && progress.stage.trim())
+        ? progress.stage.trim()
+        : ((typeof progress.phase === 'string' && progress.phase.trim()) ? progress.phase.trim() : null);
+    const phaseLabel = (typeof progress.phase_label === 'string' && progress.phase_label.trim())
+        ? progress.phase_label.trim()
+        : null;
+    const stageLabel = (typeof progress.stage_label === 'string' && progress.stage_label.trim())
+        ? progress.stage_label.trim()
+        : null;
+    const tool = (typeof progress.tool === 'string' && progress.tool.trim()) ? progress.tool.trim() : null;
+    const subtask = (typeof progress.subtask === 'string' && progress.subtask.trim())
+        ? progress.subtask.trim()
+        : ((typeof progress.workflow_task === 'string' && progress.workflow_task.trim()) ? progress.workflow_task.trim() : null);
+
+    let stageText = phaseLabel || stageLabel || (stage ? toTitleCaseWords(stage) : DEFAULT_THINKING_TEXT);
+    const detail = tool || subtask;
+    if (detail && !stageText.toLowerCase().includes(detail.toLowerCase())) {
+        stageText = `${stageText}: ${detail}`;
+    }
+
+    if (livenessState === THINKING_STATUS_STALLED) {
+        stageText = stageText ? `Stalled: ${stageText}` : 'Stalled';
+    } else if (livenessState === THINKING_STATUS_WAITING) {
+        stageText = stageText ? `Waiting: ${stageText}` : 'Waiting';
+    } else if (stage && stage !== 'completed' && stage !== 'error') {
+        stageText += '...';
+    }
+
+    return {
+        livenessState,
+        livenessLabel,
+        stageText,
+        lastActivityText: formatLastActivityText(progress),
+        requestId: request && typeof request.clientRequestId === 'string' ? request.clientRequestId : null
+    };
+}
+
+export function __testOnly_buildThinkingProgressPresentation(progress, request = null) {
+    return buildThinkingProgressPresentation(progress, request);
+}
+
+function updateThinkingCardStatusBadge(progress) {
+    const badgeEl = document.getElementById('thinkingCardStatusBadge');
+    if (!badgeEl) {
+        return;
+    }
+
+    const presentation = buildThinkingProgressPresentation(progress);
+    badgeEl.textContent = presentation.livenessLabel;
+    badgeEl.classList.remove(THINKING_STATUS_ACTIVE, THINKING_STATUS_WAITING, THINKING_STATUS_STALLED);
+    badgeEl.classList.add(presentation.livenessState);
+    badgeEl.setAttribute('aria-hidden', 'false');
+}
+
+function formatToolUseProgressText(progress, request = null) {
+    const presentation = buildThinkingProgressPresentation(progress, request);
+    return presentation.stageText || DEFAULT_THINKING_TEXT;
 }
 
 /**
- * Update the thinking card meta element (elapsed time + tool count).
+ * Update the thinking card meta element (elapsed time + liveness metadata).
  */
 function updateThinkingCardMeta(request, progress) {
     const metaEl = document.getElementById('thinkingCardMeta');
     if (!metaEl) return;
+
+    const effectiveProgress = (progress && typeof progress === 'object')
+        ? progress
+        : ((request && request.latestProgress && typeof request.latestProgress === 'object')
+            ? request.latestProgress
+            : null);
+    updateThinkingCardStatusBadge(effectiveProgress);
 
     const bits = [];
 
@@ -502,10 +619,19 @@ function updateThinkingCardMeta(request, progress) {
     }
 
     // Tool count
-    const done = progress && Number.isFinite(progress.tool_calls_done) ? Number(progress.tool_calls_done) : null;
-    const cap = progress && Number.isFinite(progress.tool_calls_cap) ? Number(progress.tool_calls_cap) : null;
+    const done = effectiveProgress && Number.isFinite(effectiveProgress.tool_calls_done)
+        ? Number(effectiveProgress.tool_calls_done)
+        : null;
+    const cap = effectiveProgress && Number.isFinite(effectiveProgress.tool_calls_cap)
+        ? Number(effectiveProgress.tool_calls_cap)
+        : null;
     if (done !== null && cap !== null && cap > 0) {
         bits.push(`${done}/${cap} tools`);
+    }
+
+    const lastActivityText = formatLastActivityText(effectiveProgress);
+    if (lastActivityText) {
+        bits.push(lastActivityText);
     }
 
     metaEl.textContent = bits.length > 0 ? bits.join(' \u00b7 ') : '';
@@ -759,7 +885,7 @@ function startThinkingTooltipTicker(request) {
             return;
         }
         setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
-        updateThinkingCardMeta(request, null);
+        updateThinkingCardMeta(request, request.latestProgress || null);
     }, 1000);
 }
 
@@ -804,7 +930,7 @@ function startToolUseProgressPolling(request) {
 
         // Keep detail text "alive" even before the server has any tool-progress state.
         setLoadingIndicatorDetailHtml(renderThinkingCardBodyHTML(request));
-        updateThinkingCardMeta(request, null);
+        updateThinkingCardMeta(request, request.latestProgress || null);
 
         try {
             const resp = await fetch(`/von/progress/${encodeURIComponent(requestId)}`,
@@ -817,6 +943,14 @@ function startToolUseProgressPolling(request) {
 
             if (resp.status === 404) {
                 poll.consecutiveNotFound += 1;
+                request.latestProgress = {
+                    status: 'pending',
+                    phase: 'context_build',
+                    phase_label: 'Waiting for status',
+                    liveness_state: THINKING_STATUS_WAITING
+                };
+                setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request));
+                updateThinkingCardMeta(request, request.latestProgress);
                 poll.nextDelayMs = Math.min(10_000, poll.nextDelayMs * 1.7);
                 scheduleNextPoll(poll.nextDelayMs);
                 return;
@@ -824,6 +958,14 @@ function startToolUseProgressPolling(request) {
 
             if (resp.status === 202) {
                 poll.consecutiveNotFound = 0;
+                request.latestProgress = {
+                    status: 'pending',
+                    phase: 'context_build',
+                    phase_label: 'Waiting for status',
+                    liveness_state: THINKING_STATUS_WAITING
+                };
+                setLoadingIndicatorText(formatToolUseProgressText(request.latestProgress, request));
+                updateThinkingCardMeta(request, request.latestProgress);
                 poll.nextDelayMs = Math.min(5000, poll.nextDelayMs * 1.4);
                 scheduleNextPoll(poll.nextDelayMs);
                 return;
@@ -835,6 +977,22 @@ function startToolUseProgressPolling(request) {
                 return;
             }
             const progress = await resp.json();
+            request.latestProgress = progress;
+            if (!Array.isArray(request.progressEvents)) {
+                request.progressEvents = [];
+            }
+            request.progressEvents.push({
+                at_utc: new Date().toISOString(),
+                status: progress?.status || null,
+                stage: progress?.stage || progress?.phase || null,
+                sequence_no: progress?.sequence_no || null,
+                liveness_state: progress?.liveness_state || null,
+                idle_ms: progress?.activity_idle_ms ?? progress?.idle_ms ?? null,
+                subtask: progress?.subtask || progress?.tool || progress?.workflow_task || null
+            });
+            if (request.progressEvents.length > 60) {
+                request.progressEvents = request.progressEvents.slice(-60);
+            }
 
             poll.consecutiveNotFound = 0;
             poll.nextDelayMs = 350;
@@ -8635,6 +8793,9 @@ function setThinkingState(isThinking) {
     const loadingIndicator = document.getElementById('loadingIndicator');
     const loadingDetail = document.getElementById('loadingIndicatorDetail');
     const abortButton = document.getElementById('abortButton');
+    const retryButton = document.getElementById('retryThinkingButton');
+    const copyDiagnosticsButton = document.getElementById('copyThinkingDiagnosticsButton');
+    const statusBadge = document.getElementById('thinkingCardStatusBadge');
     const sendButton = document.getElementById('sendButton');
     const metaEl = document.getElementById('thinkingCardMeta');
 
@@ -8666,12 +8827,33 @@ function setThinkingState(isThinking) {
         }
     }
 
+    if (statusBadge) {
+        if (isThinking) {
+            statusBadge.textContent = 'Active';
+            statusBadge.classList.remove(THINKING_STATUS_WAITING, THINKING_STATUS_STALLED);
+            statusBadge.classList.add(THINKING_STATUS_ACTIVE);
+            statusBadge.setAttribute('aria-hidden', 'false');
+        } else {
+            statusBadge.setAttribute('aria-hidden', 'true');
+        }
+    }
+
     if (sendButton) {
         sendButton.disabled = !!isThinking;
     }
 
     if (abortButton) {
         abortButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+    }
+    if (retryButton) {
+        retryButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+    }
+    if (copyDiagnosticsButton) {
+        copyDiagnosticsButton.setAttribute('aria-hidden', isThinking ? 'false' : 'true');
+        if (!isThinking) {
+            copyDiagnosticsButton.textContent = 'Copy diagnostics';
+            copyDiagnosticsButton.classList.remove('success-feedback', 'error-feedback');
+        }
     }
 }
 
@@ -8743,20 +8925,105 @@ function abortActiveHistoryRequest() {
     }
 }
 
+function buildThinkingDiagnosticsPayload(request) {
+    if (!request || typeof request !== 'object') {
+        return null;
+    }
+
+    const elapsedMs = Number.isFinite(request.thinkingStartedAtMs)
+        ? Math.max(0, Date.now() - Number(request.thinkingStartedAtMs))
+        : null;
+
+    return {
+        generated_at_utc: new Date().toISOString(),
+        request_id: request.clientRequestId || null,
+        elapsed_ms: elapsedMs,
+        prompt_preview: typeof request.promptRaw === 'string' ? request.promptRaw.slice(0, 1000) : null,
+        latest_progress: request.latestProgress || null,
+        progress_events: Array.isArray(request.progressEvents) ? request.progressEvents.slice(-40) : [],
+        phase_history: Array.isArray(request.phaseHistory) ? request.phaseHistory.slice(-40) : [],
+        tool_history: Array.isArray(request.toolUseProgressHistory) ? request.toolUseProgressHistory.slice(-40) : [],
+        workflow_discovery: request.workflowDiscovery || null
+    };
+}
+
+function retryActiveChatRequest() {
+    if (!activeChatRequest) {
+        return;
+    }
+
+    const request = activeChatRequest;
+    const prompt = typeof request.promptRaw === 'string' ? request.promptRaw : '';
+    abortActiveChatRequest();
+    if (!prompt.trim()) {
+        return;
+    }
+    const promptInput = document.getElementById('promptInput');
+    if (promptInput) {
+        promptInput.value = prompt;
+        promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    setTimeout(() => {
+        void handleSendPrompt();
+    }, 0);
+}
+
+async function copyActiveThinkingDiagnostics(button = null) {
+    if (!activeChatRequest) {
+        return false;
+    }
+    const payload = buildThinkingDiagnosticsPayload(activeChatRequest);
+    if (!payload) {
+        return false;
+    }
+
+    const text = JSON.stringify(payload, null, 2);
+    let copied = false;
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        try {
+            await navigator.clipboard.writeText(text);
+            copied = true;
+        } catch (_) {
+            copied = copyTextFallback(text);
+        }
+    } else {
+        copied = copyTextFallback(text);
+    }
+
+    if (button) {
+        const original = button.dataset.originalText || button.textContent || 'Copy diagnostics';
+        button.dataset.originalText = original;
+        indicateClipboardResult(button, original, copied);
+    }
+
+    return copied;
+}
+
 function ensureAbortButtonBound() {
     const abortButton = document.getElementById('abortButton');
-    if (!abortButton) {
-        return;
+    const retryButton = document.getElementById('retryThinkingButton');
+    const copyDiagnosticsButton = document.getElementById('copyThinkingDiagnosticsButton');
+
+    if (abortButton && abortButton.dataset.bound !== '1') {
+        abortButton.dataset.bound = '1';
+        abortButton.addEventListener('click', () => {
+            abortActiveChatRequest();
+        });
     }
 
-    if (abortButton.dataset.bound === '1') {
-        return;
+    if (retryButton && retryButton.dataset.bound !== '1') {
+        retryButton.dataset.bound = '1';
+        retryButton.addEventListener('click', () => {
+            retryActiveChatRequest();
+        });
     }
-    abortButton.dataset.bound = '1';
 
-    abortButton.addEventListener('click', () => {
-        abortActiveChatRequest();
-    });
+    if (copyDiagnosticsButton && copyDiagnosticsButton.dataset.bound !== '1') {
+        copyDiagnosticsButton.dataset.bound = '1';
+        copyDiagnosticsButton.addEventListener('click', () => {
+            void copyActiveThinkingDiagnostics(copyDiagnosticsButton);
+        });
+    }
 }
 
 async function handleSendPrompt() {
@@ -8821,7 +9088,9 @@ async function handleSendPrompt() {
             aborted: false,
             clientRequestId,
             thinkingStartedAtMs: Date.now(),
-            toolUseProgressHistory: []
+            toolUseProgressHistory: [],
+            latestProgress: null,
+            progressEvents: []
         };
         activeChatRequest = request;
 

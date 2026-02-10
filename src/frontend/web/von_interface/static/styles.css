@@ -5099,6 +5099,81 @@ footer {
     flex-shrink: 0;
 }
 
+.thinking-card-status {
+    display: none;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    border-radius: 999px;
+    padding: 2px 8px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.thinking-card-status[aria-hidden="false"] {
+    display: inline-flex;
+}
+
+.thinking-card-status.active {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.thinking-card-status.waiting {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.thinking-card-status.stalled {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.thinking-card-action {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    min-height: 22px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    border: 1px solid #cbd5e1;
+    background: #ffffff;
+    color: #334155;
+    font-size: 0.68rem;
+    font-weight: 500;
+    line-height: 1.1;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.thinking-card-action[aria-hidden="false"] {
+    display: inline-flex;
+}
+
+.thinking-card-action:hover {
+    background: #f8fafc;
+    border-color: #94a3b8;
+}
+
+.thinking-card-action:focus-visible {
+    outline: 2px solid #93c5fd;
+    outline-offset: 1px;
+}
+
+.thinking-card-action.success-feedback {
+    color: #166534;
+    border-color: #86efac;
+    background: #dcfce7;
+}
+
+.thinking-card-action.error-feedback {
+    color: #b91c1c;
+    border-color: #fecaca;
+    background: #fee2e2;
+}
+
 .thinking-card-stop {
     display: none;
     align-items: center;
@@ -5262,6 +5337,16 @@ footer {
     color: #64748b;
     margin-top: 2px;
     padding-left: 20px;
+}
+
+@media (max-width: 640px) {
+    .thinking-card-header {
+        flex-wrap: wrap;
+    }
+
+    .thinking-card-meta {
+        margin-left: 0;
+    }
 }
 
 .upload-file-status {

@@ -14,7 +14,7 @@ import threading
 import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from src.workflows.onboarding_workflow import run_onboarding_workflow
 from ...languagemodels.llm_interface import get_llm_client, get_active_model_name
 from .settings_routes import get_all_settings_data
@@ -59,10 +59,304 @@ von_bp = Blueprint("von", __name__, template_folder=_TEMPLATE_DIR)
 _TOOL_PROGRESS_TTL_SEC = 10 * 60
 _TOOL_PROGRESS_LOCK = threading.Lock()
 _TOOL_PROGRESS: dict[tuple[str, str], dict[str, Any]] = {}
+_TOOL_PROGRESS_TERMINAL_STATUSES = {"completed", "error", "cancelled"}
+_TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT = 80
+
+
+def _env_int(name: str, default: int, *, min_value: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except Exception:
+        value = int(default)
+    return max(min_value, value)
+
+
+_TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC = _env_int(
+    "VON_TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC", 5, min_value=1
+)
+_TOOL_PROGRESS_WAITING_THRESHOLD_SEC = _env_int(
+    "VON_TOOL_PROGRESS_WAITING_THRESHOLD_SEC", 12, min_value=2
+)
+_TOOL_PROGRESS_STALL_THRESHOLD_SEC = _env_int(
+    "VON_TOOL_PROGRESS_STALL_THRESHOLD_SEC", 45, min_value=5
+)
+if _TOOL_PROGRESS_WAITING_THRESHOLD_SEC >= _TOOL_PROGRESS_STALL_THRESHOLD_SEC:
+    _TOOL_PROGRESS_STALL_THRESHOLD_SEC = (
+        _TOOL_PROGRESS_WAITING_THRESHOLD_SEC + _TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC
+    )
 
 
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _progress_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _progress_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _default_stage_label(stage: str) -> str:
+    mapping = {
+        "context_build": "Building context",
+        "workflow_discovery": "Searching for workflows",
+        "workflow_discovery_complete": "Found workflows",
+        "tool_plan": "Planning tool calls",
+        "tool_execute": "Executing tools",
+        "screen_backfill": "Generating response",
+        "narration": "Generating narration",
+        "tool_recovery": "Recovering tool call",
+        "orchestrator_start": "Starting orchestrator",
+        "orchestrator_end": "Finishing orchestrator",
+        "completed": "Complete",
+        "error": "Error",
+    }
+    if stage in mapping:
+        return mapping[stage]
+    return stage.replace("_", " ").strip().title() or "Thinking"
+
+
+def _derive_progress_stage(update: dict[str, Any], existing: dict[str, Any]) -> str:
+    explicit_stage = _progress_str(update.get("stage"))
+    if explicit_stage:
+        return explicit_stage
+
+    phase = _progress_str(update.get("phase"))
+    if phase:
+        return phase
+
+    status = _progress_str(update.get("status")) or ""
+    status_stage_map = {
+        "orchestrator_start": "orchestrator_start",
+        "orchestrator_end": "orchestrator_end",
+        "llm_call_start": "llm_call",
+        "llm_call_chunk": "llm_call",
+        "llm_call_end": "llm_call",
+        "tool_call_start": "tool_execute",
+        "tool_invoked": "tool_execute",
+        "tool_failed": "tool_execute",
+        "tool_blocked": "tool_execute",
+        "retry_start": "tool_recovery",
+        "retry_end": "tool_recovery",
+        "completed": "completed",
+        "error": "error",
+    }
+    derived = status_stage_map.get(status)
+    if derived:
+        return derived
+
+    existing_stage = _progress_str(existing.get("stage"))
+    if existing_stage:
+        return existing_stage
+
+    existing_phase = _progress_str(existing.get("phase"))
+    if existing_phase:
+        return existing_phase
+
+    return "context_build"
+
+
+def _derive_progress_event_kind(update: dict[str, Any]) -> str:
+    explicit_kind = _progress_str(update.get("event_kind"))
+    if explicit_kind:
+        return explicit_kind
+
+    status = _progress_str(update.get("status")) or ""
+    status_kind_map = {
+        "phase_transition": "stage_event",
+        "heartbeat": "heartbeat",
+        "orchestrator_start": "orchestrator_start",
+        "orchestrator_end": "orchestrator_end",
+        "llm_call_start": "llm_call_start",
+        "llm_call_chunk": "llm_call_chunk",
+        "llm_call_end": "llm_call_end",
+        "tool_call_start": "tool_call_start",
+        "tool_invoked": "tool_call_end",
+        "tool_failed": "tool_call_end",
+        "tool_blocked": "tool_call_end",
+        "retry_start": "retry_start",
+        "retry_end": "retry_end",
+        "completed": "completed",
+        "error": "error",
+    }
+    return status_kind_map.get(status, status or "status_update")
+
+
+def _classify_progress_cause(stage: str, status: str) -> str:
+    stage_lower = stage.lower()
+    status_lower = status.lower()
+
+    if "tool" in stage_lower or status_lower.startswith("tool_"):
+        return "tool_timeout"
+    if "llm" in stage_lower or status_lower.startswith("llm_"):
+        return "model_timeout"
+    if "retry" in stage_lower or status_lower.startswith("retry_"):
+        return "model_timeout"
+    if "orchestrator" in stage_lower:
+        return "worker_unavailable"
+    return "network_silence"
+
+
+def _derive_progress_liveness(
+    state: dict[str, Any], *, now_epoch: float | None = None
+) -> dict[str, Any]:
+    now = float(now_epoch if now_epoch is not None else time.time())
+
+    status = (_progress_str(state.get("status")) or "thinking").lower()
+    stage = _progress_str(state.get("stage")) or _progress_str(state.get("phase")) or ""
+
+    last_activity_epoch = _progress_number(
+        state.get("last_activity_epoch")
+    ) or _progress_number(state.get("updated_at_epoch"))
+    if last_activity_epoch is None:
+        last_activity_epoch = now
+
+    last_stage_activity_epoch = _progress_number(
+        state.get("last_stage_activity_epoch")
+    ) or last_activity_epoch
+
+    activity_idle_ms = int(max(0.0, (now - float(last_activity_epoch)) * 1000.0))
+    stage_idle_ms = int(max(0.0, (now - float(last_stage_activity_epoch)) * 1000.0))
+
+    if status in _TOOL_PROGRESS_TERMINAL_STATUSES:
+        liveness_state = "active"
+        liveness_reason = status
+        stall_detected = False
+    elif activity_idle_ms >= int(_TOOL_PROGRESS_STALL_THRESHOLD_SEC * 1000):
+        liveness_state = "stalled"
+        liveness_reason = _classify_progress_cause(stage, status)
+        stall_detected = True
+    elif stage_idle_ms >= int(_TOOL_PROGRESS_WAITING_THRESHOLD_SEC * 1000):
+        liveness_state = "waiting"
+        liveness_reason = _classify_progress_cause(stage, status)
+        stall_detected = False
+    else:
+        liveness_state = "active"
+        liveness_reason = "recent_activity"
+        stall_detected = False
+
+    return {
+        "liveness_state": liveness_state,
+        "liveness_reason": liveness_reason,
+        "stall_detected": stall_detected,
+        "waiting_threshold_sec": int(_TOOL_PROGRESS_WAITING_THRESHOLD_SEC),
+        "stall_threshold_sec": int(_TOOL_PROGRESS_STALL_THRESHOLD_SEC),
+        "activity_idle_ms": activity_idle_ms,
+        "stage_idle_ms": stage_idle_ms,
+    }
+
+
+def _serialise_tool_progress_state(
+    state: dict[str, Any], *, now_epoch: float | None = None
+) -> dict[str, Any]:
+    payload = dict(state)
+    payload.update(_derive_progress_liveness(payload, now_epoch=now_epoch))
+
+    payload.pop("updated_at_epoch", None)
+    payload.pop("request_started_epoch", None)
+    payload.pop("last_activity_epoch", None)
+    payload.pop("last_stage_activity_epoch", None)
+
+    events = payload.get("diagnostic_events")
+    if isinstance(events, list):
+        payload["diagnostic_events"] = list(events[-20:])
+
+    return payload
+
+
+def _build_tool_progress_compact_summary(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(state, dict):
+        return None
+
+    summary = state.get("diagnostic_summary")
+    summary = summary if isinstance(summary, dict) else {}
+    counters = state.get("counters")
+    counters = counters if isinstance(counters, dict) else {}
+
+    return {
+        "request_id": state.get("request_id"),
+        "sequence_no": state.get("sequence_no"),
+        "status": state.get("status"),
+        "stage": state.get("stage"),
+        "subtask": state.get("subtask"),
+        "elapsed_ms": state.get("elapsed_ms"),
+        "idle_ms": state.get("activity_idle_ms", state.get("idle_ms")),
+        "stage_idle_ms": state.get("stage_idle_ms"),
+        "liveness_state": state.get("liveness_state"),
+        "liveness_reason": state.get("liveness_reason"),
+        "stall_detected": state.get("stall_detected"),
+        "last_activity_at_utc": state.get("last_activity_at_utc"),
+        "event_count": summary.get("event_count"),
+        "counters": {
+            "tokens_streamed": counters.get("tokens_streamed", 0),
+            "tools_started": counters.get("tools_started", 0),
+            "tools_completed": counters.get("tools_completed", 0),
+        },
+        "waiting_threshold_sec": state.get("waiting_threshold_sec"),
+        "stall_threshold_sec": state.get("stall_threshold_sec"),
+    }
+
+
+def _start_tool_progress_heartbeat(
+    scope_key: str, request_id: str
+) -> tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+
+    def _heartbeat_loop() -> None:
+        while not stop_event.wait(float(_TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC)):
+            try:
+                current = _get_tool_progress(scope_key, request_id)
+                if not isinstance(current, dict):
+                    continue
+                status = (_progress_str(current.get("status")) or "").lower()
+                if status in _TOOL_PROGRESS_TERMINAL_STATUSES:
+                    break
+                _set_tool_progress(
+                    scope_key,
+                    request_id,
+                    {
+                        "status": "heartbeat",
+                        "request_id": request_id,
+                        "heartbeat_interval_sec": int(
+                            _TOOL_PROGRESS_HEARTBEAT_INTERVAL_SEC
+                        ),
+                    },
+                )
+            except Exception:
+                # Heartbeat is best-effort and must never break user requests.
+                continue
+
+    thread = threading.Thread(
+        target=_heartbeat_loop,
+        name=f"tool-progress-heartbeat-{request_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
+
+
+def _stop_tool_progress_heartbeat(
+    stop_event: threading.Event | None, thread: threading.Thread | None
+) -> None:
+    try:
+        if stop_event is not None:
+            stop_event.set()
+    except Exception:
+        pass
+    try:
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.3)
+    except Exception:
+        pass
 
 
 def _slugify_concept_id_for_key(concept_id: str) -> str:
@@ -589,13 +883,148 @@ def _prune_tool_progress() -> None:
 def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) -> None:
     _prune_tool_progress()
     now_epoch = time.time()
+    now_utc = _now_utc_iso()
     with _TOOL_PROGRESS_LOCK:
         key = (scope_key, request_id)
         existing = _TOOL_PROGRESS.get(key)
         if not isinstance(existing, dict):
             existing = {}
-        merged = {**existing, **(update or {})}
-        merged["updated_at"] = _now_utc_iso()
+
+        safe_update = dict(update or {})
+        status = _progress_str(safe_update.get("status")) or _progress_str(
+            existing.get("status")
+        )
+        if not status:
+            status = "thinking"
+
+        stage = _derive_progress_stage(safe_update, existing)
+        event_kind = _derive_progress_event_kind(safe_update)
+
+        request_started_epoch = _progress_number(
+            existing.get("request_started_epoch")
+        ) or _progress_number(existing.get("updated_at_epoch"))
+        if request_started_epoch is None:
+            request_started_epoch = now_epoch
+
+        last_activity_epoch = _progress_number(
+            existing.get("last_activity_epoch")
+        ) or _progress_number(existing.get("updated_at_epoch"))
+        if last_activity_epoch is None:
+            last_activity_epoch = request_started_epoch
+
+        last_stage_activity_epoch = _progress_number(
+            existing.get("last_stage_activity_epoch")
+        )
+        if last_stage_activity_epoch is None:
+            last_stage_activity_epoch = last_activity_epoch
+        if event_kind != "heartbeat":
+            last_stage_activity_epoch = now_epoch
+
+        elapsed_ms = int(max(0.0, (now_epoch - request_started_epoch) * 1000.0))
+        idle_ms = int(max(0.0, (now_epoch - last_activity_epoch) * 1000.0))
+        stage_idle_ms = int(max(0.0, (now_epoch - last_stage_activity_epoch) * 1000.0))
+
+        sequence_no = int(_progress_number(existing.get("sequence_no")) or 0) + 1
+
+        existing_counters_raw = existing.get("counters")
+        existing_counters: dict[str, Any]
+        if isinstance(existing_counters_raw, dict):
+            existing_counters = dict(cast(dict[str, Any], existing_counters_raw))
+        else:
+            existing_counters = {}
+        explicit_tokens_streamed = _progress_number(safe_update.get("tokens_streamed"))
+        existing_tokens_streamed = _progress_number(
+            existing_counters.get("tokens_streamed", 0)
+        )
+        tokens_streamed = int(
+            explicit_tokens_streamed
+            if explicit_tokens_streamed is not None
+            else (existing_tokens_streamed or 0)
+        )
+
+        existing_tools_started = _progress_number(existing_counters.get("tools_started"))
+        existing_tools_completed = _progress_number(
+            existing_counters.get("tools_completed")
+        )
+        tools_started = int(existing_tools_started or 0)
+        tools_completed = int(existing_tools_completed or 0)
+        if event_kind == "tool_call_start":
+            tools_started += 1
+        if event_kind == "tool_call_end":
+            tools_completed += 1
+        explicit_done = _progress_number(safe_update.get("tool_calls_done"))
+        if explicit_done is not None:
+            tools_started = max(tools_started, int(explicit_done))
+            tools_completed = max(tools_completed, int(explicit_done))
+
+        merged = {**existing, **safe_update}
+        merged["request_id"] = request_id
+        merged["status"] = status
+        merged["stage"] = stage
+        merged["event_kind"] = event_kind
+        merged["sequence_no"] = sequence_no
+        merged["elapsed_ms"] = elapsed_ms
+        merged["idle_ms"] = idle_ms
+        merged["stage_idle_ms"] = stage_idle_ms
+        merged["request_started_epoch"] = request_started_epoch
+        merged["last_activity_epoch"] = now_epoch
+        merged["last_activity_at_utc"] = now_utc
+        merged["last_stage_activity_epoch"] = last_stage_activity_epoch
+        if not _progress_str(merged.get("phase")):
+            merged["phase"] = stage
+        if not _progress_str(merged.get("phase_label")):
+            merged["phase_label"] = _default_stage_label(stage)
+        merged["stage_label"] = _default_stage_label(stage)
+
+        subtask = _progress_str(merged.get("subtask"))
+        if not subtask:
+            subtask = _progress_str(merged.get("tool")) or _progress_str(
+                merged.get("workflow_task")
+            )
+        merged["subtask"] = subtask
+
+        merged["counters"] = {
+            "tokens_streamed": max(0, tokens_streamed),
+            "tools_started": max(0, tools_started),
+            "tools_completed": max(0, tools_completed),
+        }
+
+        existing_events = merged.get("diagnostic_events")
+        if not isinstance(existing_events, list):
+            existing_events = []
+        event_entry = {
+            "sequence_no": sequence_no,
+            "at_utc": now_utc,
+            "status": status,
+            "event_kind": event_kind,
+            "stage": stage,
+            "subtask": subtask,
+            "tool": _progress_str(merged.get("tool")),
+            "workflow_task": _progress_str(merged.get("workflow_task")),
+            "idle_ms": idle_ms,
+            "elapsed_ms": elapsed_ms,
+        }
+        if _progress_str(merged.get("error")):
+            event_entry["error"] = str(merged.get("error"))
+        trimmed_events = [
+            *existing_events[-(_TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT - 1) :],
+            event_entry,
+        ]
+        merged["diagnostic_events"] = trimmed_events
+        merged["diagnostic_summary"] = {
+            "request_id": request_id,
+            "event_count": len(trimmed_events),
+            "latest_sequence_no": sequence_no,
+            "latest_stage": stage,
+            "latest_status": status,
+            "elapsed_ms": elapsed_ms,
+            "idle_ms": idle_ms,
+            "last_activity_at_utc": now_utc,
+            "counters": dict(merged["counters"]),
+        }
+
+        merged.update(_derive_progress_liveness(merged, now_epoch=now_epoch))
+        merged["updated_at"] = now_utc
         merged["updated_at_epoch"] = now_epoch
         _TOOL_PROGRESS[key] = merged
 
@@ -636,9 +1065,7 @@ def get_generation_progress(request_id: str):
 
         return jsonify({"status": "pending"}), 202
 
-    # Do not leak internal epoch detail to the UI.
-    state.pop("updated_at_epoch", None)
-    return jsonify(state), 200
+    return jsonify(_serialise_tool_progress_state(state)), 200
 
 
 # ----------------- Background Tasks (JVNAUTOSCI-1038) -----------------
@@ -2279,6 +2706,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
     presenter_mode_requested = bool(data.get("presenter_mode"))
 
     request_start_perf = time.perf_counter()
+    progress_heartbeat_stop_event: threading.Event | None = None
+    progress_heartbeat_thread: threading.Thread | None = None
 
     interaction_timestamp_utc = (
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2442,6 +2871,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
     if not prompt_text:
         return jsonify({"error": "No prompt provided."}), 400
+
+    if show_tool_use_progress and not background_mode:
+        progress_heartbeat_stop_event, progress_heartbeat_thread = (
+            _start_tool_progress_heartbeat(progress_scope_key, request_id)
+        )
 
     try:
         # Build system message with user and organization context from request
@@ -3524,6 +3958,18 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         202,
                     )
 
+                if show_tool_use_progress:
+                    _set_tool_progress(
+                        progress_scope_key,
+                        request_id,
+                        {
+                            "status": "orchestrator_start",
+                            "stage": "orchestrator_start",
+                            "phase_label": "Starting orchestrator",
+                            "request_id": request_id,
+                        },
+                    )
+
                 orchestrator_start_perf = time.perf_counter()
                 orchestrator_result = orchestrator.run(
                     prompt=prompt_text,
@@ -3586,9 +4032,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         progress_scope_key,
                         request_id,
                         {
-                            "status": "completed",
-                            "phase": "completed",
-                            "phase_label": "Complete",
+                            "status": "orchestrator_end",
+                            "stage": "orchestrator_end",
+                            "phase_label": "Finishing orchestrator",
                             "request_id": request_id,
                         },
                     )
@@ -4606,6 +5052,29 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         except Exception:
             applied_tool_batch_cap = None
 
+        if show_tool_use_progress:
+            _stop_tool_progress_heartbeat(
+                progress_heartbeat_stop_event, progress_heartbeat_thread
+            )
+            _set_tool_progress(
+                progress_scope_key,
+                request_id,
+                {
+                    "status": "completed",
+                    "stage": "completed",
+                    "phase_label": "Complete",
+                    "request_id": request_id,
+                },
+            )
+
+        tool_progress_snapshot = None
+        if show_tool_use_progress:
+            raw_tool_progress_snapshot = _get_tool_progress(progress_scope_key, request_id)
+            if isinstance(raw_tool_progress_snapshot, dict):
+                tool_progress_snapshot = _serialise_tool_progress_state(
+                    raw_tool_progress_snapshot
+                )
+
         llm_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
             "request_id": request_id,
@@ -4639,6 +5108,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "tool_use_progress": {
                     "enabled": show_tool_use_progress,
                     "request_id": request_id,
+                    "diagnostic_summary": _build_tool_progress_compact_summary(
+                        tool_progress_snapshot
+                    ),
                 },
                 "tool_catalogue": tool_catalogue_summary,
             },
@@ -4745,6 +5217,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         if "show_tool_use_progress" in locals() and show_tool_use_progress:
             try:
+                _stop_tool_progress_heartbeat(
+                    progress_heartbeat_stop_event, progress_heartbeat_thread
+                )
                 _set_tool_progress(
                     _get_tool_progress_scope_key(),
                     request_id if "request_id" in locals() else "unknown",

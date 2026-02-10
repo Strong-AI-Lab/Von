@@ -1135,6 +1135,12 @@ class InternalMCPChatOrchestrator:
         data = request.data
         aux_log = data.setdefault("aux_llm_calls", [])
         augmented_context = data.get("augmented_context") or []
+        emit_progress_raw = data.get("emit_progress")
+        emit_progress_cb: Callable[[Mapping[str, Any]], None] | None = (
+            cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
+            if callable(emit_progress_raw)
+            else None
+        )
         record_llm_call = data.get("record_llm_call")
         llm_calls_log = data.get("llm_calls")
         calling_path = "legacy"
@@ -1157,6 +1163,18 @@ class InternalMCPChatOrchestrator:
         data["missing_tool_call_retry_budget"] = retry_budget
 
         if retries_remaining_before <= 0:
+            if emit_progress_cb is not None:
+                emit_progress_cb(
+                    {
+                        "status": "retry_end",
+                        "stage": "tool_recovery",
+                        "retry_attempts": retry_attempts,
+                        "retry_budget": retry_budget,
+                        "retry_remaining": 0,
+                        "success": False,
+                        "skipped": True,
+                    }
+                )
             try:
                 aux_log.append(
                     {
@@ -1191,6 +1209,18 @@ class InternalMCPChatOrchestrator:
         retries_remaining_after = max(0, retry_budget - retry_attempts)
         data["missing_tool_call_retry_attempts"] = retry_attempts
 
+        if emit_progress_cb is not None:
+            emit_progress_cb(
+                {
+                    "status": "retry_start",
+                    "stage": "tool_recovery",
+                    "retry_attempts": retry_attempts,
+                    "retry_budget": retry_budget,
+                    "retry_remaining": retries_remaining_after,
+                    "retry_reason": data.get("missing_tool_call_retry_reason") or "",
+                }
+            )
+
         forced = self._infer_missing_tool_call_retry_tool_calls(
             augmented_context,
             user_prompt=data.get("user_prompt"),
@@ -1219,6 +1249,18 @@ class InternalMCPChatOrchestrator:
             response_text = (
                 json.dumps(forced[0]) if len(forced) == 1 else json.dumps(forced)
             )
+            if emit_progress_cb is not None:
+                emit_progress_cb(
+                    {
+                        "status": "retry_end",
+                        "stage": "tool_recovery",
+                        "retry_attempts": retry_attempts,
+                        "retry_budget": retry_budget,
+                        "retry_remaining": retries_remaining_after,
+                        "success": True,
+                        "result_summary": "forced_tool_call",
+                    }
+                )
 
             return WorkflowActionResult(
                 outputs={
@@ -1309,6 +1351,7 @@ class InternalMCPChatOrchestrator:
                 ),
                 aux_log=aux_log,
                 record_llm_call=record_llm_call,
+                emit_progress=emit_progress_cb,
             )
             duration_ms = (time.perf_counter() - llm_start) * 1000.0
         else:
@@ -1368,6 +1411,20 @@ class InternalMCPChatOrchestrator:
             "missing_tool_call_retry_remaining": retries_remaining_after,
             "missing_tool_call_retry_suppressed": False,
         }
+
+        if emit_progress_cb is not None:
+            emit_progress_cb(
+                {
+                    "status": "retry_end",
+                    "stage": "tool_recovery",
+                    "retry_attempts": retry_attempts,
+                    "retry_budget": retry_budget,
+                    "retry_remaining": retries_remaining_after,
+                    "success": bool(success),
+                    "duration_ms": int(duration_ms),
+                    "tool_calls_found": bool(retry_calls),
+                }
+            )
 
         return WorkflowActionResult(
             outputs=outputs,
@@ -1480,6 +1537,12 @@ class InternalMCPChatOrchestrator:
 
         policy_state = request.data.get("policy_state")
         default_model = request.data.get("default_model")
+        emit_progress_raw = request.data.get("emit_progress")
+        emit_progress_cb: Callable[[Mapping[str, Any]], None] | None = (
+            cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
+            if callable(emit_progress_raw)
+            else None
+        )
         record_llm_call = request.data.get("record_llm_call")
         aux_llm_calls = request.data.get("aux_llm_calls")
         user_concept_id = request.data.get("user_concept_id")
@@ -1517,6 +1580,7 @@ class InternalMCPChatOrchestrator:
                 llm_calls_log=request.data.get("llm_calls_log") or [],
                 aux_log=aux_llm_calls,
                 record_llm_call=record_llm_call,
+                emit_progress=emit_progress_cb,
             )
         else:
             narration_response = request.environment.llm_client.generate(
@@ -2063,6 +2127,12 @@ class InternalMCPChatOrchestrator:
         org_concept_id = data.get("org_concept_id")
         model_for_stage = data["model_for_stage"]
         record_llm_call = data["record_llm_call"]
+        emit_progress_raw = data.get("emit_progress")
+        emit_progress_cb: Callable[[Mapping[str, Any]], None] | None = (
+            cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
+            if callable(emit_progress_raw)
+            else None
+        )
         emit_phase_transition = data.get("emit_phase_transition")
         aux_llm_calls = data["aux_llm_calls"]
         llm_calls = data["llm_calls"]
@@ -2121,6 +2191,7 @@ class InternalMCPChatOrchestrator:
                     llm_calls_log=llm_calls,
                     aux_log=aux_llm_calls,
                     record_llm_call=record_llm_call,
+                    emit_progress=emit_progress_cb,
                 )
                 if llm_response.tool_calls:
                     response = llm_response.text_response or ""
@@ -2160,6 +2231,7 @@ class InternalMCPChatOrchestrator:
                 llm_calls_log=llm_calls,
                 aux_log=aux_llm_calls,
                 record_llm_call=record_llm_call,
+                emit_progress=emit_progress_cb,
             )
             tool_calls = None
             has_valid_tool_call = False
@@ -2545,6 +2617,22 @@ class InternalMCPChatOrchestrator:
                 payload = dict(payload)
             tool_request[self._PAYLOAD_FIELD] = payload
 
+            if callable(emit_progress):
+                emit_progress(
+                    {
+                        "status": "tool_call_start",
+                        "stage": self.PHASE_TOOL_EXECUTE,
+                        "tool": tool_name,
+                        "batch_size": current_batch_size,
+                        "tool_calls_done": max(0, iteration_count - 1),
+                        "tool_calls_cap": int(max_tool_invocations),
+                        "tool_calls_remaining": max(
+                            0, max_tool_invocations - iteration_count
+                        ),
+                        "call_id": call_id,
+                    }
+                )
+
             # Write-policy gate.
             tool_category = tool_categories.get(tool_name)
             if tool_category == "write" and tool_name not in allowed_write_tools:
@@ -2714,6 +2802,12 @@ class InternalMCPChatOrchestrator:
         org_concept_id = data.get("org_concept_id")
         model_for_stage = data["model_for_stage"]
         record_llm_call = data["record_llm_call"]
+        emit_progress_raw = data.get("emit_progress")
+        emit_progress_cb: Callable[[Mapping[str, Any]], None] | None = (
+            cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
+            if callable(emit_progress_raw)
+            else None
+        )
         aux_llm_calls = data["aux_llm_calls"]
         llm_calls = data["llm_calls"]
         iteration_count = data.get("iteration_count", 0)
@@ -2774,6 +2868,7 @@ class InternalMCPChatOrchestrator:
             llm_calls_log=llm_calls,
             aux_log=aux_llm_calls,
             record_llm_call=record_llm_call,
+            emit_progress=emit_progress_cb,
         )
 
         # Check if the summariser response contains more tool calls.
@@ -4704,6 +4799,7 @@ class InternalMCPChatOrchestrator:
         llm_calls_log: list[dict[str, Any]],
         aux_log: list[Mapping[str, Any]],
         record_llm_call: Callable[..., Any],
+        emit_progress: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> tuple[str, Optional[str], Mapping[str, Any]]:
         candidates = self._stage_model_candidates(
             stage=stage,
@@ -4724,6 +4820,17 @@ class InternalMCPChatOrchestrator:
                 org_concept_id=org_concept_id,
             )
 
+            if callable(emit_progress):
+                emit_progress(
+                    {
+                        "status": "llm_call_start",
+                        "stage": stage,
+                        "model": model_name,
+                        "candidate": (
+                            dict(telemetry) if isinstance(telemetry, Mapping) else None
+                        ),
+                    }
+                )
             llm_start = time.perf_counter()
             try:
                 response = client.generate(
@@ -4732,6 +4839,25 @@ class InternalMCPChatOrchestrator:
                     model=model_name,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_call_chunk",
+                            "stage": stage,
+                            "model": model_name,
+                            "chunks": 1,
+                            "duration_ms": int(duration_ms),
+                        }
+                    )
+                    emit_progress(
+                        {
+                            "status": "llm_call_end",
+                            "stage": stage,
+                            "model": model_name,
+                            "duration_ms": int(duration_ms),
+                            "success": True,
+                        }
+                    )
                 record_llm_call(
                     call_type="llm.generate",
                     model_name=model_name,
@@ -4761,6 +4887,17 @@ class InternalMCPChatOrchestrator:
                 return response, model_name, telemetry
             except Exception as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_call_end",
+                            "stage": stage,
+                            "model": model_name,
+                            "duration_ms": int(duration_ms),
+                            "success": False,
+                            "error": str(exc),
+                        }
+                    )
                 record_llm_call(
                     call_type="llm.generate",
                     model_name=model_name,
@@ -4815,6 +4952,7 @@ class InternalMCPChatOrchestrator:
         llm_calls_log: list[dict[str, Any]],
         aux_log: list[Mapping[str, Any]],
         record_llm_call: Callable[..., Any],
+        emit_progress: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> tuple[LLMResponse, Optional[str], Mapping[str, Any]]:
         candidates = self._stage_model_candidates(
             stage=stage,
@@ -4850,6 +4988,17 @@ class InternalMCPChatOrchestrator:
                 )
                 continue
 
+            if callable(emit_progress):
+                emit_progress(
+                    {
+                        "status": "llm_call_start",
+                        "stage": stage,
+                        "model": model_name,
+                        "candidate": (
+                            dict(telemetry) if isinstance(telemetry, Mapping) else None
+                        ),
+                    }
+                )
             llm_start = time.perf_counter()
             try:
                 llm_response = client.generate_with_tools(
@@ -4860,6 +5009,33 @@ class InternalMCPChatOrchestrator:
                     system_message=None,
                 )
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                if callable(emit_progress):
+                    completion_tokens = None
+                    if isinstance(getattr(llm_response, "usage", None), Mapping):
+                        raw_completion_tokens = llm_response.usage.get(
+                            "completion_tokens"
+                        )
+                        if isinstance(raw_completion_tokens, int):
+                            completion_tokens = raw_completion_tokens
+                    emit_progress(
+                        {
+                            "status": "llm_call_chunk",
+                            "stage": stage,
+                            "model": model_name,
+                            "chunks": 1,
+                            "tokens_streamed": completion_tokens,
+                            "duration_ms": int(duration_ms),
+                        }
+                    )
+                    emit_progress(
+                        {
+                            "status": "llm_call_end",
+                            "stage": stage,
+                            "model": model_name,
+                            "duration_ms": int(duration_ms),
+                            "success": True,
+                        }
+                    )
                 record_llm_call(
                     call_type="llm.generate_with_tools",
                     model_name=(
@@ -4896,6 +5072,17 @@ class InternalMCPChatOrchestrator:
                 return llm_response, model_name, telemetry
             except Exception as exc:
                 duration_ms = (time.perf_counter() - llm_start) * 1000.0
+                if callable(emit_progress):
+                    emit_progress(
+                        {
+                            "status": "llm_call_end",
+                            "stage": stage,
+                            "model": model_name,
+                            "duration_ms": int(duration_ms),
+                            "success": False,
+                            "error": str(exc),
+                        }
+                    )
                 record_llm_call(
                     call_type="llm.generate_with_tools",
                     model_name=model_name,
@@ -8319,6 +8506,18 @@ class InternalMCPChatOrchestrator:
                 trace_store_fn = None
 
         def _persist_trace(*, status: str, error: str | None = None) -> None:
+            try:
+                payload: dict[str, Any] = {
+                    "status": "orchestrator_end",
+                    "stage": "orchestrator_end",
+                    "orchestrator_status": status,
+                }
+                if isinstance(error, str) and error.strip():
+                    payload["error"] = error
+                _emit_progress_local(payload)
+            except Exception:
+                pass
+
             if not trace_enabled or trace is None or trace_store_fn is None:
                 return
             try:
@@ -8343,6 +8542,13 @@ class InternalMCPChatOrchestrator:
                 )
             except Exception:
                 pass
+
+        _emit_progress_local(
+            {
+                "status": "orchestrator_start",
+                "stage": "orchestrator_start",
+            }
+        )
 
         policy_state, policy_telemetry = self._load_workflow_model_policy(
             preferred_language
@@ -8460,6 +8666,7 @@ class InternalMCPChatOrchestrator:
                     llm_calls_log=llm_calls,
                     aux_log=aux_llm_calls,
                     record_llm_call=_record_llm_call,
+                    emit_progress=_emit_progress_local,
                 )
             except Exception as exc:
                 aux_llm_calls.append(
@@ -8547,6 +8754,7 @@ class InternalMCPChatOrchestrator:
                 llm_calls_log=llm_calls,
                 aux_log=aux_llm_calls,
                 record_llm_call=_record_llm_call,
+                emit_progress=_emit_progress_local,
             )
             if trace_enabled and trace is not None:
                 llm_step.finish_success(
@@ -8841,6 +9049,7 @@ class InternalMCPChatOrchestrator:
                 llm_calls_log=llm_calls,
                 aux_log=aux_llm_calls,
                 record_llm_call=_record_llm_call,
+                emit_progress=_emit_progress_local,
             )
             if trace_enabled and trace is not None:
                 llm_step.finish_success(

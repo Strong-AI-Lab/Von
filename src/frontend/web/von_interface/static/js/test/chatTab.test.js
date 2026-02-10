@@ -1,4 +1,5 @@
 import {
+    __testOnly_buildThinkingProgressPresentation,
     __testOnly_buildWorkflowStatusQuery,
     __testOnly_buildLlmDebugMetadata,
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
@@ -143,6 +144,39 @@ describe('workflow status query scoping', () => {
         expect(params.has('namespace')).toBe(false);
         expect(params.get('org_id')).toBe('#V#university_of_auckland_strong_ai_lab');
         expect(params.get('user_id')).toBe('#V#michael_witbrock');
+    });
+});
+
+describe('thinking liveness presentation', () => {
+    test('renders active state with stage details', () => {
+        const presentation = __testOnly_buildThinkingProgressPresentation({
+            phase: 'tool_execute',
+            phase_label: 'Executing tools',
+            tool: 'search_knowledge_base',
+            liveness_state: 'active',
+            idle_ms: 1200
+        });
+
+        expect(presentation.livenessState).toBe('active');
+        expect(presentation.livenessLabel).toBe('Active');
+        expect(presentation.stageText).toContain('Executing tools');
+        expect(presentation.stageText).toContain('search_knowledge_base');
+        expect(presentation.lastActivityText).toContain('Last activity');
+    });
+
+    test('renders stalled state badge and text', () => {
+        const presentation = __testOnly_buildThinkingProgressPresentation({
+            stage: 'tool_execute',
+            stage_label: 'Executing tools',
+            subtask: 'mcp__atlassian__search',
+            liveness_state: 'stalled',
+            activity_idle_ms: 62000
+        });
+
+        expect(presentation.livenessState).toBe('stalled');
+        expect(presentation.livenessLabel).toBe('Stalled');
+        expect(presentation.stageText.startsWith('Stalled:')).toBe(true);
+        expect(presentation.lastActivityText).toContain('Last activity');
     });
 });
 
