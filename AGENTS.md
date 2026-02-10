@@ -31,6 +31,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - `docs/concept_refactoring.md` (or current plan doc): project roadmap for major work.
 - `docs/software_engineering.md`: conventions, debugging, and lessons learned.
 - `docs/engineering/security_considerations.md`: required security context.
+- `docs/engineering/atlassian_mcp_recovery_runbook.md`: canonical Atlassian MCP recovery and credential reset procedure.
 
 ## Workflow and Quality
 - Preserve raw user-authored text when it is rendered/transformed; store originals in dataset/raw attributes where applicable.
@@ -98,6 +99,13 @@ If Atlassian MCP is flaky (timeouts, empty responses, 401/403/5xx):
 2. Checkpoint: what issue(s), what succeeded, what remains.
 3. Ask the user to restart MCP using the steps below.
 4. Resume from the checkpoint after a minimal health check.
+5. Prefer lightweight recovery first (`Developer: Reload Window` + Atlassian MCP restart). In recent incidents this has often recovered auth without credential reset.
+
+If restart/reload does not recover Atlassian MCP (especially recurring `invalid_token` / `Canceled` token fetch loops), follow:
+
+- `docs/engineering/atlassian_mcp_recovery_runbook.md`
+- This runbook includes the no-sign-out recovery path (safe backup + targeted VS Code state DB key reset).
+- Prefer the helper script first: `scripts/powershell/reset_atlassian_mcp_auth.ps1`
 
 Restart steps (VS Code):
 - Command Palette -> `MCP: Browse MCP Servers` -> Atlassian -> Restart.
