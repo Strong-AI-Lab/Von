@@ -46,6 +46,43 @@ class _RecorderLLM:
         return self.responses.pop(0)
 
 
+def test_apply_vontology_template_search_concepts_empty_query_uses_filter_context():
+    payload = {
+        "results": [{"concept_id": "#V#one"}, {"concept_id": "#V#two"}],
+        "query_info": {
+            "query": "",
+            "instance_of": "#V#project",
+            "filter_kind": ["individual"],
+        },
+    }
+
+    summary = InternalMCPChatOrchestrator._apply_vontology_template(
+        'Found {count} concepts for "{query}"',
+        payload,
+    )
+
+    assert summary is not None
+    assert summary.startswith('Found 2 concepts for "')
+    assert "instances of project" in summary
+    assert "kind=individual" in summary
+    assert 'for ""' not in summary
+
+
+def test_apply_vontology_template_search_concepts_empty_query_defaults_to_all_concepts():
+    payload = {
+        "results": [{"concept_id": "#V#one"}],
+        "query_info": {"query": ""},
+    }
+
+    summary = InternalMCPChatOrchestrator._apply_vontology_template(
+        'Found {count} concepts for "{query}"',
+        payload,
+    )
+
+    assert summary == 'Found 1 concepts for "all concepts"'
+    assert 'for ""' not in summary
+
+
 def test_instruction_message_requires_verification_tool_calls_for_concept_existence():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     message = orchestrator._instruction_message(user_namespace="#V#user")

@@ -6760,6 +6760,65 @@ class InternalMCPChatOrchestrator:
         if not template:
             return None
 
+        def _short_concept_id(value: Any, *, max_chars: int = 25) -> str | None:
+            if not isinstance(value, str):
+                return None
+            cleaned = value.strip()
+            if not cleaned:
+                return None
+            return cleaned.replace("#V#", "")[:max_chars]
+
+        def _build_search_query_label(data: dict[str, Any], *, limit: int = 50) -> str:
+            """Build a human-meaningful search descriptor for status text.
+
+            This avoids low-signal summaries like `for ""` when search_concepts
+            intentionally uses an empty query with filters (for example instance_of).
+            """
+
+            query_info = data.get("query_info")
+            info = query_info if isinstance(query_info, dict) else {}
+
+            raw_query = data.get("query")
+            if not isinstance(raw_query, str):
+                raw_query = info.get("query")
+
+            if isinstance(raw_query, str) and raw_query.strip():
+                text = raw_query.strip()
+                return text[:limit] + "..." if len(text) > limit else text
+
+            parts: list[str] = []
+
+            instance_of = data.get("instance_of")
+            if not isinstance(instance_of, str):
+                instance_of = info.get("instance_of")
+            instance_short = _short_concept_id(instance_of)
+            if instance_short:
+                parts.append(f"instances of {instance_short}")
+
+            filter_kind = data.get("filter_kind")
+            if not isinstance(filter_kind, list):
+                filter_kind = info.get("filter_kind")
+            if isinstance(filter_kind, list):
+                kinds = [str(kind).strip() for kind in filter_kind if str(kind).strip()]
+                if kinds:
+                    kind_text = "/".join(kinds[:3])
+                    if len(kinds) > 3:
+                        kind_text += "+..."
+                    parts.append(f"kind={kind_text}")
+
+            scope_root = data.get("scope_root")
+            if not isinstance(scope_root, str):
+                scope_root = info.get("scope_root")
+            scope_short = _short_concept_id(scope_root)
+            if scope_short:
+                parts.append(f"scope={scope_short}")
+
+            if parts:
+                label = "; ".join(parts)
+                return label[:limit] + "..." if len(label) > limit else label
+
+            return "all concepts"
+
         # Build a context dict from the payload with common field mappings
         context: dict[str, Any] = {}
 
@@ -6790,6 +6849,12 @@ class InternalMCPChatOrchestrator:
                 context["name"] = str(payload[key])[:40]
                 context["title"] = context["name"]
                 break
+
+        # Search query context (especially important for search_concepts status text)
+        query_label = _build_search_query_label(payload)
+        if query_label:
+            context["query"] = query_label
+            context["query_label"] = query_label
 
         # Names list (from create_concepts)
         if "results" in payload and isinstance(payload["results"], list):
@@ -6908,6 +6973,10 @@ class InternalMCPChatOrchestrator:
             # Clean up empty placeholders and extra spaces
             result = re.sub(r"\{[^}]*\}", "", result)
             result = re.sub(r"\s+", " ", result).strip()
+
+            # Guard against low-signal empty-query rendering patterns.
+            result = re.sub(r'for\s*""', 'for "all concepts"', result)
+            result = re.sub(r"\bfor\s*$", "", result).strip()
 
             if not result or result == template:
                 return None
