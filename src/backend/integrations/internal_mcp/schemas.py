@@ -284,6 +284,17 @@ def coerce_payload_types(
                         warnings.append(f"Coerced field '{key}' from string to None.")
                         return None
                     return value
+                # JSON array string → list (common LLM output pattern)
+                if raw.startswith("[") and raw.endswith("]"):
+                    try:
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, list):
+                            warnings.append(
+                                f"Coerced field '{key}' from JSON string to list."
+                            )
+                            return parsed
+                    except json.JSONDecodeError:
+                        pass  # Fall through to wrap-in-list fallback
                 warnings.append(f"Coerced field '{key}' from string to list.")
                 return [raw]
 
