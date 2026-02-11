@@ -1680,12 +1680,41 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
             notes=notes,
             instance_of_type=instance_of_type,
         )
+        if isinstance(result, dict):
+            result["requested_name"] = str(name_val)
+            result["requested_kind"] = str(kind)
+            concept_id_value = result.get("concept_id")
+            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+                nested_concept = result.get("concept")
+                if isinstance(nested_concept, dict):
+                    nested_id = nested_concept.get("concept_id")
+                    if isinstance(nested_id, str) and nested_id.strip():
+                        concept_id_value = nested_id
+            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+                canonical_id = result.get("canonical_concept_id")
+                if isinstance(canonical_id, str) and canonical_id.strip():
+                    concept_id_value = canonical_id
+            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+                existing_id = result.get("existing_concept_id")
+                if isinstance(existing_id, str) and existing_id.strip():
+                    concept_id_value = existing_id
+            if isinstance(concept_id_value, str) and concept_id_value.strip():
+                result["concept_id"] = concept_id_value.strip()
         results.append(result)
 
+    created_concept_ids = [
+        str(r.get("concept_id")).strip()
+        for r in results
+        if isinstance(r, dict)
+        and r.get("success")
+        and isinstance(r.get("concept_id"), str)
+        and str(r.get("concept_id")).strip()
+    ]
     payload = {
         "results": results,
         "total": len(concepts),
         "successful": sum(1 for r in results if r.get("success")),
+        "created_concept_ids": created_concept_ids,
         "parent_id_used": resolved_parent_id,
         "parent_resolution": parent_resolution.to_dict(),
     }

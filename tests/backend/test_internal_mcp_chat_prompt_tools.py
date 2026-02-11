@@ -174,6 +174,17 @@ def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypat
     monkeypatch.setenv("VON_WORKFLOW_MODEL_POLICY_ENABLE", "1")
     monkeypatch.setenv("VON_MCP_ALLOW_WRITES", "0")
     monkeypatch.setenv("VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", "0")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#todo_refresh_workflow")
+    monkeypatch.setenv(
+        "VON_EVENT_TASK_STATUS_CHANGED_WORKFLOW_ID",
+        "#V#task_status_transition_workflow",
+    )
+    monkeypatch.setenv(
+        "VON_EVENT_DIRECT_MESSAGE_WORKFLOW_ID",
+        "#V#direct_message_routing_workflow",
+    )
 
     result = _chat_introspect(
         namespace="#V#michael_witbrock", organisation_concept_id="#V#uoa"
@@ -190,7 +201,18 @@ def test_chat_introspect_redacts_sensitive_values_and_reports_presence(monkeypat
     assert result["workflow_mode"]["workflow_selector_enabled"] is True
     assert result["workflow_mode"]["deterministic_introspection_enabled"] is True
     assert result["workflow_mode"]["workflow_model_policy_enabled"] is True
+    assert result["workflow_mode"]["durable_workflows_enabled"] is True
+    assert result["workflow_mode"]["event_workflow_integration_enabled"] is True
     assert result["workflow_mode"]["runtime_mode"] == "workflow_routed_tool_calling"
+    assert result["event_workflow_bindings"]["task.created"] == "#V#todo_refresh_workflow"
+    assert (
+        result["event_workflow_bindings"]["task.status_changed"]
+        == "#V#task_status_transition_workflow"
+    )
+    assert (
+        result["event_workflow_bindings"]["message.direct_created"]
+        == "#V#direct_message_routing_workflow"
+    )
 
 
 def test_chat_introspect_gateway_invoke_success_path(monkeypatch):

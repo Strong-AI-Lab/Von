@@ -22,11 +22,10 @@ def test_launch_event_workflow_integration_flag_disables_trigger(monkeypatch) ->
         org_id="#V#org_nao",
     )
 
-    assert result == {
-        "success": False,
-        "triggered": False,
-        "reason": "integration_disabled",
-    }
+    assert result["success"] is False
+    assert result["triggered"] is False
+    assert result["event_type"] == EVENT_TYPE_TASK_CREATED
+    assert result["reason"] == "integration_disabled"
 
 
 def test_launch_event_workflow_durable_gate_disables_trigger(monkeypatch) -> None:
@@ -40,11 +39,11 @@ def test_launch_event_workflow_durable_gate_disables_trigger(monkeypatch) -> Non
         org_id="#V#org_nao",
     )
 
-    assert result == {
-        "success": False,
-        "triggered": False,
-        "reason": "durable_disabled",
-    }
+    assert result["success"] is False
+    assert result["triggered"] is False
+    assert result["event_type"] == EVENT_TYPE_TASK_CREATED
+    assert result["reason"] == "durable_disabled"
+    assert "hint" in result
 
 
 def test_launch_event_workflow_requires_configured_workflow(monkeypatch) -> None:
@@ -59,11 +58,11 @@ def test_launch_event_workflow_requires_configured_workflow(monkeypatch) -> None
         org_id="#V#org_nao",
     )
 
-    assert result == {
-        "success": False,
-        "triggered": False,
-        "reason": "workflow_not_configured",
-    }
+    assert result["success"] is False
+    assert result["triggered"] is False
+    assert result["event_type"] == EVENT_TYPE_TASK_CREATED
+    assert result["reason"] == "workflow_not_configured"
+    assert result["workflow_id_env"] == "VON_EVENT_TASK_CREATED_WORKFLOW_ID"
 
 
 @patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
@@ -115,11 +114,10 @@ def test_maybe_launch_task_status_workflow_skips_unconfigured_status(monkeypatch
         organisation_concept_id="#V#org_nao",
     )
 
-    assert result == {
-        "success": False,
-        "triggered": False,
-        "reason": "status_not_configured_for_trigger",
-    }
+    assert result["success"] is False
+    assert result["triggered"] is False
+    assert result["event_type"] == "task.status_changed"
+    assert result["reason"] == "status_not_configured_for_trigger"
 
 
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")

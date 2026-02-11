@@ -111,6 +111,13 @@ const workflowStatusStreamState = {
     items: new Map(),
     lastSnapshotAt: 0
 };
+const workflowDefinitionsState = {
+    visible: false,
+    loading: false,
+    error: '',
+    items: [],
+    lastFetchedAt: 0
+};
 
 // Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
 // Stored locally only; intended to feed future introspection.
@@ -8057,8 +8064,21 @@ function getWorkflowStatusElements() {
     return {
         panel: document.getElementById('workflowStatusPanel'),
         body: document.getElementById('workflowStatusBody'),
-        refreshButton: document.getElementById('workflowStatusRefresh')
+        refreshButton: document.getElementById('workflowStatusRefresh'),
+        toggleAvailableButton: document.getElementById('workflowStatusToggleAvailable')
     };
+}
+
+function updateWorkflowStatusActionButtons() {
+    const { toggleAvailableButton } = getWorkflowStatusElements();
+    if (!toggleAvailableButton) return;
+
+    const showAvailable = Boolean(workflowDefinitionsState.visible);
+    toggleAvailableButton.setAttribute('aria-pressed', showAvailable ? 'true' : 'false');
+    toggleAvailableButton.textContent = showAvailable ? 'Show active' : 'Show available';
+    toggleAvailableButton.title = showAvailable
+        ? 'Show active workflow instances'
+        : 'Show available workflows';
 }
 
 function formatWorkflowName(workflowId) {
@@ -8174,16 +8194,72 @@ function renderWorkflowStatusList(items) {
     body.innerHTML = html;
 }
 
+function renderWorkflowDefinitionsList(items) {
+    const { body } = getWorkflowStatusElements();
+    if (!body) return;
+
+    if (workflowDefinitionsState.loading) {
+        body.innerHTML = '<div class="workflow-status-empty">Loading available workflows…</div>';
+        return;
+    }
+
+    if (workflowDefinitionsState.error && !items.length) {
+        body.innerHTML = `<div class="workflow-status-empty workflow-status-error">${escapeHtml(workflowDefinitionsState.error)}</div>`;
+        return;
+    }
+
+    if (!items.length) {
+        body.innerHTML = '<div class="workflow-status-empty">No available workflows</div>';
+        return;
+    }
+
+    const ordered = items.slice().sort((a, b) => {
+        const left = String(a?.workflow_id || '');
+        const right = String(b?.workflow_id || '');
+        return left.localeCompare(right);
+    });
+
+    const html = ordered.map((item) => {
+        const workflowName = escapeHtml(formatWorkflowName(item.workflow_id));
+        const workflowId = escapeHtml(item.workflow_id || '');
+        const description = escapeHtml(item.description || 'No description available.');
+        const initialState = escapeHtml(item.initial_state || '—');
+        const source = escapeHtml(formatWorkflowStatusLabel(item.source || 'unknown'));
+        return `
+            <div class="workflow-status-item status-available">
+              <div class="workflow-status-item-header">
+                <div class="workflow-status-name">${workflowName}</div>
+                <span class="workflow-status-badge status-available">available</span>
+              </div>
+              <div class="workflow-status-definition-description">${description}</div>
+              <div class="workflow-status-definition-meta">
+                ID: ${workflowId} · Initial state: ${initialState} · Source: ${source}
+              </div>
+            </div>
+        `;
+    }).join('');
+
+    body.innerHTML = html;
+}
+
+function renderWorkflowStatusBody() {
+    if (workflowDefinitionsState.visible) {
+        renderWorkflowDefinitionsList(workflowDefinitionsState.items);
+        return;
+    }
+    renderWorkflowStatusList(Array.from(workflowStatusStreamState.items.values()));
+}
+
 function applyWorkflowStatusUpdate(payload) {
     if (!payload || !payload.instance_id) return;
     const status = payload.status || '';
     if (!WORKFLOW_STATUS_ACTIVE.has(status)) {
         workflowStatusStreamState.items.delete(payload.instance_id);
-        renderWorkflowStatusList(Array.from(workflowStatusStreamState.items.values()));
+        renderWorkflowStatusBody();
         return;
     }
     workflowStatusStreamState.items.set(payload.instance_id, payload);
-    renderWorkflowStatusList(Array.from(workflowStatusStreamState.items.values()));
+    renderWorkflowStatusBody();
 }
 
 async function refreshWorkflowStatusSnapshot({ silent = false } = {}) {
@@ -8211,10 +8287,48 @@ async function refreshWorkflowStatusSnapshot({ silent = false } = {}) {
             }
         });
         workflowStatusStreamState.lastSnapshotAt = Date.now();
-        renderWorkflowStatusList(Array.from(workflowStatusStreamState.items.values()));
+        renderWorkflowStatusBody();
     } catch (err) {
         if (!silent) {
             console.warn('[workflowStatus] Snapshot fetch failed', err);
+        }
+    }
+}
+
+async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
+    const { panel } = getWorkflowStatusElements();
+    if (!panel) return;
+
+    workflowDefinitionsState.loading = true;
+    workflowDefinitionsState.error = '';
+    if (workflowDefinitionsState.visible) {
+        renderWorkflowStatusBody();
+    }
+
+    const params = new URLSearchParams();
+    params.set('limit', '200');
+
+    try {
+        const resp = await fetch(
+            `/api/workflows/definitions?${params.toString()}`,
+            { method: 'GET', headers: buildChatFetchHeaders() }
+        );
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        workflowDefinitionsState.items = Array.isArray(data?.items) ? data.items : [];
+        workflowDefinitionsState.lastFetchedAt = Date.now();
+        workflowDefinitionsState.error = '';
+    } catch (err) {
+        workflowDefinitionsState.error = 'Could not load available workflows';
+        if (!silent) {
+            console.warn('[workflowStatus] Available workflow fetch failed', err);
+        }
+    } finally {
+        workflowDefinitionsState.loading = false;
+        if (workflowDefinitionsState.visible) {
+            renderWorkflowStatusBody();
         }
     }
 }
@@ -8280,12 +8394,31 @@ function startWorkflowStatusStream() {
 }
 
 function initializeWorkflowStatusPanel() {
-    const { panel, refreshButton } = getWorkflowStatusElements();
+    const { panel, refreshButton, toggleAvailableButton } = getWorkflowStatusElements();
     if (!panel) return;
+
+    updateWorkflowStatusActionButtons();
 
     if (refreshButton) {
         refreshButton.addEventListener('click', () => {
+            if (workflowDefinitionsState.visible) {
+                void refreshAvailableWorkflowDefinitions();
+                return;
+            }
             void refreshWorkflowStatusSnapshot();
+        });
+    }
+
+    if (toggleAvailableButton) {
+        toggleAvailableButton.addEventListener('click', () => {
+            workflowDefinitionsState.visible = !workflowDefinitionsState.visible;
+            updateWorkflowStatusActionButtons();
+
+            if (workflowDefinitionsState.visible) {
+                void refreshAvailableWorkflowDefinitions({ silent: true });
+            } else {
+                renderWorkflowStatusBody();
+            }
         });
     }
 
@@ -8323,7 +8456,7 @@ async function handleOrgSwitchForChatTab(detail) {
     closeSharedConversationStream();
     stopWorkflowStatusStream();
     workflowStatusStreamState.items.clear();
-    renderWorkflowStatusList([]);
+    renderWorkflowStatusBody();
 
     if (container) {
         renderChatSessionTabsPlaceholder('loading');
@@ -8384,7 +8517,7 @@ function handleAuthStatusChangeForChatTab(detail) {
 
     stopWorkflowStatusStream();
     workflowStatusStreamState.items.clear();
-    renderWorkflowStatusList([]);
+    renderWorkflowStatusBody();
 
     if (detail?.authenticated !== false) {
         startWorkflowStatusStream();

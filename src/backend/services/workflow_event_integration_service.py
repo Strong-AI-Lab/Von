@@ -12,6 +12,10 @@ import logging
 import os
 from typing import Any
 
+from .feature_flags import (
+    get_durable_workflows_enabled,
+    get_event_workflow_integration_enabled,
+)
 from ..workflows.durable.startup import get_instance_manager
 
 logger = logging.getLogger(__name__)
@@ -21,21 +25,11 @@ EVENT_TYPE_TASK_CREATED = "task.created"
 EVENT_TYPE_TASK_STATUS_CHANGED = "task.status_changed"
 EVENT_TYPE_DIRECT_MESSAGE_CREATED = "message.direct_created"
 
-
-def _normalise_bool_env(var_name: str, *, default: bool = False) -> bool:
-    raw = os.getenv(var_name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _durable_workflows_enabled() -> bool:
-    return _normalise_bool_env("VON_DURABLE_WORKFLOWS_ENABLE", default=False)
-
-
-def _event_workflow_integration_enabled() -> bool:
-    # Enabled by default so teams can opt in by setting workflow IDs only.
-    return _normalise_bool_env("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", default=True)
+EVENT_WORKFLOW_ID_ENV_MAP: dict[str, str] = {
+    EVENT_TYPE_TASK_CREATED: "VON_EVENT_TASK_CREATED_WORKFLOW_ID",
+    EVENT_TYPE_TASK_STATUS_CHANGED: "VON_EVENT_TASK_STATUS_CHANGED_WORKFLOW_ID",
+    EVENT_TYPE_DIRECT_MESSAGE_CREATED: "VON_EVENT_DIRECT_MESSAGE_WORKFLOW_ID",
+}
 
 
 def _task_status_trigger_values() -> set[str]:
@@ -50,11 +44,7 @@ def _task_status_trigger_values() -> set[str]:
 
 
 def _workflow_id_for_event(event_type: str) -> str | None:
-    env_name = {
-        EVENT_TYPE_TASK_CREATED: "VON_EVENT_TASK_CREATED_WORKFLOW_ID",
-        EVENT_TYPE_TASK_STATUS_CHANGED: "VON_EVENT_TASK_STATUS_CHANGED_WORKFLOW_ID",
-        EVENT_TYPE_DIRECT_MESSAGE_CREATED: "VON_EVENT_DIRECT_MESSAGE_WORKFLOW_ID",
-    }.get(event_type)
+    env_name = EVENT_WORKFLOW_ID_ENV_MAP.get(event_type)
     if not env_name:
         return None
 
@@ -91,19 +81,51 @@ def launch_event_workflow(
 ) -> dict[str, Any]:
     """Launch a configured durable workflow for an event with idempotency."""
 
-    if not _event_workflow_integration_enabled():
-        return {"success": False, "triggered": False, "reason": "integration_disabled"}
+    integration_enabled = get_event_workflow_integration_enabled(default=True)
+    if not integration_enabled:
+        return {
+            "success": False,
+            "triggered": False,
+            "event_type": event_type,
+            "reason": "integration_disabled",
+        }
 
-    if not _durable_workflows_enabled():
-        return {"success": False, "triggered": False, "reason": "durable_disabled"}
+    durable_enabled = get_durable_workflows_enabled(default=False)
+    if not durable_enabled:
+        return {
+            "success": False,
+            "triggered": False,
+            "event_type": event_type,
+            "reason": "durable_disabled",
+            "hint": "Set VON_DURABLE_WORKFLOWS_ENABLE=1 to enable event-driven workflow execution.",
+        }
 
     resolved_workflow_id = workflow_id or _workflow_id_for_event(event_type)
     if not resolved_workflow_id:
-        return {"success": False, "triggered": False, "reason": "workflow_not_configured"}
+        env_name = EVENT_WORKFLOW_ID_ENV_MAP.get(event_type)
+        hint = (
+            f"Configure {env_name} with a workflow concept ID (for example #V#todo_refresh_workflow)."
+            if env_name
+            else "Configure a workflow_id explicitly for this event type."
+        )
+        return {
+            "success": False,
+            "triggered": False,
+            "event_type": event_type,
+            "reason": "workflow_not_configured",
+            "workflow_id_env": env_name,
+            "hint": hint,
+        }
 
     safe_event_id = str(event_id or "").strip()
     if not safe_event_id:
-        return {"success": False, "triggered": False, "reason": "missing_event_id"}
+        return {
+            "success": False,
+            "triggered": False,
+            "event_type": event_type,
+            "workflow_id": resolved_workflow_id,
+            "reason": "missing_event_id",
+        }
 
     namespace = _build_namespace(user_id, org_id)
     event_idempotency_key = _build_event_idempotency_key(
@@ -189,6 +211,10 @@ def maybe_launch_task_status_workflow(
         return {
             "success": False,
             "triggered": False,
+            "event_type": EVENT_TYPE_TASK_STATUS_CHANGED,
+            "workflow_id_env": EVENT_WORKFLOW_ID_ENV_MAP.get(
+                EVENT_TYPE_TASK_STATUS_CHANGED
+            ),
             "reason": "status_not_configured_for_trigger",
         }
 

@@ -365,9 +365,28 @@ def _create_concepts(**kwargs):
             description=concept_data.get("description"),
             notes=concept_data.get("notes"),
         )
-        # Enrich result with the requested name for traceability
+        # Enrich result with the requested name for traceability and surface
+        # the canonical created concept_id at a stable top-level key so UI
+        # summaries can reliably name what was created.
         result["requested_name"] = name
         result["requested_kind"] = kind
+        concept_id_value = result.get("concept_id")
+        if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+            nested_concept = result.get("concept")
+            if isinstance(nested_concept, dict):
+                nested_id = nested_concept.get("concept_id")
+                if isinstance(nested_id, str) and nested_id.strip():
+                    concept_id_value = nested_id
+        if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+            canonical_id = result.get("canonical_concept_id")
+            if isinstance(canonical_id, str) and canonical_id.strip():
+                concept_id_value = canonical_id
+        if not isinstance(concept_id_value, str) or not concept_id_value.strip():
+            existing_id = result.get("existing_concept_id")
+            if isinstance(existing_id, str) and existing_id.strip():
+                concept_id_value = existing_id
+        if isinstance(concept_id_value, str) and concept_id_value.strip():
+            result["concept_id"] = concept_id_value.strip()
         results.append(result)
 
     # Count different outcome types for summary
@@ -377,6 +396,14 @@ def _create_concepts(**kwargs):
         for r in results
         if isinstance(r, dict) and r.get("error_code") == "already_exists"
     )
+    created_concept_ids = [
+        str(r.get("concept_id")).strip()
+        for r in results
+        if isinstance(r, dict)
+        and r.get("success")
+        and isinstance(r.get("concept_id"), str)
+        and str(r.get("concept_id")).strip()
+    ]
 
     return {
         "results": results,
@@ -384,6 +411,7 @@ def _create_concepts(**kwargs):
         "successful": successful,
         "already_existed": already_exists,
         "failed": len(concepts) - successful - already_exists,
+        "created_concept_ids": created_concept_ids,
         "parent_id_used": validated_parent_id,  # Canonicalised parent ID that was actually used
         "parent_resolution": parent_resolution.to_dict(),
     }
@@ -7642,6 +7670,10 @@ def _chat_introspect(
         InternalMCPChatOrchestrator,
     )
     from src.backend.languagemodels.llm_interface import get_active_model_name
+    from src.backend.services.feature_flags import (
+        get_durable_workflows_enabled,
+        get_event_workflow_integration_enabled,
+    )
     from src.backend.services.settings_service import (
         get_setting,
         resolve_llm_setting,
@@ -7878,9 +7910,18 @@ def _chat_introspect(
         "VON_WORKFLOW_MODEL_POLICY_ENABLE", default="0"
     )
     write_tools_enabled = _env_flag("VON_MCP_ALLOW_WRITES", default="0")
+    durable_workflows_enabled = get_durable_workflows_enabled(default=False)
+    event_workflow_integration_enabled = get_event_workflow_integration_enabled(
+        default=True
+    )
     jira_execute_mode_enabled = _env_flag(
         "VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", default="0"
     )
+    event_workflow_bindings = {
+        "task.created": os.getenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID"),
+        "task.status_changed": os.getenv("VON_EVENT_TASK_STATUS_CHANGED_WORKFLOW_ID"),
+        "message.direct_created": os.getenv("VON_EVENT_DIRECT_MESSAGE_WORKFLOW_ID"),
+    }
 
     if gateway_enabled is False:
         inferred_runtime_mode = "llm_only"
@@ -7902,6 +7943,8 @@ def _chat_introspect(
         "critic_enabled": critic_enabled,
         "workflow_model_policy_enabled": workflow_model_policy_enabled,
         "write_tools_enabled": write_tools_enabled,
+        "durable_workflows_enabled": durable_workflows_enabled,
+        "event_workflow_integration_enabled": event_workflow_integration_enabled,
         "jira_execute_mode_enabled": jira_execute_mode_enabled,
     }
 
@@ -7981,6 +8024,7 @@ def _chat_introspect(
                 and os.getenv(configured_openai_api_key_env_var)
             )
         ),
+        "event_workflow_bindings": event_workflow_bindings,
         "sensitive_env_presence": sensitive_env_presence,
         "sensitive_env_present_count": sensitive_env_present_count,
     }

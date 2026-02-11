@@ -286,15 +286,25 @@ def create_task(
         "created_at": now.isoformat(),
     }
 
+    workflow_event_launch: dict[str, Any] | None = None
     # Event-driven workflow launch is best-effort and must not block task writes.
     try:
-        maybe_launch_task_created_workflow(
+        workflow_event_launch = maybe_launch_task_created_workflow(
             task_concept_id=task_concept_id,
             created_by_concept_id=created_by_concept_id,
             organisation_concept_id=organisation_concept_id,
             title=title,
             priority=priority,
         )
+        if isinstance(workflow_event_launch, dict):
+            result["workflow_event_launch"] = workflow_event_launch
+            if not bool(workflow_event_launch.get("triggered")):
+                logger.info(
+                    "Task-created workflow not triggered for %s: reason=%s hint=%s",
+                    task_concept_id,
+                    workflow_event_launch.get("reason"),
+                    workflow_event_launch.get("hint"),
+                )
     except Exception as e:
         logger.warning(
             "Task-created workflow launch skipped for %s: %s", task_concept_id, e
@@ -494,7 +504,7 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
         else:
             updated_at_iso = None
 
-        maybe_launch_task_status_workflow(
+        workflow_event_launch = maybe_launch_task_status_workflow(
             task_concept_id=task_concept_id,
             previous_status=previous_status if isinstance(previous_status, str) else None,
             new_status=status,
@@ -502,6 +512,17 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
             created_by_concept_id=updated_task.get("created_by_concept_id"),
             organisation_concept_id=updated_task.get("organisation_concept_id"),
         )
+        if isinstance(workflow_event_launch, dict):
+            updated_task["workflow_event_launch"] = workflow_event_launch
+            if not bool(workflow_event_launch.get("triggered")):
+                logger.info(
+                    "Task-status workflow not triggered for %s (%s -> %s): reason=%s hint=%s",
+                    task_concept_id,
+                    previous_status,
+                    status,
+                    workflow_event_launch.get("reason"),
+                    workflow_event_launch.get("hint"),
+                )
     except Exception as e:
         logger.warning(
             "Task-status workflow launch skipped for %s (%s -> %s): %s",

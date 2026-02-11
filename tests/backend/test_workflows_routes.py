@@ -200,6 +200,81 @@ def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_cli
     )
 
 
+def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_client):
+    import src.backend.workflows.durable.registry_factory as registry_factory
+
+    class _FakeDefinition:
+        def __init__(self, initial_state: str, purpose: str):
+            self.initial_state = initial_state
+            self.purpose = purpose
+
+    class _FakeRegistration:
+        def __init__(self, definition, purpose: str, source: str):
+            self.definition = definition
+            self.purpose = purpose
+            self.source = source
+
+    class _FakeRegistry:
+        def __init__(self):
+            self._ids = ["#V#alpha_workflow", "#V#beta_workflow"]
+            self._definitions = {
+                "#V#alpha_workflow": _FakeDefinition(
+                    initial_state="alpha_start",
+                    purpose="Alpha fallback purpose",
+                ),
+                "#V#beta_workflow": _FakeDefinition(
+                    initial_state="beta_start",
+                    purpose="Beta fallback purpose",
+                ),
+            }
+            self._registrations = {
+                "#V#alpha_workflow": _FakeRegistration(
+                    definition=self._definitions["#V#alpha_workflow"],
+                    purpose="Alpha explicit purpose",
+                    source="built_in",
+                ),
+                "#V#beta_workflow": _FakeRegistration(
+                    definition=self._definitions["#V#beta_workflow"],
+                    purpose="",
+                    source="vontology",
+                ),
+            }
+
+        def all_workflow_ids(self):
+            return list(self._ids)
+
+        def get(self, workflow_id):
+            return self._definitions.get(workflow_id)
+
+        def get_registration(self, workflow_id):
+            return self._registrations.get(workflow_id)
+
+    monkeypatch.setattr(
+        registry_factory,
+        "build_durable_workflow_registry_read_only",
+        lambda: _FakeRegistry(),
+    )
+
+    resp = app_client.get("/api/workflows/definitions?limit=10")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+
+    assert payload["count"] == 2
+    assert payload["total"] == 2
+
+    items = payload["items"]
+    assert items[0]["workflow_id"] == "#V#alpha_workflow"
+    assert items[0]["description"] == "Alpha explicit purpose"
+    assert items[0]["initial_state"] == "alpha_start"
+    assert items[0]["source"] == "built_in"
+
+    assert items[1]["workflow_id"] == "#V#beta_workflow"
+    # Falls back to definition.purpose when registration purpose is empty.
+    assert items[1]["description"] == "Beta fallback purpose"
+    assert items[1]["initial_state"] == "beta_start"
+    assert items[1]["source"] == "vontology"
+
+
 def test_create_workflow_instance_route_rejects_unrunnable_workflow(
     monkeypatch, app_client
 ):

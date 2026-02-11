@@ -67,6 +67,78 @@ def api_get_workflow_definition(workflow_id: str):
     )
 
 
+@workflows_bp.get("/api/workflows/definitions")
+def api_list_workflow_definitions():
+    """List workflow definitions visible to the workflow engine registry."""
+
+    limit_raw = request.args.get("limit", "200")
+    try:
+        limit = int(limit_raw)
+    except Exception:
+        limit = 200
+    limit = max(1, min(limit, 500))
+
+    try:
+        from ...workflows.durable.registry_factory import (
+            build_durable_workflow_registry_read_only,
+        )
+
+        # Read-only build avoids concept bootstrap writes on list/introspection paths.
+        registry = build_durable_workflow_registry_read_only()
+        workflow_ids = sorted(list(registry.all_workflow_ids()))
+        selected_ids = workflow_ids[:limit]
+
+        items: List[Dict[str, Any]] = []
+        for workflow_id in selected_ids:
+            registration = registry.get_registration(workflow_id)
+            definition = (
+                registration.definition
+                if registration is not None
+                else registry.get(workflow_id)
+            )
+
+            description = ""
+            source = "unknown"
+            if registration is not None:
+                if (
+                    isinstance(registration.purpose, str)
+                    and registration.purpose.strip()
+                ):
+                    description = registration.purpose.strip()
+                if isinstance(registration.source, str) and registration.source.strip():
+                    source = registration.source.strip()
+            if not description and definition is not None:
+                purpose = getattr(definition, "purpose", "")
+                if isinstance(purpose, str) and purpose.strip():
+                    description = purpose.strip()
+
+            initial_state = ""
+            if definition is not None:
+                state_value = getattr(definition, "initial_state", "")
+                if isinstance(state_value, str):
+                    initial_state = state_value
+
+            items.append(
+                {
+                    "workflow_id": workflow_id,
+                    "description": description,
+                    "initial_state": initial_state,
+                    "source": source,
+                }
+            )
+
+        return jsonify(
+            {
+                "items": items,
+                "count": len(items),
+                "total": len(workflow_ids),
+            }
+        )
+    except Exception as exc:
+        logger.exception("Failed to list workflow definitions via API")
+        return jsonify({"error": "workflow_definitions_list_failed", "detail": str(exc)}), 500
+
+
 @workflows_bp.get("/api/workflows/executions/<execution_id>")
 def api_get_workflow_execution(execution_id: str):
     doc = get_workflow_execution_trace(execution_id)

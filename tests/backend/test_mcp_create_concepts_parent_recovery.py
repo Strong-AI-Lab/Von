@@ -31,6 +31,10 @@ def _patch_create_concept_success(monkeypatch):
         "src.backend.vontology.utils_vontology.create_vontology_concept",
         _fake_create_vontology_concept,
     )
+    monkeypatch.setattr(
+        "src.backend.mcp_server.mcp_stdio_server.create_vontology_concept",
+        _fake_create_vontology_concept,
+    )
 
 
 def test_create_concepts_recovers_workflow_definition_parent(monkeypatch):
@@ -58,6 +62,8 @@ def test_create_concepts_recovers_workflow_definition_parent(monkeypatch):
 
     assert "error" not in result
     assert result.get("successful") == 1
+    assert result.get("created_concept_ids") == ["#V#workflow_recovery_type"]
+    assert (result.get("results") or [{}])[0].get("concept_id") == "#V#workflow_recovery_type"
     assert result.get("parent_id_used") == "#V#durable_workflow"
     resolution = result.get("parent_resolution") or {}
     assert resolution.get("fallback_used") is True
@@ -121,6 +127,8 @@ def test_create_concepts_recovery_works_through_gateway(monkeypatch):
     ).payload
 
     assert payload.get("successful") == 1
+    assert payload.get("created_concept_ids") == ["#V#gateway_workflow_recovery_type"]
+    assert (payload.get("results") or [{}])[0].get("concept_id") == "#V#gateway_workflow_recovery_type"
     assert payload.get("parent_id_used") == "#V#durable_workflow"
     assert (payload.get("parent_resolution") or {}).get("fallback_used") is True
 
@@ -153,6 +161,8 @@ def test_stdio_create_concepts_recovery_uses_same_parent_logic(monkeypatch):
     assert response
     payload = json.loads(response[0].text)
     assert payload.get("successful") == 1
+    assert payload.get("created_concept_ids") == ["#V#stdio_workflow_recovery_type"]
+    assert (payload.get("results") or [{}])[0].get("concept_id") == "#V#stdio_workflow_recovery_type"
     assert payload.get("parent_id_used") == "#V#durable_workflow"
     assert (payload.get("parent_resolution") or {}).get("fallback_used") is True
 

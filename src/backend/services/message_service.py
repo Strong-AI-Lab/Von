@@ -154,12 +154,21 @@ def create_message(
 
     # Event-driven workflow launch is best-effort and must not block messaging.
     try:
-        maybe_launch_direct_message_workflow(
+        workflow_event_launch = maybe_launch_direct_message_workflow(
             message_concept_id=concept_id,
             sender_id=sender_id,
             recipient_ids=recipient_ids,
             org_id=org_id,
         )
+        if isinstance(workflow_event_launch, dict):
+            concept_doc["workflow_event_launch"] = workflow_event_launch
+            if not bool(workflow_event_launch.get("triggered")):
+                _log.info(
+                    "Direct-message workflow not triggered for %s: reason=%s hint=%s",
+                    concept_id,
+                    workflow_event_launch.get("reason"),
+                    workflow_event_launch.get("hint"),
+                )
     except Exception as e:
         _log.warning("Direct-message workflow launch skipped for %s: %s", concept_id, e)
 

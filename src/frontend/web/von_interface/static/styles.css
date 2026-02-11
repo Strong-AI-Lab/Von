@@ -4687,6 +4687,11 @@ footer {
     color: #3730a3;
 }
 
+.workflow-status-badge.status-available {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
 .workflow-status-meta {
     margin-top: 4px;
     color: #475569;
@@ -4715,6 +4720,23 @@ footer {
     margin-top: 6px;
     font-size: 12px;
     color: #1f2937;
+}
+
+.workflow-status-definition-description {
+    margin-top: 4px;
+    color: #334155;
+    font-size: 12px;
+}
+
+.workflow-status-definition-meta {
+    margin-top: 6px;
+    color: #475569;
+    font-size: 12px;
+}
+
+.workflow-status-empty.workflow-status-error {
+    background: rgba(254, 242, 242, 0.9);
+    color: #991b1b;
 }
 
 .chat-session-metadata-row {

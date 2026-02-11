@@ -6307,6 +6307,49 @@ class InternalMCPChatOrchestrator:
             return json.dumps(result, default=str)
 
     @staticmethod
+    def _extract_create_concept_result_label(result: Mapping[str, Any]) -> str | None:
+        """Build a stable display label for one create_concepts result item.
+
+        Prefer showing both requested name and the resulting canonical concept ID
+        so users can immediately see exactly which concept was created.
+        """
+
+        if not isinstance(result, Mapping):
+            return None
+
+        requested_name_raw = (
+            result.get("requested_name")
+            or result.get("input_name")
+            or result.get("name")
+        )
+        requested_name = (
+            str(requested_name_raw).strip()
+            if isinstance(requested_name_raw, str) and requested_name_raw.strip()
+            else None
+        )
+
+        concept_id_value: str | None = None
+        for key in ("concept_id", "canonical_concept_id", "existing_concept_id"):
+            raw = result.get(key)
+            if isinstance(raw, str) and raw.strip():
+                concept_id_value = raw.strip()
+                break
+        if concept_id_value is None:
+            nested_concept = result.get("concept")
+            if isinstance(nested_concept, Mapping):
+                nested_id = nested_concept.get("concept_id")
+                if isinstance(nested_id, str) and nested_id.strip():
+                    concept_id_value = nested_id.strip()
+
+        if requested_name and concept_id_value:
+            return f"{requested_name} ({concept_id_value})"
+        if concept_id_value:
+            return concept_id_value
+        if requested_name:
+            return requested_name
+        return None
+
+    @staticmethod
     def _extract_result_summary(
         tool_name: str,
         payload: Any,
@@ -6661,8 +6704,8 @@ class InternalMCPChatOrchestrator:
             names = []
             for r in results:
                 if isinstance(r, dict) and r.get("success"):
-                    name = (
-                        r.get("requested_name") or r.get("name") or r.get("concept_id")
+                    name = InternalMCPChatOrchestrator._extract_create_concept_result_label(
+                        r
                     )
                     if name:
                         names.append(str(name))
@@ -6861,9 +6904,11 @@ class InternalMCPChatOrchestrator:
             names = []
             for r in payload["results"]:
                 if isinstance(r, dict) and r.get("success"):
-                    n = r.get("requested_name") or r.get("name") or r.get("concept_id")
+                    n = InternalMCPChatOrchestrator._extract_create_concept_result_label(
+                        r
+                    )
                     if n:
-                        names.append(str(n)[:20])
+                        names.append(str(n)[:48])
             if names:
                 context["names"] = ", ".join(names[:3])
                 if len(names) > 3:

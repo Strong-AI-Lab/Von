@@ -83,6 +83,50 @@ def test_apply_vontology_template_search_concepts_empty_query_defaults_to_all_co
     assert 'for ""' not in summary
 
 
+def test_apply_vontology_template_create_concepts_includes_created_concept_id():
+    payload = {
+        "successful": 1,
+        "results": [
+            {
+                "success": True,
+                "requested_name": "Planck Mission",
+                "canonical_concept_id": "#V#planck_mission",
+            }
+        ],
+    }
+
+    summary = InternalMCPChatOrchestrator._apply_vontology_template(
+        "Created {count} concept(s): {names}",
+        payload,
+        max_length=200,
+    )
+
+    assert summary is not None
+    assert "Planck Mission (#V#planck_mission)" in summary
+
+
+def test_apply_vontology_template_create_concepts_uses_nested_concept_id_when_needed():
+    payload = {
+        "successful": 1,
+        "results": [
+            {
+                "success": True,
+                "input_name": "Otter Session",
+                "concept": {"concept_id": "#V#otter_session_2"},
+            }
+        ],
+    }
+
+    summary = InternalMCPChatOrchestrator._apply_vontology_template(
+        "Created {count} concept(s): {names}",
+        payload,
+        max_length=200,
+    )
+
+    assert summary is not None
+    assert "Otter Session (#V#otter_session_2)" in summary
+
+
 def test_instruction_message_requires_verification_tool_calls_for_concept_existence():
     orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
     message = orchestrator._instruction_message(user_namespace="#V#user")

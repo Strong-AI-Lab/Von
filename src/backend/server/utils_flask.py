@@ -144,7 +144,9 @@ def _start_durable_workflow_system(app_logger) -> dict | None:
     global _durable_workflow_registry, _durable_action_registry
 
     # Check if enabled via environment
-    enabled = os.getenv("VON_DURABLE_WORKFLOWS_ENABLE", "0").lower() in {"1", "true"}
+    from ..services.feature_flags import get_durable_workflows_enabled
+
+    enabled = get_durable_workflows_enabled(default=False)
     if not enabled:
         try:
             app_logger.info(

@@ -513,10 +513,10 @@ def submit_durable_rag_sync(
             - instance_id: The workflow instance ID for status queries
             - error: Error message if submission failed
     """
-    import os
-
     # Check if durable workflows are enabled
-    enabled = os.getenv("VON_DURABLE_WORKFLOWS_ENABLE", "0").lower() in {"1", "true"}
+    from .feature_flags import get_durable_workflows_enabled
+
+    enabled = get_durable_workflows_enabled(default=False)
     if not enabled:
         return {
             "success": False,
