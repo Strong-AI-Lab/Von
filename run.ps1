@@ -345,6 +345,74 @@ function Get-ListeningProcessByPort {
     return $null
 }
 
+function Get-ProcessCommandLine {
+    param([int]$ProcessId)
+    try {
+        return (Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" | Select-Object -ExpandProperty CommandLine)
+    }
+    catch {
+        return ''
+    }
+}
+
+function Test-IsVonMainProcess {
+    param([int]$ProcessId)
+    $cmdLine = Get-ProcessCommandLine -ProcessId $ProcessId
+    if (-not $cmdLine) { return $false }
+
+    $normalisedCmd = $cmdLine.ToLowerInvariant().Replace('\', '/')
+    $normalisedRoot = $Root.ToLowerInvariant().Replace('\', '/')
+    if (-not $normalisedCmd.Contains('src/workflows/von/main.py')) { return $false }
+    if (-not $normalisedCmd.Contains($normalisedRoot)) { return $false }
+    return $true
+}
+
+function Stop-ProcessWithEscalation {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [int]$WaitMs = 10000
+    )
+
+    try { Stop-Process -Id $ProcessId -ErrorAction SilentlyContinue } catch { }
+
+    $elapsedMs = 0
+    while ($elapsedMs -lt $WaitMs) {
+        Start-Sleep -Milliseconds 500
+        if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return $true }
+        $elapsedMs += 500
+    }
+
+    try { Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue } catch { }
+    Start-Sleep -Milliseconds 250
+    return (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue))
+}
+
+function Invoke-RestartPortTakeover {
+    param([Parameter(Mandatory = $true)]$Listener)
+
+    $listenerPid = [int]$Listener.Id
+    if (-not (Test-IsVonMainProcess -ProcessId $listenerPid)) {
+        Write-LauncherLog ("Port {0} is owned by PID={1}, which does not look like this Von server. Aborting restart takeover." -f $Port, $listenerPid)
+        return $false
+    }
+
+    Write-LauncherLog ("Restart takeover: stopping untracked Von listener PID={0} on port {1}..." -f $listenerPid, $Port)
+    $stopped = Stop-ProcessWithEscalation -ProcessId $listenerPid
+    if (-not $stopped) {
+        Write-LauncherLog ("Failed to stop PID={0}; restart cannot continue safely." -f $listenerPid)
+        return $false
+    }
+
+    $remaining = Get-ListeningProcessByPort -Port $Port
+    if ($remaining) {
+        Write-LauncherLog ("Port {0} is still in use by PID={1} after takeover attempt; aborting start." -f $Port, $remaining.Id)
+        return $false
+    }
+
+    Write-LauncherLog ("Restart takeover succeeded; port {0} is clear." -f $Port)
+    return $true
+}
+
 function Read-AdminToken {
     if ($AdminToken) { return $AdminToken }
     $tokenFile = Join-Path $RunDir 'admin_token.txt'
@@ -1010,7 +1078,7 @@ function Sync-PidFileToListener {
     }
     if ($currentPid -eq $listenerPid -and $currentPid) { return }
     # Additional verification: ensure command line references our main script
-    $cmdLine = try { (Get-CimInstance Win32_Process -Filter "ProcessId=$listenerPid" | Select-Object -ExpandProperty CommandLine) } catch { '' }
+    $cmdLine = Get-ProcessCommandLine -ProcessId $listenerPid
     if ($cmdLine -and $cmdLine -like '*src/workflows/von/main.py*') {
         Write-PidFile $listenerPid
         Write-LauncherLog ("Synchronized PID file to listener PID={0}" -f $listenerPid)
@@ -1018,6 +1086,7 @@ function Sync-PidFileToListener {
 }
 
 function Start-VonServer {
+    param([switch]$RestartTakeover)
     # was Start-Von
     # Set production database name first (before any checks)
     # This ensures we default to production database and only throw if user explicitly wants test mode
@@ -1036,6 +1105,12 @@ function Start-VonServer {
     $existing = Get-ExistingProcess
     if ($existing) {
         Write-LauncherLog "Already running (PID=$($existing.Id)). Use .\run.ps1 stop or restart."; return
+    }
+    if ($RestartTakeover) {
+        $listenerToTakeOver = Get-ListeningProcessByPort -Port $Port
+        if ($listenerToTakeOver) {
+            if (-not (Invoke-RestartPortTakeover -Listener $listenerToTakeOver)) { return }
+        }
     }
     # If no valid PID file process, but port already has a listener, treat that as running and sync PID file
     $listener = Get-ListeningProcessByPort -Port $Port
@@ -1382,7 +1457,7 @@ function Show-VonLogs {
     }
 }
 
-function Restart-VonServer { Stop-VonServer; Start-VonServer }
+function Restart-VonServer { Stop-VonServer; Start-VonServer -RestartTakeover }
 
 # -----------------------------------------------------------------------------
 # Governance Daily Scan
@@ -2316,7 +2391,7 @@ switch ($Action) {
                 # Detect listener
                 $listener = Get-ListeningProcessByPort -Port $Port
                 if ($listener) {
-                    $cmdLine = try { (Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.Id)" | Select-Object -ExpandProperty CommandLine) } catch { '' }
+                    $cmdLine = Get-ProcessCommandLine -ProcessId $listener.Id
                     $expectedSubstrings = @('src/workflows/von/main.py', 'python', 'pdm')
                     $foundSubstrings = $expectedSubstrings | Where-Object { $cmdLine -like "*$_*" }
                     if ($foundSubstrings.Count -lt 1) {

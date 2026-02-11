@@ -338,13 +338,62 @@ if [ "$ACTION" = "start" ] && [ "$BACKUP_FLAGS_SET" -eq 1 ]; then
     ACTION="backup"
 fi
 
-# Load .env file to populate environment variables (matches run.ps1 behaviour)
-if [ -f "${ROOT}/.env" ]; then
-    set -a
-    source "${ROOT}/.env"
-    set +a
-    log "Loaded .env environment variables"
-fi
+load_env_from_dotenv() {
+    local env_path="$1"
+    if [ -z "$env_path" ] || [ ! -f "$env_path" ]; then
+        return 0
+    fi
+
+    local applied=0
+    local line=""
+    local trimmed=""
+    local key=""
+    local value=""
+    local first_char=""
+    local last_char=""
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Handle CRLF files safely.
+        line="${line%$'\r'}"
+
+        trimmed="$line"
+        trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+        trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+        if [ -z "$trimmed" ]; then
+            continue
+        fi
+        if [[ "$trimmed" == \#* ]]; then
+            continue
+        fi
+
+        if [[ "$trimmed" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+
+            if [ "${#value}" -ge 2 ]; then
+                first_char="${value:0:1}"
+                last_char="${value:${#value}-1:1}"
+                if [[ "$first_char" == '"' && "$last_char" == '"' ]] || [[ "$first_char" == "'" && "$last_char" == "'" ]]; then
+                    value="${value:1:${#value}-2}"
+                fi
+            fi
+
+            printf -v "$key" '%s' "$value"
+            export "$key"
+            applied=$((applied + 1))
+        fi
+    done < "$env_path"
+
+    if [ "$applied" -gt 0 ]; then
+        log "Loaded $applied .env override(s) from $env_path"
+    fi
+}
+
+# Load .env overrides without executing arbitrary shell content.
+load_env_from_dotenv "${ROOT}/.env"
 
 export PYTHONPATH="${ROOT}"
 export PYTHONUNBUFFERED=1
@@ -611,6 +660,85 @@ get_listening_pid_by_port() {
     return 0
 }
 
+get_process_commandline() {
+    local pid="${1:-}"
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+    if command -v ps >/dev/null 2>&1; then
+        ps -p "$pid" -o args= 2>/dev/null || true
+    fi
+}
+
+is_von_main_process() {
+    local pid="${1:-}"
+    local cmdline=""
+    cmdline="$(get_process_commandline "$pid")"
+    if [ -z "$cmdline" ]; then
+        return 1
+    fi
+    if ! printf '%s' "$cmdline" | grep -F -q "src/workflows/von/main.py"; then
+        return 1
+    fi
+    if ! printf '%s' "$cmdline" | grep -F -q "$ROOT"; then
+        return 1
+    fi
+    return 0
+}
+
+stop_process_with_escalation() {
+    local pid="${1:-}"
+    if [ -z "$pid" ]; then
+        return 1
+    fi
+
+    kill "$pid" >/dev/null 2>&1 || true
+
+    local waited=0
+    while [ "$waited" -lt 20 ]; do
+        if ! kill -0 "$pid" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+
+    kill -9 "$pid" >/dev/null 2>&1 || true
+    sleep 0.2
+    if kill -0 "$pid" >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+restart_port_takeover() {
+    local listener="${1:-}"
+    if [ -z "$listener" ]; then
+        return 0
+    fi
+
+    if ! is_von_main_process "$listener"; then
+        log "Port $PORT is owned by PID=$listener, which does not look like this Von server. Aborting restart takeover."
+        return 1
+    fi
+
+    log "Restart takeover: stopping untracked Von listener PID=$listener on port $PORT..."
+    if ! stop_process_with_escalation "$listener"; then
+        log "Failed to stop PID=$listener; restart cannot continue safely."
+        return 1
+    fi
+
+    local remaining=""
+    remaining="$(get_listening_pid_by_port "$PORT" || true)"
+    if [ -n "$remaining" ]; then
+        log "Port $PORT is still in use by PID=$remaining after takeover attempt; aborting start."
+        return 1
+    fi
+
+    log "Restart takeover succeeded; port $PORT is clear."
+    return 0
+}
+
 port_listening() {
     local pid
     pid="$(get_listening_pid_by_port "$PORT" || true)"
@@ -642,11 +770,7 @@ sync_pidfile_to_listener() {
     if [ -z "$listener" ]; then
         return 0
     fi
-    local cmdline=""
-    if command -v ps >/dev/null 2>&1; then
-        cmdline="$(ps -p "$listener" -o args= 2>/dev/null || true)"
-    fi
-    if [ -n "$cmdline" ] && ! printf '%s' "$cmdline" | grep -q "src/workflows/von/main.py"; then
+    if ! is_von_main_process "$listener"; then
         return 0
     fi
     local current=""
@@ -708,6 +832,8 @@ stop_rag_worker() {
 }
 
 start_server() {
+    local restart_takeover="${1:-0}"
+
     # Match run.ps1: default to production DB unless explicitly set.
     if [ -z "${VON_DB_NAME:-}" ] || [ "${VON_DB_NAME:-}" = "test_von_db" ]; then
         export VON_DB_NAME=von_db
@@ -723,6 +849,14 @@ start_server() {
     if [ -n "$existing" ] && kill -0 "$existing" >/dev/null 2>&1; then
         log "Already running (PID=$existing). Use ./run.sh stop or restart."
         return 0
+    fi
+
+    if [ "$restart_takeover" = "1" ]; then
+        local takeover_listener=""
+        takeover_listener="$(get_listening_pid_by_port "$PORT" || true)"
+        if [ -n "$takeover_listener" ]; then
+            restart_port_takeover "$takeover_listener" || return 1
+        fi
     fi
 
     # If PID file stale but port has a listener, assume running and sync PID file.
@@ -898,12 +1032,8 @@ stop_server() {
                 stop_rag_worker || true
                 return 0
             fi
-            # Verify command line looks like Von (best-effort)
-            local cmdline=""
-            if command -v ps >/dev/null 2>&1; then
-                cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-            fi
-            if ! printf '%s' "$cmdline" | grep -q "src/workflows/von/main.py"; then
+            # Verify command line looks like this Von server.
+            if ! is_von_main_process "$pid"; then
                 log "ABORT: Detected PID $pid command line does not look like Von server. Use 'stop force-any' to override."
                 return 0
             fi
@@ -1995,7 +2125,7 @@ case "$ACTION" in
         ;;
     restart)
         stop_server
-        start_server
+        start_server 1
         ;;
     logs)
         show_logs
