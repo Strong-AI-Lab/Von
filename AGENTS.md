@@ -8,7 +8,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 2. PowerShell is the default shell. Do not emit Bash heredocs, `export`, `$(cmd)`, or `source venv/bin/activate` unless explicitly asked for Bash.
 3. Never clobber `.env`. Only touch it if explicitly asked; never print its contents or secrets.
 4. It's fine to auto-start the server; don't wait for explicit user instruction. (Still obey system/developer constraints if stricter.)
-5. Use MCP tools (Vontology/Jira/Mongo) by default; explain if you must use another path.
+5. Use MCP tools (Vontology/Jira/Mongo) by default; for Jira, prefer Von's internal Jira MCP/proxy tools (`jira_*` via InternalMCPGateway) over Atlassian MCP OAuth. Explain if you must use another path.
 6. Do not use direct DB access methods for Vontology data; use Vontology routes/services (API/MCP) instead.
 7. **Vontology is THE source of truth** for all persistent knowledge and data. Exceptions (e.g., ephemeral caches, session state) must be rare and explicitly justified.
 8. Jira issues must be assigned on creation (assignee = current user unless told otherwise).
@@ -87,6 +87,9 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 ## Tooling and Automation
 - Activate required external tool categories (Jira, Vontology, MongoDB, GitHub) without asking, when clearly needed.
 - Treat tool categories as opt-in per session: activate before first use, and occasionally check whether a matching tool deactivation call exists (to disable categories when no longer needed).
+- **Jira default access path**: use Von's internal Jira proxy/tools first (`jira_get_auth_config`, `jira_get_myself`, `jira_search`, `jira_get_issue`, write helpers in `src/backend/integrations/internal_mcp/catalogue.py`). This path uses `ATLASSIAN_BASE_URL` + `ATLASSIAN_EMAIL` + `ATLASSIAN_API_TOKEN` and is independent of Atlassian MCP OAuth reliability.
+- Use Atlassian MCP OAuth tools only when explicitly needed for capabilities not available in Von's internal Jira tools.
+- When Jira friction is discovered, prefer improving Von's internal Jira path (tooling, diagnostics, schemas, guardrails) and document the issue/capability gap in code/docs/Jira so reliability improves over time.
 - Where Vontology search, analysis or manipulation is impeded by the current vontology MCP tools, suggest code improvements to those tools that will facilitate high quality ontological engineering in future.
 - If a tool category is not enabled, request enabling it by exact name.
 - If Vontology or Vonrag MCP tools are not exposed in this session, use the stdio proxy scripts (`scripts/query_vontology_mcp.py`, `scripts/query_vonrag_mcp.py`) and check cached tool lists in `data/mcp_tool_cache/`.
