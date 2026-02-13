@@ -14,6 +14,8 @@ from typing import Any, Iterable
 # internal_mcp/catalogue.py. Tests verify these names exist to prevent drift.
 WORKFLOW_MANAGEMENT_TOOL_NAMES: tuple[str, ...] = (
     "workflow_list_definitions",
+    "workflow_bind_event",
+    "workflow_list_event_bindings",
     "workflow_create_instance",
     "workflow_list_instances",
     "workflow_get_instance",

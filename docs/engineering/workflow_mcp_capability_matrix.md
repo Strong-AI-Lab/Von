@@ -18,6 +18,8 @@ available. It prevents ambiguous "missing tool" behaviour across MCP surfaces.
 | Tool | internal_mcp_gateway | vontology_mcp_stdio_server | vonrag_mcp_stdio_server |
 | --- | --- | --- | --- |
 | `workflow_list_definitions` | Yes | Yes | No |
+| `workflow_bind_event` | Yes | Yes | No |
+| `workflow_list_event_bindings` | Yes | Yes | No |
 | `workflow_create_instance` | Yes | Yes | No |
 | `workflow_list_instances` | Yes | Yes | No |
 | `workflow_get_instance` | Yes | Yes | No |

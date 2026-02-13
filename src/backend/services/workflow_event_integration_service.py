@@ -1,8 +1,8 @@
 """Event-driven workflow launch helpers (WS6 / JVNAUTOSCI-1090).
 
-This module provides one canonical pathway from domain events (task/message)
-to durable workflow instances. Keep event-to-workflow launch logic here rather
-than duplicating launch code across routes, MCP handlers, or services.
+This module is the canonical pathway from domain events to durable workflow
+instances. Keep event-to-workflow launch logic here rather than duplicating
+launch code across routes, MCP handlers, or services.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from .feature_flags import (
     get_durable_workflows_enabled,
     get_event_workflow_integration_enabled,
 )
+from ..workflows.durable.models import EventWorkflowBinding
 from ..workflows.durable.startup import get_instance_manager
 
 logger = logging.getLogger(__name__)
@@ -24,12 +25,35 @@ logger = logging.getLogger(__name__)
 EVENT_TYPE_TASK_CREATED = "task.created"
 EVENT_TYPE_TASK_STATUS_CHANGED = "task.status_changed"
 EVENT_TYPE_DIRECT_MESSAGE_CREATED = "message.direct_created"
+EVENT_TYPE_TYPE_CREATED = "type.created"
+EVENT_TYPE_CONCEPT_CREATED = "concept.created"
+EVENT_TYPE_CONCEPT_UPDATED = "concept.updated"
+EVENT_TYPE_CONCEPT_DELETED = "concept.deleted"
+EVENT_TYPE_RELATIONSHIP_ADDED = "relationship.added"
+EVENT_TYPE_RELATIONSHIP_REMOVED = "relationship.removed"
+EVENT_TYPE_TEXT_RELATION_UPSERTED = "text_relation.upserted"
+EVENT_TYPE_TEXT_RELATION_UPDATED = "text_relation.updated"
+EVENT_TYPE_TEXT_RELATION_DELETED = "text_relation.deleted"
+EVENT_TYPE_VONTOLOGY_MUTATED = "vontology.mutated"
 
+# Backward-compatible environment wiring (legacy/system bootstrap).
 EVENT_WORKFLOW_ID_ENV_MAP: dict[str, str] = {
     EVENT_TYPE_TASK_CREATED: "VON_EVENT_TASK_CREATED_WORKFLOW_ID",
     EVENT_TYPE_TASK_STATUS_CHANGED: "VON_EVENT_TASK_STATUS_CHANGED_WORKFLOW_ID",
     EVENT_TYPE_DIRECT_MESSAGE_CREATED: "VON_EVENT_DIRECT_MESSAGE_WORKFLOW_ID",
+    EVENT_TYPE_TYPE_CREATED: "VON_EVENT_TYPE_CREATED_WORKFLOW_ID",
 }
+
+_DEFAULT_EVENT_BINDINGS: tuple[dict[str, Any], ...] = (
+    {
+        "event_type": EVENT_TYPE_TYPE_CREATED,
+        "workflow_id": "#V#salient_predicate_governance_workflow",
+        "input_mapping": {"type_concept_id": "event.concept_id"},
+        "enabled": True,
+    },
+)
+
+_DEFAULT_BINDINGS_ENSURED = False
 
 
 def _task_status_trigger_values() -> set[str]:
@@ -70,6 +94,385 @@ def _build_namespace(user_id: str | None, org_id: str | None) -> str:
     return f"{safe_user}/{safe_org}"
 
 
+def resolve_event_actor_context(
+    *,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve actor context for event emission in request/non-request code paths."""
+
+    resolved_user = (
+        user_id.strip() if isinstance(user_id, str) and user_id.strip() else None
+    )
+    resolved_org = org_id.strip() if isinstance(org_id, str) and org_id.strip() else None
+
+    if resolved_user is None:
+        try:
+            from ..security.access_control import get_effective_user_concept_id
+
+            actor = get_effective_user_concept_id()
+            if isinstance(actor, str) and actor.strip():
+                resolved_user = actor.strip()
+        except Exception:
+            resolved_user = None
+
+    if resolved_org is None:
+        try:
+            from flask import has_request_context, session as flask_session
+
+            if has_request_context():
+                org_raw = flask_session.get("organisation_concept_id")
+                if isinstance(org_raw, str) and org_raw.strip():
+                    resolved_org = org_raw.strip()
+        except Exception:
+            resolved_org = None
+
+    return resolved_user, resolved_org
+
+
+def _normalise_event_binding_mapping(
+    input_mapping: dict[str, Any] | None,
+) -> dict[str, str]:
+    normalised: dict[str, str] = {}
+    if not isinstance(input_mapping, dict):
+        return normalised
+    for key, value in input_mapping.items():
+        key_clean = str(key or "").strip()
+        value_clean = str(value or "").strip()
+        if key_clean and value_clean:
+            normalised[key_clean] = value_clean
+    return normalised
+
+
+def ensure_default_event_bindings() -> dict[str, Any]:
+    """Best-effort bootstrap of default event bindings.
+
+    This is intentionally idempotent and conflict-safe:
+    - Existing equivalent bindings are treated as unchanged.
+    - Existing conflicting bindings are left untouched (no override).
+    """
+
+    global _DEFAULT_BINDINGS_ENSURED
+    if _DEFAULT_BINDINGS_ENSURED:
+        return {
+            "success": True,
+            "ensured": True,
+            "created_count": 0,
+            "updated_count": 0,
+            "unchanged_count": 0,
+            "skipped_conflicts": 0,
+        }
+
+    if os.getenv("VON_EVENT_BINDINGS_BOOTSTRAP_ENABLE", "1").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        _DEFAULT_BINDINGS_ENSURED = True
+        return {
+            "success": True,
+            "ensured": False,
+            "reason": "bootstrap_disabled",
+            "created_count": 0,
+            "updated_count": 0,
+            "unchanged_count": 0,
+            "skipped_conflicts": 0,
+        }
+
+    created_count = 0
+    updated_count = 0
+    unchanged_count = 0
+    skipped_conflicts = 0
+    errors: list[str] = []
+
+    try:
+        manager = get_instance_manager()
+        if not hasattr(manager, "upsert_event_binding"):
+            _DEFAULT_BINDINGS_ENSURED = True
+            return {
+                "success": False,
+                "ensured": False,
+                "reason": "event_binding_persistence_unavailable",
+                "created_count": 0,
+                "updated_count": 0,
+                "unchanged_count": 0,
+                "skipped_conflicts": 0,
+            }
+
+        for binding in _DEFAULT_EVENT_BINDINGS:
+            try:
+                _saved_binding, created, updated = manager.upsert_event_binding(
+                    event_type=binding["event_type"],
+                    workflow_id=binding["workflow_id"],
+                    input_mapping=binding.get("input_mapping"),
+                    enabled=bool(binding.get("enabled", True)),
+                    actor="system.bootstrap",
+                    replace_existing=False,
+                )
+                if created:
+                    created_count += 1
+                elif updated:
+                    updated_count += 1
+                else:
+                    unchanged_count += 1
+            except ValueError as exc:
+                if str(exc) == "binding_conflict":
+                    skipped_conflicts += 1
+                    continue
+                errors.append(str(exc))
+            except Exception as exc:  # pragma: no cover - defensive
+                errors.append(str(exc))
+    except Exception as exc:  # pragma: no cover - defensive
+        errors.append(str(exc))
+
+    if not errors:
+        _DEFAULT_BINDINGS_ENSURED = True
+
+    return {
+        "success": len(errors) == 0,
+        "ensured": len(errors) == 0,
+        "created_count": created_count,
+        "updated_count": updated_count,
+        "unchanged_count": unchanged_count,
+        "skipped_conflicts": skipped_conflicts,
+        "errors": errors,
+    }
+
+
+def _fetch_persistent_bindings(
+    *,
+    event_type: str | None = None,
+    enabled_only: bool = False,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    manager = get_instance_manager()
+    if not hasattr(manager, "list_event_bindings"):
+        return []
+    try:
+        bindings = manager.list_event_bindings(
+            event_type=event_type,
+            enabled_only=enabled_only,
+            limit=limit,
+        )
+    except Exception:
+        return []
+
+    payload: list[dict[str, Any]] = []
+    for item in bindings:
+        if isinstance(item, EventWorkflowBinding):
+            payload.append(
+                {
+                    "binding_id": item.binding_id,
+                    "event_type": item.event_type,
+                    "workflow_id": item.workflow_id,
+                    "input_mapping": dict(item.input_mapping),
+                    "enabled": bool(item.enabled),
+                    "created_at": item.created_at.isoformat()
+                    if item.created_at
+                    else None,
+                    "updated_at": item.updated_at.isoformat()
+                    if item.updated_at
+                    else None,
+                    "created_by": item.created_by,
+                    "updated_by": item.updated_by,
+                    "revision": int(item.revision),
+                    "source": "persistent",
+                }
+            )
+    return payload
+
+
+def list_event_workflow_bindings(
+    *,
+    event_type: str | None = None,
+    enabled_only: bool = False,
+    include_env_fallback: bool = True,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Return event-workflow bindings for introspection and diagnostics."""
+
+    bindings = _fetch_persistent_bindings(
+        event_type=event_type,
+        enabled_only=enabled_only,
+        limit=limit,
+    )
+    seen_pairs = {
+        (str(b.get("event_type") or ""), str(b.get("workflow_id") or ""))
+        for b in bindings
+    }
+
+    if include_env_fallback:
+        event_keys = (
+            [event_type]
+            if isinstance(event_type, str) and event_type.strip()
+            else list(EVENT_WORKFLOW_ID_ENV_MAP.keys())
+        )
+        for key in event_keys:
+            if not isinstance(key, str) or not key.strip():
+                continue
+            workflow_id = _workflow_id_for_event(key)
+            if not workflow_id:
+                continue
+            pair = (key, workflow_id)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            bindings.append(
+                {
+                    "binding_id": None,
+                    "event_type": key,
+                    "workflow_id": workflow_id,
+                    "input_mapping": {},
+                    "enabled": True,
+                    "created_at": None,
+                    "updated_at": None,
+                    "created_by": None,
+                    "updated_by": None,
+                    "revision": None,
+                    "source": "environment",
+                }
+            )
+
+    def _sort_key(item: dict[str, Any]) -> tuple[str, int, str]:
+        source = str(item.get("source") or "")
+        source_rank = 0 if source == "persistent" else 1
+        return (
+            str(item.get("event_type") or ""),
+            source_rank,
+            str(item.get("workflow_id") or ""),
+        )
+
+    return sorted(bindings, key=_sort_key)[: max(1, min(limit, 500))]
+
+
+def _resolve_bindings_for_event(event_type: str) -> list[dict[str, Any]]:
+    all_bindings = list_event_workflow_bindings(
+        event_type=event_type,
+        enabled_only=True,
+        include_env_fallback=True,
+        limit=200,
+    )
+    return [
+        binding
+        for binding in all_bindings
+        if str(binding.get("event_type") or "").strip() == event_type
+    ]
+
+
+def _extract_path_value(payload: dict[str, Any], path: str) -> tuple[bool, Any]:
+    current: Any = payload
+    for segment in path.split("."):
+        segment_clean = segment.strip()
+        if not segment_clean:
+            return False, None
+        if not isinstance(current, dict) or segment_clean not in current:
+            return False, None
+        current = current[segment_clean]
+    return True, current
+
+
+def _resolve_mapping_value(
+    expression: str,
+    *,
+    event_payload: dict[str, Any],
+    base_inputs: dict[str, Any],
+) -> tuple[bool, Any]:
+    text = str(expression or "").strip()
+    if not text:
+        return False, None
+    if text.startswith("event."):
+        return _extract_path_value(event_payload, text.removeprefix("event."))
+    if text.startswith("inputs."):
+        return _extract_path_value(base_inputs, text.removeprefix("inputs."))
+    return True, text
+
+
+def _apply_input_mapping(
+    *,
+    base_inputs: dict[str, Any],
+    event_payload: dict[str, Any],
+    input_mapping: dict[str, str],
+) -> tuple[dict[str, Any], list[str]]:
+    merged_inputs = dict(base_inputs)
+    unresolved: list[str] = []
+    for target_key, expression in input_mapping.items():
+        target_key_clean = str(target_key or "").strip()
+        if not target_key_clean:
+            continue
+        found, value = _resolve_mapping_value(
+            str(expression or ""),
+            event_payload=event_payload,
+            base_inputs=base_inputs,
+        )
+        if found:
+            merged_inputs[target_key_clean] = value
+        else:
+            unresolved.append(target_key_clean)
+    return merged_inputs, unresolved
+
+
+def _launch_single_event_binding(
+    *,
+    event_type: str,
+    event_id: str,
+    user_id: str | None,
+    org_id: str | None,
+    workflow_id: str,
+    inputs: dict[str, Any],
+    event_payload: dict[str, Any],
+) -> dict[str, Any]:
+    safe_event_id = str(event_id or "").strip()
+    resolved_workflow_id = str(workflow_id or "").strip()
+    namespace = _build_namespace(user_id, org_id)
+    event_idempotency_key = _build_event_idempotency_key(
+        workflow_id=resolved_workflow_id,
+        event_type=event_type,
+        event_id=safe_event_id,
+    )
+    payload_inputs = dict(inputs or {})
+    existing_event = payload_inputs.get("event")
+    existing_event_dict = existing_event if isinstance(existing_event, dict) else {}
+    payload_inputs["event"] = {
+        **existing_event_dict,
+        **dict(event_payload),
+        "event_type": event_type,
+        "event_id": safe_event_id,
+        "idempotency_key": event_idempotency_key,
+    }
+
+    manager = get_instance_manager()
+    instance_id, created_new = manager.create_instance_for_event(
+        resolved_workflow_id,
+        user_id=(user_id or "anonymous"),
+        org_id=(org_id or "default"),
+        namespace=namespace,
+        event_idempotency_key=event_idempotency_key,
+        source_event_type=event_type,
+        source_event_id=safe_event_id,
+        inputs=payload_inputs,
+    )
+
+    logger.info(
+        "[workflow_event] %s event=%s workflow=%s instance=%s created_new=%s",
+        "triggered" if created_new else "reused",
+        event_type,
+        resolved_workflow_id,
+        instance_id,
+        created_new,
+    )
+    return {
+        "success": True,
+        "triggered": created_new,
+        "workflow_id": resolved_workflow_id,
+        "instance_id": instance_id,
+        "event_type": event_type,
+        "event_id": safe_event_id,
+        "idempotency_key": event_idempotency_key,
+        "idempotent_reused": not created_new,
+    }
+
+
 def launch_event_workflow(
     *,
     event_type: str,
@@ -78,8 +481,9 @@ def launch_event_workflow(
     org_id: str | None,
     inputs: dict[str, Any] | None = None,
     workflow_id: str | None = None,
+    event_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Launch a configured durable workflow for an event with idempotency."""
+    """Launch configured durable workflow binding(s) for an event."""
 
     integration_enabled = get_event_workflow_integration_enabled(default=True)
     if not integration_enabled:
@@ -100,13 +504,36 @@ def launch_event_workflow(
             "hint": "Set VON_DURABLE_WORKFLOWS_ENABLE=1 to enable event-driven workflow execution.",
         }
 
-    resolved_workflow_id = workflow_id or _workflow_id_for_event(event_type)
-    if not resolved_workflow_id:
+    safe_event_id = str(event_id or "").strip()
+    if not safe_event_id:
+        return {
+            "success": False,
+            "triggered": False,
+            "event_type": event_type,
+            "reason": "missing_event_id",
+        }
+
+    if isinstance(workflow_id, str) and workflow_id.strip():
+        resolved_bindings = [
+            {
+                "binding_id": None,
+                "event_type": event_type,
+                "workflow_id": workflow_id.strip(),
+                "input_mapping": {},
+                "enabled": True,
+                "source": "explicit",
+            }
+        ]
+    else:
+        resolved_bindings = _resolve_bindings_for_event(event_type)
+
+    if not resolved_bindings:
         env_name = EVENT_WORKFLOW_ID_ENV_MAP.get(event_type)
         hint = (
-            f"Configure {env_name} with a workflow concept ID (for example #V#todo_refresh_workflow)."
+            "Register an event binding using workflow_bind_event, or configure "
+            f"{env_name} with a workflow concept ID."
             if env_name
-            else "Configure a workflow_id explicitly for this event type."
+            else "Register an event binding using workflow_bind_event for this event type."
         )
         return {
             "success": False,
@@ -117,63 +544,92 @@ def launch_event_workflow(
             "hint": hint,
         }
 
-    safe_event_id = str(event_id or "").strip()
-    if not safe_event_id:
+    raw_event_payload = (
+        dict(event_payload)
+        if isinstance(event_payload, dict)
+        else dict(inputs or {})
+        if isinstance(inputs, dict)
+        else {}
+    )
+    raw_event_payload.setdefault("event_type", event_type)
+    raw_event_payload.setdefault("event_id", safe_event_id)
+    if "concept_id" not in raw_event_payload:
+        raw_event_payload["concept_id"] = safe_event_id
+
+    launches: list[dict[str, Any]] = []
+    for binding in resolved_bindings:
+        binding_workflow_id = str(binding.get("workflow_id") or "").strip()
+        if not binding_workflow_id:
+            continue
+        input_mapping = _normalise_event_binding_mapping(
+            binding.get("input_mapping")
+            if isinstance(binding.get("input_mapping"), dict)
+            else {},
+        )
+        mapped_inputs, unresolved_targets = _apply_input_mapping(
+            base_inputs=dict(inputs or {}),
+            event_payload=raw_event_payload,
+            input_mapping=input_mapping,
+        )
+        try:
+            launch = _launch_single_event_binding(
+                event_type=event_type,
+                event_id=safe_event_id,
+                user_id=user_id,
+                org_id=org_id,
+                workflow_id=binding_workflow_id,
+                inputs=mapped_inputs,
+                event_payload=raw_event_payload,
+            )
+            launch["binding_source"] = binding.get("source")
+            launch["binding_id"] = binding.get("binding_id")
+            launch["unresolved_input_mappings"] = unresolved_targets
+            launches.append(launch)
+        except Exception as exc:  # pragma: no cover - defensive
+            launches.append(
+                {
+                    "success": False,
+                    "triggered": False,
+                    "event_type": event_type,
+                    "event_id": safe_event_id,
+                    "workflow_id": binding_workflow_id,
+                    "binding_source": binding.get("source"),
+                    "binding_id": binding.get("binding_id"),
+                    "error": str(exc),
+                    "error_code": "launch_failed",
+                    "unresolved_input_mappings": unresolved_targets,
+                }
+            )
+
+    if not launches:
         return {
             "success": False,
             "triggered": False,
             "event_type": event_type,
-            "workflow_id": resolved_workflow_id,
-            "reason": "missing_event_id",
+            "event_id": safe_event_id,
+            "reason": "workflow_not_configured",
         }
 
-    namespace = _build_namespace(user_id, org_id)
-    event_idempotency_key = _build_event_idempotency_key(
-        workflow_id=resolved_workflow_id,
-        event_type=event_type,
-        event_id=safe_event_id,
-    )
-    payload_inputs = dict(inputs or {})
-    payload_inputs.setdefault(
-        "event",
-        {
-            "event_type": event_type,
-            "event_id": safe_event_id,
-            "idempotency_key": event_idempotency_key,
-        },
-    )
+    if len(launches) == 1:
+        result = dict(launches[0])
+        result["launches"] = launches
+        result["launch_count"] = 1
+        result["triggered_count"] = 1 if bool(result.get("triggered")) else 0
+        return result
 
-    manager = get_instance_manager()
-    instance_id, created_new = manager.create_instance_for_event(
-        resolved_workflow_id,
-        user_id=(user_id or "anonymous"),
-        org_id=(org_id or "default"),
-        namespace=namespace,
-        event_idempotency_key=event_idempotency_key,
-        source_event_type=event_type,
-        source_event_id=safe_event_id,
-        inputs=payload_inputs,
-    )
-
-    result = {
-        "success": True,
-        "triggered": created_new,
-        "workflow_id": resolved_workflow_id,
-        "instance_id": instance_id,
+    triggered_count = sum(1 for item in launches if bool(item.get("triggered")))
+    success_count = sum(1 for item in launches if bool(item.get("success")))
+    return {
+        "success": success_count == len(launches),
+        "triggered": triggered_count > 0,
         "event_type": event_type,
         "event_id": safe_event_id,
-        "idempotency_key": event_idempotency_key,
-        "idempotent_reused": not created_new,
+        "launches": launches,
+        "launch_count": len(launches),
+        "triggered_count": triggered_count,
+        "success_count": success_count,
+        "failure_count": len(launches) - success_count,
     }
-    logger.info(
-        "[workflow_event] %s event=%s workflow=%s instance=%s created_new=%s",
-        "triggered" if created_new else "reused",
-        event_type,
-        resolved_workflow_id,
-        instance_id,
-        created_new,
-    )
-    return result
 
 
 def maybe_launch_task_created_workflow(
@@ -189,6 +645,11 @@ def maybe_launch_task_created_workflow(
         event_id=str(task_concept_id),
         user_id=created_by_concept_id,
         org_id=organisation_concept_id,
+        event_payload={
+            "task_concept_id": task_concept_id,
+            "task_title": title,
+            "task_priority": priority,
+        },
         inputs={
             "task_concept_id": task_concept_id,
             "task_title": title,
@@ -227,6 +688,13 @@ def maybe_launch_task_status_workflow(
         event_id=event_id,
         user_id=created_by_concept_id,
         org_id=organisation_concept_id,
+        event_payload={
+            "task_concept_id": task_concept_id,
+            "previous_status": previous_status,
+            "new_status": new_status,
+            "status_changed_at": updated_at_iso,
+            "concept_id": task_concept_id,
+        },
         inputs={
             "task_concept_id": task_concept_id,
             "previous_status": previous_status,
@@ -248,6 +716,12 @@ def maybe_launch_direct_message_workflow(
         event_id=str(message_concept_id),
         user_id=sender_id,
         org_id=org_id,
+        event_payload={
+            "message_concept_id": message_concept_id,
+            "sender_id": sender_id,
+            "recipient_ids": list(recipient_ids),
+            "concept_id": message_concept_id,
+        },
         inputs={
             "message_concept_id": message_concept_id,
             "sender_id": sender_id,
@@ -255,3 +729,111 @@ def maybe_launch_direct_message_workflow(
         },
     )
 
+
+def maybe_launch_type_created_workflow(
+    *,
+    type_concept_id: str,
+    created_by_concept_id: str | None,
+    organisation_concept_id: str | None,
+    parent_type_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Launch workflow(s) bound to type.created for new type concepts."""
+
+    return launch_event_workflow(
+        event_type=EVENT_TYPE_TYPE_CREATED,
+        event_id=str(type_concept_id),
+        user_id=created_by_concept_id,
+        org_id=organisation_concept_id,
+        event_payload={
+            "concept_id": type_concept_id,
+            "type_concept_id": type_concept_id,
+            "parent_type_ids": list(parent_type_ids or []),
+            "kind": "type",
+        },
+        inputs={
+            "type_concept_id": type_concept_id,
+            "parent_type_ids": list(parent_type_ids or []),
+        },
+    )
+
+
+def maybe_launch_vontology_mutation_workflow(
+    *,
+    mutation_event_type: str,
+    mutation_id: str,
+    event_payload: dict[str, Any] | None = None,
+    inputs: dict[str, Any] | None = None,
+    user_id: str | None = None,
+    org_id: str | None = None,
+) -> dict[str, Any]:
+    """Emit both specific and catch-all Vontology mutation events.
+
+    This keeps event semantics general for future mutation-triggered workflows
+    without requiring additional engine-level event wiring.
+    """
+
+    mutation_type = str(mutation_event_type or "").strip()
+    safe_mutation_id = str(mutation_id or "").strip()
+    if not mutation_type:
+        return {
+            "success": False,
+            "triggered": False,
+            "reason": "missing_mutation_event_type",
+        }
+    if not safe_mutation_id:
+        return {
+            "success": False,
+            "triggered": False,
+            "reason": "missing_mutation_id",
+            "event_type": mutation_type,
+        }
+
+    resolved_user, resolved_org = resolve_event_actor_context(
+        user_id=user_id,
+        org_id=org_id,
+    )
+
+    payload = dict(event_payload or {})
+    payload.setdefault("mutation_event_type", mutation_type)
+    payload.setdefault("mutation_id", safe_mutation_id)
+
+    specific_inputs = dict(inputs or {})
+    specific_inputs.setdefault("mutation_event_type", mutation_type)
+    specific_inputs.setdefault("mutation_id", safe_mutation_id)
+
+    specific_result = launch_event_workflow(
+        event_type=mutation_type,
+        event_id=safe_mutation_id,
+        user_id=resolved_user,
+        org_id=resolved_org,
+        event_payload=payload,
+        inputs=specific_inputs,
+    )
+
+    catch_all_inputs = dict(specific_inputs)
+    catch_all_inputs.setdefault("event_type", mutation_type)
+    catch_all_payload = dict(payload)
+    catch_all_payload.setdefault("event_type", mutation_type)
+
+    catch_all_result = launch_event_workflow(
+        event_type=EVENT_TYPE_VONTOLOGY_MUTATED,
+        event_id=f"{mutation_type}:{safe_mutation_id}",
+        user_id=resolved_user,
+        org_id=resolved_org,
+        event_payload=catch_all_payload,
+        inputs=catch_all_inputs,
+    )
+
+    return {
+        "success": bool(specific_result.get("success")) and bool(
+            catch_all_result.get("success")
+        ),
+        "triggered": bool(specific_result.get("triggered"))
+        or bool(catch_all_result.get("triggered")),
+        "mutation_event_type": mutation_type,
+        "mutation_id": safe_mutation_id,
+        "specific": specific_result,
+        "catch_all": catch_all_result,
+        "specific_triggered": bool(specific_result.get("triggered")),
+        "catch_all_triggered": bool(catch_all_result.get("triggered")),
+    }

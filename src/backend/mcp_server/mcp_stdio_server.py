@@ -111,6 +111,7 @@ from src.backend.integrations.internal_mcp.catalogue import _jira_search
 from src.backend.integrations.internal_mcp.catalogue import _jira_transition_issue
 from src.backend.integrations.internal_mcp.catalogue import _jira_update_issue
 from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
+from src.backend.integrations.internal_mcp.catalogue import _workflow_bind_event
 from src.backend.integrations.internal_mcp.catalogue import _workflow_cancel_instance
 from src.backend.integrations.internal_mcp.catalogue import _workflow_create_instance
 from src.backend.integrations.internal_mcp.catalogue import _workflow_create_schedule
@@ -118,6 +119,7 @@ from src.backend.integrations.internal_mcp.catalogue import _workflow_delete_sch
 from src.backend.integrations.internal_mcp.catalogue import _workflow_get_instance
 from src.backend.integrations.internal_mcp.catalogue import _workflow_get_schedule
 from src.backend.integrations.internal_mcp.catalogue import _workflow_list_definitions
+from src.backend.integrations.internal_mcp.catalogue import _workflow_list_event_bindings
 from src.backend.integrations.internal_mcp.catalogue import _workflow_list_instances
 from src.backend.integrations.internal_mcp.catalogue import _workflow_list_schedules
 from src.backend.integrations.internal_mcp.catalogue import _workflow_mcp_health_check
@@ -1657,6 +1659,45 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Optional cap on number of definitions returned",
                     }
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="workflow_bind_event",
+            description="Register or update an event-to-workflow binding with optional input mapping.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "event_type": {
+                        "type": "string",
+                        "description": "Event type name (for example type.created)",
+                    },
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "Workflow definition concept ID",
+                    },
+                    "input_mapping": {
+                        "type": "object",
+                        "description": "Optional mapping from workflow input keys to event paths (event.foo) or literals",
+                    },
+                    "enabled": {"type": "boolean"},
+                    "replace_existing": {"type": "boolean"},
+                    "actor": {"type": "string"},
+                },
+                "required": ["event_type", "workflow_id"],
+            },
+        ),
+        Tool(
+            name="workflow_list_event_bindings",
+            description="List event bindings from persistent storage with optional environment fallback entries.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "event_type": {"type": "string"},
+                    "enabled_only": {"type": "boolean"},
+                    "include_env_fallback": {"type": "boolean"},
+                    "limit": {"type": "integer"},
                 },
                 "required": [],
             },
@@ -4145,6 +4186,24 @@ async def _handle_workflow_list_definitions(
     )
 
 
+async def _handle_workflow_bind_event(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_bind_event,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_list_event_bindings(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_list_event_bindings,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
 async def _handle_workflow_mcp_health_check(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
@@ -4435,6 +4494,8 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "jira_get_myself": _handle_jira_get_myself,
     "jira_get_auth_config": _handle_jira_get_auth_config,
     "workflow_list_definitions": _handle_workflow_list_definitions,
+    "workflow_bind_event": _handle_workflow_bind_event,
+    "workflow_list_event_bindings": _handle_workflow_list_event_bindings,
     "workflow_mcp_health_check": _handle_workflow_mcp_health_check,
     "workflow_create_instance": _handle_workflow_create_instance,
     "workflow_list_instances": _handle_workflow_list_instances,

@@ -48,6 +48,7 @@ def reset_mock_db(monkeypatch):
         try:
             db.drop_collection("workflow_instances")
             db.drop_collection("workflow_schedules")
+            db.drop_collection("workflow_event_bindings")
             db.drop_collection("concepts")
             db.drop_collection("text_relations")
             db.drop_collection("text_values")
@@ -665,6 +666,67 @@ class TestWorkflowInstanceManager:
         assert id1 in event_id_filtered_ids
         assert id2 in message_ids
         assert id2 not in task_ids
+
+    def test_upsert_event_binding_create_and_list(self) -> None:
+        """Event binding upsert should create records and support listing."""
+        manager = WorkflowInstanceManager()
+
+        binding, created, updated = manager.upsert_event_binding(
+            event_type="type.created",
+            workflow_id="#V#salient_predicate_governance_workflow",
+            input_mapping={"type_concept_id": "event.concept_id"},
+            enabled=True,
+            actor="test_user",
+        )
+
+        assert created is True
+        assert updated is False
+        assert binding.event_type == "type.created"
+        assert binding.workflow_id == "#V#salient_predicate_governance_workflow"
+        assert binding.revision == 1
+
+        listed = manager.list_event_bindings(event_type="type.created")
+        assert len(listed) == 1
+        assert listed[0].binding_id == binding.binding_id
+
+    def test_upsert_event_binding_conflict_requires_replace(self) -> None:
+        """Conflicting upsert should require replace_existing=True."""
+        manager = WorkflowInstanceManager()
+
+        original, created, updated = manager.upsert_event_binding(
+            event_type="concept.updated",
+            workflow_id="#V#generate_considerations_workflow",
+            input_mapping={"concept_id": "event.concept_id"},
+            enabled=True,
+            actor="test_user",
+        )
+        assert created is True
+        assert updated is False
+
+        with pytest.raises(ValueError, match="binding_conflict"):
+            manager.upsert_event_binding(
+                event_type="concept.updated",
+                workflow_id="#V#generate_considerations_workflow",
+                input_mapping={"different_key": "event.concept_id"},
+                enabled=True,
+                actor="test_user",
+                replace_existing=False,
+            )
+
+        replaced, created, updated = manager.upsert_event_binding(
+            event_type="concept.updated",
+            workflow_id="#V#generate_considerations_workflow",
+            input_mapping={"different_key": "event.concept_id"},
+            enabled=False,
+            actor="test_user",
+            replace_existing=True,
+        )
+
+        assert created is False
+        assert updated is True
+        assert replaced.binding_id == original.binding_id
+        assert replaced.revision == original.revision + 1
+        assert replaced.enabled is False
 
     def test_find_and_claim_instance(self) -> None:
         """find_and_claim_instance() should atomically claim a pending instance."""

@@ -1360,6 +1360,32 @@ def _remove_relationship(**kwargs):
         )
 
         if update_result.modified_count > 0:
+            try:
+                from ...services.workflow_event_integration_service import (
+                    EVENT_TYPE_RELATIONSHIP_REMOVED,
+                    maybe_launch_vontology_mutation_workflow,
+                    resolve_event_actor_context,
+                )
+
+                actor_id, actor_org = resolve_event_actor_context()
+                maybe_launch_vontology_mutation_workflow(
+                    mutation_event_type=EVENT_TYPE_RELATIONSHIP_REMOVED,
+                    mutation_id=f"{source_id}:{rel_kind}:{target}",
+                    user_id=actor_id,
+                    org_id=actor_org,
+                    event_payload={
+                        "source_id": source_id,
+                        "predicate": rel_kind,
+                        "target_id": target,
+                    },
+                    inputs={
+                        "source_id": source_id,
+                        "predicate": rel_kind,
+                        "target_id": target,
+                    },
+                )
+            except Exception:
+                pass
             return {
                 "success": True,
                 "source_id": source_id,
@@ -5121,6 +5147,7 @@ def _workflow_mcp_health_check(**kwargs):
     checks_to_run: list[tuple[str, dict[str, Any]]] = [
         ("workflow_list_definitions", {"limit": 5}),
         ("workflow_list_instances", {"limit": 5}),
+        ("workflow_list_event_bindings", {"limit": 5}),
         ("workflow_list_schedules", {"limit": 5}),
     ]
     if include_introspection:
@@ -5178,6 +5205,144 @@ def _workflow_mcp_health_check(**kwargs):
         "checks": checks,
         "failed_tools": failed_tools,
         "capability_matrix": capability_matrix,
+    }
+
+
+def _workflow_bind_event(**kwargs):
+    """Create or update an event -> workflow binding."""
+
+    from ...workflows.durable import WorkflowInstanceManager
+    from ...workflows.durable.registry_factory import (
+        build_durable_workflow_registry_read_only,
+    )
+    from ...services.workflow_event_integration_service import (
+        resolve_event_actor_context,
+    )
+
+    event_type_raw = kwargs.get("event_type")
+    workflow_id_raw = kwargs.get("workflow_id")
+    if not isinstance(event_type_raw, str) or not event_type_raw.strip():
+        return make_error_response(
+            "missing_parameter",
+            "event_type is required",
+            details={"missing": ["event_type"]},
+        )
+    if not isinstance(workflow_id_raw, str) or not workflow_id_raw.strip():
+        return make_error_response(
+            "missing_parameter",
+            "workflow_id is required",
+            details={"missing": ["workflow_id"]},
+        )
+
+    event_type = event_type_raw.strip()
+    workflow_id = workflow_id_raw.strip()
+    input_mapping_raw = kwargs.get("input_mapping")
+    enabled = kwargs.get("enabled", True)
+    replace_existing = kwargs.get("replace_existing", False)
+    actor = kwargs.get("actor")
+
+    input_mapping: dict[str, str] = {}
+    if isinstance(input_mapping_raw, dict):
+        for key, value in input_mapping_raw.items():
+            key_clean = str(key or "").strip()
+            value_clean = str(value or "").strip()
+            if key_clean and value_clean:
+                input_mapping[key_clean] = value_clean
+
+    if not isinstance(enabled, bool):
+        enabled = bool(enabled)
+    if not isinstance(replace_existing, bool):
+        replace_existing = bool(replace_existing)
+
+    actor_clean = actor.strip() if isinstance(actor, str) and actor.strip() else None
+    if actor_clean is None:
+        actor_id, _actor_org = resolve_event_actor_context()
+        actor_clean = actor_id
+
+    workflow_registry_known: bool | None = None
+    try:
+        registry = build_durable_workflow_registry_read_only()
+        workflow_registry_known = workflow_id in set(registry.all_workflow_ids())
+    except Exception:
+        workflow_registry_known = None
+
+    manager = WorkflowInstanceManager()
+    try:
+        binding, created, updated = manager.upsert_event_binding(
+            event_type=event_type,
+            workflow_id=workflow_id,
+            input_mapping=input_mapping,
+            enabled=enabled,
+            actor=actor_clean,
+            replace_existing=replace_existing,
+        )
+    except ValueError as exc:
+        if str(exc) == "binding_conflict":
+            return make_error_response(
+                "binding_conflict",
+                (
+                    "Binding already exists with different configuration. "
+                    "Set replace_existing=true to overwrite."
+                ),
+                details={
+                    "event_type": event_type,
+                    "workflow_id": workflow_id,
+                    "replace_existing": replace_existing,
+                },
+            )
+        return make_error_response(
+            "invalid_binding",
+            str(exc),
+            details={"event_type": event_type, "workflow_id": workflow_id},
+        )
+    except Exception as exc:
+        return make_error_response(
+            "bind_failed",
+            f"Failed to bind event to workflow: {exc}",
+            details={"event_type": event_type, "workflow_id": workflow_id},
+        )
+
+    return {
+        "success": True,
+        "binding": binding.to_status_dict(),
+        "created": created,
+        "updated": updated,
+        "unchanged": not created and not updated,
+        "workflow_registry_known": workflow_registry_known,
+    }
+
+
+def _workflow_list_event_bindings(**kwargs):
+    """List event -> workflow bindings (persistent + optional env fallback)."""
+
+    from ...services.workflow_event_integration_service import list_event_workflow_bindings
+
+    event_type = kwargs.get("event_type")
+    enabled_only = kwargs.get("enabled_only", False)
+    include_env_fallback = kwargs.get("include_env_fallback", True)
+    try:
+        limit = int(kwargs.get("limit", 100))
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(1, min(limit, 500))
+
+    if not isinstance(event_type, str) or not event_type.strip():
+        event_type = None
+    if not isinstance(enabled_only, bool):
+        enabled_only = bool(enabled_only)
+    if not isinstance(include_env_fallback, bool):
+        include_env_fallback = bool(include_env_fallback)
+
+    bindings = list_event_workflow_bindings(
+        event_type=event_type,
+        enabled_only=enabled_only,
+        include_env_fallback=include_env_fallback,
+        limit=limit,
+    )
+    return {
+        "success": True,
+        "bindings": bindings,
+        "count": len(bindings),
     }
 
 
@@ -7992,11 +8157,38 @@ def _chat_introspect(
     jira_execute_mode_enabled = _env_flag(
         "VON_INTERNAL_MCP_JIRA_EXECUTE_MODE", default="0"
     )
-    event_workflow_bindings = {
-        "task.created": os.getenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID"),
-        "task.status_changed": os.getenv("VON_EVENT_TASK_STATUS_CHANGED_WORKFLOW_ID"),
-        "message.direct_created": os.getenv("VON_EVENT_DIRECT_MESSAGE_WORKFLOW_ID"),
-    }
+    event_workflow_bindings_detailed: list[dict[str, Any]] = []
+    try:
+        from src.backend.services.workflow_event_integration_service import (
+            list_event_workflow_bindings,
+        )
+
+        event_workflow_bindings_detailed = list_event_workflow_bindings(
+            include_env_fallback=True,
+            limit=200,
+        )
+    except Exception:
+        event_workflow_bindings_detailed = []
+
+    # Backwards-compatible compact shape:
+    # - one workflow per event -> string
+    # - multiple workflows per event -> list[str]
+    event_workflow_bindings: dict[str, Any] = {}
+    for binding in event_workflow_bindings_detailed:
+        event_type = str(binding.get("event_type") or "").strip()
+        workflow_id = str(binding.get("workflow_id") or "").strip()
+        if not event_type or not workflow_id:
+            continue
+        existing = event_workflow_bindings.get(event_type)
+        if existing is None:
+            event_workflow_bindings[event_type] = workflow_id
+            continue
+        if isinstance(existing, list):
+            if workflow_id not in existing:
+                existing.append(workflow_id)
+            continue
+        if existing != workflow_id:
+            event_workflow_bindings[event_type] = [existing, workflow_id]
 
     if gateway_enabled is False:
         inferred_runtime_mode = "llm_only"
@@ -8100,6 +8292,7 @@ def _chat_introspect(
             )
         ),
         "event_workflow_bindings": event_workflow_bindings,
+        "event_workflow_bindings_detailed": event_workflow_bindings_detailed,
         "sensitive_env_presence": sensitive_env_presence,
         "sensitive_env_present_count": sensitive_env_present_count,
     }
@@ -8529,6 +8722,8 @@ def build_default_catalogue() -> MethodCatalogue:
                     "workflow_mode": dict,
                     "configured_openai_api_key_env_var": (str, type(None)),
                     "configured_openai_api_key_env_var_present": bool,
+                    "event_workflow_bindings": dict,
+                    "event_workflow_bindings_detailed": list,
                     "sensitive_env_presence": dict,
                     "sensitive_env_present_count": int,
                 },
@@ -9453,6 +9648,66 @@ def build_default_catalogue() -> MethodCatalogue:
             description=(
                 "Create a new durable workflow instance. The workflow will be queued for "
                 "execution by a background worker. Use workflow_get_instance to check status."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_bind_event",
+            handler=_workflow_bind_event,
+            input_schema=Schema(
+                required={"event_type": str, "workflow_id": str},
+                optional={
+                    "input_mapping": (dict, type(None)),
+                    "enabled": bool,
+                    "replace_existing": bool,
+                    "actor": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Create or update an event -> workflow binding.",
+            ),
+            output_schema=Schema(
+                required={"success": bool},
+                optional={
+                    "binding": dict,
+                    "created": bool,
+                    "updated": bool,
+                    "unchanged": bool,
+                    "workflow_registry_known": (bool, type(None)),
+                    "error": str,
+                    "error_code": str,
+                },
+                allow_unknown=True,
+                description="Binding write result.",
+            ),
+            category="write",
+            description=(
+                "Register or update an event-to-workflow binding with optional input mapping. "
+                "Set replace_existing=true to overwrite an existing conflicting binding."
+            ),
+        ),
+        MethodDefinition(
+            name="workflow_list_event_bindings",
+            handler=_workflow_list_event_bindings,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "event_type": (str, type(None)),
+                    "enabled_only": bool,
+                    "include_env_fallback": bool,
+                    "limit": int,
+                },
+                allow_unknown=True,
+                description="List event->workflow bindings.",
+            ),
+            output_schema=Schema(
+                required={"success": bool, "bindings": list, "count": int},
+                optional={"error": str, "error_code": str},
+                allow_unknown=True,
+                description="List of event->workflow bindings.",
+            ),
+            category="read",
+            description=(
+                "List event bindings from persistent storage, with optional environment fallback "
+                "entries for legacy compatibility."
             ),
         ),
         MethodDefinition(

@@ -8,6 +8,7 @@ from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.integrations.internal_mcp.workflow_surface_capabilities import (
     tracked_workflow_surface_tool_names,
 )
+from src.backend.workflows.durable.models import EventWorkflowBinding
 from src.backend.workflows.durable.scheduler import WorkflowScheduler
 
 
@@ -70,6 +71,7 @@ class _StubWorkflowManager:
     def __init__(self) -> None:
         self.instances: dict[str, _StubInstance] = {}
         self._counter = 0
+        self.bindings: dict[tuple[str, str], EventWorkflowBinding] = {}
 
     def create_instance(
         self,
@@ -127,6 +129,54 @@ class _StubWorkflowManager:
 
     def get_instance(self, instance_id: str) -> _StubInstance | None:
         return self.instances.get(instance_id)
+
+    def upsert_event_binding(
+        self,
+        *,
+        event_type: str,
+        workflow_id: str,
+        input_mapping: dict[str, str] | None = None,
+        enabled: bool = True,
+        actor: str | None = None,
+        replace_existing: bool = False,
+    ) -> tuple[EventWorkflowBinding, bool, bool]:
+        key = (event_type, workflow_id)
+        mapping = dict(input_mapping or {})
+        existing = self.bindings.get(key)
+        if existing is not None:
+            if existing.input_mapping == mapping and bool(existing.enabled) == bool(enabled):
+                return existing, False, False
+            if not replace_existing:
+                raise ValueError("binding_conflict")
+            existing.input_mapping = mapping
+            existing.enabled = bool(enabled)
+            existing.updated_by = actor
+            existing.revision += 1
+            return existing, False, True
+
+        created = EventWorkflowBinding.create(
+            event_type=event_type,
+            workflow_id=workflow_id,
+            input_mapping=mapping,
+            enabled=bool(enabled),
+            actor=actor,
+        )
+        self.bindings[key] = created
+        return created, True, False
+
+    def list_event_bindings(
+        self,
+        *,
+        event_type: str | None = None,
+        enabled_only: bool = False,
+        limit: int = 100,
+    ) -> list[EventWorkflowBinding]:
+        values = list(self.bindings.values())
+        if event_type is not None:
+            values = [item for item in values if item.event_type == event_type]
+        if enabled_only:
+            values = [item for item in values if bool(item.enabled)]
+        return values[:limit]
 
 
 class _InMemoryScheduleWorkflowManager:
@@ -387,7 +437,7 @@ def test_workflow_mcp_health_check_exists_and_runs():
     assert result.get("success") is True
     checks = result.get("checks")
     assert isinstance(checks, list)
-    assert len(checks) >= 3
+    assert len(checks) >= 4
     assert all(bool(check.get("ok")) for check in checks)
 
 
@@ -407,6 +457,84 @@ def test_workflow_surface_capability_tools_exist_in_internal_catalogue():
     tracked = set(tracked_workflow_surface_tool_names())
     missing = sorted(tracked - methods)
     assert not missing, f"Tracked workflow surface tools missing from catalogue: {missing}"
+
+
+def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
+    manager = _StubWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.get_instance_manager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    bind_payload = gateway.invoke(
+        "workflow_bind_event",
+        {
+            "event_type": "concept.created",
+            "workflow_id": "#V#generate_considerations_workflow",
+            "input_mapping": {"concept_id": "event.concept_id"},
+        },
+    ).payload
+    assert bind_payload.get("success") is True
+    assert bind_payload.get("created") is True
+    binding = bind_payload.get("binding") or {}
+    assert binding.get("event_type") == "concept.created"
+    assert binding.get("workflow_id") == "#V#generate_considerations_workflow"
+
+    listed = gateway.invoke(
+        "workflow_list_event_bindings",
+        {"event_type": "concept.created"},
+    ).payload
+    assert listed.get("success") is True
+    assert listed.get("count") == 1
+    assert listed.get("bindings")[0]["workflow_id"] == "#V#generate_considerations_workflow"
+
+
+def test_workflow_bind_event_conflict_requires_replace(monkeypatch):
+    manager = _StubWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    first = gateway.invoke(
+        "workflow_bind_event",
+        {
+            "event_type": "concept.updated",
+            "workflow_id": "#V#generate_considerations_workflow",
+            "input_mapping": {"concept_id": "event.concept_id"},
+        },
+    ).payload
+    assert first.get("success") is True
+    assert first.get("created") is True
+
+    conflict = gateway.invoke(
+        "workflow_bind_event",
+        {
+            "event_type": "concept.updated",
+            "workflow_id": "#V#generate_considerations_workflow",
+            "input_mapping": {"different": "event.concept_id"},
+        },
+    ).payload
+    assert conflict.get("success") is False
+    assert conflict.get("error_code") == "binding_conflict"
+
+    replaced = gateway.invoke(
+        "workflow_bind_event",
+        {
+            "event_type": "concept.updated",
+            "workflow_id": "#V#generate_considerations_workflow",
+            "input_mapping": {"different": "event.concept_id"},
+            "replace_existing": True,
+        },
+    ).payload
+    assert replaced.get("success") is True
+    assert replaced.get("updated") is True
 
 
 def test_workflow_schedule_gateway_tools_integrate_with_scheduler(monkeypatch):

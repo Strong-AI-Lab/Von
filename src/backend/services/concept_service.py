@@ -403,6 +403,58 @@ def create_concept(
                 reconcile_err,
             )
 
+        workflow_event_launches: Dict[str, Any] = {}
+        if concept_identifier:
+            # Keep mutation emission in this canonical create path so all
+            # create surfaces (routes, MCP tools, internal services) stay consistent.
+            try:
+                from .workflow_event_integration_service import (
+                    EVENT_TYPE_CONCEPT_CREATED,
+                    maybe_launch_type_created_workflow,
+                    maybe_launch_vontology_mutation_workflow,
+                    resolve_event_actor_context,
+                )
+
+                created_by_concept_id, organisation_concept_id = (
+                    resolve_event_actor_context()
+                )
+                workflow_event_launches[EVENT_TYPE_CONCEPT_CREATED] = (
+                    maybe_launch_vontology_mutation_workflow(
+                        mutation_event_type=EVENT_TYPE_CONCEPT_CREATED,
+                        mutation_id=concept_identifier,
+                        user_id=created_by_concept_id,
+                        org_id=organisation_concept_id,
+                        event_payload={
+                            "concept_id": concept_identifier,
+                            "instance_of_type": instance_of_type,
+                            "parent_type_ids": list(parent_ids),
+                            "create_as_instance": bool(create_as_instance),
+                        },
+                        inputs={
+                            "concept_id": concept_identifier,
+                            "instance_of_type": instance_of_type,
+                            "parent_type_ids": list(parent_ids),
+                            "create_as_instance": bool(create_as_instance),
+                        },
+                    )
+                )
+
+                if not create_as_instance:
+                    workflow_event_launches["type.created"] = (
+                        maybe_launch_type_created_workflow(
+                            type_concept_id=concept_identifier,
+                            created_by_concept_id=created_by_concept_id,
+                            organisation_concept_id=organisation_concept_id,
+                            parent_type_ids=list(parent_ids),
+                        )
+                    )
+            except Exception as workflow_exc:
+                logger.warning(
+                    "create_concept: workflow event launch failed for %s: %s",
+                    concept_identifier,
+                    workflow_exc,
+                )
+
         if created_concept:
             if "_id" in created_concept:
                 created_concept["id"] = str(created_concept.pop("_id"))
@@ -418,6 +470,8 @@ def create_concept(
             except Exception:
                 # Best-effort; leave name as-is if accessor fails
                 pass
+            if workflow_event_launches:
+                created_concept["workflow_event_launch"] = workflow_event_launches
         _invalidate_concept_mutation_caches()
         return created_concept if created_concept else {}
 
@@ -1015,6 +1069,42 @@ def update_concept(concept_id: str, update_data: Dict[str, Any]) -> Dict[str, An
                     reconcile_err,
                 )
 
+        try:
+            from .workflow_event_integration_service import (
+                EVENT_TYPE_CONCEPT_UPDATED,
+                maybe_launch_vontology_mutation_workflow,
+                resolve_event_actor_context,
+            )
+
+            updated_concept_id = (
+                str(updated_concept_doc.get("concept_id") or "").strip()
+                if isinstance(updated_concept_doc, dict)
+                else ""
+            ) or concept_id
+            actor_id, actor_org = resolve_event_actor_context()
+            mutation_launch = maybe_launch_vontology_mutation_workflow(
+                mutation_event_type=EVENT_TYPE_CONCEPT_UPDATED,
+                mutation_id=updated_concept_id,
+                user_id=actor_id,
+                org_id=actor_org,
+                event_payload={
+                    "concept_id": updated_concept_id,
+                    "updated_fields": sorted(list(update_data.keys())),
+                },
+                inputs={
+                    "concept_id": updated_concept_id,
+                    "updated_fields": sorted(list(update_data.keys())),
+                },
+            )
+            if isinstance(updated_concept_doc, dict):
+                updated_concept_doc["workflow_event_launch"] = mutation_launch
+        except Exception as workflow_exc:
+            logger.warning(
+                "update_concept: workflow event launch failed for %s: %s",
+                concept_id,
+                workflow_exc,
+            )
+
         _invalidate_concept_mutation_caches()
         return updated_concept_doc
     except ConceptNotFoundError:  # Re-raise specific error
@@ -1084,6 +1174,28 @@ def delete_concept(concept_id: str) -> bool:
                 raise ConceptNotFoundError(
                     f"concept with ID '{concept_id}' not found for deletion."
                 )
+            try:
+                from .workflow_event_integration_service import (
+                    EVENT_TYPE_CONCEPT_DELETED,
+                    maybe_launch_vontology_mutation_workflow,
+                    resolve_event_actor_context,
+                )
+
+                actor_id, actor_org = resolve_event_actor_context()
+                maybe_launch_vontology_mutation_workflow(
+                    mutation_event_type=EVENT_TYPE_CONCEPT_DELETED,
+                    mutation_id=concept_id,
+                    user_id=actor_id,
+                    org_id=actor_org,
+                    event_payload={"concept_id": concept_id},
+                    inputs={"concept_id": concept_id},
+                )
+            except Exception as workflow_exc:
+                logger.warning(
+                    "delete_concept: workflow event launch failed for %s: %s",
+                    concept_id,
+                    workflow_exc,
+                )
             _invalidate_concept_mutation_caches()
             return bool(result.acknowledged and result.deleted_count > 0)
 
@@ -1117,6 +1229,37 @@ def delete_concept(concept_id: str) -> bool:
                 )
             raise ConceptServiceError(
                 f"Delete failed for concept '{canonical_concept_id}': {delete_report.get('error') or delete_report.get('message') or delete_report}"
+            )
+
+        try:
+            from .workflow_event_integration_service import (
+                EVENT_TYPE_CONCEPT_DELETED,
+                maybe_launch_vontology_mutation_workflow,
+                resolve_event_actor_context,
+            )
+
+            actor_id, actor_org = resolve_event_actor_context()
+            maybe_launch_vontology_mutation_workflow(
+                mutation_event_type=EVENT_TYPE_CONCEPT_DELETED,
+                mutation_id=canonical_concept_id,
+                user_id=actor_id,
+                org_id=actor_org,
+                event_payload={
+                    "concept_id": canonical_concept_id,
+                    "removed_text_relations_count": total_rel,
+                    "removed_orphan_text_values_count": total_tv,
+                },
+                inputs={
+                    "concept_id": canonical_concept_id,
+                    "removed_text_relations_count": total_rel,
+                    "removed_orphan_text_values_count": total_tv,
+                },
+            )
+        except Exception as workflow_exc:
+            logger.warning(
+                "delete_concept: workflow event launch failed for %s: %s",
+                canonical_concept_id,
+                workflow_exc,
             )
 
         _invalidate_concept_mutation_caches()

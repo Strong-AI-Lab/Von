@@ -21,6 +21,7 @@ from ...services.workflow_episode_service import (
     start_workflow_use_episode,
 )
 from .models import (
+    EventWorkflowBinding,
     WorkflowInstance,
     WorkflowInstanceStatus,
     WorkflowSchedule,
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 WORKFLOW_INSTANCES_COLLECTION = "workflow_instances"
 WORKFLOW_SCHEDULES_COLLECTION = "workflow_schedules"
+WORKFLOW_EVENT_BINDINGS_COLLECTION = "workflow_event_bindings"
 
 # Default lock TTL: 5 minutes
 DEFAULT_LOCK_TTL_SECONDS = 300
@@ -144,6 +146,32 @@ def _ensure_indexes() -> None:
                 name="user_schedules",
             )
 
+        # Event-workflow bindings collection
+        event_bindings_coll = db[WORKFLOW_EVENT_BINDINGS_COLLECTION]
+        event_existing = [idx["name"] for idx in event_bindings_coll.list_indexes()]
+
+        # One binding per (event_type, workflow_id). This allows multiple
+        # workflows for one event while keeping duplicate registration idempotent.
+        if "event_workflow_binding_unique" not in event_existing:
+            event_bindings_coll.create_index(
+                [("event_type", ASCENDING), ("workflow_id", ASCENDING)],
+                unique=True,
+                name="event_workflow_binding_unique",
+            )
+
+        if "event_enabled_lookup" not in event_existing:
+            event_bindings_coll.create_index(
+                [("event_type", ASCENDING), ("enabled", ASCENDING)],
+                name="event_enabled_lookup",
+            )
+
+        if "binding_id_unique" not in event_existing:
+            event_bindings_coll.create_index(
+                [("binding_id", ASCENDING)],
+                unique=True,
+                name="binding_id_unique",
+            )
+
     except OperationFailure as e:
         logger.warning("Could not create some workflow indexes: %s", e)
     except Exception as e:
@@ -176,6 +204,11 @@ class WorkflowInstanceManager:
         """Get the workflow_schedules collection."""
         db = get_db()
         return db[WORKFLOW_SCHEDULES_COLLECTION] if db is not None else None
+
+    def _get_event_bindings_collection(self) -> Collection | None:
+        """Get the workflow_event_bindings collection."""
+        db = get_db()
+        return db[WORKFLOW_EVENT_BINDINGS_COLLECTION] if db is not None else None
 
     def _broadcast_instance(self, instance: WorkflowInstance) -> None:
         try:
@@ -946,6 +979,175 @@ class WorkflowInstanceManager:
             logger.info("[durable_workflow] Instance %s reset for retry", instance_id)
             self._broadcast_instance_status(instance_id)
         return result.modified_count > 0
+
+    # -------------------------------------------------------------------------
+    # Event Binding CRUD
+    # -------------------------------------------------------------------------
+
+    def upsert_event_binding(
+        self,
+        *,
+        event_type: str,
+        workflow_id: str,
+        input_mapping: dict[str, str] | None = None,
+        enabled: bool = True,
+        actor: str | None = None,
+        replace_existing: bool = False,
+    ) -> tuple[EventWorkflowBinding, bool, bool]:
+        """Create or update an event->workflow binding.
+
+        Returns:
+            (binding, created, updated)
+
+        Conflict behaviour:
+        - Same (event_type, workflow_id) + same config => idempotent no-op.
+        - Same (event_type, workflow_id) + different config:
+          - replace_existing=False => ValueError("binding_conflict")
+          - replace_existing=True => update existing binding (revision++).
+        """
+
+        coll = self._get_event_bindings_collection()
+        if coll is None:
+            raise RuntimeError("Database unavailable for event binding persistence")
+
+        event_type_clean = str(event_type or "").strip()
+        workflow_id_clean = str(workflow_id or "").strip()
+        if not event_type_clean:
+            raise ValueError("event_type is required")
+        if not workflow_id_clean:
+            raise ValueError("workflow_id is required")
+
+        mapping_clean: dict[str, str] = {}
+        if isinstance(input_mapping, dict):
+            for key, value in input_mapping.items():
+                key_clean = str(key or "").strip()
+                value_clean = str(value or "").strip()
+                if key_clean and value_clean:
+                    mapping_clean[key_clean] = value_clean
+
+        actor_clean = (
+            actor.strip() if isinstance(actor, str) and actor.strip() else None
+        )
+        query = {"event_type": event_type_clean, "workflow_id": workflow_id_clean}
+        existing_doc = coll.find_one(query)
+        if existing_doc:
+            existing = EventWorkflowBinding.from_doc(existing_doc)
+            if (
+                existing.input_mapping == mapping_clean
+                and bool(existing.enabled) == bool(enabled)
+            ):
+                return existing, False, False
+
+            if not replace_existing:
+                raise ValueError("binding_conflict")
+
+            now = datetime.now(timezone.utc)
+            next_revision = max(1, int(existing.revision)) + 1
+            coll.update_one(
+                {"binding_id": existing.binding_id},
+                {
+                    "$set": {
+                        "input_mapping": mapping_clean,
+                        "enabled": bool(enabled),
+                        "updated_at": now,
+                        "updated_by": actor_clean,
+                        "revision": next_revision,
+                    }
+                },
+            )
+            updated_doc = coll.find_one({"binding_id": existing.binding_id})
+            if updated_doc is None:
+                raise RuntimeError("binding_update_failed")
+            return EventWorkflowBinding.from_doc(updated_doc), False, True
+
+        binding = EventWorkflowBinding.create(
+            event_type=event_type_clean,
+            workflow_id=workflow_id_clean,
+            input_mapping=mapping_clean,
+            enabled=bool(enabled),
+            actor=actor_clean,
+        )
+        try:
+            coll.insert_one(binding.to_doc())
+            return binding, True, False
+        except DuplicateKeyError:
+            # Concurrent upsert: re-read and apply deterministic conflict rules.
+            existing_doc = coll.find_one(query)
+            if existing_doc is None:
+                raise
+            existing = EventWorkflowBinding.from_doc(existing_doc)
+            if (
+                existing.input_mapping == mapping_clean
+                and bool(existing.enabled) == bool(enabled)
+            ):
+                return existing, False, False
+            if not replace_existing:
+                raise ValueError("binding_conflict")
+            now = datetime.now(timezone.utc)
+            next_revision = max(1, int(existing.revision)) + 1
+            coll.update_one(
+                {"binding_id": existing.binding_id},
+                {
+                    "$set": {
+                        "input_mapping": mapping_clean,
+                        "enabled": bool(enabled),
+                        "updated_at": now,
+                        "updated_by": actor_clean,
+                        "revision": next_revision,
+                    }
+                },
+            )
+            updated_doc = coll.find_one({"binding_id": existing.binding_id})
+            if updated_doc is None:
+                raise RuntimeError("binding_update_failed")
+            return EventWorkflowBinding.from_doc(updated_doc), False, True
+
+    def list_event_bindings(
+        self,
+        *,
+        event_type: str | None = None,
+        enabled_only: bool = False,
+        limit: int = 100,
+    ) -> list[EventWorkflowBinding]:
+        """List event-workflow bindings with optional filters."""
+
+        coll = self._get_event_bindings_collection()
+        if coll is None:
+            return []
+
+        query: dict[str, Any] = {}
+        if isinstance(event_type, str) and event_type.strip():
+            query["event_type"] = event_type.strip()
+        if enabled_only:
+            query["enabled"] = True
+
+        capped_limit = max(1, min(int(limit), 500))
+        cursor = (
+            coll.find(query)
+            .sort(
+                [
+                    ("event_type", ASCENDING),
+                    ("created_at", ASCENDING),
+                    ("workflow_id", ASCENDING),
+                ]
+            )
+            .limit(capped_limit)
+        )
+        return [EventWorkflowBinding.from_doc(doc) for doc in cursor]
+
+    def get_event_binding(self, binding_id: str) -> EventWorkflowBinding | None:
+        """Load a specific event-workflow binding by ID."""
+
+        binding_id_clean = str(binding_id or "").strip()
+        if not binding_id_clean:
+            return None
+        coll = self._get_event_bindings_collection()
+        if coll is None:
+            return None
+        doc = coll.find_one({"binding_id": binding_id_clean})
+        if doc is None:
+            return None
+        return EventWorkflowBinding.from_doc(doc)
 
     # -------------------------------------------------------------------------
     # Schedule CRUD

@@ -1478,6 +1478,62 @@
             }
         },
         {
+            "name": "workflow_bind_event",
+            "description": "Register or update an event-to-workflow binding with optional input mapping.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "event_type": {
+                        "type": "string",
+                        "description": "Event type name (for example type.created)"
+                    },
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "Workflow definition concept ID"
+                    },
+                    "input_mapping": {
+                        "type": "object",
+                        "description": "Optional mapping from workflow input keys to event paths (event.foo) or literals"
+                    },
+                    "enabled": {
+                        "type": "boolean"
+                    },
+                    "replace_existing": {
+                        "type": "boolean"
+                    },
+                    "actor": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "event_type",
+                    "workflow_id"
+                ]
+            }
+        },
+        {
+            "name": "workflow_list_event_bindings",
+            "description": "List event bindings from persistent storage with optional environment fallback entries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "event_type": {
+                        "type": "string"
+                    },
+                    "enabled_only": {
+                        "type": "boolean"
+                    },
+                    "include_env_fallback": {
+                        "type": "boolean"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
             "name": "workflow_mcp_health_check",
             "description": "Run lightweight workflow/introspection MCP health checks through InternalMCPGateway.invoke() and return actionable diagnostics.",
             "inputSchema": {

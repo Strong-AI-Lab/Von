@@ -1,7 +1,9 @@
 """Data models for durable workflow execution.
 
-Defines the WorkflowInstance and WorkflowSchedule dataclasses that map to
-MongoDB documents in the workflow_instances and workflow_schedules collections.
+Defines durable workflow dataclasses that map to persistence records for:
+- workflow instances
+- workflow schedules
+- event-to-workflow bindings
 """
 
 from __future__ import annotations
@@ -45,6 +47,101 @@ class ScheduleType(str, Enum):
     ONCE = "once"
     INTERVAL = "interval"
     CRON = "cron"
+
+
+@dataclass
+class EventWorkflowBinding:
+    """Persistent event -> workflow binding definition.
+
+    Supports reusable event-driven workflow triggering for arbitrary event
+    names, with optional input mapping from event payload paths.
+    """
+
+    binding_id: str
+    event_type: str
+    workflow_id: str
+    input_mapping: dict[str, str] = field(default_factory=dict)
+    enabled: bool = True
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_by: str | None = None
+    updated_by: str | None = None
+    revision: int = 1
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        event_type: str,
+        workflow_id: str,
+        input_mapping: dict[str, str] | None = None,
+        enabled: bool = True,
+        actor: str | None = None,
+    ) -> "EventWorkflowBinding":
+        now = datetime.now(timezone.utc)
+        return cls(
+            binding_id=str(uuid.uuid4()),
+            event_type=str(event_type or "").strip(),
+            workflow_id=str(workflow_id or "").strip(),
+            input_mapping=dict(input_mapping or {}),
+            enabled=bool(enabled),
+            created_at=now,
+            updated_at=now,
+            created_by=actor.strip() if isinstance(actor, str) and actor.strip() else None,
+            updated_by=actor.strip() if isinstance(actor, str) and actor.strip() else None,
+            revision=1,
+        )
+
+    def to_doc(self) -> dict[str, Any]:
+        return {
+            "binding_id": self.binding_id,
+            "event_type": self.event_type,
+            "workflow_id": self.workflow_id,
+            "input_mapping": dict(self.input_mapping),
+            "enabled": bool(self.enabled),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "created_by": self.created_by,
+            "updated_by": self.updated_by,
+            "revision": int(self.revision),
+        }
+
+    @classmethod
+    def from_doc(cls, doc: dict[str, Any]) -> "EventWorkflowBinding":
+        return cls(
+            binding_id=str(doc.get("binding_id") or ""),
+            event_type=str(doc.get("event_type") or ""),
+            workflow_id=str(doc.get("workflow_id") or ""),
+            input_mapping=(
+                dict(doc.get("input_mapping"))
+                if isinstance(doc.get("input_mapping"), dict)
+                else {}
+            ),
+            enabled=bool(doc.get("enabled", True)),
+            created_at=doc.get("created_at") or datetime.now(timezone.utc),
+            updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
+            created_by=doc.get("created_by"),
+            updated_by=doc.get("updated_by"),
+            revision=int(doc.get("revision", 1) or 1),
+        )
+
+    def to_status_dict(self) -> dict[str, Any]:
+        return {
+            "binding_id": self.binding_id,
+            "event_type": self.event_type,
+            "workflow_id": self.workflow_id,
+            "input_mapping": dict(self.input_mapping),
+            "enabled": bool(self.enabled),
+            "created_at": self.created_at.isoformat()
+            if isinstance(self.created_at, datetime)
+            else None,
+            "updated_at": self.updated_at.isoformat()
+            if isinstance(self.updated_at, datetime)
+            else None,
+            "created_by": self.created_by,
+            "updated_by": self.updated_by,
+            "revision": int(self.revision),
+        }
 
 
 @dataclass

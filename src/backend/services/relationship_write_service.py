@@ -80,6 +80,51 @@ SUGGESTED_SUPERTYPES: List[str] = [
 ]
 
 
+def _emit_relationship_mutation_event(
+    *,
+    event_type: str,
+    source_id: str,
+    predicate: str,
+    target_id: str,
+    is_structural: bool,
+) -> None:
+    """Best-effort workflow event emission for relationship mutations."""
+
+    try:
+        from .workflow_event_integration_service import (
+            maybe_launch_vontology_mutation_workflow,
+            resolve_event_actor_context,
+        )
+
+        actor_id, actor_org = resolve_event_actor_context()
+        maybe_launch_vontology_mutation_workflow(
+            mutation_event_type=event_type,
+            mutation_id=f"{source_id}:{predicate}:{target_id}",
+            user_id=actor_id,
+            org_id=actor_org,
+            event_payload={
+                "source_id": source_id,
+                "predicate": predicate,
+                "target_id": target_id,
+                "is_structural": is_structural,
+            },
+            inputs={
+                "source_id": source_id,
+                "predicate": predicate,
+                "target_id": target_id,
+                "is_structural": is_structural,
+            },
+        )
+    except Exception as exc:  # pragma: no cover - event emission is best-effort
+        _logger.warning(
+            "relationship_write_service: failed to emit relationship mutation event for %s %s %s: %s",
+            source_id,
+            predicate,
+            target_id,
+            exc,
+        )
+
+
 def normalise_structural_predicate(predicate: str) -> str:
     """Normalise a predicate string to its canonical form.
 
@@ -448,6 +493,20 @@ def add_structural_relationship(
             )
             result["inverse_error"] = str(e)
 
+    if bool(result.get("forward_modified")) or bool(result.get("inverse_modified")):
+        try:
+            from .workflow_event_integration_service import EVENT_TYPE_RELATIONSHIP_ADDED
+
+            _emit_relationship_mutation_event(
+                event_type=EVENT_TYPE_RELATIONSHIP_ADDED,
+                source_id=source_id,
+                predicate=normalised,
+                target_id=target_id,
+                is_structural=True,
+            )
+        except Exception:
+            pass
+
     return result
 
 
@@ -517,13 +576,27 @@ def add_dynamic_relationship(
         {"$addToSet": {f"relationships.{predicate}": target_id}},
     )
 
-    return {
+    result = {
         "success": True,
         "source_id": source_id,
         "predicate": predicate,
         "target_id": target_id,
         "modified": update.modified_count > 0,
     }
+    if bool(result.get("modified")):
+        try:
+            from .workflow_event_integration_service import EVENT_TYPE_RELATIONSHIP_ADDED
+
+            _emit_relationship_mutation_event(
+                event_type=EVENT_TYPE_RELATIONSHIP_ADDED,
+                source_id=source_id,
+                predicate=predicate,
+                target_id=target_id,
+                is_structural=False,
+            )
+        except Exception:
+            pass
+    return result
 
 
 def add_relationship(

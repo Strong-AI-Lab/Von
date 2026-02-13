@@ -47,6 +47,51 @@ def _invalidate_stats_for_predicate_change(predicate: str | None) -> None:
         pass
 
 
+def _emit_text_relation_mutation_event(
+    *,
+    event_type: str,
+    subject_concept_id: str,
+    relation_id: str | None = None,
+    predicate: str | None = None,
+    text: str | None = None,
+    lang: str | None = None,
+    extra_payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Best-effort workflow event emission for text-relation mutations."""
+
+    try:
+        from .workflow_event_integration_service import (
+            maybe_launch_vontology_mutation_workflow,
+            resolve_event_actor_context,
+        )
+
+        actor_id, actor_org = resolve_event_actor_context()
+        payload: Dict[str, Any] = {
+            "subject_concept_id": subject_concept_id,
+            "relation_id": relation_id,
+            "predicate": predicate,
+            "text": text,
+            "lang": lang,
+        }
+        if isinstance(extra_payload, dict):
+            payload.update(extra_payload)
+        mutation_id = (
+            relation_id
+            if isinstance(relation_id, str) and relation_id.strip()
+            else f"{subject_concept_id}:{predicate or 'unknown'}"
+        )
+        maybe_launch_vontology_mutation_workflow(
+            mutation_event_type=event_type,
+            mutation_id=mutation_id,
+            user_id=actor_id,
+            org_id=actor_org,
+            event_payload=payload,
+            inputs=dict(payload),
+        )
+    except Exception:
+        pass
+
+
 def _normalize_text(raw: str) -> str:
     """Normalise text for fingerprint/dedup purposes.
 
@@ -228,6 +273,29 @@ def upsert_text_for_concept(
         payload["predicate"] = relation_doc.get("predicate")
     elif context:
         payload["context"] = context
+
+    if relation_created or context_updated:
+        try:
+            from .workflow_event_integration_service import (
+                EVENT_TYPE_TEXT_RELATION_UPSERTED,
+            )
+
+            _emit_text_relation_mutation_event(
+                event_type=EVENT_TYPE_TEXT_RELATION_UPSERTED,
+                subject_concept_id=subject_concept_id,
+                relation_id=relation_id,
+                predicate=predicate,
+                text=stored_text,
+                lang=lang,
+                extra_payload={
+                    "relation_created": relation_created,
+                    "context_updated": context_updated,
+                    "text_value_id": text_value_id,
+                },
+            )
+        except Exception:
+            pass
+
     return payload
 
 
@@ -377,7 +445,7 @@ def update_text_relation_text(
         )
         relation_updated = True
 
-    return {
+    result = {
         "relation_id": relation_id,
         "text_value_id": new_text_value_id,
         "text": new_raw,
@@ -385,6 +453,24 @@ def update_text_relation_text(
         "predicate": rel.get("predicate"),
         "updated": relation_updated,
     }
+    if relation_updated:
+        try:
+            from .workflow_event_integration_service import (
+                EVENT_TYPE_TEXT_RELATION_UPDATED,
+            )
+
+            _emit_text_relation_mutation_event(
+                event_type=EVENT_TYPE_TEXT_RELATION_UPDATED,
+                subject_concept_id=subject_concept_id,
+                relation_id=relation_id,
+                predicate=str(rel.get("predicate") or ""),
+                text=new_raw,
+                lang=lang,
+                extra_payload={"text_value_id": new_text_value_id},
+            )
+        except Exception:
+            pass
+    return result
 
 
 def delete_text_relation_by_predicate_and_text(
@@ -471,13 +557,28 @@ def delete_text_relation_by_predicate_and_text(
             TextValuesRepository.delete_one({"_id": ObjectId(text_value_id)})
             orphaned = True
 
-    return {
+    result = {
         "deleted": True,
         "relation_id": relation_id,
         "predicate": predicate,
         "text": text,
         "orphaned_text_value_deleted": orphaned,
     }
+    try:
+        from .workflow_event_integration_service import EVENT_TYPE_TEXT_RELATION_DELETED
+
+        _emit_text_relation_mutation_event(
+            event_type=EVENT_TYPE_TEXT_RELATION_DELETED,
+            subject_concept_id=subject_concept_id,
+            relation_id=relation_id,
+            predicate=predicate,
+            text=raw_text,
+            lang=lang,
+            extra_payload={"orphaned_text_value_deleted": orphaned},
+        )
+    except Exception:
+        pass
+    return result
 
 
 def delete_text_relation(
@@ -510,11 +611,24 @@ def delete_text_relation(
             # Safe to delete
             TextValuesRepository.delete_one({"_id": ObjectId(tv_id)})
             orphaned = True
-    return {
+    result = {
         "deleted": True,
         "relation_id": relation_id,
         "orphaned_text_value_deleted": orphaned,
     }
+    try:
+        from .workflow_event_integration_service import EVENT_TYPE_TEXT_RELATION_DELETED
+
+        _emit_text_relation_mutation_event(
+            event_type=EVENT_TYPE_TEXT_RELATION_DELETED,
+            subject_concept_id=subject_concept_id,
+            relation_id=relation_id,
+            predicate=predicate if isinstance(predicate, str) else None,
+            extra_payload={"orphaned_text_value_deleted": orphaned},
+        )
+    except Exception:
+        pass
+    return result
 
 
 def get_text_relations_summary(
