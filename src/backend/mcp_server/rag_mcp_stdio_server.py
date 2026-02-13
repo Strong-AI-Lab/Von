@@ -49,6 +49,10 @@ except ImportError:
 
 # Absolute imports (required when executed as a script)
 from src.backend.integrations.internal_mcp import catalogue as internal_catalogue
+from src.backend.integrations.internal_mcp.tool_contract_registry import (
+    SURFACE_VONRAG_STDIO,
+    get_surface_tool_payloads,
+)
 
 
 app = Server("vonrag-mcp")
@@ -101,280 +105,22 @@ def _tool_handler(
     return _inner
 
 
+def _tool_from_surface_payload(tool_payload: dict[str, Any]) -> Tool:
+    input_schema = tool_payload.get("inputSchema")
+    if not isinstance(input_schema, dict):
+        input_schema = {}
+    return Tool(
+        name=str(tool_payload["name"]),
+        description=str(tool_payload.get("description") or ""),
+        inputSchema=input_schema,
+    )
+
+
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     return [
-        Tool(
-            name="rag_list_collections",
-            description=(
-                "List available RAG collections/sources for the given namespace. "
-                "Use when asked 'what is in my RAG store?'"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
-                    }
-                },
-                "required": [],
-            },
-        ),
-        Tool(
-            name="rag_get_status",
-            description=(
-                "Get RAG status counts for the given namespace (mirrors /admin/rag_status)."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
-                    },
-                    "detail": {
-                        "type": "boolean",
-                        "description": "If true, return more detailed stats when available",
-                        "default": False,
-                    },
-                },
-                "required": [],
-            },
-        ),
-        Tool(
-            name="rag_list_indexed",
-            description=(
-                "List indexed sessions for a namespace. Use collection=ka_sessions or collection=chat_history_sessions "
-                "to disambiguate."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
-                    },
-                    "collection": {
-                        "type": "string",
-                        "description": "Collection selector (ka_sessions|chat_history_sessions|vontology_text_relations)",
-                        "default": "ka_sessions",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max items to return",
-                        "default": 20,
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "Pagination offset",
-                        "default": 0,
-                    },
-                },
-                "required": [],
-            },
-        ),
-        Tool(
-            name="rag_get_item",
-            description=(
-                "Fetch one indexed session/item by session_id for a namespace. Use collection=... to disambiguate."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
-                    },
-                    "collection": {
-                        "type": "string",
-                        "description": "Collection selector (ka_sessions|chat_history_sessions|vontology_text_relations)",
-                        "default": "ka_sessions",
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Session identifier (Mongo _id for KA sessions, session_id for chat sessions)",
-                    },
-                },
-                "required": ["session_id"],
-            },
-        ),
-        Tool(
-            name="search_knowledge_base",
-            description=(
-                "Semantic search over the vector-store RAG content for the given namespace. "
-                "Returns relevant chunks with provenance-stamped metadata."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Search query text",
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Number of results to return",
-                        "default": 5,
-                    },
-                    "mode": {
-                        "type": "string",
-                        "description": "Semantic search mode (chat|concepts|all). Default all.",
-                        "default": "all",
-                    },
-                    "type": {
-                        "type": "string",
-                        "description": "Filter by document type (chat_message|text_relation).",
-                    },
-                    "predicate": {
-                        "type": "string",
-                        "description": "Filter by predicate (e.g. hasDescription).",
-                    },
-                    "predicates": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Filter by multiple predicates.",
-                    },
-                },
-                "required": ["query"],
-            },
-        ),
-        Tool(
-            name="search_concept_descriptions",
-            description=(
-                "Semantic search over concept descriptions only (hasDescription text relations) for the given namespace."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
-                    },
-                    "query": {"type": "string", "description": "Search query text"},
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Number of results to return",
-                        "default": 5,
-                    },
-                    "org_id": {
-                        "type": "string",
-                        "description": "Optional organisation concept id (alias for organisation_concept_id).",
-                    },
-                },
-                "required": ["query"],
-            },
-        ),
-        Tool(
-            name="get_related_concepts",
-            description=(
-                "Find concepts with similar descriptions (vector similarity) within the given namespace."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
-                    },
-                    "concept_id": {
-                        "type": "string",
-                        "description": "Concept ID to find related concepts for (e.g. #V#my_concept).",
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Number of related results to return",
-                        "default": 10,
-                    },
-                    "seed_text": {
-                        "type": "string",
-                        "description": "Optional override for the seed description text.",
-                    },
-                },
-                "required": ["concept_id"],
-            },
-        ),
-        Tool(
-            name="index_concept_text",
-            description=(
-                "Force reindex a single concept's text relations for the given namespace."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
-                    },
-                    "concept_id": {
-                        "type": "string",
-                        "description": "Concept ID to reindex (e.g. #V#my_concept).",
-                    },
-                    "predicates": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional predicate filter (e.g. hasName, hasDescription)",
-                    },
-                    "languages": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional language filter (e.g. en-NZ)",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max relations to consider",
-                        "default": 5000,
-                    },
-                    "batch_size": {
-                        "type": "integer",
-                        "description": "Upsert batch size",
-                        "default": 200,
-                    },
-                },
-                "required": ["concept_id"],
-            },
-        ),
-        Tool(
-            name="rag_sync_text_relations",
-            description=(
-                "Index Vontology text relations (text_relations + text_values) into the vector-store for the given namespace. "
-                "After syncing, they become discoverable via search_knowledge_base."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace (e.g. #V#user@org). Defaults to env VON_DEFAULT_NAMESPACE.",
-                    },
-                    "predicates": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional predicate filter (e.g. hasName, hasDescription)",
-                    },
-                    "languages": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional language filter (e.g. en-NZ)",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max relations to consider",
-                        "default": 5000,
-                    },
-                    "batch_size": {
-                        "type": "integer",
-                        "description": "Upsert batch size",
-                        "default": 200,
-                    },
-                },
-                "required": [],
-            },
-        ),
+        _tool_from_surface_payload(tool_payload)
+        for tool_payload in get_surface_tool_payloads(SURFACE_VONRAG_STDIO)
     ]
 
 
@@ -417,3 +163,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+

@@ -2,320 +2,69 @@
     "mcpVersion": "1.0.0",
     "tools": [
         {
-            "name": "get_context",
-            "description": "Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "create_concepts",
-            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?, instance_of_type?}. Supports singleton arrays. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. Use add_names afterward for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context. Use instance_of_type when creating a concept that should be both a subtype of parent_id AND an instance of a specific type (e.g., creating a predicate instance like 'published_in' as instance of '#V#nearly_functional_binary_predicate').",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "parent_id": {
-                        "type": "string",
-                        "description": "Parent concept ID for hierarchy positioning (is_a_type_of relationship)"
-                    },
-                    "concepts": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {
-                                    "type": "string"
-                                },
-                                "kind": {
-                                    "type": "string",
-                                    "enum": [
-                                        "instance",
-                                        "type",
-                                        "predicate"
-                                    ],
-                                    "description": "Concept kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationship types. When instance_of_type is provided, kind affects concept_id disambiguation but instance_of_type determines the is_an_instance_of relationship."
-                                },
-                                "description": {
-                                    "type": "string"
-                                },
-                                "notes": {
-                                    "type": "string"
-                                },
-                                "instance_of_type": {
-                                    "type": "string",
-                                    "description": "Optional: create concept as instance of this type (is_an_instance_of relationship). Use when the new concept should be BOTH a subtype of parent_id AND an instance of a specific type. Example: create 'published_in' predicate as subtype of '#V#predicate' AND instance of '#V#nearly_functional_binary_predicate'."
-                                }
-                            },
-                            "required": [
-                                "name"
-                            ]
-                        }
-                    },
-                    "allow_duplicate_instances": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "When true, bypass duplicate guard for instance concepts and allow legacy suffix-based instance IDs."
-                    }
-                },
-                "required": [
-                    "parent_id",
-                    "concepts"
-                ]
-            }
-        },
-        {
-            "name": "find_subconcepts",
-            "description": "Finds direct subconcepts (children) of a given concept.",
+            "name": "add_names",
+            "description": "Add one or more names/aliases/synonyms to a concept using text relations (hasName predicate). Supports bulk operations and multilingual names. Pass array of strings for simple names (defaults: en-NZ, NL) or objects for control. Name types: NL (Natural Language - standard names/translations, default), ABBR (Abbreviation - 'EU', 'NATO', 'PhD'), CODE (URIs/system IDs). Language codes: en-NZ (default), en-US, fr, de, es, it, mi (M\u0101ori), zh (Chinese), ja (Japanese), etc. Examples: names=['EU member', 'EU state'] or names=[{name:'\u00c9tat membre', language:'fr'}, {name:'EU MS', name_type:'ABBR'}].",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "concept_id": {
-                        "type": "string",
-                        "description": "The concept ID to find children for"
-                    }
-                },
-                "required": [
-                    "concept_id"
-                ]
-            }
-        },
-        {
-            "name": "find_concepts_by_name",
-            "description": "Finds concepts with a name containing the provided string.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The name substring to search for"
-                    }
-                },
-                "required": [
-                    "name"
-                ]
-            }
-        },
-        {
-            "name": "upsert_text_relation",
-            "description": "Add or update ANY text relation (hasContent, hasDescription, hasNote, custom predicates, etc.). Use for attaching text content to concepts with flexible predicate types.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace (e.g., #V#user@org). When provided, triggers a best-effort RAG reindex for the concept; otherwise no automatic indexing occurs."
+                        "type": "string"
                     },
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept to attach text to (e.g., '#V#my_concept')"
-                    },
-                    "predicate": {
-                        "type": "string",
-                        "description": "The text relation predicate (e.g., 'hasContent', 'hasDescription', 'hasNote')"
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "The text content to attach"
-                    },
-                    "language": {
-                        "type": "string",
-                        "default": "en-NZ",
-                        "description": "Language code (ISO 639-1/BCP 47): en-NZ (default), en-US, fr, de, mi, zh, etc."
-                    },
-                    "context": {
-                        "type": [
-                            "object",
-                            "null"
-                        ],
-                        "description": "Optional metadata (e.g., {'text_type': 'NL', 'author': 'system'})"
+                    "names": {
+                        "type": "array"
                     }
                 },
                 "required": [
                     "concept_id",
+                    "names"
+                ],
+                "additionalProperties": true,
+                "description": "add_names input: concept_id (str, e.g., '#V#person'), names (list, array of names - each can be a string or dict with {name, language, name_type}). Strings default to en-NZ language and NL type."
+            }
+        },
+        {
+            "name": "add_relationship",
+            "description": "Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' \u2192 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'. Examples: source_id='#V#nikola_k._kasabov', predicate='instance_of', target='#V#professor' OR source_id='#V#nikola_k._kasabov', predicate='#V#hasAffiliation', target='Auckland University of Technology'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_id": {
+                        "type": "string"
+                    },
+                    "predicate": {
+                        "type": "string"
+                    },
+                    "target": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "source_id",
                     "predicate",
-                    "text"
-                ]
+                    "target"
+                ],
+                "additionalProperties": true,
+                "description": "add_relationship input: source_id (str, concept ID like '#V#nikola_k._kasabov'), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'), target (str, target concept ID like '#V#professor' or text value for text predicates like 'Auckland University')"
             }
         },
         {
-            "name": "get_text_relations",
-            "description": "Retrieve text relations for a concept, optionally filtered by predicate/language. Returns all text attachments (hasContent, hasDescription, hasName, etc.).",
+            "name": "assign_task",
+            "description": "Assign or reassign a task to a user.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "concept_id": {
+                    "task_concept_id": {
                         "type": "string",
-                        "description": "The concept to query text relations for"
+                        "description": "The task's concept ID"
                     },
-                    "predicate": {
+                    "assignee_concept_id": {
                         "type": "string",
-                        "description": "Optional: filter by predicate (e.g., 'hasContent', 'hasName')"
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Optional: filter by language code (e.g., 'en-NZ', 'fr')"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 50,
-                        "description": "Maximum number of results to return"
+                        "description": "The assignee's concept ID"
                     }
                 },
                 "required": [
-                    "concept_id"
-                ]
-            }
-        },
-        {
-            "name": "update_text_relation",
-            "description": "Modify the text content of an existing text relation by relation ID. Updates the text value while preserving the relation structure.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept owning the text relation"
-                    },
-                    "relation_id": {
-                        "type": "string",
-                        "description": "The ID of the text relation to update"
-                    },
-                    "new_text": {
-                        "type": "string",
-                        "description": "The new text content"
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Optional: update the language code"
-                    }
-                },
-                "required": [
-                    "concept_id",
-                    "relation_id",
-                    "new_text"
-                ]
-            }
-        },
-        {
-            "name": "delete_text_relation",
-            "description": "Delete a specific text relation by relation ID or by predicate+text match. Optionally garbage-collects orphaned text values.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept owning the text relation"
-                    },
-                    "relation_id": {
-                        "type": "string",
-                        "description": "Optional: delete by relation ID (preferred method)"
-                    },
-                    "predicate": {
-                        "type": "string",
-                        "description": "Optional: delete by predicate + text match"
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "Optional: exact text to match (used with predicate)"
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Optional: language code for predicate+text deletion"
-                    },
-                    "garbage_collect": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Optional: when true, delete orphaned text_values after relation removal"
-                    }
-                },
-                "required": [
-                    "concept_id"
-                ]
-            }
-        },
-        {
-            "name": "get_text_relations_summary",
-            "description": "Return a lightweight summary of text relations for a concept: counts + relation IDs grouped by predicate/language (no full text bodies).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept to summarise text relations for"
-                    },
-                    "predicates": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Optional: filter by predicate allow-list"
-                    },
-                    "languages": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Optional: filter by language allow-list (derived from text_values.lang)"
-                    },
-                    "max_relation_ids_per_group": {
-                        "type": "integer",
-                        "default": 25,
-                        "description": "Cap for relation IDs returned per predicate/language bucket"
-                    }
-                },
-                "required": [
-                    "concept_id"
-                ]
-            }
-        },
-        {
-            "name": "upsert_singleton_text_relation",
-            "description": "Upsert a text relation and enforce singleton semantics for (concept, predicate, language) by replacing any other relations in the same group.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept to attach text to"
-                    },
-                    "predicate": {
-                        "type": "string",
-                        "description": "Text predicate (e.g., 'hasDescription')"
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "Text to attach"
-                    },
-                    "language": {
-                        "type": "string",
-                        "default": "en-NZ",
-                        "description": "Language code for the singleton group"
-                    },
-                    "policy": {
-                        "type": "string",
-                        "default": "replace_others",
-                        "description": "Singleton policy (currently only replace_others)"
-                    },
-                    "garbage_collect": {
-                        "type": "boolean",
-                        "default": true,
-                        "description": "When true, garbage-collect orphaned text_values for replaced relations"
-                    },
-                    "provenance": {
-                        "type": "object",
-                        "description": "Optional provenance metadata"
-                    },
-                    "context": {
-                        "type": "object",
-                        "description": "Optional relation context metadata"
-                    }
-                },
-                "required": [
-                    "concept_id",
-                    "predicate",
-                    "text"
+                    "task_concept_id",
+                    "assignee_concept_id"
                 ]
             }
         },
@@ -347,513 +96,19 @@
         },
         {
             "name": "concept_exists",
-            "description": "Minimal existence/accessibility check for a concept_id.",
+            "description": "Minimal existence/accessibility check for a concept_id. Use before expensive fetch operations or when you need to validate user input.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "concept_id": {
-                        "type": "string",
-                        "description": "The concept ID to check"
-                    }
-                },
-                "required": [
-                    "concept_id"
-                ]
-            }
-        },
-        {
-            "name": "fetch_concept_content",
-            "description": "Fetch rendered markdown content for a concept (content_html + md_content + raw_doc). Use reconstruct_md=false to avoid masking missing md_content.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept ID to fetch"
-                    },
-                    "reconstruct_md": {
-                        "type": "boolean",
-                        "default": true,
-                        "description": "When false, do not reconstruct md_content if it is missing"
-                    }
-                },
-                "required": [
-                    "concept_id"
-                ]
-            }
-        },
-        {
-            "name": "add_names",
-            "description": "Add one or more names/aliases/synonyms to a concept using text relations (hasName predicate). Supports bulk operations and multilingual names. Pass array of strings for simple names (defaults: en-NZ, NL) or objects for control. Name types: NL (Natural Language - standard names/translations, default), ABBR (Abbreviation - 'EU', 'NATO', 'PhD'), CODE (URIs/system IDs). Language codes: en-NZ (default), en-US, fr, de, es, it, mi (Māori), zh (Chinese), ja (Japanese), etc. Examples: names=['EU member', 'EU state'] or names=[{name:'État membre', language:'fr'}, {name:'EU MS', name_type:'ABBR'}].",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept ID to add names to"
-                    },
-                    "names": {
-                        "type": "array",
-                        "items": {
-                            "anyOf": [
-                                {
-                                    "type": "string"
-                                },
-                                {
-                                    "type": "object",
-                                    "properties": {
-                                        "name": {
-                                            "type": "string"
-                                        },
-                                        "language": {
-                                            "type": "string"
-                                        },
-                                        "name_type": {
-                                            "type": "string"
-                                        }
-                                    },
-                                    "required": [
-                                        "name"
-                                    ]
-                                }
-                            ]
-                        },
-                        "description": "List of names to add (strings or objects)"
-                    }
-                },
-                "required": [
-                    "concept_id",
-                    "names"
-                ]
-            }
-        },
-        {
-            "name": "get_tree",
-            "description": "Get complete ontology tree structure starting from the root 'thing' concept. Returns nested hierarchy showing all concepts and their relationships.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "fetch_concept",
-            "description": "Fetch full details of ONE specific concept by its ID. Returns complete information including names (from text relations), description, metadata, relationships, salient predicates, and all other concept properties.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept ID to fetch (format: #V#concept_name, e.g., '#V#person')"
-                    },
-                    "include_relations_arg1": {
-                        "type": "boolean",
-                        "description": "When true, include structural relations where the concept is the subject (argument 1)."
-                    },
-                    "include_relations_any_arg": {
-                        "type": "boolean",
-                        "description": "When true, include structural relations where the concept appears in any argument position (incoming references)."
-                    },
-                    "include_text_relations_arg1": {
-                        "oneOf": [
-                            {
-                                "type": "boolean"
-                            },
-                            {
-                                "type": "string",
-                                "enum": [
-                                    "snippets"
-                                ],
-                                "description": "Use 'snippets' to request short text snippets in addition to raw text."
-                            }
-                        ],
-                        "description": "Include text relations (e.g., hasName, hasDescription) where the concept is the subject."
-                    },
-                    "predicate_filter": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Optional whitelist of predicate identifiers to include."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of relation entries to return (defaults to 200, capped at 500)."
-                    },
-                    "offset": {
-                        "type": "integer",
-                        "description": "Offset applied before collecting relation entries."
-                    },
-                    "include_concept_preview": {
-                        "type": "boolean",
-                        "description": "Toggle inclusion of light-weight previews for related concepts.",
-                        "default": true
-                    }
-                },
-                "required": [
-                    "concept_id"
-                ]
-            }
-        },
-        {
-            "name": "search_concepts",
-            "description": "Advanced concept search with multiple filter options. Supports filtering by kind (individual/type/predicate), instance_of, hierarchy paths, and match types.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query text"
-                    },
-                    "instance_of": {
-                        "type": "string",
-                        "description": "Filter to instances of a specific type (e.g., '#V#researcher'). By default includes instances of subtypes."
-                    },
-                    "direct_instances_only": {
-                        "type": "boolean",
-                        "description": "If true, only return direct instances of instance_of (not instances of subtypes). Default: false.",
-                        "default": false
-                    },
-                    "filter_kind": {
-                        "type": "array",
-                        "items": {
-                            "type": "string",
-                            "enum": [
-                                "individual",
-                                "type",
-                                "predicate"
-                            ]
-                        },
-                        "description": "Filter by concept kind"
-                    },
-                    "include_hierarchy_path": {
-                        "type": "boolean",
-                        "description": "Include full hierarchy path"
-                    },
-                    "match_type": {
-                        "type": "string",
-                        "enum": [
-                            "exact",
-                            "substring",
-                            "similarity"
-                        ],
-                        "description": "Type of matching"
-                    },
-                    "namespace": {
-                        "type": [
-                            "string",
-                            "null"
-                        ],
-                        "description": "Optional namespace for future isolation; accepted but not required"
-                    }
-                },
-                "required": [
-                    "query"
-                ]
-            }
-        },
-        {
-            "name": "get_concept_index_status",
-            "description": "Get the embedding index status for concepts. If concept_id is provided, returns status for that specific concept. If omitted, returns aggregate embedding stats (total concepts, counts by status, concepts needing indexing).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "Optional concept ID to check (e.g., '#V#person'). If omitted, returns aggregate index stats."
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "resolve_concept_by_name",
-            "description": "Resolve a Vontology concept deterministically from a user-provided surface form. Read-only (no mutation). Returns resolved/ambiguous/not_found with an audit trail.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The surface form / name to resolve"
-                    },
-                    "preferred_languages": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Preferred languages (ordered) used as a tie-breaker"
-                    },
-                    "allowed_languages": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Restrict candidate name matching to these languages"
-                    },
-                    "instance_of": {
-                        "type": "string",
-                        "description": "Restrict matches to concepts that are instances of this type (includes descendants)"
-                    },
-                    "match_code_strings": {
-                        "type": "boolean",
-                        "default": true,
-                        "description": "If true, allow resolving '#V#...' and code-style identifiers"
-                    },
-                    "normalisation_level": {
-                        "type": "string",
-                        "default": "default",
-                        "description": "Normalisation aggressiveness (currently informational)"
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "default": 5,
-                        "description": "Maximum candidates returned when ambiguous"
-                    }
-                },
-                "required": [
-                    "name"
-                ]
-            }
-        },
-        {
-            "name": "vontology_concept_search",
-            "description": "Namespaced alias for concept search used by the MCP orchestrator. Same behaviour as search_concepts (query required; use empty string when combining with instance_of filters).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query text"
-                    },
-                    "instance_of": {
-                        "type": "string",
-                        "description": "Filter to instances of a specific type. By default includes instances of subtypes."
-                    },
-                    "direct_instances_only": {
-                        "type": "boolean",
-                        "description": "If true, only return direct instances of instance_of (not instances of subtypes). Default: false.",
-                        "default": false
-                    },
-                    "filter_kind": {
-                        "type": "array",
-                        "items": {
-                            "type": "string",
-                            "enum": [
-                                "individual",
-                                "type",
-                                "predicate"
-                            ]
-                        },
-                        "description": "Filter by concept kind"
-                    },
-                    "include_hierarchy_path": {
-                        "type": "boolean",
-                        "description": "Include full hierarchy path"
-                    },
-                    "match_type": {
-                        "type": "string",
-                        "enum": [
-                            "exact",
-                            "substring",
-                            "similarity"
-                        ],
-                        "description": "Type of matching"
-                    },
-                    "namespace": {
-                        "type": [
-                            "string",
-                            "null"
-                        ],
-                        "description": "Optional namespace for future isolation; accepted but not required"
-                    }
-                },
-                "required": [
-                    "query"
-                ]
-            }
-        },
-        {
-            "name": "extract_annotations",
-            "description": "Extract structured annotations from text using LLM analysis. Identifies concept mentions and suggests ontology links. Returns array of annotation objects with concept IDs, matched text, and confidence scores.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "input_text": {
-                        "type": "string",
-                        "description": "The text content to analyze"
-                    },
-                    "context_concept_id": {
-                        "type": "string",
-                        "description": "Optional context concept ID"
-                    }
-                },
-                "required": [
-                    "input_text"
-                ]
-            }
-        },
-        {
-            "name": "add_relationship",
-            "description": "Add a relationship between two concepts or from a concept to a text value. Use to add instance_of/typeOf relationships (e.g., add '#V#professor' as instance_of for a person), custom predicates (e.g., '#V#hasAffiliation' → 'Auckland University'), or any binary relationship. Supports both concept-to-concept relations (target is concept ID) and text predicates (target is text value). Common predicates: 'instance_of'/'instanceOf' (maps to is_an_instance_of), 'typeOf' (maps to is_a_type_of), or custom predicates like '#V#hasAffiliation', '#V#founderOf', '#V#hasResearchInterest'.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "source_id": {
-                        "type": "string",
-                        "description": "Source concept ID (e.g., '#V#nikola_k._kasabov')"
-                    },
-                    "predicate": {
-                        "type": "string",
-                        "description": "Relationship type: 'instance_of', 'typeOf', or custom predicate like '#V#hasAffiliation'"
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "Target concept ID (e.g., '#V#professor') or text value for text predicates"
-                    }
-                },
-                "required": [
-                    "source_id",
-                    "predicate",
-                    "target"
-                ]
-            }
-        },
-        {
-            "name": "remove_relationship",
-            "description": "Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "source_id": {
-                        "type": "string",
-                        "description": "Source concept ID (e.g., '#V#mjw_work_diary_2025-11-24')"
-                    },
-                    "predicate": {
-                        "type": "string",
-                        "description": "Relationship alias or stored field name (e.g., 'instance_of', 'typeOf')"
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "Target concept ID (e.g., '#V#diary_entry_about_michael_witbrocks_work')"
-                    }
-                },
-                "required": [
-                    "source_id",
-                    "predicate",
-                    "target"
-                ]
-            }
-        },
-        {
-            "name": "delete_concept",
-            "description": "Deletes a concept and handles its relationships. Can simulate the deletion first to see impact. Use when you need to remove a concept from the ontology. Returns a report of operations and warnings.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept ID to delete"
-                    },
-                    "simulate": {
-                        "type": "boolean",
-                        "description": "Whether to simulate the deletion first (default: true)"
-                    }
-                },
-                "required": [
-                    "concept_id"
-                ]
-            }
-        },
-        {
-            "name": "merge_concepts",
-            "description": "Merges a source concept into a target concept. Moves relationships, names, and text values, then deletes the source. Can simulate first. Use when you have duplicate concepts and want to consolidate them into one.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "source_id": {
-                        "type": "string",
-                        "description": "The source concept ID to merge from"
-                    },
-                    "target_id": {
-                        "type": "string",
-                        "description": "The target concept ID to merge into"
-                    },
-                    "simulate": {
-                        "type": "boolean",
-                        "description": "Whether to simulate the merge first (default: true)"
-                    }
-                },
-                "required": [
-                    "source_id",
-                    "target_id"
-                ]
-            }
-        },
-        {
-            "name": "update_concept",
-            "description": "Update specific fields of a concept. Use when you need to modify properties or relationships directly (e.g. fixing ontology errors, changing 'kind' by updating relationships). Supports dot notation in update_data keys for partial updates of nested objects.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "concept_id": {
-                        "type": "string",
-                        "description": "The concept ID to update"
-                    },
-                    "update_data": {
-                        "type": "object",
-                        "description": "Dictionary of fields to update. Use dot notation for nested fields (e.g. {'relationships.is_an_instance_of': [...]})."
-                    }
-                },
-                "required": [
-                    "concept_id",
-                    "update_data"
-                ]
-            }
-        },
-        {
-            "name": "search_web",
-            "description": "⚠️ USE FOR RECENT/CURRENT INFORMATION ⚠️ Search the web for information published after your training cutoff. REQUIRED when user asks for: recent, latest, current, new, breaking, today's, this week's, 2024+, 2025+, 'what's new', 'recent advances', 'latest research', 'current developments'. Returns web pages with titles, URLs, content snippets, and relevance scores. Supports advanced search (search_depth='advanced'), domain filtering (include_domains/exclude_domains), AI-generated answers (include_answer=true), full page content (include_raw_content=true), and images (include_images=true).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
                         "type": "string"
-                    },
-                    "max_results": {
-                        "type": "integer"
-                    },
-                    "search_depth": {
-                        "type": "string",
-                        "enum": [
-                            "basic",
-                            "advanced"
-                        ]
-                    },
-                    "include_domains": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        }
-                    },
-                    "exclude_domains": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        }
-                    },
-                    "include_answer": {
-                        "type": "boolean"
-                    },
-                    "include_raw_content": {
-                        "type": "boolean"
-                    },
-                    "include_images": {
-                        "type": "boolean"
                     }
                 },
                 "required": [
-                    "query"
-                ]
+                    "concept_id"
+                ],
+                "additionalProperties": true,
+                "description": "concept_exists input: concept_id (str)"
             }
         },
         {
@@ -872,11 +127,7 @@
                         "type": "integer"
                     },
                     "search_depth": {
-                        "type": "string",
-                        "enum": [
-                            "basic",
-                            "advanced"
-                        ]
+                        "type": "string"
                     },
                     "include_answer": {
                         "type": "boolean"
@@ -885,7 +136,955 @@
                 "required": [
                     "query",
                     "context"
+                ],
+                "additionalProperties": true,
+                "description": "context_search input: query (str, required), context (str, required, contextual information to improve search), max_results (int, default 10), search_depth (str, 'basic'|'advanced', default 'basic'), include_answer (bool, AI-generated answer)"
+            }
+        },
+        {
+            "name": "create_concepts",
+            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "parent_id": {
+                        "type": "string"
+                    },
+                    "concepts": {
+                        "type": "array"
+                    },
+                    "allow_duplicate_instances": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "parent_id",
+                    "concepts"
+                ],
+                "additionalProperties": true,
+                "description": "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. Unknown top-level fields are ignored to accommodate orchestrator-added context (e.g., namespace)."
+            }
+        },
+        {
+            "name": "create_task",
+            "description": "Create a task from a conversation. Tasks are stored as Vontology concepts with rich metadata. Optionally links to the originating conversation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Brief task title (required)"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Detailed task description"
+                    },
+                    "assignee_concept_id": {
+                        "type": "string",
+                        "description": "Assignee's concept ID (e.g., '#V#user_abc')"
+                    },
+                    "creator_concept_id": {
+                        "type": "string",
+                        "description": "Creator's concept ID (e.g., '#V#user_abc')"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Chat session_id to link task to conversation"
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "ISO 8601 date string for due date"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "critical"
+                        ],
+                        "default": "medium",
+                        "description": "Task priority level"
+                    },
+                    "organisation_concept_id": {
+                        "type": "string",
+                        "description": "Organisation context for the task"
+                    }
+                },
+                "required": [
+                    "title",
+                    "description"
                 ]
+            }
+        },
+        {
+            "name": "delete_concept",
+            "description": "Deletes a concept and handles its relationships. Can simulate the deletion first to see impact. Use when you need to remove a concept from the ontology. Returns a report of operations and warnings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string"
+                    },
+                    "simulate": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ],
+                "additionalProperties": true,
+                "description": "delete_concept input: concept_id (str), simulate (bool, default true)"
+            }
+        },
+        {
+            "name": "delete_text_relation",
+            "description": "Delete a specific text relation by relation ID or by predicate+text match. Optionally garbage-collects orphaned text values. Use to remove unwanted text attachments from concepts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string"
+                    },
+                    "relation_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "predicate": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "text": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "language": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "garbage_collect": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ],
+                "additionalProperties": true,
+                "description": "delete_text_relation input: concept_id (str), relation_id (str, optional - preferred method), predicate (str, optional for predicate+text deletion), text (str, optional with predicate), language (str, optional), garbage_collect (bool, optional - if true, delete orphaned text_values)"
+            }
+        },
+        {
+            "name": "download_paper",
+            "description": "Download PDF of an arXiv paper, then store it in the configured blob store (local or OpenStack Swift). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file_path and a durable storage.uri. Use when user asks to download/save/fetch a paper.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "arxiv_id": {
+                        "type": "string"
+                    },
+                    "filename": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "delete_local_cache": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "arxiv_id"
+                ],
+                "additionalProperties": true,
+                "description": "download_paper input: arxiv_id (str, e.g., '2506.16596'), filename (str, optional custom name), delete_local_cache (bool, optional; default true when authenticated)"
+            }
+        },
+        {
+            "name": "extract_annotations",
+            "description": "Find concept mentions in text and suggest ontology links. Use when user provides text/document and wants to identify which ontology concepts appear in it. Returns concept matches with context. Not for general concept search.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string"
+                    },
+                    "use_llm": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "use_match": {
+                        "type": "boolean"
+                    },
+                    "return_timings": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "text"
+                ],
+                "additionalProperties": true,
+                "description": "extract_annotations input"
+            }
+        },
+        {
+            "name": "extract_url",
+            "description": "Extract and return the main text content from a specific URL. Use when user provides a URL and wants to read, analyse, or extract information from that specific web page. Returns cleaned text content and page title. Useful for reading articles, documentation, or any web page content. Example: 'read this article: https://example.com/article', 'extract content from this URL'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "url"
+                ],
+                "additionalProperties": true,
+                "description": "extract_url input: url (str, required, URL to extract content from)"
+            }
+        },
+        {
+            "name": "fetch_concept",
+            "description": "Fetch full details of ONE specific concept by its ID (format: #V#concept_name). Use when you already know the exact concept_id and need complete information (description, predicates, relationships). Don't use for searching.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string"
+                    },
+                    "include_relations_arg1": {
+                        "type": "boolean"
+                    },
+                    "include_relations_any_arg": {
+                        "type": "boolean"
+                    },
+                    "include_text_relations_arg1": {
+                        "type": [
+                            "boolean",
+                            "string"
+                        ]
+                    },
+                    "predicate_filter": {
+                        "type": "array"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "include_concept_preview": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ],
+                "additionalProperties": true,
+                "description": "get_concept_by_concept_id input: concept_id (required), plus optional flags to include structural/text relations (include_relations_arg1, include_relations_any_arg, include_text_relations_arg1), predicate filtering, paging (limit/offset), and concept preview toggling."
+            }
+        },
+        {
+            "name": "fetch_concept_content",
+            "description": "Fetch rendered markdown content for a concept (content_html + md_content + raw_doc). Use reconstruct_md=false to avoid masking missing md_content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string"
+                    },
+                    "reconstruct_md": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ],
+                "additionalProperties": true,
+                "description": "fetch_concept_content input: concept_id (str), reconstruct_md (bool optional default true)"
+            }
+        },
+        {
+            "name": "finalise_cached_paper",
+            "description": "Take an already-cached arXiv PDF (in the local arXiv cache directory), upload it to the configured durable blob store, and register a #V#computer_file_copy instance with authoritative blob metadata text relations. Use when the PDF is already cached and you need a definitive durable URI + ontology record.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "arxiv_id": {
+                        "type": "string"
+                    },
+                    "name": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "delete_local_cache": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "include_markdown": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "arxiv_id"
+                ],
+                "additionalProperties": true,
+                "description": "finalise_cached_paper input: arxiv_id (str, e.g., '2506.16596v2'); name (str, optional concept/display name override); delete_local_cache (bool, optional; default true); include_markdown (bool, optional; default true)"
+            }
+        },
+        {
+            "name": "find_concepts_by_name",
+            "description": "Searches for concepts in the Vontology by name substring",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name substring to search for"
+                    }
+                },
+                "required": [
+                    "name"
+                ]
+            }
+        },
+        {
+            "name": "find_subconcepts",
+            "description": "Finds all direct subconcepts (children) of a given concept in the Vontology hierarchy",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "The concept ID to find children of"
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ]
+            }
+        },
+        {
+            "name": "get_concept_index_status",
+            "description": "Get statistics about the concept embedding index. Shows counts by status (pending, indexed, stale, failed), concepts needing indexing, and index namespace.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string",
+                        "description": "Optional: get status for a specific concept instead of aggregate stats"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "get_context",
+            "description": "Get current server-side context: active LLM model (string), provider, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and may not be available here. Use when you need to know what model/language is configured.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "description": "get_context input: no parameters required"
+            }
+        },
+        {
+            "name": "get_paper_metadata",
+            "description": "Get detailed metadata for a single arXiv paper (title, authors, abstract, categories, DOI, pdf_url). Use when a user needs paper details without downloading the PDF.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "arxiv_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "arxiv_id"
+                ],
+                "additionalProperties": true,
+                "description": "get_paper_metadata input: arxiv_id (str, e.g., '2506.16596' or 'arXiv:2506.16596')"
+            }
+        },
+        {
+            "name": "get_task",
+            "description": "Get details of a specific task by its concept ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string",
+                        "description": "The task's concept ID (e.g., '#V#task_abc123')"
+                    }
+                },
+                "required": [
+                    "task_concept_id"
+                ]
+            }
+        },
+        {
+            "name": "get_text_relations",
+            "description": "Retrieve text relations for a concept, optionally filtered by predicate/language. Returns all text attachments (hasContent, hasDescription, hasName, etc.). Use to query what text is attached to a concept.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string"
+                    },
+                    "predicate": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "language": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ],
+                "additionalProperties": true,
+                "description": "get_text_relations input: concept_id (str), predicate (str, optional filter), language (str, optional filter), limit (int, optional, default 50)"
+            }
+        },
+        {
+            "name": "get_text_relations_summary",
+            "description": "Return a lightweight summary of text relations for a concept: counts + relation IDs grouped by predicate/language (no full text bodies). Use to quickly decide what to fetch next.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string"
+                    },
+                    "predicates": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
+                    "languages": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
+                    "max_relation_ids_per_group": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "concept_id"
+                ],
+                "additionalProperties": true,
+                "description": "get_text_relations_summary input: concept_id (str), predicates (list[str] optional), languages (list[str] optional), max_relation_ids_per_group (int optional, default 25)"
+            }
+        },
+        {
+            "name": "get_tree",
+            "description": "Get complete ontology tree structure. Use when user wants to browse/explore the whole taxonomy or understand overall organization. Returns nested hierarchy starting from 'thing' root.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "root_concept": {
+                        "type": "string"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "get_vontology_tree input"
+            }
+        },
+        {
+            "name": "gmail_get_attachment",
+            "description": "Fetch a Gmail attachment for a profile (base64 data). Read-only; profile token required.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string"
+                    },
+                    "message_id": {
+                        "type": "string"
+                    },
+                    "attachment_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "profile",
+                    "message_id",
+                    "attachment_id"
+                ],
+                "description": "Fetch a Gmail attachment for a profile (base64 payload)."
+            }
+        },
+        {
+            "name": "gmail_get_message",
+            "description": "Fetch a Gmail message for a profile. Supports Gmail API formats metadata|full|raw|minimal. Read-only; profile token required.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string"
+                    },
+                    "message_id": {
+                        "type": "string"
+                    },
+                    "format": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "profile",
+                    "message_id"
+                ],
+                "description": "Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal)."
+            }
+        },
+        {
+            "name": "gmail_list_labels",
+            "description": "List Gmail labels for a profile. Read-only; useful to discover label IDs for queries.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "profile"
+                ],
+                "description": "List Gmail labels for a profile (read-only)."
+            }
+        },
+        {
+            "name": "gmail_list_messages",
+            "description": "List Gmail messages for a profile with optional query and label filters. Read-only; relies on pre-provisioned tokens per profile.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string"
+                    },
+                    "query": {
+                        "type": "string"
+                    },
+                    "label_ids": {
+                        "type": "array"
+                    },
+                    "max_results": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "maxResults": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "profile"
+                ],
+                "description": "List Gmail messages for a profile with optional query/labels (read-only)."
+            }
+        },
+        {
+            "name": "gmail_modify_labels",
+            "description": "Add/remove labels on a Gmail message. Requires allow_mutation=true and profile with gmail.modify scope.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string"
+                    },
+                    "message_id": {
+                        "type": "string"
+                    },
+                    "allow_mutation": {
+                        "type": "boolean"
+                    },
+                    "add_labels": {
+                        "type": "array"
+                    },
+                    "remove_labels": {
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "profile",
+                    "message_id",
+                    "allow_mutation"
+                ],
+                "description": "Add/remove labels on a Gmail message. Requires allow_mutation=true and gmail.modify scope."
+            }
+        },
+        {
+            "name": "jira_add_comment",
+            "description": "Add a comment to a Jira issue. Use to log investigation notes or status updates. Requires issue key and comment text.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string"
+                    },
+                    "comment": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "issue_key",
+                    "comment"
+                ],
+                "additionalProperties": true,
+                "description": "jira_add_comment input: issue_key (str) and comment (str) both required"
+            }
+        },
+        {
+            "name": "jira_create_issue",
+            "description": "Create a Jira issue with safety guardrails. Default dry_run=true (no mutation). Writes are allowed only for allow-listed projects (default JVNAUTOSCI). To execute, pass dry_run=false and either approved=true (per write) or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_key": {
+                        "type": "string"
+                    },
+                    "issue_type": {
+                        "type": "string"
+                    },
+                    "summary": {
+                        "type": "string"
+                    },
+                    "description": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "parent": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "assignee_account_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "labels": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
+                    "dry_run": {
+                        "type": "boolean"
+                    },
+                    "approved": {
+                        "type": "boolean"
+                    },
+                    "execute": {
+                        "type": "boolean"
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "project_key",
+                    "issue_type",
+                    "summary"
+                ],
+                "additionalProperties": true,
+                "description": "jira_create_issue input: project_key, issue_type, summary (required). Optional description/parent/assignee_account_id/labels. Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+            }
+        },
+        {
+            "name": "jira_get_auth_config",
+            "description": "Inspect Jira auth configuration (base URL, email, whether a token is present) from environment variables. Does not contact Jira and never returns the token. Use when Jira calls return 401 and you need to confirm which account is configured.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "description": "jira_get_auth_config input: no arguments"
+            }
+        },
+        {
+            "name": "jira_get_issue",
+            "description": "Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). Use when you need issue fields, summary, status, or metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string"
+                    },
+                    "fields": {
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "issue_key"
+                ],
+                "additionalProperties": true,
+                "description": "jira_get_issue input: issue_key (str, required), optional fields (list of field names)"
+            }
+        },
+        {
+            "name": "jira_get_myself",
+            "description": "Return the Jira user profile for the currently configured Atlassian credentials. Useful for diagnosing permission-related 404s (different accounts see different issues).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": true,
+                "description": "jira_get_myself input: no arguments"
+            }
+        },
+        {
+            "name": "jira_get_transitions",
+            "description": "List available transitions for a Jira issue key and return transition IDs required by jira_transition.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "issue_key"
+                ],
+                "additionalProperties": true,
+                "description": "jira_get_transitions input: issue_key (str, required)"
+            }
+        },
+        {
+            "name": "jira_link_issue",
+            "description": "Create a Jira issue link (e.g. Relates) with safety guardrails. Default dry_run=true (no mutation). Both issue projects must be allow-listed. To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inward_issue_key": {
+                        "type": "string"
+                    },
+                    "outward_issue_key": {
+                        "type": "string"
+                    },
+                    "link_type": {
+                        "type": "string"
+                    },
+                    "comment": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "dry_run": {
+                        "type": "boolean"
+                    },
+                    "approved": {
+                        "type": "boolean"
+                    },
+                    "execute": {
+                        "type": "boolean"
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "inward_issue_key",
+                    "outward_issue_key",
+                    "link_type"
+                ],
+                "additionalProperties": true,
+                "description": "jira_link_issue input: inward_issue_key, outward_issue_key, link_type (required; e.g. 'Relates'). Optional comment. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+            }
+        },
+        {
+            "name": "jira_search",
+            "description": "Run a JQL query against Jira. Use when you need to find issues by status, assignee, project, or other fields. Requires valid ATLASSIAN_BASE_URL, ATLASSIAN_EMAIL, and ATLASSIAN_API_TOKEN in the environment. Returns the Jira search response including issues array.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "jql": {
+                        "type": "string"
+                    },
+                    "max_results": {
+                        "type": "integer"
+                    },
+                    "start_at": {
+                        "type": "integer"
+                    },
+                    "next_page_token": {
+                        "type": "string"
+                    },
+                    "fields": {
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "jql"
+                ],
+                "additionalProperties": true,
+                "description": "jira_search input: jql (str, required) plus optional max_results, next_page_token, start_at (deprecated), and fields (list of field names)."
+            }
+        },
+        {
+            "name": "jira_transition",
+            "description": "Transition a Jira issue using a transition ID. Use when you need to move an issue through workflow states after retrieving available transitions in Jira.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string"
+                    },
+                    "transition_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "issue_key",
+                    "transition_id"
+                ],
+                "additionalProperties": true,
+                "description": "jira_transition input: issue_key (str) and transition_id (str) required"
+            }
+        },
+        {
+            "name": "jira_update_issue",
+            "description": "Update a Jira issue with safety guardrails. Default dry_run=true (no mutation). Writes are blocked unless the issue belongs to an allow-listed project. To execute, pass dry_run=false and either approved=true or execute=true with VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string"
+                    },
+                    "update_fields": {
+                        "type": "object"
+                    },
+                    "dry_run": {
+                        "type": "boolean"
+                    },
+                    "approved": {
+                        "type": "boolean"
+                    },
+                    "execute": {
+                        "type": "boolean"
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "issue_key",
+                    "update_fields"
+                ],
+                "additionalProperties": true,
+                "description": "jira_update_issue input: issue_key (required) and update_fields (dict of Jira fields to update). Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+            }
+        },
+        {
+            "name": "list_my_tasks",
+            "description": "List tasks assigned to a user, optionally filtered by status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "user_concept_id": {
+                        "type": "string",
+                        "description": "User's concept ID to get tasks for"
+                    },
+                    "status_filter": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "in_progress",
+                            "completed",
+                            "cancelled",
+                            "blocked"
+                        ],
+                        "description": "Optional status filter"
+                    },
+                    "include_created": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "If true, also include tasks created by the user (not just assigned)"
+                    }
+                },
+                "required": [
+                    "user_concept_id"
+                ]
+            }
+        },
+        {
+            "name": "merge_concepts",
+            "description": "Merges a source concept into a target concept. Moves relationships, names, and text values, then deletes the source. Can simulate first. Use when you have duplicate concepts and want to consolidate them into one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_id": {
+                        "type": "string"
+                    },
+                    "target_id": {
+                        "type": "string"
+                    },
+                    "simulate": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "source_id",
+                    "target_id"
+                ],
+                "additionalProperties": true,
+                "description": "merge_concepts input: source_id (str), target_id (str), simulate (bool, default true)"
             }
         },
         {
@@ -901,176 +1100,92 @@
                         "type": "integer"
                     },
                     "search_depth": {
-                        "type": "string",
-                        "enum": [
-                            "basic",
-                            "advanced"
-                        ]
-                    }
-                },
-                "required": [
-                    "query"
-                ]
-            }
-        },
-        {
-            "name": "extract_url",
-            "description": "Extract and return the main text content from a specific URL. Use when user provides a URL and wants to read, analyse, or extract information from that specific web page. Returns cleaned text content and page title. Useful for reading articles, documentation, or any web page content. Example: 'read this article: https://example.com/article', 'extract content from this URL'.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "url": {
                         "type": "string"
                     }
                 },
                 "required": [
-                    "url"
-                ]
+                    "query"
+                ],
+                "additionalProperties": true,
+                "description": "qna_search input: query (str, required, question to answer), max_results (int, default 5), search_depth (str, 'basic'|'advanced', default 'advanced')"
             }
         },
         {
-            "name": "gmail_list_messages",
-            "description": "List Gmail messages for a profile with optional query and label filters (read-only). Profile must be configured via environment.",
+            "name": "remove_relationship",
+            "description": "Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates. Text relation removal is not supported in this tool.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "profile": {
-                        "type": "string",
-                        "description": "Profile ID configured via env"
+                    "source_id": {
+                        "type": "string"
                     },
-                    "query": {
-                        "type": "string",
-                        "description": "Optional Gmail search query"
+                    "predicate": {
+                        "type": "string"
                     },
-                    "label_ids": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Optional Gmail label IDs"
+                    "target": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "source_id",
+                    "predicate",
+                    "target"
+                ],
+                "additionalProperties": true,
+                "description": "remove_relationship input: source_id (str, concept ID), predicate (str, relationship type like 'instance_of', 'typeOf', or custom predicate), target (str, target concept ID). Only concept-to-concept relationships are supported."
+            }
+        },
+        {
+            "name": "resolve_concept_by_name",
+            "description": "Resolve a Vontology concept deterministically from a user-provided surface form. Read-only: does not mutate concepts. Returns resolved/ambiguous/not_found with an audit trail. Supports language preferences, instance_of restriction, and optional code-string matching.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "preferred_languages": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
+                    "allowed_languages": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
+                    "instance_of": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "match_code_strings": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "normalisation_level": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     },
                     "max_results": {
-                        "type": "integer",
-                        "description": "Maximum number of messages to return"
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
-                    "profile"
-                ]
-            }
-        },
-        {
-            "name": "gmail_get_message",
-            "description": "Fetch a Gmail message for a profile (formats: metadata|full|raw|minimal). Read-only; profile token required.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "profile": {
-                        "type": "string",
-                        "description": "Profile ID configured via env"
-                    },
-                    "message_id": {
-                        "type": "string",
-                        "description": "Gmail message ID"
-                    },
-                    "format": {
-                        "type": "string",
-                        "enum": [
-                            "metadata",
-                            "full",
-                            "raw",
-                            "minimal"
-                        ],
-                        "default": "metadata",
-                        "description": "Gmail API format"
-                    }
-                },
-                "required": [
-                    "profile",
-                    "message_id"
-                ]
-            }
-        },
-        {
-            "name": "gmail_get_attachment",
-            "description": "Fetch a Gmail attachment for a profile (base64 payload). Read-only; profile token required.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "profile": {
-                        "type": "string",
-                        "description": "Profile ID configured via env"
-                    },
-                    "message_id": {
-                        "type": "string",
-                        "description": "Gmail message ID"
-                    },
-                    "attachment_id": {
-                        "type": "string",
-                        "description": "Gmail attachment ID"
-                    }
-                },
-                "required": [
-                    "profile",
-                    "message_id",
-                    "attachment_id"
-                ]
-            }
-        },
-        {
-            "name": "gmail_list_labels",
-            "description": "List Gmail labels for a profile. Read-only; useful to discover label IDs for filtering.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "profile": {
-                        "type": "string",
-                        "description": "Profile ID configured via env"
-                    }
-                },
-                "required": [
-                    "profile"
-                ]
-            }
-        },
-        {
-            "name": "gmail_modify_labels",
-            "description": "Add/remove labels on a Gmail message for a profile. Requires allow_mutation=true and gmail.modify scope.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "profile": {
-                        "type": "string",
-                        "description": "Profile ID configured via env"
-                    },
-                    "message_id": {
-                        "type": "string",
-                        "description": "Gmail message ID"
-                    },
-                    "add_labels": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Labels to add"
-                    },
-                    "remove_labels": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Labels to remove"
-                    },
-                    "allow_mutation": {
-                        "type": "boolean",
-                        "description": "Must be true to permit mutation"
-                    }
-                },
-                "required": [
-                    "profile",
-                    "message_id",
-                    "allow_mutation"
-                ]
+                    "name"
+                ],
+                "additionalProperties": true,
+                "description": "resolve_concept_by_name input: name (str) plus optional language preferences/constraints, instance_of restriction, code-string matching toggle, normalisation_level, max_results"
             }
         },
         {
@@ -1086,73 +1201,74 @@
                         "type": "integer"
                     },
                     "sort_by": {
-                        "type": "string",
-                        "enum": [
-                            "relevance",
-                            "lastUpdatedDate",
-                            "submittedDate"
-                        ]
+                        "type": "string"
                     },
                     "sort_order": {
-                        "type": "string",
-                        "enum": [
-                            "ascending",
-                            "descending"
+                        "type": "string"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "search_arxiv input: query (str, search query with boolean operators), max_results (int, default 10), sort_by (str, 'relevance'|'lastUpdatedDate'|'submittedDate'), sort_order (str, 'ascending'|'descending')"
+            }
+        },
+        {
+            "name": "search_concepts",
+            "description": "Find concepts. For 'list instances of X': use instance_of='#V#type' param (e.g., instance_of='#V#researcher'). For 'find X': use query param. Other key params: filter_kind=['individual'|'type'], include_hierarchy_path=true (shows paths), match_type='exact'|'substring'|'similarity'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string"
+                    },
+                    "filter_kind": {
+                        "type": [
+                            "array",
+                            "null"
                         ]
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "get_paper_metadata",
-            "description": "Get detailed metadata for a single arXiv paper (title, authors, abstract, categories, DOI, pdf_url). Use when a user needs paper details without downloading the PDF.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "arxiv_id": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "arxiv_id"
-                ]
-            }
-        },
-        {
-            "name": "download_paper",
-            "description": "Download PDF of an arXiv paper and store it in the configured blob store (local or OpenStack Swift). The external arXiv tool writes into a local cache directory; this tool returns both the local cache file path and a durable storage URI.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "arxiv_id": {
+                    },
+                    "scope_root": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "instance_of": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "match_type": {
                         "type": "string"
                     },
-                    "filename": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "arxiv_id"
-                ]
-            }
-        },
-        {
-            "name": "finalise_cached_paper",
-            "description": "Upload an already-cached arXiv PDF to the configured blob store and register a Computer File Copy record. Requires authentication (user-scoped write).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "arxiv_id": {
-                        "type": "string"
+                    "exact_match": {
+                        "type": "boolean"
                     },
-                    "filename": {
-                        "type": "string"
+                    "min_similarity": {
+                        "type": "number"
+                    },
+                    "include_description": {
+                        "type": "boolean"
+                    },
+                    "include_hierarchy_path": {
+                        "type": "boolean"
+                    },
+                    "limit": {
+                        "type": "integer"
                     }
                 },
                 "required": [
-                    "arxiv_id"
-                ]
+                    "query"
+                ],
+                "additionalProperties": true,
+                "description": "search_concepts input: query (str, optional - defaults to empty), match_type ('exact'|'substring'|'similarity'|'all'), min_similarity (float 0.0-1.0), filter_kind (list[str]), scope_root (str), instance_of (str concept_id - finds instances of this type), include_description (bool), include_hierarchy_path (bool), limit (int)"
             }
         },
         {
@@ -1168,641 +1284,245 @@
                         "type": "integer"
                     },
                     "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "mode": {
+                        "type": "string"
+                    },
+                    "type": {
+                        "type": "string"
+                    },
+                    "predicate": {
+                        "type": "string"
+                    },
+                    "predicates": {
+                        "type": "array"
+                    },
+                    "org_id": {
                         "type": "string"
                     }
                 },
                 "required": [
                     "query"
-                ]
+                ],
+                "additionalProperties": true,
+                "description": "search_knowledge_base input: query (str), top_k (int, default 5), namespace (str, optional filter)"
             }
         },
         {
-            "name": "jira_search",
-            "description": "Run a JQL query against Jira. Use when you need to find issues by status, assignee, project, or other fields.",
+            "name": "search_web",
+            "description": "\u26a0\ufe0f USE FOR RECENT/CURRENT INFORMATION \u26a0\ufe0f Search the web for information published after your training cutoff. REQUIRED when user asks for: recent, latest, current, new, breaking, today's, this week's, 2024+, 2025+, 'what's new', 'recent advances', 'latest research', 'current developments'. Returns web pages with titles, URLs, content snippets, and relevance scores. Supports advanced search (search_depth='advanced'), domain filtering (include_domains/exclude_domains), AI-generated answers (include_answer=true), full page content (include_raw_content=true), and images (include_images=true).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "jql": {
-                        "type": "string",
-                        "description": "JQL query string (required)"
+                    "query": {
+                        "type": "string"
                     },
                     "max_results": {
-                        "type": "integer",
-                        "description": "Optional Jira page size"
-                    },
-                    "next_page_token": {
-                        "type": "string",
-                        "description": "Optional Jira cursor token"
-                    },
-                    "start_at": {
-                        "type": "integer",
-                        "description": "Deprecated offset parameter"
-                    },
-                    "fields": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Optional list of field names to return"
-                    }
-                },
-                "required": [
-                    "jql"
-                ]
-            }
-        },
-        {
-            "name": "jira_get_issue",
-            "description": "Fetch full details for a Jira issue by key (for example JVNAUTOSCI-123).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "issue_key": {
-                        "type": "string",
-                        "description": "Issue key (required)"
-                    },
-                    "fields": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Optional list of field names to return"
-                    }
-                },
-                "required": [
-                    "issue_key"
-                ]
-            }
-        },
-        {
-            "name": "jira_get_transitions",
-            "description": "List available transitions for a Jira issue and return transition IDs.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "issue_key": {
-                        "type": "string",
-                        "description": "Issue key (required)"
-                    }
-                },
-                "required": [
-                    "issue_key"
-                ]
-            }
-        },
-        {
-            "name": "jira_add_comment",
-            "description": "Add a comment to a Jira issue.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "issue_key": {
-                        "type": "string",
-                        "description": "Issue key"
-                    },
-                    "comment": {
-                        "type": "string",
-                        "description": "Comment body text"
-                    }
-                },
-                "required": [
-                    "issue_key",
-                    "comment"
-                ]
-            }
-        },
-        {
-            "name": "jira_transition",
-            "description": "Transition a Jira issue using a transition ID.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "issue_key": {
-                        "type": "string",
-                        "description": "Issue key"
-                    },
-                    "transition_id": {
-                        "type": "string",
-                        "description": "Transition ID"
-                    }
-                },
-                "required": [
-                    "issue_key",
-                    "transition_id"
-                ]
-            }
-        },
-        {
-            "name": "jira_create_issue",
-            "description": "Create a Jira issue with write guardrails. Default dry_run=true.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "project_key": {
-                        "type": "string",
-                        "description": "Project key"
-                    },
-                    "issue_type": {
-                        "type": "string",
-                        "description": "Issue type name"
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "Issue summary"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Optional issue description"
-                    },
-                    "parent": {
-                        "type": "string",
-                        "description": "Optional parent issue key"
-                    },
-                    "assignee_account_id": {
-                        "type": "string",
-                        "description": "Optional Jira accountId to assign"
-                    },
-                    "labels": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "Optional labels"
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "default": true,
-                        "description": "When true, preview only"
-                    },
-                    "approved": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Per-write approval flag for execution"
-                    },
-                    "execute": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Execution override when execute mode is enabled"
-                    },
-                    "request_id": {
-                        "type": "string",
-                        "description": "Optional idempotency key"
-                    }
-                },
-                "required": [
-                    "project_key",
-                    "issue_type",
-                    "summary"
-                ]
-            }
-        },
-        {
-            "name": "jira_update_issue",
-            "description": "Update a Jira issue with write guardrails. Default dry_run=true.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "issue_key": {
-                        "type": "string",
-                        "description": "Issue key"
-                    },
-                    "update_fields": {
-                        "type": "object",
-                        "description": "Jira fields dictionary to update"
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "default": true,
-                        "description": "When true, preview only"
-                    },
-                    "approved": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Per-write approval flag for execution"
-                    },
-                    "execute": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Execution override when execute mode is enabled"
-                    },
-                    "request_id": {
-                        "type": "string",
-                        "description": "Optional idempotency key"
-                    }
-                },
-                "required": [
-                    "issue_key",
-                    "update_fields"
-                ]
-            }
-        },
-        {
-            "name": "jira_link_issue",
-            "description": "Link two Jira issues with write guardrails. Default dry_run=true.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "inward_issue_key": {
-                        "type": "string",
-                        "description": "Inward issue key"
-                    },
-                    "outward_issue_key": {
-                        "type": "string",
-                        "description": "Outward issue key"
-                    },
-                    "link_type": {
-                        "type": "string",
-                        "description": "Jira link type name"
-                    },
-                    "comment": {
-                        "type": "string",
-                        "description": "Optional link comment"
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "default": true,
-                        "description": "When true, preview only"
-                    },
-                    "approved": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Per-write approval flag for execution"
-                    },
-                    "execute": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Execution override when execute mode is enabled"
-                    },
-                    "request_id": {
-                        "type": "string",
-                        "description": "Optional idempotency key"
-                    }
-                },
-                "required": [
-                    "inward_issue_key",
-                    "outward_issue_key",
-                    "link_type"
-                ]
-            }
-        },
-        {
-            "name": "jira_get_myself",
-            "description": "Return the Jira user profile for the currently configured Atlassian credentials.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "jira_get_auth_config",
-            "description": "Inspect Jira auth configuration (base URL/email/token presence) from the process environment.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "workflow_list_definitions",
-            "description": "List available workflow definitions (IDs, descriptions) that can be instantiated.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "description": "Optional cap on number of definitions returned"
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "workflow_bind_event",
-            "description": "Register or update an event-to-workflow binding with optional input mapping.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "event_type": {
-                        "type": "string",
-                        "description": "Event type name (for example type.created)"
-                    },
-                    "workflow_id": {
-                        "type": "string",
-                        "description": "Workflow definition concept ID"
-                    },
-                    "input_mapping": {
-                        "type": "object",
-                        "description": "Optional mapping from workflow input keys to event paths (event.foo) or literals"
-                    },
-                    "enabled": {
-                        "type": "boolean"
-                    },
-                    "replace_existing": {
-                        "type": "boolean"
-                    },
-                    "actor": {
-                        "type": "string"
-                    }
-                },
-                "required": [
-                    "event_type",
-                    "workflow_id"
-                ]
-            }
-        },
-        {
-            "name": "workflow_list_event_bindings",
-            "description": "List event bindings from persistent storage with optional environment fallback entries.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "event_type": {
-                        "type": "string"
-                    },
-                    "enabled_only": {
-                        "type": "boolean"
-                    },
-                    "include_env_fallback": {
-                        "type": "boolean"
-                    },
-                    "limit": {
                         "type": "integer"
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "workflow_mcp_health_check",
-            "description": "Run lightweight workflow/introspection MCP health checks through InternalMCPGateway.invoke() and return actionable diagnostics.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace used for check payloads"
                     },
-                    "include_introspection": {
-                        "type": "boolean",
-                        "description": "When true, include chat introspection checks"
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "workflow_create_instance",
-            "description": "Create a new durable workflow instance. The workflow will be queued for execution by a background worker. Use workflow_get_instance to check status.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "workflow_id": {
-                        "type": "string",
-                        "description": "Workflow definition concept ID"
+                    "search_depth": {
+                        "type": "string"
                     },
-                    "user_id": {
-                        "type": "string",
-                        "description": "Optional user concept ID"
+                    "include_domains": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
                     },
-                    "org_id": {
-                        "type": "string",
-                        "description": "Optional organisation concept ID"
+                    "exclude_domains": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
                     },
-                    "namespace": {
-                        "type": "string",
-                        "description": "Optional namespace for routing/scoping"
+                    "include_answer": {
+                        "type": "boolean"
                     },
-                    "inputs": {
-                        "type": "object",
-                        "description": "Optional workflow input payload"
+                    "include_raw_content": {
+                        "type": "boolean"
                     },
-                    "max_retries": {
-                        "type": "integer",
-                        "description": "Optional retry override for this instance"
+                    "include_images": {
+                        "type": "boolean"
                     }
                 },
                 "required": [
-                    "workflow_id"
-                ]
+                    "query"
+                ],
+                "additionalProperties": true,
+                "description": "search_web input: query (str, required), max_results (int, default 10), search_depth (str, 'basic'|'advanced', default 'basic'), include_domains (list of str, domain whitelist), exclude_domains (list of str, domain blacklist), include_answer (bool, AI-generated answer), include_raw_content (bool, full page content), include_images (bool, image URLs)"
             }
         },
         {
-            "name": "workflow_list_instances",
-            "description": "List durable workflow instances. Filter by user, org, namespace, status, or workflow_id. Supports source_event_type/source_event_id filters for event-to-workflow traceability.",
+            "name": "update_concept",
+            "description": "Update specific fields of a concept. Use when you need to modify properties or relationships directly (e.g. fixing ontology errors, changing 'kind' by updating relationships). Supports dot notation in update_data keys for partial updates of nested objects.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "user_id": {
+                    "concept_id": {
                         "type": "string"
                     },
-                    "org_id": {
-                        "type": "string"
-                    },
-                    "namespace": {
-                        "type": "string"
+                    "update_data": {
+                        "type": "object"
+                    }
+                },
+                "required": [
+                    "concept_id",
+                    "update_data"
+                ],
+                "additionalProperties": true,
+                "description": "update_concept input: concept_id (str), update_data (dict). Use dot notation for nested fields (e.g. {'relationships.is_an_instance_of': [...]}) to avoid overwriting entire objects."
+            }
+        },
+        {
+            "name": "update_task_status",
+            "description": "Update the status of a task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string",
+                        "description": "The task's concept ID"
                     },
                     "status": {
                         "type": "string",
-                        "description": "pending|running|completed|failed|cancelled|paused"
-                    },
-                    "workflow_id": {
-                        "type": "string"
-                    },
-                    "source_event_type": {
-                        "type": "string"
-                    },
-                    "source_event_id": {
-                        "type": "string"
-                    },
-                    "limit": {
-                        "type": "integer"
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "workflow_get_instance",
-            "description": "Get detailed status of a durable workflow instance including current state, inputs, outputs, and any errors.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "instance_id": {
-                        "type": "string",
-                        "description": "Workflow instance ID"
+                        "enum": [
+                            "pending",
+                            "in_progress",
+                            "completed",
+                            "cancelled",
+                            "blocked"
+                        ],
+                        "description": "New task status"
                     }
                 },
                 "required": [
-                    "instance_id"
+                    "task_concept_id",
+                    "status"
                 ]
             }
         },
         {
-            "name": "workflow_cancel_instance",
-            "description": "Cancel a running or pending workflow instance. The worker will stop execution at the next checkpoint.",
+            "name": "update_text_relation",
+            "description": "Modify the text content of an existing text relation by relation ID. Updates the text value while preserving the relation structure. Use when you need to change existing attached text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "instance_id": {
-                        "type": "string",
-                        "description": "Workflow instance ID"
-                    }
-                },
-                "required": [
-                    "instance_id"
-                ]
-            }
-        },
-        {
-            "name": "workflow_retry_instance",
-            "description": "Reset a failed workflow instance for retry if it has not exceeded its max_retries limit.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "instance_id": {
-                        "type": "string",
-                        "description": "Workflow instance ID"
-                    }
-                },
-                "required": [
-                    "instance_id"
-                ]
-            }
-        },
-        {
-            "name": "workflow_create_schedule",
-            "description": "Create a scheduled trigger for a workflow. Supports schedule types: interval, cron, or once.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "workflow_id": {
-                        "type": "string",
-                        "description": "Workflow definition concept ID"
-                    },
-                    "schedule_type": {
-                        "type": "string",
-                        "description": "interval|cron|once"
-                    },
-                    "user_id": {
+                    "concept_id": {
                         "type": "string"
                     },
-                    "org_id": {
+                    "relation_id": {
+                        "type": "string"
+                    },
+                    "new_text": {
+                        "type": "string"
+                    },
+                    "language": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "concept_id",
+                    "relation_id",
+                    "new_text"
+                ],
+                "additionalProperties": true,
+                "description": "update_text_relation input: concept_id (str), relation_id (str), new_text (str), language (str, optional)"
+            }
+        },
+        {
+            "name": "upsert_singleton_text_relation",
+            "description": "Upsert a text relation and enforce singleton semantics for (concept, predicate, language) by replacing any other relations in the same group.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string"
+                    },
+                    "predicate": {
+                        "type": "string"
+                    },
+                    "text": {
+                        "type": "string"
+                    },
+                    "language": {
+                        "type": "string"
+                    },
+                    "policy": {
+                        "type": "string"
+                    },
+                    "garbage_collect": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "provenance": {
+                        "type": [
+                            "object",
+                            "null"
+                        ]
+                    },
+                    "context": {
+                        "type": [
+                            "object",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "concept_id",
+                    "predicate",
+                    "text"
+                ],
+                "additionalProperties": true,
+                "description": "upsert_singleton_text_relation input: concept_id (str), predicate (str), text (str), language (str optional default en-NZ), policy (str optional default replace_others), garbage_collect (bool optional default true), provenance/context (dict optional)"
+            }
+        },
+        {
+            "name": "upsert_text_relation",
+            "description": "Add or update ANY text relation (hasContent, hasDescription, hasNote, custom predicates, etc.). Use for attaching text content to concepts with flexible predicate types. More general than add_names which is specialized for hasName relations only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "concept_id": {
+                        "type": "string"
+                    },
+                    "predicate": {
+                        "type": "string"
+                    },
+                    "text": {
                         "type": "string"
                     },
                     "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "language": {
                         "type": "string"
                     },
-                    "interval_seconds": {
-                        "type": "integer"
-                    },
-                    "cron_expression": {
-                        "type": "string"
-                    },
-                    "run_at": {
-                        "type": "string",
-                        "description": "ISO datetime used for once schedules"
-                    },
-                    "default_inputs": {
-                        "type": "object",
-                        "description": "Optional default inputs for triggered instances"
-                    },
-                    "description": {
-                        "type": "string"
+                    "context": {
+                        "type": [
+                            "object",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
-                    "workflow_id",
-                    "schedule_type"
-                ]
-            }
-        },
-        {
-            "name": "workflow_list_schedules",
-            "description": "List workflow schedules. Filter by user or enabled status.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "user_id": {
-                        "type": "string"
-                    },
-                    "enabled_only": {
-                        "type": "boolean"
-                    },
-                    "limit": {
-                        "type": "integer"
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "workflow_get_schedule",
-            "description": "Get detailed information about a workflow schedule.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "schedule_id": {
-                        "type": "string",
-                        "description": "Schedule ID"
-                    }
-                },
-                "required": [
-                    "schedule_id"
-                ]
-            }
-        },
-        {
-            "name": "workflow_set_schedule_enabled",
-            "description": "Enable or disable a workflow schedule.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "schedule_id": {
-                        "type": "string",
-                        "description": "Schedule ID"
-                    },
-                    "enabled": {
-                        "type": "boolean",
-                        "description": "Desired enabled state"
-                    }
-                },
-                "required": [
-                    "schedule_id",
-                    "enabled"
-                ]
-            }
-        },
-        {
-            "name": "workflow_delete_schedule",
-            "description": "Delete a workflow schedule permanently.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "schedule_id": {
-                        "type": "string",
-                        "description": "Schedule ID"
-                    }
-                },
-                "required": [
-                    "schedule_id"
-                ]
-            }
-        },
-        {
-            "name": "workflow_trigger_schedule",
-            "description": "Manually trigger a workflow schedule immediately, creating a new workflow instance.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "schedule_id": {
-                        "type": "string",
-                        "description": "Schedule ID"
-                    }
-                },
-                "required": [
-                    "schedule_id"
-                ]
+                    "concept_id",
+                    "predicate",
+                    "text"
+                ],
+                "additionalProperties": true,
+                "description": "upsert_text_relation input: concept_id (str), predicate (str, e.g., 'hasContent', 'hasDescription'), text (str), namespace (str, optional), language (str, optional, default 'en-NZ'), context (dict, optional metadata)"
             }
         },
         {
@@ -1898,151 +1618,460 @@
             }
         },
         {
-            "name": "create_task",
-            "description": "Create a task from a conversation. Tasks are stored as Vontology concepts with rich metadata. Optionally links to the originating conversation.",
+            "name": "vontology_concept_search",
+            "description": "Namespaced alias for concept search used by the MCP orchestrator. Same parameters as search_concepts (query required; pass empty string when using instance_of filters).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Brief task title (required)"
+                    "query": {
+                        "type": "string"
+                    },
+                    "filter_kind": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
+                    "scope_root": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "instance_of": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "match_type": {
+                        "type": "string"
+                    },
+                    "exact_match": {
+                        "type": "boolean"
+                    },
+                    "min_similarity": {
+                        "type": "number"
+                    },
+                    "include_description": {
+                        "type": "boolean"
+                    },
+                    "include_hierarchy_path": {
+                        "type": "boolean"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "query"
+                ],
+                "additionalProperties": true,
+                "description": "search_concepts input: query (str, optional - defaults to empty), match_type ('exact'|'substring'|'similarity'|'all'), min_similarity (float 0.0-1.0), filter_kind (list[str]), scope_root (str), instance_of (str concept_id - finds instances of this type), include_description (bool), include_hierarchy_path (bool), limit (int)"
+            }
+        },
+        {
+            "name": "workflow_bind_event",
+            "description": "Register or update an event-to-workflow binding with optional input mapping. Set replace_existing=true to overwrite an existing conflicting binding.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "event_type": {
+                        "type": "string"
+                    },
+                    "workflow_id": {
+                        "type": "string"
+                    },
+                    "input_mapping": {
+                        "type": [
+                            "object",
+                            "null"
+                        ]
+                    },
+                    "enabled": {
+                        "type": "boolean"
+                    },
+                    "replace_existing": {
+                        "type": "boolean"
+                    },
+                    "actor": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "event_type",
+                    "workflow_id"
+                ],
+                "additionalProperties": true,
+                "description": "Create or update an event -> workflow binding."
+            }
+        },
+        {
+            "name": "workflow_cancel_instance",
+            "description": "Cancel a running or pending workflow instance. The worker will stop execution at the next checkpoint. Cannot cancel already-terminal instances.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "instance_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "instance_id"
+                ],
+                "additionalProperties": true,
+                "description": "Cancel a workflow instance."
+            }
+        },
+        {
+            "name": "workflow_create_instance",
+            "description": "Create a new durable workflow instance. The workflow will be queued for execution by a background worker. Use workflow_get_instance to check status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string"
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "org_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "inputs": {
+                        "type": [
+                            "object",
+                            "null"
+                        ]
+                    },
+                    "max_retries": {
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "workflow_id"
+                ],
+                "additionalProperties": true,
+                "description": "Create a durable workflow instance."
+            }
+        },
+        {
+            "name": "workflow_create_schedule",
+            "description": "Create a scheduled trigger for a workflow. Supports three types: 'interval' (run every N seconds), 'cron' (5-field cron expression), 'once' (run at a specific time). The scheduler will automatically create workflow instances when schedules are due.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string"
+                    },
+                    "schedule_type": {
+                        "type": "string"
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "org_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "interval_seconds": {
+                        "type": "integer"
+                    },
+                    "cron_expression": {
+                        "type": "string"
+                    },
+                    "run_at": {
+                        "type": "string"
+                    },
+                    "default_inputs": {
+                        "type": [
+                            "object",
+                            "null"
+                        ]
                     },
                     "description": {
-                        "type": "string",
-                        "description": "Detailed task description"
-                    },
-                    "assignee_concept_id": {
-                        "type": "string",
-                        "description": "Assignee's concept ID (e.g., '#V#user_abc')"
-                    },
-                    "creator_concept_id": {
-                        "type": "string",
-                        "description": "Creator's concept ID (e.g., '#V#user_abc')"
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Chat session_id to link task to conversation"
-                    },
-                    "due_date": {
-                        "type": "string",
-                        "description": "ISO 8601 date string for due date"
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": [
-                            "low",
-                            "medium",
-                            "high",
-                            "critical"
-                        ],
-                        "default": "medium",
-                        "description": "Task priority level"
-                    },
-                    "organisation_concept_id": {
-                        "type": "string",
-                        "description": "Organisation context for the task"
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
-                    "title"
-                ]
+                    "workflow_id",
+                    "schedule_type"
+                ],
+                "additionalProperties": true,
+                "description": "Create a workflow schedule. schedule_type: 'interval', 'cron', or 'once'. Provide interval_seconds for interval, cron_expression for cron, run_at (ISO datetime) for once."
             }
         },
         {
-            "name": "get_task",
-            "description": "Get task details by concept_id.",
+            "name": "workflow_delete_schedule",
+            "description": "Delete a workflow schedule permanently.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task_concept_id": {
-                        "type": "string",
-                        "description": "The task's concept ID (e.g., '#V#task_abc123')"
+                    "schedule_id": {
+                        "type": "string"
                     }
                 },
                 "required": [
-                    "task_concept_id"
-                ]
+                    "schedule_id"
+                ],
+                "additionalProperties": true,
+                "description": "Delete a schedule."
             }
         },
         {
-            "name": "list_my_tasks",
-            "description": "List tasks assigned to a user, optionally filtered by status.",
+            "name": "workflow_get_instance",
+            "description": "Get detailed status of a durable workflow instance including current state, inputs, outputs, and any errors.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "user_concept_id": {
-                        "type": "string",
-                        "description": "User's concept ID to get tasks for"
-                    },
-                    "status_filter": {
-                        "type": "string",
-                        "enum": [
-                            "pending",
-                            "in_progress",
-                            "completed",
-                            "cancelled",
-                            "blocked"
-                        ],
-                        "description": "Optional status filter"
-                    },
-                    "include_created": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "If true, also include tasks created by the user (not just assigned)"
+                    "instance_id": {
+                        "type": "string"
                     }
                 },
                 "required": [
-                    "user_concept_id"
-                ]
+                    "instance_id"
+                ],
+                "additionalProperties": true,
+                "description": "Get a workflow instance by ID."
             }
         },
         {
-            "name": "update_task_status",
-            "description": "Update the status of a task.",
+            "name": "workflow_get_schedule",
+            "description": "Get detailed information about a workflow schedule.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task_concept_id": {
-                        "type": "string",
-                        "description": "The task's concept ID"
+                    "schedule_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "schedule_id"
+                ],
+                "additionalProperties": true,
+                "description": "Get a schedule by ID."
+            }
+        },
+        {
+            "name": "workflow_list_definitions",
+            "description": "List available workflow definitions (IDs, descriptions) that can be instantiated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List available workflow definitions."
+            }
+        },
+        {
+            "name": "workflow_list_event_bindings",
+            "description": "List event bindings from persistent storage, with optional environment fallback entries for legacy compatibility.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "event_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "enabled_only": {
+                        "type": "boolean"
+                    },
+                    "include_env_fallback": {
+                        "type": "boolean"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List event->workflow bindings."
+            }
+        },
+        {
+            "name": "workflow_list_instances",
+            "description": "List durable workflow instances. Filter by user, org, namespace, status, or workflow_id. Supports source_event_type/source_event_id filters for event-to-workflow traceability. Valid statuses: pending, running, completed, failed, cancelled, paused.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "org_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     },
                     "status": {
-                        "type": "string",
-                        "enum": [
-                            "pending",
-                            "in_progress",
-                            "completed",
-                            "cancelled",
-                            "blocked"
-                        ],
-                        "description": "New task status"
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "workflow_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "source_event_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "source_event_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit": {
+                        "type": "integer"
                     }
                 },
-                "required": [
-                    "task_concept_id",
-                    "status"
-                ]
+                "required": [],
+                "additionalProperties": true,
+                "description": "List workflow instances with filters."
             }
         },
         {
-            "name": "assign_task",
-            "description": "Assign or reassign a task to a user.",
+            "name": "workflow_list_schedules",
+            "description": "List workflow schedules. Filter by user or enabled status.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task_concept_id": {
-                        "type": "string",
-                        "description": "The task's concept ID"
+                    "user_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     },
-                    "assignee_concept_id": {
-                        "type": "string",
-                        "description": "The assignee's concept ID"
+                    "enabled_only": {
+                        "type": "boolean"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List workflow schedules."
+            }
+        },
+        {
+            "name": "workflow_mcp_health_check",
+            "description": "Run lightweight workflow/introspection MCP health checks through InternalMCPGateway.invoke() and return actionable diagnostics.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "include_introspection": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Run read-only health checks for core workflow MCP tools."
+            }
+        },
+        {
+            "name": "workflow_retry_instance",
+            "description": "Reset a failed workflow instance for retry. Only works if the instance has not exceeded its max_retries limit. Execution will resume from the last checkpoint.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "instance_id": {
+                        "type": "string"
                     }
                 },
                 "required": [
-                    "task_concept_id",
-                    "assignee_concept_id"
-                ]
+                    "instance_id"
+                ],
+                "additionalProperties": true,
+                "description": "Retry a failed workflow instance."
+            }
+        },
+        {
+            "name": "workflow_set_schedule_enabled",
+            "description": "Enable or disable a workflow schedule.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "schedule_id": {
+                        "type": "string"
+                    },
+                    "enabled": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "schedule_id",
+                    "enabled"
+                ],
+                "additionalProperties": true,
+                "description": "Enable or disable a schedule."
+            }
+        },
+        {
+            "name": "workflow_trigger_schedule",
+            "description": "Manually trigger a workflow schedule immediately, creating a new workflow instance. Useful for testing or ad-hoc execution.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "schedule_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "schedule_id"
+                ],
+                "additionalProperties": true,
+                "description": "Manually trigger a schedule."
             }
         }
     ]

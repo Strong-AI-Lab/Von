@@ -15,6 +15,10 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+from src.backend.integrations.internal_mcp.tool_contract_registry import (
+    SURFACE_JIRA_FAMILY_SERVER,
+    get_surface_tool_payloads,
+)
 
 try:
     from mcp.server import Server
@@ -82,88 +86,23 @@ def jira_post(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 server = Server("jira-mcp")
 
 
+def _tool_from_surface_payload(tool_payload: dict[str, Any]) -> Tool:
+    input_schema = tool_payload.get("inputSchema")
+    if not isinstance(input_schema, dict):
+        input_schema = {}
+    return Tool(
+        name=str(tool_payload["name"]),
+        description=str(tool_payload.get("description") or ""),
+        inputSchema=input_schema,
+    )
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List all available Jira tools."""
     return [
-        Tool(
-            name="jira_search",
-            description="Run a JQL query and return matching issues",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "jql": {
-                        "type": "string",
-                        "description": "JQL query string (e.g., 'project = JVNAUTOSCI AND status = Open')",
-                    }
-                },
-                "required": ["jql"],
-            },
-        ),
-        Tool(
-            name="jira_get_issue",
-            description="Get full details about a Jira issue",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "issue_key": {
-                        "type": "string",
-                        "description": "Issue key (e.g., 'JVNAUTOSCI-123')",
-                    }
-                },
-                "required": ["issue_key"],
-            },
-        ),
-        Tool(
-            name="jira_get_transitions",
-            description="List available transitions for a Jira issue",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "issue_key": {
-                        "type": "string",
-                        "description": "Issue key (e.g., 'JVNAUTOSCI-123')",
-                    }
-                },
-                "required": ["issue_key"],
-            },
-        ),
-        Tool(
-            name="jira_add_comment",
-            description="Add a comment to a Jira issue",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "issue_key": {
-                        "type": "string",
-                        "description": "Issue key (e.g., 'JVNAUTOSCI-123')",
-                    },
-                    "comment": {
-                        "type": "string",
-                        "description": "Comment text to add",
-                    },
-                },
-                "required": ["issue_key", "comment"],
-            },
-        ),
-        Tool(
-            name="jira_transition",
-            description="Transition a Jira issue to a new status",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "issue_key": {
-                        "type": "string",
-                        "description": "Issue key (e.g., 'JVNAUTOSCI-123')",
-                    },
-                    "transition_id": {
-                        "type": "string",
-                        "description": "Transition ID (get from Jira API or UI)",
-                    },
-                },
-                "required": ["issue_key", "transition_id"],
-            },
-        ),
+        _tool_from_surface_payload(tool_payload)
+        for tool_payload in get_surface_tool_payloads(SURFACE_JIRA_FAMILY_SERVER)
     ]
 
 
