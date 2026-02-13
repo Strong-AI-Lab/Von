@@ -68,6 +68,10 @@ PREDICATE_NAME_ALIASES: Dict[str, str] = {
 # #V#thing is the universal top type - everything is implicitly a thing.
 # Explicit relationships to it provide no semantic value.
 BLOCKED_PARENT_TYPES: frozenset[str] = frozenset({"#V#thing"})
+THING_PARENT_GUIDANCE = (
+    "Parents should be a semantically close generalisation of the child concept, "
+    "and can be introduced if no adequate parent exists."
+)
 
 # Suggested alternative supertypes to offer when blocked parent type is detected.
 SUGGESTED_SUPERTYPES: List[str] = [
@@ -427,25 +431,28 @@ def add_structural_relationship(
         # Build contextual guidance based on the relationship type
         if normalised == "is_an_instance_of":
             guidance = (
-                "When creating instances, first search for or create a specific type. "
-                "For example, if creating Otter recordings, first ensure a type like "
-                "'#V#otter_recording_session' exists (as subtype of #V#event), then make "
-                "instances of that specific type rather than the broad category."
+                "For instances, use a semantically close parent type. "
+                "If one does not exist, create it first, then attach instances to it "
+                "rather than to #V#thing. "
+                "For example, if creating Otter recordings, first create "
+                "'#V#otter_recording_session' as a subtype of #V#event, then create "
+                "instances under that specific type."
             )
         else:
             guidance = (
-                "Choose a semantically meaningful supertype. Consider: #V#physical_object "
-                "(tangible items), #V#abstract_object (ideas/concepts), #V#event (things "
-                "that happen in time), #V#process, #V#information_object (documents/recordings)."
+                "Choose a parent that is a semantically close generalisation of the child. "
+                f"{THING_PARENT_GUIDANCE} Example parent families include: "
+                "#V#physical_object, #V#abstract_object, #V#living_organism, "
+                "#V#event, #V#process, #V#information_object."
             )
 
         return {
             "success": False,
             "error": "blocked_parent_type",
             "message": (
-                f"Cannot use '{target_id}' as parent type. Every concept should have a "
-                "semantically meaningful type — search for or create a specific type rather "
-                "than using the universal top type."
+                f"Cannot use '{target_id}' as parent type. Every concept needs a "
+                "semantically close parent. If one does not exist, create a new parent "
+                "type first. This cannot be #V#thing."
             ),
             "guidance": guidance,
             "blocked_target": target_id,

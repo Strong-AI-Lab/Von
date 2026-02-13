@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Workflow type concepts to search for instances
+# Workflow type concepts to search for instances.
 WORKFLOW_TYPE_IDS = (
     "#V#ai_workflow",
     "#V#llm_workflow",
@@ -52,12 +52,35 @@ SEARCH_TIMEOUT_SECONDS = 0.5
 EXECUTABILITY_EXECUTABLE_NOW = "executable_now"
 EXECUTABILITY_GRAPH_INCOMPLETE = "graph_incomplete"
 EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT = "non_executable_design_artifact"
+EXECUTABILITY_WORKFLOW_STEP_INTEGRITY = "workflow_step_integrity_issue"
+EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS = "workflow_step_partially_vacuous"
+EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS = (
+    "workflow_step_completely_vacuous"
+)
 
 _EXECUTABILITY_REASON_PRIORITY = {
     EXECUTABILITY_EXECUTABLE_NOW: 2,
     EXECUTABILITY_GRAPH_INCOMPLETE: 1,
     EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT: 0,
+    EXECUTABILITY_WORKFLOW_STEP_INTEGRITY: 1,
+    EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS: 1,
+    EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS: 1,
 }
+
+
+def _count_workflow_steps(graph: Optional[Dict[str, Any]]) -> int:
+    """Count concrete step nodes in a workflow graph payload."""
+    steps = graph.get("steps") if isinstance(graph, dict) else None
+    if not isinstance(steps, list):
+        return 0
+    count = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        step_id = str(step.get("step_id", "") or "").strip()
+        if step_id:
+            count += 1
+    return count
 
 
 @dataclass
@@ -369,6 +392,7 @@ def _classify_workflow_concept_executability(
         from ..workflows.vontology_loader import (
             build_workflow_process_graph,
             load_workflow_definition_from_vontology,
+            detect_vacuous_workflow_steps,
         )
 
         graph, warnings = build_workflow_process_graph(concept_id)
@@ -377,9 +401,33 @@ def _classify_workflow_concept_executability(
             for item in (warnings or [])
             if isinstance(item, str) and item.strip()
         ]
+        total_steps = _count_workflow_steps(graph)
 
         definition = load_workflow_definition_from_vontology(concept_id)
         if definition is not None:
+            integrity_issues = detect_vacuous_workflow_steps(
+                workflow_id=concept_id,
+                graph=graph,
+            )
+            if integrity_issues:
+                sample_issue = integrity_issues[0]
+                issue_step = sample_issue.get("step_id")
+                issue_count = len(integrity_issues)
+                if total_steps > 0 and issue_count >= total_steps:
+                    reason = EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS
+                elif issue_count:
+                    reason = EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS
+                else:
+                    reason = EXECUTABILITY_WORKFLOW_STEP_INTEGRITY
+                return (
+                    False,
+                    reason,
+                    (
+                        "workflow_step_contract_issue:"
+                        f"count={issue_count},total={total_steps},"
+                        f"first_step={issue_step}"
+                    ),
+                )
             return (True, EXECUTABILITY_EXECUTABLE_NOW, None)
 
         if isinstance(graph, dict):
@@ -404,6 +452,19 @@ def _classify_workflow_concept_executability(
             EXECUTABILITY_GRAPH_INCOMPLETE,
             f"classification_error:{type(exc).__name__}",
         )
+
+
+def classify_workflow_concept_executability(
+    concept_id: str,
+) -> Tuple[bool, str, Optional[str]]:
+    """Expose workflow executability classification for API consumers.
+
+    Returns a tuple:
+    - is_executable: whether the workflow should be callable now
+    - executability_reason: machine-readable reason code
+    - executability_detail: optional human-readable detail
+    """
+    return _classify_workflow_concept_executability(concept_id)
 
 
 def _compute_candidate_confidence(match: WorkflowMatch) -> float:

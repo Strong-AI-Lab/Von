@@ -60,6 +60,8 @@ def test_add_structural_is_a_type_of_thing_is_blocked(monkeypatch):
     assert result["success"] is False
     assert result["error"] == "blocked_parent_type"
     assert "#V#thing" in result["message"]
+    assert "semantically close parent" in result["message"]
+    assert "create" in result["message"].lower()
     assert "suggested_alternatives" in result
     assert len(result["suggested_alternatives"]) > 0
 
@@ -159,6 +161,8 @@ def test_add_structural_is_an_instance_of_thing_is_blocked(monkeypatch):
     assert result["success"] is False
     assert result["error"] == "blocked_parent_type"
     assert "#V#thing" in result["message"]
+    assert "semantically close parent" in result["message"]
+    assert "create" in result["message"].lower()
     assert "suggested_alternatives" in result
 
     # Ensure no update was made
@@ -230,6 +234,7 @@ def test_mcp_create_concepts_blocks_thing_as_parent():
     )
     assert "blocked_parent_type" in str(result)
     assert "#V#thing" in str(result)
+    assert "semantically close parent" in str(result).lower()
 
 
 # --- Tests for detect_vacuous_typing (soft warning on retrieval) ---

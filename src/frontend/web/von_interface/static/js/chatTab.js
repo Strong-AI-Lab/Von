@@ -8212,6 +8212,94 @@ function formatWorkflowStatusLabel(status) {
     return String(status).replace(/_/g, ' ');
 }
 
+function formatWorkflowDefinitionStatus(item) {
+    if (!item || item.is_executable === true) {
+        return 'available';
+    }
+
+    const reason = String(item.executability_reason || '').trim();
+    if (!reason) {
+        return 'not executable';
+    }
+    if (reason === 'workflow_step_partially_vacuous') {
+        return 'partially vacuous';
+    }
+    if (reason === 'workflow_step_completely_vacuous') {
+        return 'completely vacuous';
+    }
+    if (reason === 'workflow_step_integrity_issue') {
+        return 'vacuous';
+    }
+    if (reason === 'graph_incomplete') {
+        return 'partially available';
+    }
+    return reason.replace(/_/g, ' ');
+}
+
+function formatWorkflowDefinitionStatusClass(item) {
+    if (!item || item.is_executable === true) {
+        return 'available';
+    }
+    const reason = String(item.executability_reason || '').trim();
+    if (reason === 'workflow_step_partially_vacuous') {
+        return 'partially-vacuous';
+    }
+    if (reason === 'workflow_step_completely_vacuous') {
+        return 'completely-vacuous';
+    }
+    if (reason === 'workflow_step_integrity_issue') {
+        return 'vacuous';
+    }
+    if (reason === 'graph_incomplete') {
+        return 'partially-available';
+    }
+    return 'not-executable';
+}
+
+function formatWorkflowExecutabilitySummary(item) {
+    if (!item || item.is_executable === true) {
+        return '';
+    }
+    const reason = String(item.executability_reason || '').trim();
+    const detail = String(item.executability_detail || '').trim();
+
+    if (
+        reason === 'workflow_step_partially_vacuous' ||
+        reason === 'workflow_step_completely_vacuous' ||
+        reason === 'workflow_step_integrity_issue'
+    ) {
+        const countMatch = /count=(\d+)/.exec(detail);
+        const count = countMatch && countMatch[1] ? countMatch[1] : null;
+        const totalMatch = /total=(\d+)/.exec(detail);
+        const total = totalMatch && totalMatch[1] ? totalMatch[1] : null;
+        if (count) {
+            if (reason === 'workflow_step_completely_vacuous') {
+                return `All ${count} workflow step(s) are vacuous.`;
+            }
+            if (
+                reason === 'workflow_step_partially_vacuous' &&
+                total &&
+                count
+            ) {
+                return `${count}/${total} workflow step(s) are vacuous`;
+            }
+            return `Vacuous workflow steps detected (${count}).`;
+        }
+        return 'Vacuous workflow step detected.';
+    }
+    if (reason === 'graph_incomplete') {
+        if (detail) {
+            return `Graph issue: ${detail.replace(/_/g, ' ')}`;
+        }
+        return 'Workflow graph incomplete.';
+    }
+
+    if (detail) {
+        return detail;
+    }
+    return formatWorkflowDefinitionStatus(item);
+}
+
 function buildWorkflowStatusQuery({ includeStatusFilter } = {}) {
     const params = new URLSearchParams();
     const namespace = getSessionScopedNamespace();
@@ -8354,6 +8442,9 @@ function renderWorkflowDefinitionsList(items) {
         const description = escapeHtml(item.description || 'No description available.');
         const initialState = escapeHtml(item.initial_state || '—');
         const source = escapeHtml(formatWorkflowStatusLabel(item.source || 'unknown'));
+        const statusClass = escapeHtml(formatWorkflowDefinitionStatusClass(item));
+        const statusLabel = escapeHtml(formatWorkflowDefinitionStatus(item));
+        const executableSummary = formatWorkflowExecutabilitySummary(item);
         const attempts = Number.isFinite(Number(item?.attempts)) ? Number(item.attempts) : 0;
         const completions = Number.isFinite(Number(item?.completions)) ? Number(item.completions) : 0;
         const completionRateRaw = Number(item?.completion_rate);
@@ -8361,18 +8452,22 @@ function renderWorkflowDefinitionsList(items) {
             ? `${Math.round(Math.max(0, Math.min(1, completionRateRaw)) * 100)}%`
             : '—';
         const usageMeta = `Attempts: ${attempts} · Completions: ${completions} · Completion: ${completionRate}`;
+        const executionMeta = executableSummary
+            ? `<div class="workflow-status-definition-meta">Status detail: ${escapeHtml(executableSummary)}</div>`
+            : '';
         const episodesButton = `<button type="button" class="btn-mini workflow-status-episodes-btn" data-workflow-id="${escapeHtml(workflowIdRaw)}" data-workflow-name="${escapeHtml(workflowNameText)}">Episodes</button>`;
         return `
-            <div class="workflow-status-item status-available">
+            <div class="workflow-status-item status-${statusClass}">
               <div class="workflow-status-item-header">
                 <div class="workflow-status-name">${workflowName}</div>
-                <span class="workflow-status-badge status-available">available</span>
+                <span class="workflow-status-badge status-${statusClass}">${statusLabel}</span>
               </div>
               <div class="workflow-status-definition-description">${description}</div>
               <div class="workflow-status-definition-meta">
                 ID: ${workflowId} · Initial state: ${initialState} · Source: ${source}
               </div>
               <div class="workflow-status-definition-meta">${escapeHtml(usageMeta)}</div>
+              ${executionMeta}
               <div class="workflow-status-definition-actions">${episodesButton}</div>
             </div>
         `;

@@ -247,7 +247,7 @@ def _create_concepts(**kwargs):
             ],
         )
 
-    # Block #V#thing as parent type (JVNAUTOSCI-1072)
+    # Block #V#thing as parent type (JVNAUTOSCI-1072).
     # #V#thing is the universal top type - everything is implicitly a thing.
     # Explicit relationships to it provide no semantic value.
     BLOCKED_PARENT_TYPES = {"#V#thing"}
@@ -261,16 +261,18 @@ def _create_concepts(**kwargs):
 
         # Build contextual suggestions
         suggestions = [
-            "1. FIRST search for an existing specific type that matches what you're creating "
-            "(e.g., search_concepts with query based on the domain/category of these items)",
+            "1. FIRST look for an existing parent type that is a semantically close "
+            "generalisation of what you're creating by querying search_concepts with a "
+            "domain/category-specific query.",
         ]
 
         if creating_multiple or kind_requested == "instance":
             suggestions.append(
-                "2. If no specific type exists but you're creating multiple similar instances, "
-                "CREATE A NEW TYPE FIRST as a subtype of an appropriate category "
-                "(#V#event for things that happen in time, #V#physical_object for tangible items, "
-                "#V#abstract_object for ideas/concepts, #V#information_object for documents/recordings)"
+                "2. If no suitable parent exists, CREATE A NEW PARENT TYPE FIRST as a subtype of an "
+                "appropriate root parent (for example #V#event for things that happen in time, "
+                "#V#physical_object for tangible items, #V#abstract_object for ideas/concepts, "
+                "#V#information_object for documents/recordings). "
+                "The new parent should be a semantically close generalisation of the child."
             )
             suggestions.append(
                 "3. Then create your instances as instances of that specific type, not the broad category"
@@ -281,14 +283,16 @@ def _create_concepts(**kwargs):
             )
         else:
             suggestions.append(
-                "2. Consider appropriate parent types: #V#physical_object, #V#abstract_object, "
-                "#V#event, #V#process, #V#information_object, #V#living_organism"
+                "2. Consider semantically close parent types: #V#physical_object, #V#abstract_object, "
+                "#V#event, #V#process, #V#information_object, #V#living_organism. "
+                "If none fits, create one that does."
             )
 
         return make_error_response(
             "blocked_parent_type",
-            f"Cannot use '{parent_id}' as parent type. Every concept should have a semantically "
-            "meaningful type — search for or create a specific type rather than using the universal top type.",
+            f"Cannot use '{parent_id}' as parent type. Every concept needs a semantically close parent. "
+            "If no parent exists, create a specific parent type first. "
+            "Using the universal top type is not allowed.",
             details={
                 "blocked_parent_id": parent_id,
                 "concepts_count": len(concepts),

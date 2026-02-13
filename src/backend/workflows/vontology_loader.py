@@ -84,6 +84,8 @@ WORKFLOW_DISCOVERY_BASE_TYPE_IDS: Tuple[str, ...] = (
     "#V#llm_workflow",
 )
 
+WORKFLOW_STEP_VACUITY_REASON_CODE = "workflow_step_vacuous"
+
 
 def _normalise_relationship_targets(value: Any) -> List[str]:
     if isinstance(value, str):
@@ -91,6 +93,131 @@ def _normalise_relationship_targets(value: Any) -> List[str]:
     if isinstance(value, list):
         return [v for v in value if isinstance(v, str) and v.strip()]
     return []
+
+
+def detect_vacuous_workflow_steps(
+    *,
+    workflow_id: str | None,
+    graph: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Find workflow steps that have no executable contract.
+
+    A step is considered vacuous when it contains no executable instruction:
+      - no ``invokesAction`` target
+      - no preconditions/effects
+      - no variable read/write declarations
+
+    This intentionally surfaces steps that appear structurally wired but do not
+    declare what they should do, enabling fast diagnosis from previous step
+    context before execution is attempted.
+    """
+    if not isinstance(graph, dict):
+        return []
+
+    steps = graph.get("steps")
+    edges = graph.get("edges")
+    if not isinstance(steps, list) or not steps:
+        return []
+
+    initial_step = graph.get("initial_step")
+    if not isinstance(initial_step, str) or not initial_step.strip():
+        initial_step = None
+
+    step_by_id: Dict[str, Dict[str, Any]] = {}
+    step_order: Dict[str, int] = {}
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        step_id = str(step.get("step_id", "") or "").strip()
+        if step_id:
+            step_by_id[step_id] = step
+            step_order[step_id] = index
+
+    incoming: Dict[str, List[Dict[str, Any]]] = {key: [] for key in step_by_id}
+    if isinstance(edges, list):
+        for edge in edges:
+            if not isinstance(edge, dict):
+                continue
+            from_step_id = str(edge.get("from", "") or "").strip()
+            to_step_id = str(edge.get("to", "") or "").strip()
+            predicate = edge.get("predicate")
+            if from_step_id and to_step_id:
+                incoming.setdefault(to_step_id, []).append(
+                    {
+                        "from_step_id": from_step_id,
+                        "predicate": predicate,
+                    }
+                )
+
+    issues: List[Dict[str, Any]] = []
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+
+        step_id = str(step.get("step_id", "") or "").strip()
+        if not step_id:
+            continue
+
+        invokes_action = str(step.get("invokes_action", "") or "").strip()
+        preconditions = step.get("preconditions") or []
+        effects = step.get("effects") or []
+        reads_variables = step.get("reads_variables") or []
+        writes_variables = step.get("writes_variables") or []
+
+        has_contract = bool(
+            invokes_action
+            or preconditions
+            or effects
+            or reads_variables
+            or writes_variables
+        )
+        if has_contract:
+            continue
+
+        previous_steps = incoming.get(step_id, [])
+        previous_step_context: List[Dict[str, Any]] = []
+        if previous_steps:
+            for context in previous_steps:
+                prev_step_id = str(context.get("from_step_id", "") or "").strip()
+                prev_step = step_by_id.get(prev_step_id, {})
+                previous_step_context.append(
+                    {
+                        "step_id": prev_step_id,
+                        "step_name": prev_step.get("name"),
+                        "invokes_action": str(prev_step.get("invokes_action", "") or "").strip()
+                        or None,
+                        "link_predicate": context.get("predicate"),
+                    }
+                )
+        elif step_id == initial_step:
+            previous_step_context = [
+                {
+                    "step_id": "__workflow_input__",
+                    "step_name": "Workflow input",
+                    "invokes_action": None,
+                    "link_predicate": None,
+                }
+            ]
+
+        issues.append(
+            {
+                "workflow_id": str(workflow_id or "").strip() or None,
+                "step_id": step_id,
+                "step_name": str(step.get("name", "") or "").strip() or None,
+                "step_index": step_order.get(step_id, -1),
+                "reason_code": WORKFLOW_STEP_VACUITY_REASON_CODE,
+                "cause": (
+                    "No executable contract found for step. "
+                    "Expected invokesAction, preconditions/effects, "
+                    "or variable read/write declarations."
+                ),
+                "previous_steps": previous_step_context,
+                "previous_step_count": len(previous_step_context),
+            }
+        )
+
+    return issues
 
 
 def _first_relationship_target(

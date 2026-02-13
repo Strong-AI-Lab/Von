@@ -18,6 +18,9 @@ from src.backend.services.workflow_discovery_service import (
     DEFAULT_RELEVANCE_THRESHOLD,
     EXECUTABILITY_EXECUTABLE_NOW,
     EXECUTABILITY_GRAPH_INCOMPLETE,
+    EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS,
+    EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS,
+    EXECUTABILITY_WORKFLOW_STEP_INTEGRITY,
     EXECUTABILITY_NON_EXECUTABLE_DESIGN_ARTIFACT,
     WORKFLOW_TYPE_IDS,
     WorkflowDiscoveryResult,
@@ -523,3 +526,91 @@ def test_invalidate_workflow_discovery_executability_caches_clears_lru_state() -
 
     assert _classify_workflow_concept_executability.cache_info().currsize == 0
     assert _is_executable_workflow_concept.cache_info().currsize == 0
+
+
+def test_classify_workflow_treats_partial_vacuous_steps_as_non_executable() -> None:
+    graph = {
+        "workflow_id": "#V#wf_vacancy",
+        "initial_step": "#V#identify",
+        "steps": [
+            {
+                "step_id": "#V#identify",
+                "name": "identify",
+                "invokes_action": None,
+                "preconditions": [],
+                "effects": [],
+                "reads_variables": [],
+                "writes_variables": [],
+            },
+            {
+                "step_id": "#V#final",
+                "name": "final",
+                "invokes_action": "tool.finished",
+            },
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+
+    with patch(
+        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+        return_value=(graph, []),
+    ), patch(
+        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+        return_value=object(),
+    ):
+        is_executable, reason, detail = _classify_workflow_concept_executability(
+            "#V#wf_vacancy"
+        )
+
+    assert is_executable is False
+    assert reason == EXECUTABILITY_WORKFLOW_STEP_PARTIALLY_VACUOUS
+    assert "count=1" in str(detail)
+    assert "total=2" in str(detail)
+    assert "first_step=#V#identify" in str(detail)
+
+
+def test_classify_workflow_treats_completely_vacuous_steps_as_non_executable() -> None:
+    graph = {
+        "workflow_id": "#V#wf_vacancy_full",
+        "initial_step": "#V#step_one",
+        "steps": [
+            {
+                "step_id": "#V#step_one",
+                "name": "step one",
+                "invokes_action": None,
+                "preconditions": [],
+                "effects": [],
+                "reads_variables": [],
+                "writes_variables": [],
+            },
+            {
+                "step_id": "#V#step_two",
+                "name": "step two",
+                "invokes_action": None,
+                "preconditions": [],
+                "effects": [],
+                "reads_variables": [],
+                "writes_variables": [],
+            },
+        ],
+        "edges": [],
+        "warnings": [],
+    }
+
+    with patch(
+        "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+        return_value=(graph, []),
+    ), patch(
+        "src.backend.workflows.vontology_loader.load_workflow_definition_from_vontology",
+        return_value=object(),
+    ):
+        is_executable, reason, detail = _classify_workflow_concept_executability(
+            "#V#wf_vacancy_full"
+        )
+
+    assert is_executable is False
+    assert reason == EXECUTABILITY_WORKFLOW_STEP_COMPLETELY_VACUOUS
+    assert "count=2" in str(detail)
+    assert "total=2" in str(detail)
+    assert "first_step=#V#step_one" in str(detail)

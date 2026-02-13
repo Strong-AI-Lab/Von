@@ -203,6 +203,7 @@ def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_cli
 def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
     import src.backend.workflows.durable.registry_factory as registry_factory
+    import src.backend.services.workflow_discovery_service as workflow_discovery_service
 
     class _FakeDefinition:
         def __init__(self, initial_state: str, purpose: str):
@@ -273,6 +274,33 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
             },
         },
     )
+    classification_map = {
+        "#V#alpha_workflow": (
+            True,
+            "executable_now",
+            None,
+        ),
+        "#V#beta_workflow": (
+            False,
+            "workflow_step_partially_vacuous",
+            (
+                "workflow_step_contract_issue:"
+                "count=2,total=3,first_step=#V#alpha_step"
+            ),
+        ),
+    }
+
+    def _fake_classify_workflow_executability(workflow_id: str):
+        return classification_map.get(
+            workflow_id,
+            (False, "non_executable_design_artifact", None),
+        )
+
+    monkeypatch.setattr(
+        workflow_discovery_service,
+        "classify_workflow_concept_executability",
+        _fake_classify_workflow_executability,
+    )
 
     resp = app_client.get("/api/workflows/definitions?limit=10")
     assert resp.status_code == 200
@@ -290,6 +318,9 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert items[0]["completions"] == 6
     assert items[0]["completion_rate"] == pytest.approx(0.75)
     assert items[0]["last_episode_at"] == "2026-02-13T10:22:00+00:00"
+    assert items[0]["is_executable"] is True
+    assert items[0]["executability_reason"] == "executable_now"
+    assert items[0]["executability_detail"] is None
 
     assert items[1]["workflow_id"] == "#V#beta_workflow"
     # Falls back to definition.purpose when registration purpose is empty.
@@ -300,6 +331,12 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert items[1]["completions"] == 1
     assert items[1]["completion_rate"] == pytest.approx(0.5)
     assert items[1]["last_episode_at"] == "2026-02-13T11:00:00+00:00"
+    assert items[1]["is_executable"] is False
+    assert items[1]["executability_reason"] == "workflow_step_partially_vacuous"
+    assert (
+        items[1]["executability_detail"]
+        == "workflow_step_contract_issue:count=2,total=3,first_step=#V#alpha_step"
+    )
 
 
 def test_workflow_episodes_list_endpoint(monkeypatch, app_client):

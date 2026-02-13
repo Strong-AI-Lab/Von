@@ -86,6 +86,9 @@ def api_list_workflow_definitions():
         from ...workflows.durable.registry_factory import (
             build_durable_workflow_registry_read_only,
         )
+        from ...services.workflow_discovery_service import (
+            classify_workflow_concept_executability,
+        )
 
         # Read-only build avoids concept bootstrap writes on list/introspection paths.
         registry = build_durable_workflow_registry_read_only()
@@ -132,6 +135,20 @@ def api_list_workflow_definitions():
             completions = usage.get("completions")
             completion_rate = usage.get("completion_rate")
 
+            try:
+                is_executable, executability_reason, executability_detail = (
+                    classify_workflow_concept_executability(workflow_id)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Workflow executability classification failed for %s: %s",
+                    workflow_id,
+                    exc,
+                )
+                is_executable = False
+                executability_reason = "classification_error"
+                executability_detail = f"classification_error:{type(exc).__name__}"
+
             items.append(
                 {
                     "workflow_id": workflow_id,
@@ -156,6 +173,9 @@ def api_list_workflow_definitions():
                         if usage.get("last_episode_at") is not None
                         else None
                     ),
+                    "is_executable": bool(is_executable),
+                    "executability_reason": executability_reason,
+                    "executability_detail": executability_detail,
                 }
             )
 

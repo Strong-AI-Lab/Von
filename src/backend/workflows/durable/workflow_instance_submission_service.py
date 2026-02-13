@@ -19,7 +19,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Mapping, Sequence
 
 from ..engine import WorkflowDefinition
-from ..vontology_loader import build_workflow_process_graph
+from ..vontology_loader import build_workflow_process_graph, detect_vacuous_workflow_steps
 from .instance_manager import WorkflowInstanceManager
 from .registry_factory import (
     build_durable_action_registry,
@@ -36,6 +36,7 @@ class WorkflowRunnableVerification:
     fallback_action_routing_enabled: bool
     discovered_action_ids: tuple[str, ...]
     unsupported_action_ids: tuple[str, ...]
+    integrity_issues: tuple[Dict[str, Any], ...]
     warnings: tuple[str, ...]
     errors: tuple[str, ...]
 
@@ -48,6 +49,7 @@ class WorkflowRunnableVerification:
             "fallback_action_routing_enabled": self.fallback_action_routing_enabled,
             "discovered_action_ids": list(self.discovered_action_ids),
             "unsupported_action_ids": list(self.unsupported_action_ids),
+            "integrity_issues": [dict(item) for item in self.integrity_issues],
             "warnings": list(self.warnings),
             "errors": list(self.errors),
         }
@@ -122,6 +124,7 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
             fallback_action_routing_enabled=False,
             discovered_action_ids=(),
             unsupported_action_ids=(),
+            integrity_issues=(),
             warnings=(),
             errors=("invalid_workflow_id",),
         )
@@ -143,9 +146,18 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
             fallback_action_routing_enabled=False,
             discovered_action_ids=(),
             unsupported_action_ids=(),
+            integrity_issues=(),
             warnings=tuple(warnings),
             errors=error_items,
         )
+
+    integrity_issues = tuple(
+        detect_vacuous_workflow_steps(workflow_id=workflow_id, graph=graph)
+    )
+    if integrity_issues:
+        warnings.append("workflow_step_contract_integrity_issue")
+        # Keep concise error code at top level for compatibility with callers.
+        # Detailed context remains in integrity_issues.
 
     action_registry = build_durable_action_registry()
     fallback_enabled = action_registry.has_fallback_handler()
@@ -164,10 +176,12 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
                 continue
         unsupported.append(action_id)
 
-    runnable_verification_success = len(unsupported) == 0
+    runnable_verification_success = len(unsupported) == 0 and not integrity_issues
     errors: list[str] = []
     if unsupported:
         errors.append("unsupported_workflow_actions")
+    if integrity_issues:
+        errors.append("workflow_step_contract_integrity_issue")
 
     return WorkflowRunnableVerification(
         workflow_id=workflow_id,
@@ -177,6 +191,7 @@ def verify_workflow_runnable(workflow_id: str) -> WorkflowRunnableVerification:
         fallback_action_routing_enabled=fallback_enabled,
         discovered_action_ids=action_ids,
         unsupported_action_ids=tuple(sorted(set(unsupported))),
+        integrity_issues=integrity_issues,
         warnings=tuple(warnings),
         errors=tuple(errors),
     )
