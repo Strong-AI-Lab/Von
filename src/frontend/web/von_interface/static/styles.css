@@ -4659,6 +4659,40 @@ footer {
     font-size: 14px;
 }
 
+.workflow-status-concept-link {
+    display: inline;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 1px 4px;
+    margin: -1px -4px;
+    color: #0f172a;
+    font: inherit;
+    font-weight: inherit;
+    text-align: left;
+    text-decoration: underline;
+    text-decoration-color: rgba(15, 23, 42, 0.35);
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+
+.workflow-status-concept-link:hover {
+    background: #dbeafe;
+    border-color: #93c5fd;
+    text-decoration-color: #1d4ed8;
+}
+
+.workflow-status-concept-link:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+    border-color: #93c5fd;
+}
+
+.workflow-status-id-link {
+    font-size: 12px;
+    color: #334155;
+}
+
 .workflow-status-badge {
     display: inline-flex;
     align-items: center;

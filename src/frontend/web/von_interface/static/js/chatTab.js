@@ -8140,7 +8140,12 @@ function renderWorkflowStatusList(items) {
     });
 
     const html = ordered.map((item) => {
-        const workflowName = escapeHtml(formatWorkflowName(item.workflow_id));
+        const workflowIdRaw = typeof item?.workflow_id === 'string' ? item.workflow_id.trim() : '';
+        const workflowNameText = formatWorkflowName(workflowIdRaw);
+        const workflowConceptId = _normalisePotentialConceptId(workflowIdRaw);
+        const workflowName = workflowConceptId
+            ? `<button type="button" class="workflow-status-concept-link" data-concept-id="${escapeHtml(workflowConceptId)}">${escapeHtml(workflowNameText)}</button>`
+            : escapeHtml(workflowNameText);
         const statusLabel = escapeHtml(formatWorkflowStatusLabel(item.status));
         const statusClass = escapeHtml(item.status || 'unknown');
         const currentState = escapeHtml(item.current_state || '');
@@ -8220,8 +8225,15 @@ function renderWorkflowDefinitionsList(items) {
     });
 
     const html = ordered.map((item) => {
-        const workflowName = escapeHtml(formatWorkflowName(item.workflow_id));
-        const workflowId = escapeHtml(item.workflow_id || '');
+        const workflowIdRaw = typeof item?.workflow_id === 'string' ? item.workflow_id.trim() : '';
+        const workflowNameText = formatWorkflowName(workflowIdRaw);
+        const workflowConceptId = _normalisePotentialConceptId(workflowIdRaw);
+        const workflowName = workflowConceptId
+            ? `<button type="button" class="workflow-status-concept-link" data-concept-id="${escapeHtml(workflowConceptId)}">${escapeHtml(workflowNameText)}</button>`
+            : escapeHtml(workflowNameText);
+        const workflowId = workflowConceptId
+            ? `<button type="button" class="workflow-status-concept-link workflow-status-id-link" data-concept-id="${escapeHtml(workflowConceptId)}">${escapeHtml(workflowIdRaw)}</button>`
+            : escapeHtml(workflowIdRaw);
         const description = escapeHtml(item.description || 'No description available.');
         const initialState = escapeHtml(item.initial_state || '—');
         const source = escapeHtml(formatWorkflowStatusLabel(item.source || 'unknown'));
@@ -8242,7 +8254,42 @@ function renderWorkflowDefinitionsList(items) {
     body.innerHTML = html;
 }
 
+function bindWorkflowStatusConceptLinks() {
+    const { body } = getWorkflowStatusElements();
+    if (!body || body.dataset.conceptLinkBound === 'true') {
+        return;
+    }
+
+    body.addEventListener('click', (event) => {
+        const target = event.target;
+        if (!target || !(target instanceof HTMLElement)) {
+            return;
+        }
+        const button = target.closest('.workflow-status-concept-link');
+        if (!button) {
+            return;
+        }
+        event.preventDefault();
+        const conceptId = button.dataset.conceptId;
+        if (!conceptId) {
+            return;
+        }
+        document.dispatchEvent(new CustomEvent('von:selectConceptById', {
+            detail: {
+                conceptId,
+                createConceptTab: true,
+                modifierKeys: {
+                    shiftKey: event.shiftKey
+                }
+            }
+        }));
+    });
+
+    body.dataset.conceptLinkBound = 'true';
+}
+
 function renderWorkflowStatusBody() {
+    bindWorkflowStatusConceptLinks();
     if (workflowDefinitionsState.visible) {
         renderWorkflowDefinitionsList(workflowDefinitionsState.items);
         return;
@@ -10611,6 +10658,13 @@ export const __test_only__rehydrateHistory = rehydrateHistory;
 export const __test_only__renderChatSessionMetadataPanel = _renderChatSessionMetadataPanel;
 export function __testOnly_buildWorkflowStatusQuery(opts = {}) {
     return buildWorkflowStatusQuery(opts).toString();
+}
+export function __testOnly_renderWorkflowDefinitionsBody(items = []) {
+    workflowDefinitionsState.visible = true;
+    workflowDefinitionsState.loading = false;
+    workflowDefinitionsState.error = '';
+    workflowDefinitionsState.items = Array.isArray(items) ? items : [];
+    renderWorkflowStatusBody();
 }
 
 // Export for testing.

@@ -1,5 +1,6 @@
 import {
     __testOnly_buildThinkingProgressPresentation,
+    __testOnly_renderWorkflowDefinitionsBody,
     __testOnly_buildWorkflowStatusQuery,
     __testOnly_buildLlmDebugMetadata,
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
@@ -144,6 +145,47 @@ describe('workflow status query scoping', () => {
         expect(params.has('namespace')).toBe(false);
         expect(params.get('org_id')).toBe('#V#university_of_auckland_strong_ai_lab');
         expect(params.get('user_id')).toBe('#V#michael_witbrock');
+    });
+});
+
+describe('workflow monitor concept links', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="workflowStatusPanel"></div>
+            <div id="workflowStatusBody"></div>
+            <button id="workflowStatusRefresh"></button>
+            <button id="workflowStatusToggleAvailable"></button>
+        `;
+    });
+
+    test('renders workflow concept links and dispatches concept selection event on click', () => {
+        const onSelect = jest.fn();
+        document.addEventListener('von:selectConceptById', onSelect);
+
+        __testOnly_renderWorkflowDefinitionsBody([
+            {
+                workflow_id: '#V#chat_assistant_workflow',
+                description: 'Base chat assistant workflow.',
+                initial_state: 'completed',
+                source: 'built_in'
+            }
+        ]);
+
+        const links = document.querySelectorAll('.workflow-status-concept-link');
+        expect(links.length).toBeGreaterThan(0);
+
+        const nameLink = Array.from(links).find((el) => el.textContent?.includes('chat assistant workflow'));
+        expect(nameLink).toBeTruthy();
+        expect(nameLink.dataset.conceptId).toBe('#V#chat_assistant_workflow');
+
+        nameLink.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+        expect(onSelect).toHaveBeenCalledTimes(1);
+        const eventArg = onSelect.mock.calls[0][0];
+        expect(eventArg.detail.conceptId).toBe('#V#chat_assistant_workflow');
+        expect(eventArg.detail.createConceptTab).toBe(true);
+
+        document.removeEventListener('von:selectConceptById', onSelect);
     });
 });
 

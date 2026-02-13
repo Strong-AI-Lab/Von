@@ -2649,9 +2649,12 @@ function getDisplayLanguageForName(nameObj) {
 
   // JVNAUTOSCI-937: GUID-like CODE values are not natural-language text.
   // This is display-only; we do not rewrite stored language codes.
-  if (type === 'VONGUID') return 'guid';
-  if (type === 'CODE' && (isUuidLike(text) || isHexObjectIdLike(text))) return 'guid';
-  if (type === 'CODE' && language.toLowerCase() === 'vonguid') return 'guid';
+  if (type === 'VONGUID') return 'id-uuid';
+  if (type === 'CODE' && isUuidLike(text)) return 'id-uuid';
+  if (type === 'CODE' && isHexObjectIdLike(text)) return 'id-objectid';
+  if (type === 'CODE' && language.toLowerCase() === 'vonguid') {
+    return isHexObjectIdLike(text) ? 'id-objectid' : 'id-uuid';
+  }
 
   // JVNAUTOSCI-937: Von concept IDs are CODE identifiers (display-only language `id-von`).
   if (type === 'CODE' && isVonConceptIdLike(text)) return 'id-von';
