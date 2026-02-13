@@ -15,11 +15,11 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 9. Keep changes minimal, well-scoped, and add/update tests and docs where relevant.
 10. Prefer small, composable functions; avoid monolithic helpers.
 11. Always check VS Code Problems panel (or run `get_errors`) after edits and when errors are reported. If the Problems panel is not available, run `pyright` as a proxy.
-12. **Pre-commit lint gate**: Before every `git commit`, run `get_errors` (or `pyright`) and fix all outstanding linting/type-checking errors. Do not commit with known unresolved diagnostics.
+12. **Pre-commit lint gate**: Before every `git commit`, run `get_errors` (or `pyright`) and fix all outstanding linting/type-checking errors. Do not commit with known unresolved diagnostics. If using `pyright`, include **every changed Python file** from `git diff --name-only` (do not hand-pick a partial subset).
 13. Enable pre-commit guardrails: `git config core.hooksPath .githooks`.
 14. **STOP**: Never run backend tests against `VON_DB_NAME=von_db`. Always use the test DB (`VON_DB_NAME=test_von_db`) or the `pytest:backend (test db)` task.
 15. Requiring a user choice is almost always dispreferred; prefer LLM reasoning to achieve reliability and only ask the user when ambiguity cannot be resolved safely.
-16. When in doubt, run tests or re-run tests without requiring user confirmation.
+16. When in doubt, run tests or re-run tests without requiring user confirmation, but start with a **targeted impacted set** (touched modules + real call-path tests) and only expand to broader suites when risk or failures indicate.
 17. In the case that multiple tests are failing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
 18. If you think you've finished implementing a Jira task, read the task and its epic and subtask context again and check.
 19. **DRY first**: Create central helpers FIRST, then replace all usages. See "DRY refactoring discipline" in Workflow section.

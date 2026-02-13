@@ -108,15 +108,26 @@ class EventWorkflowBinding:
 
     @classmethod
     def from_doc(cls, doc: dict[str, Any]) -> "EventWorkflowBinding":
+        raw_input_mapping = doc.get("input_mapping")
+        input_mapping: dict[str, str] = {}
+        if isinstance(raw_input_mapping, dict):
+            for raw_key, raw_value in raw_input_mapping.items():
+                if isinstance(raw_key, bytes):
+                    key = raw_key.decode("utf-8", errors="ignore").strip()
+                else:
+                    key = str(raw_key or "").strip()
+                if isinstance(raw_value, bytes):
+                    value = raw_value.decode("utf-8", errors="ignore").strip()
+                else:
+                    value = str(raw_value or "").strip()
+                if key and value:
+                    input_mapping[key] = value
+
         return cls(
             binding_id=str(doc.get("binding_id") or ""),
             event_type=str(doc.get("event_type") or ""),
             workflow_id=str(doc.get("workflow_id") or ""),
-            input_mapping=(
-                dict(doc.get("input_mapping"))
-                if isinstance(doc.get("input_mapping"), dict)
-                else {}
-            ),
+            input_mapping=input_mapping,
             enabled=bool(doc.get("enabled", True)),
             created_at=doc.get("created_at") or datetime.now(timezone.utc),
             updated_at=doc.get("updated_at") or datetime.now(timezone.utc),
