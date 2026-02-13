@@ -15,6 +15,11 @@ from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from ...db.mongo_client import get_db
+from ...services.workflow_episode_service import (
+    build_workflow_episode_stable_key,
+    finalise_workflow_use_episode,
+    start_workflow_use_episode,
+)
 from .models import (
     WorkflowInstance,
     WorkflowInstanceStatus,
@@ -186,6 +191,92 @@ class WorkflowInstanceManager:
         instance = self.get_instance(instance_id)
         if instance is not None:
             self._broadcast_instance(instance)
+
+    @staticmethod
+    def _build_durable_episode_stable_key(
+        *,
+        workflow_id: str,
+        instance_id: str,
+        retry_count: int,
+    ) -> str:
+        attempt_number = max(1, int(retry_count) + 1)
+        return build_workflow_episode_stable_key(
+            workflow_id=workflow_id,
+            source="durable_instance",
+            instance_id=instance_id,
+            attempt_number=attempt_number,
+        )
+
+    def _record_durable_episode_start(
+        self,
+        *,
+        instance: WorkflowInstance,
+        worker_id: str | None,
+    ) -> None:
+        try:
+            stable_key = self._build_durable_episode_stable_key(
+                workflow_id=instance.workflow_id,
+                instance_id=instance.instance_id,
+                retry_count=instance.retry_count,
+            )
+            start_workflow_use_episode(
+                workflow_id=instance.workflow_id,
+                source="durable_instance",
+                namespace=instance.namespace,
+                user_id=instance.user_id,
+                org_id=instance.org_id,
+                instance_id=instance.instance_id,
+                stable_key=stable_key,
+                metadata={
+                    "status": instance.status.value,
+                    "worker_id": worker_id,
+                    "retry_count": int(instance.retry_count),
+                },
+            )
+        except Exception as exc:
+            logger.debug(
+                "[durable_workflow] Episode start skipped for %s: %s",
+                instance.instance_id,
+                exc,
+            )
+
+    def _record_durable_episode_final(
+        self,
+        *,
+        instance: WorkflowInstance,
+        completed: bool,
+        terminal_stage: str | None,
+        termination_code: str | None,
+        termination_detail: str | None,
+        final_state: str | None = None,
+    ) -> None:
+        try:
+            stable_key = self._build_durable_episode_stable_key(
+                workflow_id=instance.workflow_id,
+                instance_id=instance.instance_id,
+                retry_count=instance.retry_count,
+            )
+            finalise_workflow_use_episode(
+                workflow_id=instance.workflow_id,
+                stable_key=stable_key,
+                completed=completed,
+                terminal_stage=terminal_stage,
+                final_state=final_state,
+                termination_code=termination_code,
+                termination_detail=termination_detail,
+                metadata={
+                    "instance_id": instance.instance_id,
+                    "namespace": instance.namespace,
+                    "retry_count": int(instance.retry_count),
+                    "status": instance.status.value,
+                },
+            )
+        except Exception as exc:
+            logger.debug(
+                "[durable_workflow] Episode finalise skipped for %s: %s",
+                instance.instance_id,
+                exc,
+            )
 
     # -------------------------------------------------------------------------
     # Instance CRUD
@@ -460,6 +551,7 @@ class WorkflowInstanceManager:
                 worker_id,
                 instance.instance_id,
             )
+            self._record_durable_episode_start(instance=instance, worker_id=worker_id)
             self._broadcast_instance(instance)
             return instance
         return None
@@ -610,6 +702,7 @@ class WorkflowInstanceManager:
         coll = self._get_instances_collection()
         if coll is None:
             return False
+        instance_before = self.get_instance(instance_id)
 
         now = datetime.now(timezone.utc)
         update: dict[str, Any] = {
@@ -630,6 +723,15 @@ class WorkflowInstanceManager:
         result = coll.update_one({"instance_id": instance_id}, update)
         if result.modified_count > 0:
             logger.info("[durable_workflow] Instance %s completed", instance_id)
+            if instance_before is not None:
+                self._record_durable_episode_final(
+                    instance=instance_before,
+                    completed=True,
+                    terminal_stage=final_state or "completed",
+                    termination_code="completed",
+                    termination_detail=None,
+                    final_state=final_state or instance_before.current_state,
+                )
             self._broadcast_instance_status(instance_id)
         return result.modified_count > 0
 
@@ -655,6 +757,7 @@ class WorkflowInstanceManager:
         coll = self._get_instances_collection()
         if coll is None:
             return False
+        instance_before = self.get_instance(instance_id)
 
         now = datetime.now(timezone.utc)
         update: dict[str, Any] = {
@@ -678,6 +781,20 @@ class WorkflowInstanceManager:
             logger.warning(
                 "[durable_workflow] Instance %s failed: %s", instance_id, error
             )
+            if instance_before is not None:
+                reason_code = (
+                    error.split(":", 1)[0].strip().lower()
+                    if isinstance(error, str) and ":" in error
+                    else "failed"
+                )
+                self._record_durable_episode_final(
+                    instance=instance_before,
+                    completed=False,
+                    terminal_stage=error_step or instance_before.current_state or "failed",
+                    termination_code=reason_code or "failed",
+                    termination_detail=error,
+                    final_state=instance_before.current_state,
+                )
             self._broadcast_instance_status(instance_id)
         return result.modified_count > 0
 
@@ -693,6 +810,7 @@ class WorkflowInstanceManager:
         coll = self._get_instances_collection()
         if coll is None:
             return False
+        instance_before = self.get_instance(instance_id)
 
         now = datetime.now(timezone.utc)
         result = coll.update_one(
@@ -719,6 +837,15 @@ class WorkflowInstanceManager:
         )
         if result.modified_count > 0:
             logger.info("[durable_workflow] Instance %s cancelled", instance_id)
+            if instance_before is not None:
+                self._record_durable_episode_final(
+                    instance=instance_before,
+                    completed=False,
+                    terminal_stage=instance_before.current_state or "cancelled",
+                    termination_code="cancelled",
+                    termination_detail="Workflow instance cancelled",
+                    final_state=instance_before.current_state,
+                )
             self._broadcast_instance_status(instance_id)
         return result.modified_count > 0
 

@@ -5879,6 +5879,15 @@ def _jira_get_issue_input_schema() -> Schema:
     )
 
 
+def _jira_get_transitions_input_schema() -> Schema:
+    return Schema(
+        required={"issue_key": str},
+        optional={},
+        allow_unknown=True,
+        description="jira_get_transitions input: issue_key (str, required)",
+    )
+
+
 def _jira_add_comment_input_schema() -> Schema:
     return Schema(
         required={"issue_key": str, "comment": str},
@@ -7105,6 +7114,34 @@ def _jira_get_issue(**kwargs):
         )
 
 
+def _jira_get_transitions(**kwargs):
+    import asyncio
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    issue_key = kwargs.get("issue_key")
+    if not issue_key:
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: issue_key",
+            details={"missing": ["issue_key"]},
+            suggestions=["Provide a Jira issue key (e.g., PROJ-123)"],
+        )
+
+    async def _async_get_transitions():
+        proxy = await get_jira_proxy()
+        return await proxy.get_transitions(issue_key=issue_key)
+
+    try:
+        return _run_async_compat(_async_get_transitions)
+    except JiraProxyError as exc:
+        return make_error_response(
+            "jira_proxy_error",
+            str(exc),
+            details={"exception_type": "JiraProxyError"},
+            suggestions=["Check Jira connectivity and authentication"],
+        )
+
+
 def _jira_add_comment(**kwargs):
     import asyncio
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
@@ -7138,7 +7175,7 @@ def _jira_transition_issue(**kwargs):
         return make_error_response(
             "MISSING_PARAMS",
             "Missing required parameters: issue_key and transition_id",
-            suggestions=["Use jira_get_issue first to find available transition IDs"],
+            suggestions=["Use jira_get_transitions first to find available IDs"],
         )
 
     async def _async_transition():
@@ -8298,6 +8335,7 @@ def build_default_catalogue() -> MethodCatalogue:
     concept_search_output_schema = _concept_search_output_schema()
     jira_search_output_schema = _jira_generic_output_schema("search")
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
+    jira_get_transitions_output_schema = _jira_generic_output_schema("get_transitions")
     jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
     jira_transition_output_schema = _jira_generic_output_schema("transition")
     jira_create_issue_output_schema = _jira_generic_output_schema("create_issue")
@@ -8994,7 +9032,16 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=jira_get_issue_output_schema,
             category="read",
             timeout_sec=15.0,
-            description="Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). Use when you need fields or transitions for a specific issue.",
+            description="Fetch full details for a Jira issue by key (e.g., JVNAUTOSCI-123). Use when you need issue fields, summary, status, or metadata.",
+        ),
+        MethodDefinition(
+            name="jira_get_transitions",
+            handler=_jira_get_transitions,
+            input_schema=_jira_get_transitions_input_schema(),
+            output_schema=jira_get_transitions_output_schema,
+            category="read",
+            timeout_sec=15.0,
+            description="List available transitions for a Jira issue key and return transition IDs required by jira_transition.",
         ),
         MethodDefinition(
             name="jira_add_comment",

@@ -1235,6 +1235,22 @@
             }
         },
         {
+            "name": "jira_get_transitions",
+            "description": "List available transitions for a Jira issue and return transition IDs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key (required)"
+                    }
+                },
+                "required": [
+                    "issue_key"
+                ]
+            }
+        },
+        {
             "name": "jira_add_comment",
             "description": "Add a comment to a Jira issue.",
             "inputSchema": {

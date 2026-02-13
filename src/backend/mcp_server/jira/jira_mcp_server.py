@@ -115,6 +115,20 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="jira_get_transitions",
+            description="List available transitions for a Jira issue",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key (e.g., 'JVNAUTOSCI-123')",
+                    }
+                },
+                "required": ["issue_key"],
+            },
+        ),
+        Tool(
             name="jira_add_comment",
             description="Add a comment to a Jira issue",
             inputSchema={
@@ -170,6 +184,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         elif name == "jira_get_issue":
             issue_key = arguments.get("issue_key", "")
             result = jira_get(f"issue/{issue_key}")
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(result, indent=2),
+                )
+            ]
+
+        elif name == "jira_get_transitions":
+            issue_key = arguments.get("issue_key", "")
+            result = jira_get(f"issue/{issue_key}/transitions")
             return [
                 TextContent(
                     type="text",

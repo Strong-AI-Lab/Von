@@ -104,6 +104,7 @@ from src.backend.integrations.internal_mcp.catalogue import _jira_add_comment
 from src.backend.integrations.internal_mcp.catalogue import _jira_create_issue
 from src.backend.integrations.internal_mcp.catalogue import _jira_get_auth_config
 from src.backend.integrations.internal_mcp.catalogue import _jira_get_issue
+from src.backend.integrations.internal_mcp.catalogue import _jira_get_transitions
 from src.backend.integrations.internal_mcp.catalogue import _jira_get_myself
 from src.backend.integrations.internal_mcp.catalogue import _jira_link_issue
 from src.backend.integrations.internal_mcp.catalogue import _jira_search
@@ -1466,6 +1467,20 @@ async def list_tools() -> list[Tool]:
                         "items": {"type": "string"},
                         "description": "Optional list of field names to return",
                     },
+                },
+                "required": ["issue_key"],
+            },
+        ),
+        Tool(
+            name="jira_get_transitions",
+            description="List available transitions for a Jira issue and return transition IDs.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key (required)",
+                    }
                 },
                 "required": ["issue_key"],
             },
@@ -4048,6 +4063,15 @@ async def _handle_jira_get_issue(arguments: dict[str, Any]) -> list[TextContent]
     )
 
 
+async def _handle_jira_get_transitions(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_get_transitions,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
 async def _handle_jira_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _jira_add_comment,
@@ -4402,6 +4426,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "search_knowledge_base": _handle_search_knowledge_base,
     "jira_search": _handle_jira_search,
     "jira_get_issue": _handle_jira_get_issue,
+    "jira_get_transitions": _handle_jira_get_transitions,
     "jira_add_comment": _handle_jira_add_comment,
     "jira_transition": _handle_jira_transition,
     "jira_create_issue": _handle_jira_create_issue,

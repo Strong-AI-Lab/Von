@@ -118,6 +118,14 @@ const workflowDefinitionsState = {
     items: [],
     lastFetchedAt: 0
 };
+const workflowEpisodesState = {
+    open: false,
+    workflowId: '',
+    workflowName: '',
+    loading: false,
+    error: '',
+    items: []
+};
 
 // Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
 // Stored locally only; intended to feed future introspection.
@@ -8069,6 +8077,115 @@ function getWorkflowStatusElements() {
     };
 }
 
+function getWorkflowEpisodesElements() {
+    return {
+        popup: document.getElementById('workflowEpisodesPopup'),
+        title: document.getElementById('workflowEpisodesTitle'),
+        status: document.getElementById('workflowEpisodesStatus'),
+        list: document.getElementById('workflowEpisodesList'),
+        closeButton: document.getElementById('closeWorkflowEpisodes')
+    };
+}
+
+function setWorkflowEpisodesPopupVisible(visible) {
+    const { popup } = getWorkflowEpisodesElements();
+    if (!popup) return;
+    workflowEpisodesState.open = Boolean(visible);
+    popup.classList.toggle('hidden', !workflowEpisodesState.open);
+    popup.setAttribute('aria-hidden', workflowEpisodesState.open ? 'false' : 'true');
+}
+
+function formatWorkflowEpisodeTimestamp(value) {
+    if (!value) return 'Unknown time';
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return String(value);
+    return dt.toLocaleString();
+}
+
+function renderWorkflowEpisodesPopup() {
+    const { title, status, list } = getWorkflowEpisodesElements();
+    if (!title || !status || !list) return;
+
+    const workflowLabel = workflowEpisodesState.workflowName || workflowEpisodesState.workflowId || 'Workflow';
+    title.textContent = `${workflowLabel} episodes`;
+
+    if (workflowEpisodesState.loading) {
+        status.textContent = 'Loading episodes...';
+        list.innerHTML = '';
+        return;
+    }
+
+    if (workflowEpisodesState.error) {
+        status.textContent = workflowEpisodesState.error;
+        list.innerHTML = '';
+        return;
+    }
+
+    if (!workflowEpisodesState.items.length) {
+        status.textContent = 'No episodes found for this workflow.';
+        list.innerHTML = '';
+        return;
+    }
+
+    status.textContent = `${workflowEpisodesState.items.length} episodes`;
+    list.innerHTML = workflowEpisodesState.items.map((item) => {
+        const statusLabel = item?.completed ? 'completed' : (item?.status || 'terminated');
+        const stageLabel = item?.terminal_stage || item?.final_state || 'unknown';
+        const reason = item?.termination_reason || {};
+        const reasonCode = reason?.code || (item?.completed ? 'completed' : 'terminated');
+        const reasonDetail = reason?.detail || '';
+        const timestampLabel = formatWorkflowEpisodeTimestamp(item?.attempt_started_at || item?.updated_at);
+        const turnLabel = item?.turn_id || '—';
+        const episodeId = item?.episode_id || '—';
+        return `
+            <div class="workflow-episode-item" role="listitem">
+              <div class="workflow-episode-header">
+                <span class="workflow-status-badge status-${escapeHtml(statusLabel)}">${escapeHtml(formatWorkflowStatusLabel(statusLabel))}</span>
+                <span class="workflow-episode-time">${escapeHtml(timestampLabel)}</span>
+              </div>
+              <div class="workflow-episode-meta">Stage: ${escapeHtml(stageLabel)} · Reason: ${escapeHtml(reasonCode)}</div>
+              ${reasonDetail ? `<div class="workflow-episode-detail">${escapeHtml(reasonDetail)}</div>` : ''}
+              <div class="workflow-episode-meta">Turn: ${escapeHtml(turnLabel)} · Episode: ${escapeHtml(episodeId)}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function openWorkflowEpisodesPopup(workflowId, workflowName) {
+    if (!workflowId) return;
+    workflowEpisodesState.workflowId = String(workflowId).trim();
+    workflowEpisodesState.workflowName = workflowName || formatWorkflowName(workflowId);
+    workflowEpisodesState.loading = true;
+    workflowEpisodesState.error = '';
+    workflowEpisodesState.items = [];
+    setWorkflowEpisodesPopupVisible(true);
+    renderWorkflowEpisodesPopup();
+
+    const params = buildWorkflowStatusQuery();
+    params.set('workflow_id', workflowEpisodesState.workflowId);
+    params.set('limit', '60');
+
+    try {
+        const resp = await fetch(
+            `/api/workflows/episodes?${params.toString()}`,
+            { method: 'GET', headers: buildChatFetchHeaders() }
+        );
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        const payload = await resp.json();
+        workflowEpisodesState.items = Array.isArray(payload?.items) ? payload.items : [];
+        workflowEpisodesState.error = '';
+    } catch (err) {
+        workflowEpisodesState.items = [];
+        workflowEpisodesState.error = 'Could not load workflow episodes';
+        console.warn('[workflowStatus] Episode fetch failed', err);
+    } finally {
+        workflowEpisodesState.loading = false;
+        renderWorkflowEpisodesPopup();
+    }
+}
+
 function updateWorkflowStatusActionButtons() {
     const { toggleAvailableButton } = getWorkflowStatusElements();
     if (!toggleAvailableButton) return;
@@ -8237,6 +8354,14 @@ function renderWorkflowDefinitionsList(items) {
         const description = escapeHtml(item.description || 'No description available.');
         const initialState = escapeHtml(item.initial_state || '—');
         const source = escapeHtml(formatWorkflowStatusLabel(item.source || 'unknown'));
+        const attempts = Number.isFinite(Number(item?.attempts)) ? Number(item.attempts) : 0;
+        const completions = Number.isFinite(Number(item?.completions)) ? Number(item.completions) : 0;
+        const completionRateRaw = Number(item?.completion_rate);
+        const completionRate = Number.isFinite(completionRateRaw)
+            ? `${Math.round(Math.max(0, Math.min(1, completionRateRaw)) * 100)}%`
+            : '—';
+        const usageMeta = `Attempts: ${attempts} · Completions: ${completions} · Completion: ${completionRate}`;
+        const episodesButton = `<button type="button" class="btn-mini workflow-status-episodes-btn" data-workflow-id="${escapeHtml(workflowIdRaw)}" data-workflow-name="${escapeHtml(workflowNameText)}">Episodes</button>`;
         return `
             <div class="workflow-status-item status-available">
               <div class="workflow-status-item-header">
@@ -8247,6 +8372,8 @@ function renderWorkflowDefinitionsList(items) {
               <div class="workflow-status-definition-meta">
                 ID: ${workflowId} · Initial state: ${initialState} · Source: ${source}
               </div>
+              <div class="workflow-status-definition-meta">${escapeHtml(usageMeta)}</div>
+              <div class="workflow-status-definition-actions">${episodesButton}</div>
             </div>
         `;
     }).join('');
@@ -8263,6 +8390,16 @@ function bindWorkflowStatusConceptLinks() {
     body.addEventListener('click', (event) => {
         const target = event.target;
         if (!target || !(target instanceof HTMLElement)) {
+            return;
+        }
+        const episodesButton = target.closest('.workflow-status-episodes-btn');
+        if (episodesButton) {
+            event.preventDefault();
+            const workflowId = episodesButton.dataset.workflowId;
+            const workflowName = episodesButton.dataset.workflowName || '';
+            if (workflowId) {
+                void openWorkflowEpisodesPopup(workflowId, workflowName);
+            }
             return;
         }
         const button = target.closest('.workflow-status-concept-link');
@@ -8443,8 +8580,16 @@ function startWorkflowStatusStream() {
 function initializeWorkflowStatusPanel() {
     const { panel, refreshButton, toggleAvailableButton } = getWorkflowStatusElements();
     if (!panel) return;
+    const { closeButton: closeEpisodesButton } = getWorkflowEpisodesElements();
 
     updateWorkflowStatusActionButtons();
+
+    if (closeEpisodesButton && closeEpisodesButton.dataset.bound !== 'true') {
+        closeEpisodesButton.addEventListener('click', () => {
+            setWorkflowEpisodesPopupVisible(false);
+        });
+        closeEpisodesButton.dataset.bound = 'true';
+    }
 
     if (refreshButton) {
         refreshButton.addEventListener('click', () => {

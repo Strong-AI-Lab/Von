@@ -3886,6 +3886,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                                 preferred_language=request_language,
                                 progress_tracker=progress_tracker,
                                 conversation_session_id=bg_session_id,
+                                turn_id=request_id,
                                 workflow_discovery_result=workflow_discovery_result,
                             )
 
@@ -3982,6 +3983,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     preferred_language=request_language,
                     progress_tracker=progress_tracker,
                     conversation_session_id=session_id,
+                    turn_id=request_id,
                     workflow_discovery_result=workflow_discovery_result,
                 )
                 llm_interaction["duration_ms"] = (
@@ -5075,6 +5077,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     raw_tool_progress_snapshot
                 )
 
+        workflow_use_episodes = [
+            entry
+            for entry in auxiliary_llm_calls
+            if isinstance(entry, dict)
+            and str(entry.get("type", "")).strip() == "workflow_use_episode"
+        ]
+
         llm_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
             "request_id": request_id,
@@ -5133,6 +5142,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 else []
             ),
             "aux_llm_calls": auxiliary_llm_calls,
+            "workflow_use_episodes": workflow_use_episodes,
             "buttonify": buttonify_meta,
             # JVNAUTOSCI-1076: Workflow discovery results for Thinking context
             "workflow_discovery": workflow_discovery_result,

@@ -82,6 +82,9 @@ class JiraMCPProxy:
             arguments["fields"] = fields
         return await self._call("jira_get_issue", arguments)
 
+    async def get_transitions(self, *, issue_key: str) -> Dict[str, Any]:
+        return await self._call("jira_get_transitions", {"issue_key": issue_key})
+
     async def add_comment(self, *, issue_key: str, comment: str) -> Dict[str, Any]:
         return await self._call(
             "jira_add_comment", {"issue_key": issue_key, "comment": comment}

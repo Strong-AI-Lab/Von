@@ -8,6 +8,10 @@ from flask import Blueprint, jsonify, request
 
 from ...db.repositories.concepts_repository import ConceptsRepository
 from ...services.text_value_service import get_texts_for_concept
+from ...services.workflow_episode_service import (
+    get_workflow_usage_aggregates_for_workflows,
+    list_workflow_use_episodes,
+)
 from ...workflows.trace_store import (
     get_workflow_execution_trace,
     list_recent_workflow_execution_traces,
@@ -87,6 +91,7 @@ def api_list_workflow_definitions():
         registry = build_durable_workflow_registry_read_only()
         workflow_ids = sorted(list(registry.all_workflow_ids()))
         selected_ids = workflow_ids[:limit]
+        usage_aggregate_map = get_workflow_usage_aggregates_for_workflows(selected_ids)
 
         items: List[Dict[str, Any]] = []
         for workflow_id in selected_ids:
@@ -118,12 +123,39 @@ def api_list_workflow_definitions():
                 if isinstance(state_value, str):
                     initial_state = state_value
 
+            usage = (
+                usage_aggregate_map.get(workflow_id, {})
+                if isinstance(usage_aggregate_map, dict)
+                else {}
+            )
+            attempts = usage.get("attempts")
+            completions = usage.get("completions")
+            completion_rate = usage.get("completion_rate")
+
             items.append(
                 {
                     "workflow_id": workflow_id,
                     "description": description,
                     "initial_state": initial_state,
                     "source": source,
+                    "attempts": (
+                        int(attempts) if isinstance(attempts, (int, float)) else 0
+                    ),
+                    "completions": (
+                        int(completions)
+                        if isinstance(completions, (int, float))
+                        else 0
+                    ),
+                    "completion_rate": (
+                        float(completion_rate)
+                        if isinstance(completion_rate, (int, float))
+                        else None
+                    ),
+                    "last_episode_at": (
+                        str(usage.get("last_episode_at"))
+                        if usage.get("last_episode_at") is not None
+                        else None
+                    ),
                 }
             )
 
@@ -165,6 +197,41 @@ def api_list_recent_workflow_executions():
         limit=limit, namespace=namespace or None
     )
     return jsonify({"items": docs, "count": len(docs)})
+
+
+@workflows_bp.get("/api/workflows/episodes")
+def api_list_workflow_use_episodes():
+    """List workflow-use episodes for monitor drill-down diagnostics."""
+
+    workflow_id = request.args.get("workflow_id")
+    namespace = request.args.get("namespace")
+    session_id = request.args.get("session_id")
+    turn_id = request.args.get("turn_id")
+    try:
+        limit = int(request.args.get("limit", "50"))
+    except Exception:
+        limit = 50
+    limit = max(1, min(limit, 200))
+
+    items = list_workflow_use_episodes(
+        workflow_id=workflow_id or None,
+        namespace=namespace or None,
+        session_id=session_id or None,
+        turn_id=turn_id or None,
+        limit=limit,
+    )
+    return jsonify(
+        {
+            "items": items,
+            "count": len(items),
+            "filters": {
+                "workflow_id": workflow_id or None,
+                "namespace": namespace or None,
+                "session_id": session_id or None,
+                "turn_id": turn_id or None,
+            },
+        }
+    )
 
 
 # =============================================================================

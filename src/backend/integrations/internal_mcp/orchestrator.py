@@ -1533,12 +1533,32 @@ class InternalMCPChatOrchestrator:
                 data.get("gmail_profile") or environment.default_gmail_profile
             ),
         )
-        workflow_result = self._workflow_executor.run(
-            workflow_def,
-            environment=recovery_env,
-            data=workflow_context,
-            trace=request.trace,
+        workflow_context.setdefault(
+            "conversation_session_id", data.get("conversation_session_id")
         )
+        workflow_context.setdefault("turn_id", data.get("turn_id"))
+        workflow_context.setdefault("workflow_episode_source", "chat_turn_workflow")
+        workflow_context.setdefault("workflow_episode_stage", "missing_tool_recovery")
+
+        workflow_result = self.execute_workflow(
+            MISSING_TOOL_CALL_WORKFLOW_ID,
+            data=workflow_context,
+            llm_client=environment.llm_client,
+            model=recovery_model,
+            user_namespace=environment.user_namespace,
+            auxiliary_system_prompt=environment.auxiliary_system_prompt,
+            trace=request.trace,
+            environment=recovery_env,
+            conversation_session_id=(
+                data.get("conversation_session_id")
+                if isinstance(data.get("conversation_session_id"), str)
+                else None
+            ),
+            turn_id=data.get("turn_id") if isinstance(data.get("turn_id"), str) else None,
+            episode_source="chat_turn_workflow",
+        )
+        if workflow_result is None:
+            return None
         return workflow_result.data
 
     def _action_narration_classify(self, request: Any) -> WorkflowActionResult:
@@ -2724,6 +2744,9 @@ class InternalMCPChatOrchestrator:
                         user_namespace=env.user_namespace,
                         auxiliary_system_prompt=env.auxiliary_system_prompt,
                         trace=request.trace,
+                        conversation_session_id=conversation_session_id,
+                        turn_id=data.get("turn_id"),
+                        aux_llm_calls=data.get("aux_llm_calls"),
                     )
                 )
 
@@ -8920,6 +8943,9 @@ class InternalMCPChatOrchestrator:
         user_namespace: str | None,
         auxiliary_system_prompt: str | None,
         trace: Any | None,
+        conversation_session_id: str | None = None,
+        turn_id: str | None = None,
+        aux_llm_calls: list[Mapping[str, Any]] | None = None,
     ) -> tuple[set[str], str]:
         workflow_result = self.execute_workflow(
             WRITE_TOOL_POLICY_WORKFLOW_ID,
@@ -8927,12 +8953,20 @@ class InternalMCPChatOrchestrator:
                 "prompt": prompt,
                 "requested_write_tools": list(requested_write_tools),
                 "recent_user_prompts": list(recent_user_prompts or []),
+                "conversation_session_id": conversation_session_id,
+                "turn_id": turn_id,
+                "aux_llm_calls": aux_llm_calls or [],
+                "workflow_episode_source": "chat_turn_workflow",
+                "workflow_episode_stage": "write_policy",
             },
             llm_client=llm_client,
             model=model,
             user_namespace=user_namespace,
             auxiliary_system_prompt=auxiliary_system_prompt,
             trace=trace,
+            conversation_session_id=conversation_session_id,
+            turn_id=turn_id,
+            episode_source="chat_turn_workflow",
         )
         if workflow_result is None:
             return set(), "workflow_unavailable"
@@ -8955,11 +8989,179 @@ class InternalMCPChatOrchestrator:
         user_namespace: Optional[str] = None,
         auxiliary_system_prompt: str | None = None,
         trace: Any | None = None,
+        environment: WorkflowEnvironment | None = None,
+        conversation_session_id: str | None = None,
+        turn_id: str | None = None,
+        episode_source: str | None = None,
     ):
+        if not isinstance(data, dict):
+            data = dict(data) if isinstance(data, Mapping) else {}
+
+        resolved_session_id = (
+            conversation_session_id
+            or data.get("conversation_session_id")
+            or data.get("session_id")
+        )
+        resolved_turn_id = turn_id or data.get("turn_id")
+        resolved_source = (
+            episode_source
+            or data.get("workflow_episode_source")
+            or data.get("workflow_source")
+            or "workflow_execution"
+        )
+        resolved_stage = data.get("workflow_episode_stage")
+
+        episode_id: str | None = None
+        stable_key: str | None = None
+        start_episode_fn = None
+        finalise_episode_fn = None
+        build_episode_key_fn = None
+        try:
+            from ...services.workflow_episode_service import (
+                build_workflow_episode_stable_key,
+                finalise_workflow_use_episode,
+                start_workflow_use_episode,
+            )
+
+            start_episode_fn = start_workflow_use_episode
+            finalise_episode_fn = finalise_workflow_use_episode
+            build_episode_key_fn = build_workflow_episode_stable_key
+        except Exception:
+            start_episode_fn = None
+            finalise_episode_fn = None
+            build_episode_key_fn = None
+
+        def _normalise_error_code(error_value: Any) -> str:
+            if not isinstance(error_value, str) or not error_value.strip():
+                return "terminated"
+            cleaned_error = error_value.strip()
+            if ":" in cleaned_error:
+                return cleaned_error.split(":", 1)[0].strip().lower() or "terminated"
+            return "terminated"
+
+        def _record_episode_telemetry(
+            *,
+            completed: bool,
+            terminal_stage: str | None,
+            final_state: str | None,
+            termination_code: str | None,
+            termination_detail: str | None,
+        ) -> None:
+            aux_log = data.get("aux_llm_calls")
+            if not isinstance(aux_log, list):
+                return
+            aux_log.append(
+                {
+                    "type": "workflow_use_episode",
+                    "episode_id": episode_id,
+                    "workflow_id": workflow_id,
+                    "source": str(resolved_source),
+                    "session_id": (
+                        str(resolved_session_id).strip()
+                        if isinstance(resolved_session_id, str)
+                        and resolved_session_id.strip()
+                        else None
+                    ),
+                    "turn_id": (
+                        str(resolved_turn_id).strip()
+                        if isinstance(resolved_turn_id, str) and resolved_turn_id.strip()
+                        else None
+                    ),
+                    "completed": bool(completed),
+                    "terminal_stage": terminal_stage,
+                    "final_state": final_state,
+                    "termination_reason": {
+                        "code": termination_code,
+                        "detail": termination_detail,
+                    },
+                }
+            )
+
+        if (
+            callable(start_episode_fn)
+            and callable(build_episode_key_fn)
+            and isinstance(workflow_id, str)
+            and workflow_id.strip()
+        ):
+            try:
+                stable_key = build_episode_key_fn(
+                    workflow_id=workflow_id,
+                    source=str(resolved_source),
+                    turn_id=(
+                        str(resolved_turn_id).strip()
+                        if isinstance(resolved_turn_id, str)
+                        and resolved_turn_id.strip()
+                        else None
+                    ),
+                    session_id=(
+                        str(resolved_session_id).strip()
+                        if isinstance(resolved_session_id, str)
+                        and resolved_session_id.strip()
+                        else None
+                    ),
+                    stage=(
+                        str(resolved_stage).strip()
+                        if isinstance(resolved_stage, str) and resolved_stage.strip()
+                        else None
+                    ),
+                )
+                start_payload = start_episode_fn(
+                    workflow_id=workflow_id,
+                    source=str(resolved_source),
+                    namespace=user_namespace,
+                    session_id=(
+                        str(resolved_session_id).strip()
+                        if isinstance(resolved_session_id, str)
+                        and resolved_session_id.strip()
+                        else None
+                    ),
+                    turn_id=(
+                        str(resolved_turn_id).strip()
+                        if isinstance(resolved_turn_id, str) and resolved_turn_id.strip()
+                        else None
+                    ),
+                    stable_key=stable_key,
+                    metadata={
+                        "stage": resolved_stage,
+                        "path": "orchestrator.execute_workflow",
+                    },
+                )
+                if isinstance(start_payload, Mapping):
+                    payload_episode_id = start_payload.get("episode_id")
+                    if isinstance(payload_episode_id, str) and payload_episode_id:
+                        episode_id = payload_episode_id
+            except Exception:
+                episode_id = None
+
         workflow_def = self._workflow_registry.get(workflow_id)
         if workflow_def is None:
+            if callable(finalise_episode_fn):
+                try:
+                    finalise_episode_fn(
+                        workflow_id=workflow_id,
+                        episode_id=episode_id,
+                        stable_key=stable_key,
+                        completed=False,
+                        terminal_stage="workflow_lookup",
+                        final_state=None,
+                        termination_code="workflow_not_registered",
+                        termination_detail="workflow_definition_not_found",
+                        metadata={
+                            "path": "orchestrator.execute_workflow",
+                        },
+                    )
+                except Exception:
+                    pass
+            _record_episode_telemetry(
+                completed=False,
+                terminal_stage="workflow_lookup",
+                final_state=None,
+                termination_code="workflow_not_registered",
+                termination_detail="workflow_definition_not_found",
+            )
             return None
-        env = WorkflowEnvironment(
+
+        env = environment or WorkflowEnvironment(
             llm_client=llm_client,
             gateway=self._gateway,
             model=model,
@@ -8968,12 +9170,76 @@ class InternalMCPChatOrchestrator:
             max_tool_invocations=self._max_tool_invocations,
             default_gmail_profile=self._default_gmail_profile,
         )
-        return self._workflow_executor.run(
-            workflow_def,
-            environment=env,
-            data=data,
-            trace=trace,
-        )
+        try:
+            result = self._workflow_executor.run(
+                workflow_def,
+                environment=env,
+                data=data,
+                trace=trace,
+            )
+            completed = bool(getattr(result, "completed", False))
+            final_state = (
+                str(result.final_state)
+                if isinstance(getattr(result, "final_state", None), str)
+                else None
+            )
+            error_value = result.error if isinstance(result.error, str) else None
+            termination_code = "completed" if completed else _normalise_error_code(
+                error_value
+            )
+            termination_detail = None if completed else error_value
+            terminal_stage = final_state or ("completed" if completed else "terminated")
+            if callable(finalise_episode_fn):
+                try:
+                    finalise_episode_fn(
+                        workflow_id=workflow_id,
+                        episode_id=episode_id,
+                        stable_key=stable_key,
+                        completed=completed,
+                        terminal_stage=terminal_stage,
+                        final_state=final_state,
+                        termination_code=termination_code,
+                        termination_detail=termination_detail,
+                        metadata={
+                            "path": "orchestrator.execute_workflow",
+                        },
+                    )
+                except Exception:
+                    pass
+            _record_episode_telemetry(
+                completed=completed,
+                terminal_stage=terminal_stage,
+                final_state=final_state,
+                termination_code=termination_code,
+                termination_detail=termination_detail,
+            )
+            return result
+        except Exception as exc:
+            if callable(finalise_episode_fn):
+                try:
+                    finalise_episode_fn(
+                        workflow_id=workflow_id,
+                        episode_id=episode_id,
+                        stable_key=stable_key,
+                        completed=False,
+                        terminal_stage="workflow_exception",
+                        final_state=None,
+                        termination_code="exception",
+                        termination_detail=str(exc),
+                        metadata={
+                            "path": "orchestrator.execute_workflow",
+                        },
+                    )
+                except Exception:
+                    pass
+            _record_episode_telemetry(
+                completed=False,
+                terminal_stage="workflow_exception",
+                final_state=None,
+                termination_code="exception",
+                termination_detail=str(exc),
+            )
+            raise
 
     def _get_auto_proceed_minimal_imposition_enabled(self) -> bool:
         """Return whether minimal-imposition auto-proceed is enabled.
@@ -9156,6 +9422,7 @@ class InternalMCPChatOrchestrator:
         preferred_language: str | None = None,
         progress_tracker: ProgressTracker | None = None,
         conversation_session_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
         workflow_discovery_result: Mapping[str, Any] | None = None,
     ) -> OrchestratorResult:
         aux_llm_calls: List[Mapping[str, Any]] = []
@@ -9807,6 +10074,10 @@ class InternalMCPChatOrchestrator:
                     "org_concept_id": org_concept_id,
                     "aux_llm_calls": aux_llm_calls,
                     "record_llm_call": _record_llm_call,
+                    "conversation_session_id": conversation_session_id,
+                    "turn_id": turn_id,
+                    "workflow_episode_source": "chat_turn_workflow",
+                    "workflow_episode_stage": "narration",
                 }
 
                 narration_result = self.execute_workflow(
@@ -9817,6 +10088,9 @@ class InternalMCPChatOrchestrator:
                     user_namespace=user_namespace,
                     auxiliary_system_prompt=auxiliary_system_prompt,
                     trace=None,
+                    conversation_session_id=conversation_session_id,
+                    turn_id=turn_id,
+                    episode_source="chat_turn_workflow",
                 )
 
                 channels_obj = (
@@ -9944,12 +10218,19 @@ class InternalMCPChatOrchestrator:
                         "aux_llm_calls": aux_llm_calls,
                         "policy_state": policy_state,
                         "registry_snapshot": registry_snapshot,
+                        "conversation_session_id": conversation_session_id,
+                        "turn_id": turn_id,
+                        "workflow_episode_source": "chat_turn_workflow",
+                        "workflow_episode_stage": "workflow_dispatch",
                     },
                     llm_client=llm_client,
                     model=model,
                     user_namespace=user_namespace,
                     auxiliary_system_prompt=auxiliary_system_prompt,
                     trace=trace if trace_enabled else None,
+                    conversation_session_id=conversation_session_id,
+                    turn_id=turn_id,
+                    episode_source="chat_turn_workflow",
                 )
                 if wf_result is not None:
                     # Build an OrchestratorResult from the workflow output.
@@ -10058,11 +10339,14 @@ class InternalMCPChatOrchestrator:
             "user_concept_id": user_concept_id,
             "org_concept_id": org_concept_id,
             "conversation_session_id": conversation_session_id,
+            "turn_id": turn_id,
             "recent_user_prompts": recent_user_prompts,
             "gmail_profile": gmail_profile or self._default_gmail_profile,
             "auto_proceed_minimal_imposition_enabled": bool(
                 auto_proceed_minimal_imposition_enabled
             ),
+            "workflow_episode_source": "chat_turn_workflow",
+            "workflow_episode_stage": "tool_calling",
             # Closures from run().
             "model_for_stage": _model_for_stage,
             "record_llm_call": _record_llm_call,
@@ -10087,12 +10371,35 @@ class InternalMCPChatOrchestrator:
             ),
         }
 
-        tc_result = self._workflow_executor.run(
-            tool_calling_def,
-            environment=tc_env,
+        tc_result = self.execute_workflow(
+            TOOL_CALLING_WORKFLOW_ID,
             data=tc_data,
+            llm_client=llm_client,
+            model=model,
+            user_namespace=user_namespace,
+            auxiliary_system_prompt=auxiliary_system_prompt,
             trace=trace if trace_enabled else None,
+            environment=tc_env,
+            conversation_session_id=conversation_session_id,
+            turn_id=turn_id,
+            episode_source="chat_turn_workflow",
         )
+        if tc_result is None:
+            result = OrchestratorResult(
+                response_text=(
+                    "I attempted to use tools but the tool-calling workflow is not "
+                    "available. Please try again or report this issue."
+                ),
+                extra_messages=(),
+                tool_invocations=(),
+                aux_llm_calls=tuple(aux_llm_calls),
+                llm_calls=tuple(llm_calls),
+                llm_usage=_aggregate_usage_total(),
+                orchestrator_duration_ms=_orchestrator_duration_ms(),
+                workflow_routing=routing_info,
+            )
+            _persist_trace(status="completed")
+            return result
 
         # Unpack the workflow result.
         if tc_result.data.get("orchestrator_result") is not None:

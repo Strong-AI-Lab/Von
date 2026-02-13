@@ -187,6 +187,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "jira",
         "display_template": "Issue: {key}",
     },
+    "jira_get_transitions": {
+        "salience": "medium",
+        "category": "jira",
+        "display_template": "Transitions: {key}",
+    },
     "gmail_list_messages": {
         "salience": "medium",
         "category": "gmail",

@@ -201,6 +201,7 @@ def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_cli
 
 
 def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
     import src.backend.workflows.durable.registry_factory as registry_factory
 
     class _FakeDefinition:
@@ -254,6 +255,24 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
         "build_durable_workflow_registry_read_only",
         lambda: _FakeRegistry(),
     )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_usage_aggregates_for_workflows",
+        lambda workflow_ids: {
+            "#V#alpha_workflow": {
+                "attempts": 8,
+                "completions": 6,
+                "completion_rate": 0.75,
+                "last_episode_at": "2026-02-13T10:22:00+00:00",
+            },
+            "#V#beta_workflow": {
+                "attempts": 2,
+                "completions": 1,
+                "completion_rate": 0.5,
+                "last_episode_at": "2026-02-13T11:00:00+00:00",
+            },
+        },
+    )
 
     resp = app_client.get("/api/workflows/definitions?limit=10")
     assert resp.status_code == 200
@@ -267,12 +286,78 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert items[0]["description"] == "Alpha explicit purpose"
     assert items[0]["initial_state"] == "alpha_start"
     assert items[0]["source"] == "built_in"
+    assert items[0]["attempts"] == 8
+    assert items[0]["completions"] == 6
+    assert items[0]["completion_rate"] == pytest.approx(0.75)
+    assert items[0]["last_episode_at"] == "2026-02-13T10:22:00+00:00"
 
     assert items[1]["workflow_id"] == "#V#beta_workflow"
     # Falls back to definition.purpose when registration purpose is empty.
     assert items[1]["description"] == "Beta fallback purpose"
     assert items[1]["initial_state"] == "beta_start"
     assert items[1]["source"] == "vontology"
+    assert items[1]["attempts"] == 2
+    assert items[1]["completions"] == 1
+    assert items[1]["completion_rate"] == pytest.approx(0.5)
+    assert items[1]["last_episode_at"] == "2026-02-13T11:00:00+00:00"
+
+
+def test_workflow_episodes_list_endpoint(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+
+    expected_items = [
+        {
+            "episode_id": "wfep_1",
+            "workflow_id": "#V#alpha_workflow",
+            "completed": False,
+            "terminal_stage": "tool_execution",
+            "termination_reason": {
+                "code": "tool_timeout",
+                "detail": "Tool invocation exceeded timeout",
+            },
+            "turn_id": "turn-123",
+            "attempt_started_at": "2026-02-13T12:00:00+00:00",
+        },
+        {
+            "episode_id": "wfep_2",
+            "workflow_id": "#V#alpha_workflow",
+            "completed": True,
+            "terminal_stage": "completed",
+            "termination_reason": {"code": "completed", "detail": None},
+            "turn_id": "turn-124",
+            "attempt_started_at": "2026-02-13T12:05:00+00:00",
+        },
+    ]
+
+    def _fake_list_workflow_use_episodes(**kwargs):
+        assert kwargs["workflow_id"] == "#V#alpha_workflow"
+        assert kwargs["namespace"] == "#V#user/#V#org"
+        assert kwargs["session_id"] == "session-1"
+        assert kwargs["turn_id"] == "turn-123"
+        assert kwargs["limit"] == 25
+        return expected_items
+
+    monkeypatch.setattr(
+        workflows_routes,
+        "list_workflow_use_episodes",
+        _fake_list_workflow_use_episodes,
+    )
+
+    resp = app_client.get(
+        (
+            "/api/workflows/episodes?"
+            "workflow_id=%23V%23alpha_workflow&namespace=%23V%23user/%23V%23org"
+            "&session_id=session-1&turn_id=turn-123&limit=25"
+        )
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["count"] == 2
+    assert payload["items"] == expected_items
+    assert payload["filters"]["workflow_id"] == "#V#alpha_workflow"
+    assert payload["filters"]["namespace"] == "#V#user/#V#org"
+    assert payload["filters"]["session_id"] == "session-1"
+    assert payload["filters"]["turn_id"] == "turn-123"
 
 
 def test_create_workflow_instance_route_rejects_unrunnable_workflow(

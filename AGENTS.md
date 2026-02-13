@@ -21,7 +21,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 15. Requiring a user choice is almost always dispreferred; prefer LLM reasoning to achieve reliability and only ask the user when ambiguity cannot be resolved safely.
 16. When in doubt, run tests or re-run tests without requiring user confirmation.
 17. In the case that multiple tests are failing, carefully consider the possibility that the tests are based on a design assumption that no longer holds. Tests are not definitional here, they are diagnostic, and should be changed (carefully) if they are not diagnostic for the current design. Do not allow tests to be a barrier to generality and good factoring.
-18. If you think you've finished implementing a Jira task, read the task again and check.
+18. If you think you've finished implementing a Jira task, read the task and its epic and subtask context again and check.
 19. **DRY first**: Create central helpers FIRST, then replace all usages. See "DRY refactoring discipline" in Workflow section.
 20. **Comment for evolution**: Add comments that guide future modifications. See "Self-Documenting, Evolvable Code" section.
 21. **Proactive hygiene**: Periodically review touched files and their neighbours for inconsistency, duplication, and drift. Fix proactively.
@@ -122,6 +122,7 @@ Do not "hack around" MCP failures with ad-hoc scripts or direct REST calls. Fix 
 - Tasks can have Subtasks (use `issueTypeName="Subtask"` + `parent="JVNAUTOSCI-XXX"`).
 - Tasks can set an Epic as `parent` via edit tooling (`{"parent": {"key": "JVNAUTOSCI-123"}}`).
 - If an issue is created without an assignee, fix it via the Jira edit tool rather than duplicating.
+- For full Jira Tasks (not sub-tasks), always identify the appropriate epic and attach them to it. In the very unlikely event that a suitable epic isn't available, plan what that epic would look like, and offer to create it.
 - Jira site URL: https://naoinstitute.atlassian.net/
 - If a cloudId is required, fetch it from https://naoinstitute.atlassian.net/_edge/tenant_info and include that URL when requesting it.
 

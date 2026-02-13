@@ -685,6 +685,49 @@ class TestWorkflowInstanceManager:
         assert claimed.locked_by == "worker-1"
         assert claimed.lock_expires_at is not None
 
+    def test_claim_and_terminal_updates_record_workflow_episodes(
+        self, monkeypatch
+    ) -> None:
+        """Durable lifecycle should emit one start + one final episode record."""
+        manager = WorkflowInstanceManager()
+        started: list[dict[str, Any]] = []
+        finalised: list[dict[str, Any]] = []
+
+        monkeypatch.setattr(
+            "src.backend.workflows.durable.instance_manager.start_workflow_use_episode",
+            lambda **kwargs: started.append(kwargs) or {"episode_id": "wfep_started"},
+        )
+        monkeypatch.setattr(
+            "src.backend.workflows.durable.instance_manager.finalise_workflow_use_episode",
+            lambda **kwargs: finalised.append(kwargs) or {"episode_id": "wfep_final"},
+        )
+
+        instance_id = manager.create_instance(
+            "#V#test_workflow",
+            user_id="user-1",
+            org_id="org-1",
+            namespace="user-1/org-1",
+        )
+
+        claimed = manager.find_and_claim_instance("worker-episode-test")
+        assert claimed is not None
+        assert len(started) == 1
+        assert started[0]["workflow_id"] == "#V#test_workflow"
+        assert started[0]["source"] == "durable_instance"
+        assert started[0]["instance_id"] == instance_id
+
+        success = manager.mark_failed(
+            instance_id,
+            error="tool_timeout:Workflow step timed out",
+            error_step="tool_execution",
+        )
+        assert success is True
+        assert len(finalised) == 1
+        assert finalised[0]["workflow_id"] == "#V#test_workflow"
+        assert finalised[0]["completed"] is False
+        assert finalised[0]["terminal_stage"] == "tool_execution"
+        assert finalised[0]["termination_code"] == "tool_timeout"
+
     def test_find_and_claim_returns_none_when_empty(self) -> None:
         """find_and_claim_instance() should return None when no instances available."""
         manager = WorkflowInstanceManager()
