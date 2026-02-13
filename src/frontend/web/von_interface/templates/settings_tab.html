@@ -420,6 +420,16 @@
             </div>
             <small id="buttonifyModelEnabledHelp" class="settings-note">Default: enabled. Uses a lightweight model to
                 turn explicit or implied choices into quick-reply buttons in Conversations.</small>
+            <div class="inline-form inline-form-tight mt-2">
+                <input type="checkbox" id="autoProceedMinimalImpositionToggle"
+                    aria-describedby="autoProceedMinimalImpositionHelp" />
+                <label for="autoProceedMinimalImpositionToggle" class="ml-1"
+                    title="When enabled, Von automatically continues tool execution if the assistant says it is proceeding and no user decision is requested.">
+                    Auto-proceed with minimal imposition
+                </label>
+            </div>
+            <small id="autoProceedMinimalImpositionHelp" class="settings-note">Default: enabled. Prevents “Proceeding
+                now” dead-ends by continuing automatically when no user decision is needed.</small>
             <div class="inline-form inline-form-tight mt-1">
                 <span class="settings-note"><strong>Active buttonify prompt:</strong></span>
                 <button id="buttonifyPromptLink" class="runtime-copy-button ml-2" type="button"

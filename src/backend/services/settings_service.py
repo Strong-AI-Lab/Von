@@ -35,6 +35,9 @@ FETCH_COUNTS_ON_LOAD_SETTING_NAME = "fetch_counts_on_load"
 PRELOAD_VONTOLOGY_TREE_SETTING_NAME = "preload_vontology_tree"
 DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME = "disable_remote_ollama_scan"
 BUTTONIFY_MODEL_ENABLED_SETTING_NAME = "buttonify_model_enabled"
+AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLED_SETTING_NAME = (
+    "auto_proceed_minimal_imposition_enabled"
+)
 
 # Internal MCP orchestrator caps (Settings → Agent Configuration)
 INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME = "internal_mcp_max_tool_invocations"
@@ -168,6 +171,7 @@ def get_all_settings_batch() -> Dict[str, Any]:
         DISABLE_REMOTE_OLLAMA_SCAN_SETTING_NAME,
         SHOW_TOOL_USE_DURING_THINKING_SETTING_NAME,
         BUTTONIFY_MODEL_ENABLED_SETTING_NAME,
+        AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLED_SETTING_NAME,
         INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME,
         INTERNAL_MCP_TOOL_BATCH_CAP_SETTING_NAME,
         DISABLE_WRITE_TOOL_CONSERVATISM_SETTING_NAME,
@@ -193,6 +197,10 @@ def get_all_settings_batch() -> Dict[str, Any]:
         ),
         "buttonify_model_enabled": _coerce_bool(
             raw.get(BUTTONIFY_MODEL_ENABLED_SETTING_NAME), default=True
+        ),
+        "auto_proceed_minimal_imposition_enabled": _coerce_bool(
+            raw.get(AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLED_SETTING_NAME),
+            default=True,
         ),
         "internal_mcp_max_tool_invocations": _coerce_int(
             raw.get(INTERNAL_MCP_MAX_TOOL_INVOCATIONS_SETTING_NAME), default=8
@@ -887,6 +895,36 @@ def set_buttonify_model_enabled(enabled: bool) -> bool:
     if not isinstance(enabled, bool):
         enabled = bool(enabled)
     return update_setting(BUTTONIFY_MODEL_ENABLED_SETTING_NAME, enabled)
+
+
+def get_auto_proceed_minimal_imposition_enabled() -> bool:
+    """Return whether minimal-imposition auto-proceed is enabled.
+
+    Defaults to True when unset or invalid.
+    Falls back to VON_AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLE.
+    """
+
+    val = get_setting(AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLED_SETTING_NAME)
+    if val is None:
+        env_value = os.getenv("VON_AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLE", "1")
+        return str(env_value).strip().lower() in {"1", "true", "yes", "y", "on"}
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("1", "true", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "no", "n", "off"):
+            return False
+    if isinstance(val, (int, float)):
+        return val != 0
+    return True
+
+
+def set_auto_proceed_minimal_imposition_enabled(enabled: bool) -> bool:
+    if not isinstance(enabled, bool):
+        enabled = bool(enabled)
+    return update_setting(AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLED_SETTING_NAME, enabled)
 
 
 def get_disable_write_tool_conservatism() -> bool:

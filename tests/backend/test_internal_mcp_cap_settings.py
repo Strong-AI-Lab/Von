@@ -93,6 +93,54 @@ def test_set_internal_mcp_tool_batch_cap_persists_clamped_value(monkeypatch):
     assert captured["value"] == 1
 
 
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (True, True),
+        (False, False),
+        ("1", True),
+        ("0", False),
+        ("true", True),
+        ("false", False),
+        (1, True),
+        (0, False),
+        ("not-a-bool", True),
+    ],
+)
+def test_get_auto_proceed_minimal_imposition_enabled_coerces(
+    raw: Any, expected: bool, monkeypatch
+):
+    monkeypatch.setattr(settings_service, "get_setting", lambda _name: raw)
+    assert settings_service.get_auto_proceed_minimal_imposition_enabled() is expected
+
+
+def test_get_auto_proceed_minimal_imposition_enabled_uses_env_fallback(monkeypatch):
+    monkeypatch.setattr(settings_service, "get_setting", lambda _name: None)
+    monkeypatch.setenv("VON_AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLE", "0")
+    assert settings_service.get_auto_proceed_minimal_imposition_enabled() is False
+
+
+def test_set_auto_proceed_minimal_imposition_enabled_persists_bool(monkeypatch):
+    captured = {}
+
+    def _update_setting(name, value):
+        captured["name"] = name
+        captured["value"] = value
+        return True
+
+    monkeypatch.setattr(settings_service, "update_setting", _update_setting)
+
+    assert (
+        settings_service.set_auto_proceed_minimal_imposition_enabled(cast(Any, "yes"))
+        is True
+    )
+    assert (
+        captured["name"]
+        == settings_service.AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLED_SETTING_NAME
+    )
+    assert captured["value"] is True
+
+
 def test_orchestrator_configure_execution_caps_clamps():
     orchestrator = InternalMCPChatOrchestrator(
         gateway=cast(Any, _StubGateway()),

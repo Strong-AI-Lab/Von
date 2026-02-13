@@ -35,6 +35,7 @@ Provide a clear, end-to-end model of what happens from a user submitting a promp
 1. If the internal MCP orchestrator is available, it is invoked with prompt, context, model, namespace, and auxiliary system prompt. See [src/backend/server/routes/von_routes.py](src/backend/server/routes/von_routes.py#L2910-L3050).
 2. The orchestrator may call a workflow selector for authenticated presenter turns, used mainly to decide narration routing. See [src/backend/integrations/internal_mcp/orchestrator.py](src/backend/integrations/internal_mcp/orchestrator.py#L2905-L2965).
 3. The orchestrator executes the tool loop: LLM response → strict tool-call JSON parsing → tool invocation → tool result message → repeat until no further tool calls or caps reached. See [src/backend/integrations/internal_mcp/orchestrator.py](src/backend/integrations/internal_mcp/orchestrator.py#L2774-L2925).
+4. During post-tool backfill, the orchestrator now runs a **minimal-imposition auto-proceed gate**. If the model says it is continuing (for example “Proceeding now”) and does not request a user decision, the missing-tool-call subworkflow is invoked to continue execution in the same turn. This is controlled by `auto_proceed_minimal_imposition_enabled` (default: enabled).
 
 ### Stage 3a: Ontology discovery context (current reality)
 There is **no dedicated ontology discovery pre-flight** today. The orchestrator does not inject a curated list of existing predicate/type concepts before tool planning. This means the LLM must already “know” or guess correct `#V#...` predicate IDs, which increases invalid predicate attempts.
@@ -100,8 +101,8 @@ When `VON_BUTTONIFY_MODEL_ENABLE=1`, the backend runs a lightweight model pass (
    - Response-based screen backfill can restate unverified actions when only partial tool evidence exists.
 2. **Excess caution blocks trivial writes**
    - The model may request manual confirmation for prerequisite checks instead of executing them immediately.
-3. **Missing tool-call detection does not trigger recovery**
-   - Detection artefacts are logged but do not drive a repair loop in the same turn.
+3. **Auto-proceed gate disabled**
+   - If `auto_proceed_minimal_imposition_enabled` is disabled, “Proceeding now” style responses can intentionally stop after narration and wait for another user turn.
 4. **Workflow selector verdicts are non-binding**
    - Selector metadata does not enforce subsequent stage execution.
 5. **Predicate discovery gap**

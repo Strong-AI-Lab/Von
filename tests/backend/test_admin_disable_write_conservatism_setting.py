@@ -168,3 +168,27 @@ def test_settings_endpoint_only_returns_flag_for_admin(monkeypatch):
         assert resp2.status_code == 200
         payload2 = resp2.get_json() or {}
         assert payload2.get("disable_write_tool_conservatism") is True
+
+
+def test_settings_endpoint_updates_auto_proceed_minimal_imposition(monkeypatch):
+    app = _make_settings_app()
+
+    captured: dict[str, Any] = {}
+
+    def _setter(enabled: bool) -> bool:
+        captured["enabled"] = enabled
+        return True
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.settings_routes.set_auto_proceed_minimal_imposition_enabled",
+        _setter,
+    )
+
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/settings/",
+            json={"auto_proceed_minimal_imposition_enabled": False},
+        )
+
+        assert resp.status_code == 200
+        assert captured["enabled"] is False

@@ -39,6 +39,7 @@ from ...services.settings_service import (
     set_disable_write_tool_conservatism,
     get_buttonify_model_enabled,
     set_buttonify_model_enabled,
+    set_auto_proceed_minimal_imposition_enabled,
     get_all_settings_batch,
 )
 from ...services.feature_flags import (
@@ -734,6 +735,17 @@ def save_all_settings():
                 enabled = True
             set_buttonify_model_enabled(enabled)
             current_app.logger.info("buttonify_model_enabled updated: %s", enabled)
+
+        if "auto_proceed_minimal_imposition_enabled" in data:
+            try:
+                enabled = bool(data.get("auto_proceed_minimal_imposition_enabled"))
+            except Exception:
+                enabled = True
+            set_auto_proceed_minimal_imposition_enabled(enabled)
+            current_app.logger.info(
+                "auto_proceed_minimal_imposition_enabled updated: %s",
+                enabled,
+            )
 
         # user/org/language fields intentionally ignored (browser-local)
 

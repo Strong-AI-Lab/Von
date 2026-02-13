@@ -1400,6 +1400,22 @@ if (buttonifyToggle) {
   });
 }
 
+const autoProceedMinimalImpositionToggle = document.getElementById('autoProceedMinimalImpositionToggle');
+if (autoProceedMinimalImpositionToggle) {
+  try {
+    // Load current server value via existing loadAndDisplaySettings pipeline
+  } catch { }
+  autoProceedMinimalImpositionToggle.addEventListener('change', async () => {
+    try {
+      await saveAllSettings();
+      showStatusMessage('settingsStatusMessage', 'Saved. Applies to new chat turns.', false);
+    } catch (e) {
+      console.warn('Failed to save auto-proceed toggle', e);
+      showStatusMessage('settingsStatusMessage', 'Failed to save setting', true);
+    }
+  });
+}
+
 const buttonifyPromptLink = document.getElementById('buttonifyPromptLink');
 if (buttonifyPromptLink) {
   buttonifyPromptLink.addEventListener('click', (event) => {
@@ -1748,6 +1764,17 @@ async function loadAndDisplaySettings() {
       }
     } catch { }
 
+    // Populate minimal-imposition auto-proceed toggle
+    try {
+      const autoProceedToggleEl = document.getElementById('autoProceedMinimalImpositionToggle');
+      if (autoProceedToggleEl) {
+        const flag = Object.prototype.hasOwnProperty.call(settings, 'auto_proceed_minimal_imposition_enabled')
+          ? !!settings.auto_proceed_minimal_imposition_enabled
+          : true;
+        autoProceedToggleEl.checked = !!flag;
+      }
+    } catch { }
+
     // Populate buttonify prompt link
     try {
       const promptLinkEl = document.getElementById('buttonifyPromptLink');
@@ -2011,6 +2038,7 @@ async function saveAllSettings(changedProvider = null) {
     ),
     show_tool_use_during_thinking: !!document.getElementById('showToolUseDuringThinkingToggle')?.checked,
     buttonify_model_enabled: !!document.getElementById('buttonifyModelEnabledToggle')?.checked,
+    auto_proceed_minimal_imposition_enabled: !!document.getElementById('autoProceedMinimalImpositionToggle')?.checked,
   };
 
   if (__vonIsAdminOrOwner) {
