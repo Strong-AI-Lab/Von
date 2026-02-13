@@ -17,8 +17,8 @@ def _call_tool(name: str, arguments: dict) -> dict:
     return json.loads(text)
 
 
-def test_unknown_workflow_tool_returns_surface_guidance():
-    payload = _call_tool("workflow_list_definitions", {})
+def test_unknown_internal_only_tool_returns_surface_guidance():
+    payload = _call_tool("chat_introspect", {})
     assert payload.get("success") is False
     assert payload.get("error_code") == "unknown_tool"
 

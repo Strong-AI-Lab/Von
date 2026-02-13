@@ -10,41 +10,41 @@ available. It prevents ambiguous "missing tool" behaviour across MCP surfaces.
 | Surface | Intended usage |
 | --- | --- |
 | `internal_mcp_gateway` | Canonical workflow management and introspection surface used by Von internals. |
-| `vontology_mcp_stdio_server` | Vontology concept/text tools for external IDE agents. Workflow tools are intentionally not exposed directly. |
+| `vontology_mcp_stdio_server` | Vontology concept/text tools for external IDE agents. Durable `workflow_*` tools are exposed directly; chat introspection tools remain internal-only. |
 | `vonrag_mcp_stdio_server` | Focused RAG/search tools only. |
 
 ## Tool Availability
 
 | Tool | internal_mcp_gateway | vontology_mcp_stdio_server | vonrag_mcp_stdio_server |
 | --- | --- | --- | --- |
-| `workflow_list_definitions` | Yes | No | No |
-| `workflow_create_instance` | Yes | No | No |
-| `workflow_list_instances` | Yes | No | No |
-| `workflow_get_instance` | Yes | No | No |
-| `workflow_cancel_instance` | Yes | No | No |
-| `workflow_retry_instance` | Yes | No | No |
-| `workflow_create_schedule` | Yes | No | No |
-| `workflow_list_schedules` | Yes | No | No |
-| `workflow_get_schedule` | Yes | No | No |
-| `workflow_set_schedule_enabled` | Yes | No | No |
-| `workflow_delete_schedule` | Yes | No | No |
-| `workflow_trigger_schedule` | Yes | No | No |
-| `workflow_mcp_health_check` | Yes | No | No |
+| `workflow_list_definitions` | Yes | Yes | No |
+| `workflow_create_instance` | Yes | Yes | No |
+| `workflow_list_instances` | Yes | Yes | No |
+| `workflow_get_instance` | Yes | Yes | No |
+| `workflow_cancel_instance` | Yes | Yes | No |
+| `workflow_retry_instance` | Yes | Yes | No |
+| `workflow_create_schedule` | Yes | Yes | No |
+| `workflow_list_schedules` | Yes | Yes | No |
+| `workflow_get_schedule` | Yes | Yes | No |
+| `workflow_set_schedule_enabled` | Yes | Yes | No |
+| `workflow_delete_schedule` | Yes | Yes | No |
+| `workflow_trigger_schedule` | Yes | Yes | No |
+| `workflow_mcp_health_check` | Yes | Yes | No |
 | `chat_get_prompt_context` | Yes | No | No |
 | `chat_introspect` | Yes | No | No |
 | `settings_get_public` | Yes | No | No |
 
 ## Delegated Access Notes
 
-- `vontology_mcp_stdio_server` can still access workflow behaviour indirectly via
-  `von_chat_run` (tool orchestration pathway), but it does not expose direct
-  `workflow_*` tool calls.
+- `vontology_mcp_stdio_server` exposes direct durable `workflow_*` calls and can
+  also access workflow behaviour indirectly via `von_chat_run` (tool orchestration pathway).
 - `vonrag_mcp_stdio_server` is intentionally limited to RAG/search tools.
 
 ## Diagnostics Contract
 
-When a workflow/introspection tool is requested from `vontology_mcp_stdio_server`
-and the tool is not exposed on that surface:
+When a chat-introspection tool (`chat_get_prompt_context`, `chat_introspect`,
+`settings_get_public`) is requested from `vontology_mcp_stdio_server` and the
+tool is not exposed on that surface:
 
 - response `error_code` is `unknown_tool`
 - response `error_details.surface_diagnostic.classification` is

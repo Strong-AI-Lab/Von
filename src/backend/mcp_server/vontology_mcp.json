@@ -12,7 +12,7 @@
         },
         {
             "name": "create_concepts",
-            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?, instance_of_type?}. Supports singleton arrays. Use add_names afterward for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context. Use instance_of_type when creating a concept that should be both a subtype of parent_id AND an instance of a specific type (e.g., creating a predicate instance like 'published_in' as instance of '#V#nearly_functional_binary_predicate').",
+            "description": "Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?, instance_of_type?}. Supports singleton arrays. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. Use add_names afterward for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context. Use instance_of_type when creating a concept that should be both a subtype of parent_id AND an instance of a specific type (e.g., creating a predicate instance like 'published_in' as instance of '#V#nearly_functional_binary_predicate').",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -52,6 +52,11 @@
                                 "name"
                             ]
                         }
+                    },
+                    "allow_duplicate_instances": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, bypass duplicate guard for instance concepts and allow legacy suffix-based instance IDs."
                     }
                 },
                 "required": [
@@ -1168,6 +1173,563 @@
                 },
                 "required": [
                     "query"
+                ]
+            }
+        },
+        {
+            "name": "jira_search",
+            "description": "Run a JQL query against Jira. Use when you need to find issues by status, assignee, project, or other fields.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "jql": {
+                        "type": "string",
+                        "description": "JQL query string (required)"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Optional Jira page size"
+                    },
+                    "next_page_token": {
+                        "type": "string",
+                        "description": "Optional Jira cursor token"
+                    },
+                    "start_at": {
+                        "type": "integer",
+                        "description": "Deprecated offset parameter"
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Optional list of field names to return"
+                    }
+                },
+                "required": [
+                    "jql"
+                ]
+            }
+        },
+        {
+            "name": "jira_get_issue",
+            "description": "Fetch full details for a Jira issue by key (for example JVNAUTOSCI-123).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key (required)"
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Optional list of field names to return"
+                    }
+                },
+                "required": [
+                    "issue_key"
+                ]
+            }
+        },
+        {
+            "name": "jira_add_comment",
+            "description": "Add a comment to a Jira issue.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key"
+                    },
+                    "comment": {
+                        "type": "string",
+                        "description": "Comment body text"
+                    }
+                },
+                "required": [
+                    "issue_key",
+                    "comment"
+                ]
+            }
+        },
+        {
+            "name": "jira_transition",
+            "description": "Transition a Jira issue using a transition ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key"
+                    },
+                    "transition_id": {
+                        "type": "string",
+                        "description": "Transition ID"
+                    }
+                },
+                "required": [
+                    "issue_key",
+                    "transition_id"
+                ]
+            }
+        },
+        {
+            "name": "jira_create_issue",
+            "description": "Create a Jira issue with write guardrails. Default dry_run=true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_key": {
+                        "type": "string",
+                        "description": "Project key"
+                    },
+                    "issue_type": {
+                        "type": "string",
+                        "description": "Issue type name"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Issue summary"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional issue description"
+                    },
+                    "parent": {
+                        "type": "string",
+                        "description": "Optional parent issue key"
+                    },
+                    "assignee_account_id": {
+                        "type": "string",
+                        "description": "Optional Jira accountId to assign"
+                    },
+                    "labels": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Optional labels"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "When true, preview only"
+                    },
+                    "approved": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Per-write approval flag for execution"
+                    },
+                    "execute": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Execution override when execute mode is enabled"
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional idempotency key"
+                    }
+                },
+                "required": [
+                    "project_key",
+                    "issue_type",
+                    "summary"
+                ]
+            }
+        },
+        {
+            "name": "jira_update_issue",
+            "description": "Update a Jira issue with write guardrails. Default dry_run=true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key"
+                    },
+                    "update_fields": {
+                        "type": "object",
+                        "description": "Jira fields dictionary to update"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "When true, preview only"
+                    },
+                    "approved": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Per-write approval flag for execution"
+                    },
+                    "execute": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Execution override when execute mode is enabled"
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional idempotency key"
+                    }
+                },
+                "required": [
+                    "issue_key",
+                    "update_fields"
+                ]
+            }
+        },
+        {
+            "name": "jira_link_issue",
+            "description": "Link two Jira issues with write guardrails. Default dry_run=true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inward_issue_key": {
+                        "type": "string",
+                        "description": "Inward issue key"
+                    },
+                    "outward_issue_key": {
+                        "type": "string",
+                        "description": "Outward issue key"
+                    },
+                    "link_type": {
+                        "type": "string",
+                        "description": "Jira link type name"
+                    },
+                    "comment": {
+                        "type": "string",
+                        "description": "Optional link comment"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "When true, preview only"
+                    },
+                    "approved": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Per-write approval flag for execution"
+                    },
+                    "execute": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Execution override when execute mode is enabled"
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional idempotency key"
+                    }
+                },
+                "required": [
+                    "inward_issue_key",
+                    "outward_issue_key",
+                    "link_type"
+                ]
+            }
+        },
+        {
+            "name": "jira_get_myself",
+            "description": "Return the Jira user profile for the currently configured Atlassian credentials.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "name": "jira_get_auth_config",
+            "description": "Inspect Jira auth configuration (base URL/email/token presence) from the process environment.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "name": "workflow_list_definitions",
+            "description": "List available workflow definitions (IDs, descriptions) that can be instantiated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Optional cap on number of definitions returned"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "workflow_mcp_health_check",
+            "description": "Run lightweight workflow/introspection MCP health checks through InternalMCPGateway.invoke() and return actionable diagnostics.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace used for check payloads"
+                    },
+                    "include_introspection": {
+                        "type": "boolean",
+                        "description": "When true, include chat introspection checks"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "workflow_create_instance",
+            "description": "Create a new durable workflow instance. The workflow will be queued for execution by a background worker. Use workflow_get_instance to check status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "Workflow definition concept ID"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "Optional user concept ID"
+                    },
+                    "org_id": {
+                        "type": "string",
+                        "description": "Optional organisation concept ID"
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace for routing/scoping"
+                    },
+                    "inputs": {
+                        "type": "object",
+                        "description": "Optional workflow input payload"
+                    },
+                    "max_retries": {
+                        "type": "integer",
+                        "description": "Optional retry override for this instance"
+                    }
+                },
+                "required": [
+                    "workflow_id"
+                ]
+            }
+        },
+        {
+            "name": "workflow_list_instances",
+            "description": "List durable workflow instances. Filter by user, org, namespace, status, or workflow_id. Supports source_event_type/source_event_id filters for event-to-workflow traceability.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "org_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "pending|running|completed|failed|cancelled|paused"
+                    },
+                    "workflow_id": {
+                        "type": "string"
+                    },
+                    "source_event_type": {
+                        "type": "string"
+                    },
+                    "source_event_id": {
+                        "type": "string"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "workflow_get_instance",
+            "description": "Get detailed status of a durable workflow instance including current state, inputs, outputs, and any errors.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "instance_id": {
+                        "type": "string",
+                        "description": "Workflow instance ID"
+                    }
+                },
+                "required": [
+                    "instance_id"
+                ]
+            }
+        },
+        {
+            "name": "workflow_cancel_instance",
+            "description": "Cancel a running or pending workflow instance. The worker will stop execution at the next checkpoint.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "instance_id": {
+                        "type": "string",
+                        "description": "Workflow instance ID"
+                    }
+                },
+                "required": [
+                    "instance_id"
+                ]
+            }
+        },
+        {
+            "name": "workflow_retry_instance",
+            "description": "Reset a failed workflow instance for retry if it has not exceeded its max_retries limit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "instance_id": {
+                        "type": "string",
+                        "description": "Workflow instance ID"
+                    }
+                },
+                "required": [
+                    "instance_id"
+                ]
+            }
+        },
+        {
+            "name": "workflow_create_schedule",
+            "description": "Create a scheduled trigger for a workflow. Supports schedule types: interval, cron, or once.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "Workflow definition concept ID"
+                    },
+                    "schedule_type": {
+                        "type": "string",
+                        "description": "interval|cron|once"
+                    },
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "org_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": "string"
+                    },
+                    "interval_seconds": {
+                        "type": "integer"
+                    },
+                    "cron_expression": {
+                        "type": "string"
+                    },
+                    "run_at": {
+                        "type": "string",
+                        "description": "ISO datetime used for once schedules"
+                    },
+                    "default_inputs": {
+                        "type": "object",
+                        "description": "Optional default inputs for triggered instances"
+                    },
+                    "description": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "workflow_id",
+                    "schedule_type"
+                ]
+            }
+        },
+        {
+            "name": "workflow_list_schedules",
+            "description": "List workflow schedules. Filter by user or enabled status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string"
+                    },
+                    "enabled_only": {
+                        "type": "boolean"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "workflow_get_schedule",
+            "description": "Get detailed information about a workflow schedule.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "schedule_id": {
+                        "type": "string",
+                        "description": "Schedule ID"
+                    }
+                },
+                "required": [
+                    "schedule_id"
+                ]
+            }
+        },
+        {
+            "name": "workflow_set_schedule_enabled",
+            "description": "Enable or disable a workflow schedule.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "schedule_id": {
+                        "type": "string",
+                        "description": "Schedule ID"
+                    },
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Desired enabled state"
+                    }
+                },
+                "required": [
+                    "schedule_id",
+                    "enabled"
+                ]
+            }
+        },
+        {
+            "name": "workflow_delete_schedule",
+            "description": "Delete a workflow schedule permanently.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "schedule_id": {
+                        "type": "string",
+                        "description": "Schedule ID"
+                    }
+                },
+                "required": [
+                    "schedule_id"
+                ]
+            }
+        },
+        {
+            "name": "workflow_trigger_schedule",
+            "description": "Manually trigger a workflow schedule immediately, creating a new workflow instance.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "schedule_id": {
+                        "type": "string",
+                        "description": "Schedule ID"
+                    }
+                },
+                "required": [
+                    "schedule_id"
                 ]
             }
         },

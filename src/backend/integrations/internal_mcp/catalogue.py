@@ -219,12 +219,23 @@ def _get_paper_metadata(**kwargs):
 def _create_concepts(**kwargs):
     from ...vontology.utils_vontology import create_vontology_concept
     from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
+    from ...services.create_concepts_duplicate_guard_service import (
+        build_duplicate_prevented_create_concepts_result,
+        find_existing_concept_for_create_concepts,
+    )
     from ...services.create_concepts_parent_resolution_service import (
         resolve_parent_for_create_concepts,
     )
 
     parent_id: str | None = kwargs.get("parent_id")
     concepts = kwargs.get("concepts", [])
+    allow_duplicate_instances_raw = kwargs.get("allow_duplicate_instances", False)
+    allow_duplicate_instances = (
+        allow_duplicate_instances_raw
+        if isinstance(allow_duplicate_instances_raw, bool)
+        else str(allow_duplicate_instances_raw).strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
 
     if not parent_id:
         return make_error_response(
@@ -357,6 +368,25 @@ def _create_concepts(**kwargs):
         else:
             create_as_instance = kind == "instance"
             parent_id_for_concept = validated_parent_id
+
+        duplicate_match = find_existing_concept_for_create_concepts(
+            concept_name=str(name),
+            kind=kind,
+            parent_id_for_concept=parent_id_for_concept,
+            preferred_language="en-NZ",
+            allow_duplicate_instances=allow_duplicate_instances,
+        )
+        if duplicate_match is not None:
+            result = build_duplicate_prevented_create_concepts_result(
+                requested_name=str(name),
+                requested_kind=kind,
+                existing_concept_id=duplicate_match.existing_concept_id,
+                guard_scope=duplicate_match.guard_scope,
+                match_source=duplicate_match.match_source,
+            )
+            result["concept_id"] = duplicate_match.existing_concept_id
+            results.append(result)
+            continue
 
         result = create_vontology_concept(
             parent_id=parent_id_for_concept,
@@ -3495,9 +3525,17 @@ def _concepts_create_input_schema() -> Schema:
             "parent_id": str,
             "concepts": list,
         },
-        optional={},
+        optional={
+            "allow_duplicate_instances": (bool,),
+        },
         allow_unknown=True,
-        description="create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. Unknown top-level fields are ignored to accommodate orchestrator-added context (e.g., namespace).",
+        description=(
+            "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). "
+            "kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. "
+            "By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; "
+            "set allow_duplicate_instances=true to opt into legacy instance suffixing. "
+            "Unknown top-level fields are ignored to accommodate orchestrator-added context (e.g., namespace)."
+        ),
     )
 
 

@@ -37,6 +37,10 @@ WORKFLOW_HEALTHCHECK_TOOL_NAMES: tuple[str, ...] = (
     "workflow_mcp_health_check",
 )
 
+WORKFLOW_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = tuple(
+    sorted(set(WORKFLOW_MANAGEMENT_TOOL_NAMES) | set(WORKFLOW_HEALTHCHECK_TOOL_NAMES))
+)
+
 _DOCS_REFERENCE = "docs/engineering/workflow_mcp_capability_matrix.md"
 
 
@@ -60,9 +64,7 @@ def is_tracked_workflow_surface_tool(tool_name: str | None) -> bool:
     normalised = tool_name.strip()
     if not normalised:
         return False
-    return normalised.startswith("workflow_") or (
-        normalised in WORKFLOW_INTROSPECTION_TOOL_NAMES
-    )
+    return normalised in tracked_workflow_surface_tool_names()
 
 
 def build_workflow_surface_capability_matrix(
@@ -81,6 +83,10 @@ def build_workflow_surface_capability_matrix(
         tool_name: tool_name in available_internal for tool_name in tracked_tools
     }
     unavailable_availability = {tool_name: False for tool_name in tracked_tools}
+    stdio_availability = {
+        tool_name: tool_name in set(WORKFLOW_STDIO_EXPOSED_TOOL_NAMES)
+        for tool_name in tracked_tools
+    }
 
     return {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -95,9 +101,10 @@ def build_workflow_surface_capability_matrix(
             "vontology_mcp_stdio_server": {
                 "intended_usage": (
                     "Vontology concept/text operations for external IDE agents; "
-                    "direct workflow tools are intentionally not exposed here."
+                    "durable workflow tools are exposed directly, while chat "
+                    "introspection tools remain internal-only."
                 ),
-                "tool_availability": unavailable_availability,
+                "tool_availability": stdio_availability,
                 "delegated_entrypoints": ["von_chat_run"],
             },
             "vonrag_mcp_stdio_server": {
@@ -116,6 +123,8 @@ def classify_stdio_missing_tool(tool_name: str | None) -> dict[str, Any] | None:
         return None
 
     requested_tool = str(tool_name).strip()
+    if requested_tool in set(WORKFLOW_STDIO_EXPOSED_TOOL_NAMES):
+        return None
     matrix = build_workflow_surface_capability_matrix()
     return {
         "classification": "internal_mcp_only_tool",

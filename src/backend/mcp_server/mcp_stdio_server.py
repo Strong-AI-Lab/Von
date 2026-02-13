@@ -10,6 +10,7 @@ import os
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 # Avoid UnicodeEncodeError on Windows consoles (default cp1252) when any
@@ -83,6 +84,10 @@ from src.backend.services.text_value_service import (
 from src.backend.services.create_concepts_parent_resolution_service import (
     resolve_parent_for_create_concepts,
 )
+from src.backend.services.create_concepts_duplicate_guard_service import (
+    build_duplicate_prevented_create_concepts_result,
+    find_existing_concept_for_create_concepts,
+)
 from src.backend.services.rag_text_relation_change_hook_service import (
     maybe_delete_text_relation_doc_from_rag,
     maybe_sync_concept_text_relations_to_rag,
@@ -95,7 +100,31 @@ from src.backend.services.settings_service import (
     get_setting,
 )
 from src.backend.integrations.internal_mcp.catalogue import _add_relationship
+from src.backend.integrations.internal_mcp.catalogue import _jira_add_comment
+from src.backend.integrations.internal_mcp.catalogue import _jira_create_issue
+from src.backend.integrations.internal_mcp.catalogue import _jira_get_auth_config
+from src.backend.integrations.internal_mcp.catalogue import _jira_get_issue
+from src.backend.integrations.internal_mcp.catalogue import _jira_get_myself
+from src.backend.integrations.internal_mcp.catalogue import _jira_link_issue
+from src.backend.integrations.internal_mcp.catalogue import _jira_search
+from src.backend.integrations.internal_mcp.catalogue import _jira_transition_issue
+from src.backend.integrations.internal_mcp.catalogue import _jira_update_issue
 from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
+from src.backend.integrations.internal_mcp.catalogue import _workflow_cancel_instance
+from src.backend.integrations.internal_mcp.catalogue import _workflow_create_instance
+from src.backend.integrations.internal_mcp.catalogue import _workflow_create_schedule
+from src.backend.integrations.internal_mcp.catalogue import _workflow_delete_schedule
+from src.backend.integrations.internal_mcp.catalogue import _workflow_get_instance
+from src.backend.integrations.internal_mcp.catalogue import _workflow_get_schedule
+from src.backend.integrations.internal_mcp.catalogue import _workflow_list_definitions
+from src.backend.integrations.internal_mcp.catalogue import _workflow_list_instances
+from src.backend.integrations.internal_mcp.catalogue import _workflow_list_schedules
+from src.backend.integrations.internal_mcp.catalogue import _workflow_mcp_health_check
+from src.backend.integrations.internal_mcp.catalogue import _workflow_retry_instance
+from src.backend.integrations.internal_mcp.catalogue import (
+    _workflow_set_schedule_enabled,
+)
+from src.backend.integrations.internal_mcp.catalogue import _workflow_trigger_schedule
 from src.backend.integrations.internal_mcp.schemas import make_error_response
 from src.backend.integrations.internal_mcp.workflow_surface_capabilities import (
     classify_stdio_missing_tool,
@@ -127,6 +156,104 @@ app = Server("vontology-mcp")
 
 
 _LOG = logging.getLogger(__name__)
+
+_TOOL_LIST_CACHE: list[Tool] | None = None
+_TOOL_LIST_CACHE_PATH = (
+    Path(project_root) / "data" / "mcp_tool_cache" / "vontology_tools_runtime.json"
+)
+
+
+def _tool_cache_enabled() -> bool:
+    return os.getenv("VON_MCP_TOOL_LIST_CACHE_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _tool_cache_path() -> Path:
+    override = os.getenv("VON_MCP_TOOL_LIST_CACHE_PATH")
+    if isinstance(override, str) and override.strip():
+        return Path(override.strip())
+    return _TOOL_LIST_CACHE_PATH
+
+
+def _tool_to_cache_payload(tool: Tool) -> dict[str, Any]:
+    return {
+        "name": str(getattr(tool, "name", "")),
+        "description": str(getattr(tool, "description", "")),
+        "inputSchema": getattr(tool, "inputSchema", {}) or {},
+    }
+
+
+def _load_tool_list_cache() -> list[Tool] | None:
+    if not _tool_cache_enabled():
+        return None
+    try:
+        cache_path = _tool_cache_path()
+        if not cache_path.exists():
+            return None
+
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+
+        source_mtime_ns = payload.get("source_file_mtime_ns")
+        current_mtime_ns = Path(__file__).resolve().stat().st_mtime_ns
+        if not isinstance(source_mtime_ns, int) or source_mtime_ns != current_mtime_ns:
+            return None
+
+        raw_tools = payload.get("tools")
+        if not isinstance(raw_tools, list):
+            return None
+
+        tools: list[Tool] = []
+        for raw in raw_tools:
+            if not isinstance(raw, dict):
+                continue
+            name = raw.get("name")
+            description = raw.get("description")
+            input_schema = raw.get("inputSchema")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if not isinstance(input_schema, dict):
+                input_schema = {}
+            tools.append(
+                Tool(
+                    name=name.strip(),
+                    description=str(description or ""),
+                    inputSchema=input_schema,
+                )
+            )
+        if tools:
+            return tools
+    except Exception as exc:  # pragma: no cover - best-effort diagnostics cache
+        _LOG.debug("Could not load MCP tool cache: %s", exc)
+    return None
+
+
+def _persist_tool_list_cache(tools: list[Tool]) -> None:
+    if not _tool_cache_enabled():
+        return
+    try:
+        source_path = Path(__file__).resolve()
+        payload = {
+            "cached_at_utc": datetime.now(timezone.utc).isoformat(),
+            "source": "src/backend/mcp_server/mcp_stdio_server.py:list_tools",
+            "source_file": str(source_path),
+            "source_file_mtime_ns": source_path.stat().st_mtime_ns,
+            "tool_count": len(tools),
+            "tools": [_tool_to_cache_payload(tool) for tool in tools],
+        }
+        cache_path = _tool_cache_path()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # pragma: no cover - best-effort diagnostics cache
+        _LOG.debug("Could not persist MCP tool cache: %s", exc)
 
 
 def _truthy_env(var_name: str) -> bool:
@@ -259,7 +386,15 @@ class _RestrictedGateway:
 @app.list_tools()
 async def list_tools() -> list[Tool]:
     """List available tools."""
-    return [
+    global _TOOL_LIST_CACHE
+    if _TOOL_LIST_CACHE is not None:
+        return list(_TOOL_LIST_CACHE)
+    disk_cached_tools = _load_tool_list_cache()
+    if disk_cached_tools is not None:
+        _TOOL_LIST_CACHE = list(disk_cached_tools)
+        return list(_TOOL_LIST_CACHE)
+
+    tools = [
         Tool(
             name="get_context",
             description="Get current server-side context: active LLM model, language preference, and runtime settings. NOTE: User and organisation information is managed client-side (localStorage) per JVNAUTOSCI-628 and is not available through this endpoint.",
@@ -267,7 +402,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="create_concepts",
-            description="Creates one or more concepts (instances, types, or predicates). Each concept needs a name and kind. Use for bulk creation. Supports singleton arrays. After creation, use add_names for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context.",
+            description="Creates one or more concepts (instances, types, or predicates). Each concept needs a name and kind. Use for bulk creation. Supports singleton arrays. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. After creation, use add_names for alternative names/translations. Unknown top-level fields are ignored to accommodate orchestrator-added context.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -303,6 +438,11 @@ async def list_tools() -> list[Tool]:
                             "required": ["name"],
                         },
                         "minItems": 1,
+                    },
+                    "allow_duplicate_instances": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "When true, bypass duplicate guard for instance concepts and allow legacy suffix-based instance IDs",
                     },
                 },
                 "required": ["parent_id", "concepts"],
@@ -1281,6 +1421,422 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="jira_search",
+            description="Run a JQL query against Jira. Use when you need to find issues by status, assignee, project, or other fields.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "jql": {
+                        "type": "string",
+                        "description": "JQL query string (required)",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Optional Jira page size",
+                    },
+                    "next_page_token": {
+                        "type": "string",
+                        "description": "Optional Jira cursor token",
+                    },
+                    "start_at": {
+                        "type": "integer",
+                        "description": "Deprecated offset parameter",
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of field names to return",
+                    },
+                },
+                "required": ["jql"],
+            },
+        ),
+        Tool(
+            name="jira_get_issue",
+            description="Fetch full details for a Jira issue by key (for example JVNAUTOSCI-123).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string",
+                        "description": "Issue key (required)",
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of field names to return",
+                    },
+                },
+                "required": ["issue_key"],
+            },
+        ),
+        Tool(
+            name="jira_add_comment",
+            description="Add a comment to a Jira issue.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "Issue key"},
+                    "comment": {"type": "string", "description": "Comment body text"},
+                },
+                "required": ["issue_key", "comment"],
+            },
+        ),
+        Tool(
+            name="jira_transition",
+            description="Transition a Jira issue using a transition ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "Issue key"},
+                    "transition_id": {
+                        "type": "string",
+                        "description": "Transition ID",
+                    },
+                },
+                "required": ["issue_key", "transition_id"],
+            },
+        ),
+        Tool(
+            name="jira_create_issue",
+            description="Create a Jira issue with write guardrails. Default dry_run=true.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "project_key": {"type": "string", "description": "Project key"},
+                    "issue_type": {"type": "string", "description": "Issue type name"},
+                    "summary": {"type": "string", "description": "Issue summary"},
+                    "description": {
+                        "type": "string",
+                        "description": "Optional issue description",
+                    },
+                    "parent": {
+                        "type": "string",
+                        "description": "Optional parent issue key",
+                    },
+                    "assignee_account_id": {
+                        "type": "string",
+                        "description": "Optional Jira accountId to assign",
+                    },
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional labels",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When true, preview only",
+                    },
+                    "approved": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Per-write approval flag for execution",
+                    },
+                    "execute": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Execution override when execute mode is enabled",
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional idempotency key",
+                    },
+                },
+                "required": ["project_key", "issue_type", "summary"],
+            },
+        ),
+        Tool(
+            name="jira_update_issue",
+            description="Update a Jira issue with write guardrails. Default dry_run=true.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "Issue key"},
+                    "update_fields": {
+                        "type": "object",
+                        "description": "Jira fields dictionary to update",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When true, preview only",
+                    },
+                    "approved": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Per-write approval flag for execution",
+                    },
+                    "execute": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Execution override when execute mode is enabled",
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional idempotency key",
+                    },
+                },
+                "required": ["issue_key", "update_fields"],
+            },
+        ),
+        Tool(
+            name="jira_link_issue",
+            description="Link two Jira issues with write guardrails. Default dry_run=true.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "inward_issue_key": {
+                        "type": "string",
+                        "description": "Inward issue key",
+                    },
+                    "outward_issue_key": {
+                        "type": "string",
+                        "description": "Outward issue key",
+                    },
+                    "link_type": {"type": "string", "description": "Jira link type name"},
+                    "comment": {
+                        "type": "string",
+                        "description": "Optional link comment",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When true, preview only",
+                    },
+                    "approved": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Per-write approval flag for execution",
+                    },
+                    "execute": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Execution override when execute mode is enabled",
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional idempotency key",
+                    },
+                },
+                "required": ["inward_issue_key", "outward_issue_key", "link_type"],
+            },
+        ),
+        Tool(
+            name="jira_get_myself",
+            description="Return the Jira user profile for the currently configured Atlassian credentials.",
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        Tool(
+            name="jira_get_auth_config",
+            description="Inspect Jira auth configuration (base URL/email/token presence) from the process environment.",
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        Tool(
+            name="workflow_list_definitions",
+            description="List available workflow definitions (IDs, descriptions) that can be instantiated.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Optional cap on number of definitions returned",
+                    }
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="workflow_mcp_health_check",
+            description="Run lightweight workflow/introspection MCP health checks through InternalMCPGateway.invoke() and return actionable diagnostics.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace used for check payloads",
+                    },
+                    "include_introspection": {
+                        "type": "boolean",
+                        "description": "When true, include chat introspection checks",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="workflow_create_instance",
+            description="Create a new durable workflow instance. The workflow will be queued for execution by a background worker. Use workflow_get_instance to check status.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "Workflow definition concept ID",
+                    },
+                    "user_id": {"type": "string", "description": "Optional user concept ID"},
+                    "org_id": {"type": "string", "description": "Optional organisation concept ID"},
+                    "namespace": {
+                        "type": "string",
+                        "description": "Optional namespace for routing/scoping",
+                    },
+                    "inputs": {
+                        "type": "object",
+                        "description": "Optional workflow input payload",
+                    },
+                    "max_retries": {
+                        "type": "integer",
+                        "description": "Optional retry override for this instance",
+                    },
+                },
+                "required": ["workflow_id"],
+            },
+        ),
+        Tool(
+            name="workflow_list_instances",
+            description="List durable workflow instances. Filter by user, org, namespace, status, or workflow_id. Supports source_event_type/source_event_id filters for event-to-workflow traceability.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "org_id": {"type": "string"},
+                    "namespace": {"type": "string"},
+                    "status": {
+                        "type": "string",
+                        "description": "pending|running|completed|failed|cancelled|paused",
+                    },
+                    "workflow_id": {"type": "string"},
+                    "source_event_type": {"type": "string"},
+                    "source_event_id": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="workflow_get_instance",
+            description="Get detailed status of a durable workflow instance including current state, inputs, outputs, and any errors.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "Workflow instance ID"}
+                },
+                "required": ["instance_id"],
+            },
+        ),
+        Tool(
+            name="workflow_cancel_instance",
+            description="Cancel a running or pending workflow instance. The worker will stop execution at the next checkpoint.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "Workflow instance ID"}
+                },
+                "required": ["instance_id"],
+            },
+        ),
+        Tool(
+            name="workflow_retry_instance",
+            description="Reset a failed workflow instance for retry if it has not exceeded its max_retries limit.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string", "description": "Workflow instance ID"}
+                },
+                "required": ["instance_id"],
+            },
+        ),
+        Tool(
+            name="workflow_create_schedule",
+            description="Create a scheduled trigger for a workflow. Supports schedule types: interval, cron, or once.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "Workflow definition concept ID",
+                    },
+                    "schedule_type": {
+                        "type": "string",
+                        "description": "interval|cron|once",
+                    },
+                    "user_id": {"type": "string"},
+                    "org_id": {"type": "string"},
+                    "namespace": {"type": "string"},
+                    "interval_seconds": {"type": "integer"},
+                    "cron_expression": {"type": "string"},
+                    "run_at": {
+                        "type": "string",
+                        "description": "ISO datetime used for once schedules",
+                    },
+                    "default_inputs": {
+                        "type": "object",
+                        "description": "Optional default inputs for triggered instances",
+                    },
+                    "description": {"type": "string"},
+                },
+                "required": ["workflow_id", "schedule_type"],
+            },
+        ),
+        Tool(
+            name="workflow_list_schedules",
+            description="List workflow schedules. Filter by user or enabled status.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "enabled_only": {"type": "boolean"},
+                    "limit": {"type": "integer"},
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="workflow_get_schedule",
+            description="Get detailed information about a workflow schedule.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "schedule_id": {"type": "string", "description": "Schedule ID"}
+                },
+                "required": ["schedule_id"],
+            },
+        ),
+        Tool(
+            name="workflow_set_schedule_enabled",
+            description="Enable or disable a workflow schedule.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "schedule_id": {"type": "string", "description": "Schedule ID"},
+                    "enabled": {"type": "boolean", "description": "Desired enabled state"},
+                },
+                "required": ["schedule_id", "enabled"],
+            },
+        ),
+        Tool(
+            name="workflow_delete_schedule",
+            description="Delete a workflow schedule permanently.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "schedule_id": {"type": "string", "description": "Schedule ID"}
+                },
+                "required": ["schedule_id"],
+            },
+        ),
+        Tool(
+            name="workflow_trigger_schedule",
+            description="Manually trigger a workflow schedule immediately, creating a new workflow instance.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "schedule_id": {"type": "string", "description": "Schedule ID"}
+                },
+                "required": ["schedule_id"],
+            },
+        ),
+        Tool(
             name="von_chat_run",
             description=(
                 "Run the Von chat orchestrator (LLM + internal MCP tools) and return a redacted trace. "
@@ -1500,6 +2056,10 @@ async def list_tools() -> list[Tool]:
         ),
     ]
 
+    _TOOL_LIST_CACHE = list(tools)
+    _persist_tool_list_cache(_TOOL_LIST_CACHE)
+    return list(_TOOL_LIST_CACHE)
+
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ignore[misc]
@@ -1598,8 +2158,17 @@ async def _handle_get_context(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent]:
+    from src.backend.vontology.code_concepts_registry import PREDICATE_TYPE_ID
+
     parent_id = arguments.get("parent_id")
     concepts = arguments.get("concepts", [])
+    allow_duplicate_instances_raw = arguments.get("allow_duplicate_instances", False)
+    allow_duplicate_instances = (
+        allow_duplicate_instances_raw
+        if isinstance(allow_duplicate_instances_raw, bool)
+        else str(allow_duplicate_instances_raw).strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
     if not parent_id or not concepts:
         return [
             _json_error(
@@ -1660,7 +2229,10 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
     results = []
     for concept_data in concepts:
         name_val = concept_data.get("name")
-        kind = concept_data.get("kind", "type")
+        kind_raw = concept_data.get("kind", "type")
+        kind = str(kind_raw or "type").strip().lower()
+        if kind == "individual":
+            kind = "instance"
         description = concept_data.get("description")
         notes = concept_data.get("notes")
         instance_of_type = concept_data.get("instance_of_type")
@@ -1671,9 +2243,34 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
             )
             continue
 
-        create_as_instance = kind == "instance"
+        if kind == "predicate":
+            create_as_instance = True
+            parent_id_for_concept = PREDICATE_TYPE_ID
+        else:
+            create_as_instance = kind == "instance"
+            parent_id_for_concept = resolved_parent_id
+
+        duplicate_match = find_existing_concept_for_create_concepts(
+            concept_name=str(name_val),
+            kind=kind,
+            parent_id_for_concept=parent_id_for_concept,
+            preferred_language="en-NZ",
+            allow_duplicate_instances=allow_duplicate_instances,
+        )
+        if duplicate_match is not None:
+            result = build_duplicate_prevented_create_concepts_result(
+                requested_name=str(name_val),
+                requested_kind=kind,
+                existing_concept_id=duplicate_match.existing_concept_id,
+                guard_scope=duplicate_match.guard_scope,
+                match_source=duplicate_match.match_source,
+            )
+            result["concept_id"] = duplicate_match.existing_concept_id
+            results.append(result)
+            continue
+
         result = create_vontology_concept(
-            parent_id=resolved_parent_id,
+            parent_id=parent_id_for_concept,
             new_concept_name=name_val,
             create_as_instance=create_as_instance,
             description=description,
@@ -1710,10 +2307,20 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
         and isinstance(r.get("concept_id"), str)
         and str(r.get("concept_id")).strip()
     ]
+    successful = sum(
+        1 for r in results if isinstance(r, dict) and bool(r.get("success"))
+    )
+    already_exists = sum(
+        1
+        for r in results
+        if isinstance(r, dict) and r.get("error_code") == "already_exists"
+    )
     payload = {
         "results": results,
         "total": len(concepts),
-        "successful": sum(1 for r in results if r.get("success")),
+        "successful": successful,
+        "already_existed": already_exists,
+        "failed": len(concepts) - successful - already_exists,
         "created_concept_ids": created_concept_ids,
         "parent_id_used": resolved_parent_id,
         "parent_resolution": parent_resolution.to_dict(),
@@ -3398,6 +4005,238 @@ async def _handle_search_knowledge_base(arguments: dict[str, Any]) -> list[TextC
         return [_json_text({"error": f"Unexpected error: {exc}", "success": False})]
 
 
+def _run_catalogue_proxy_handler(
+    handler: Callable[..., Any],
+    arguments: dict[str, Any],
+    *,
+    tool_family_label: str,
+    suggestions: list[str] | None = None,
+) -> list[TextContent]:
+    try:
+        result = handler(**(arguments or {}))
+        return [_json_text(result)]
+    except Exception as exc:
+        return [
+            _json_error(
+                f"{tool_family_label} tool failed: {exc}",
+                error_code="operation_failed",
+                details={"exception_type": type(exc).__name__},
+                suggestions=(
+                    suggestions
+                    if suggestions
+                    else ["Check tool arguments and service availability"]
+                ),
+            )
+        ]
+
+
+async def _handle_jira_search(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_search,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
+async def _handle_jira_get_issue(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_get_issue,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
+async def _handle_jira_add_comment(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_add_comment,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
+async def _handle_jira_transition(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_transition_issue,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
+async def _handle_jira_create_issue(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_create_issue,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
+async def _handle_jira_update_issue(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_update_issue,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
+async def _handle_jira_link_issue(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_link_issue,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
+async def _handle_jira_get_myself(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_get_myself,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
+async def _handle_jira_get_auth_config(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_get_auth_config,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
+async def _handle_workflow_list_definitions(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_list_definitions,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_mcp_health_check(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_mcp_health_check,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_create_instance(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_create_instance,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_list_instances(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_list_instances,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_get_instance(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_get_instance,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_cancel_instance(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_cancel_instance,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_retry_instance(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_retry_instance,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_create_schedule(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_create_schedule,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_list_schedules(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_list_schedules,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_get_schedule(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_get_schedule,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_set_schedule_enabled(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_set_schedule_enabled,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_delete_schedule(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_delete_schedule,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
+async def _handle_workflow_trigger_schedule(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _workflow_trigger_schedule,
+        arguments,
+        tool_family_label="Workflow",
+    )
+
+
 # Task management handlers (JVNAUTOSCI-1040)
 async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
     title = arguments.get("title")
@@ -3561,6 +4400,28 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "merge_concepts": _handle_merge_concepts,
     "update_concept": _handle_update_concept,
     "search_knowledge_base": _handle_search_knowledge_base,
+    "jira_search": _handle_jira_search,
+    "jira_get_issue": _handle_jira_get_issue,
+    "jira_add_comment": _handle_jira_add_comment,
+    "jira_transition": _handle_jira_transition,
+    "jira_create_issue": _handle_jira_create_issue,
+    "jira_update_issue": _handle_jira_update_issue,
+    "jira_link_issue": _handle_jira_link_issue,
+    "jira_get_myself": _handle_jira_get_myself,
+    "jira_get_auth_config": _handle_jira_get_auth_config,
+    "workflow_list_definitions": _handle_workflow_list_definitions,
+    "workflow_mcp_health_check": _handle_workflow_mcp_health_check,
+    "workflow_create_instance": _handle_workflow_create_instance,
+    "workflow_list_instances": _handle_workflow_list_instances,
+    "workflow_get_instance": _handle_workflow_get_instance,
+    "workflow_cancel_instance": _handle_workflow_cancel_instance,
+    "workflow_retry_instance": _handle_workflow_retry_instance,
+    "workflow_create_schedule": _handle_workflow_create_schedule,
+    "workflow_list_schedules": _handle_workflow_list_schedules,
+    "workflow_get_schedule": _handle_workflow_get_schedule,
+    "workflow_set_schedule_enabled": _handle_workflow_set_schedule_enabled,
+    "workflow_delete_schedule": _handle_workflow_delete_schedule,
+    "workflow_trigger_schedule": _handle_workflow_trigger_schedule,
     # Task management handlers (JVNAUTOSCI-1040)
     "create_task": _handle_create_task,
     "get_task": _handle_get_task,
