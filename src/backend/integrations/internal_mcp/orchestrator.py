@@ -448,6 +448,41 @@ class InternalMCPChatOrchestrator:
         r"we're going to|let me|about to)\b",
         flags=re.IGNORECASE,
     )
+    # Minimal-imposition auto-proceed gate:
+    # If the assistant explicitly says it is continuing now (for example
+    # "Proceeding now") and it is not asking the user for a decision, we
+    # should continue the tool workflow instead of waiting for another human
+    # prompt.
+    _AUTO_PROCEED_PROGRESS_PROMISE_PATTERN = re.compile(
+        r"\b(i will now|i'll now|i am going to|i'm going to|proceeding now|"
+        r"next (?:i|we) will|continuing now|proceed with)\b",
+        flags=re.IGNORECASE,
+    )
+    _AUTO_PROCEED_USER_DECISION_PATTERN = re.compile(
+        r"\b(would you like|do you want|should i|shall i|can i|may i|"
+        r"please confirm|confirm first|let me know|which option|"
+        r"choose|select|pick|if you'd like|if you would like|if you want|"
+        r"if you prefer)\b",
+        flags=re.IGNORECASE,
+    )
+    # Deterministic concept-id fields for write-category tools.
+    #
+    # We normalise these before execution so writable operations are robust to
+    # close-but-wrong guessed IDs (for example #V#gill_dobbie vs
+    # #V#gillian_dobbie) without relying on non-deterministic LLM retries.
+    _WRITE_TOOL_CONCEPT_ID_FIELDS: Mapping[str, tuple[str, ...]] = {
+        "add_relationship": ("source_id", "predicate", "target"),
+        "remove_relationship": ("source_id", "predicate", "target"),
+        "add_names": ("concept_id",),
+        "update_concept": ("concept_id",),
+        "delete_concept": ("concept_id",),
+        "merge_concepts": ("source_id", "target_id"),
+        "upsert_text_relation": ("concept_id",),
+        "upsert_singleton_text_relation": ("concept_id",),
+        "delete_text_relation": ("concept_id",),
+        "update_text_relation": ("concept_id",),
+        "create_concepts": ("parent_id",),
+    }
 
     def __init__(
         self,
@@ -1431,6 +1466,81 @@ class InternalMCPChatOrchestrator:
             duration_ms=duration_ms,
         )
 
+    def _run_missing_tool_call_recovery_workflow(
+        self,
+        *,
+        request: Any,
+        environment: WorkflowEnvironment,
+        data: Mapping[str, Any],
+        response_text: str,
+        interpretation: _ModelTurnInterpretation | None,
+        use_structured: bool,
+        tool_call_parse_error: ToolCallParsingError | None,
+        tool_calls: Sequence[Mapping[str, Any]] | None,
+        default_model: str | None,
+    ) -> Mapping[str, Any] | None:
+        """Execute the shared missing-tool-call recovery workflow.
+
+        This keeps plan/backfill recovery behaviour aligned and avoids
+        duplicating workflow bootstrap logic.
+        """
+
+        workflow_def = self._workflow_registry.get(MISSING_TOOL_CALL_WORKFLOW_ID)
+        if workflow_def is None:
+            return None
+
+        model_for_stage = data.get("model_for_stage")
+        if not callable(model_for_stage):
+            return None
+
+        workflow_context = {
+            "user_prompt": data.get("prompt") or "",
+            "response_text": response_text if isinstance(response_text, str) else str(response_text),
+            "interpretation": interpretation,
+            "use_structured": use_structured,
+            "tool_call_parse_error": tool_call_parse_error,
+            "aux_llm_calls": data.get("aux_llm_calls") or [],
+            "augmented_context": data.get("augmented_context") or [],
+            "tool_calls": tool_calls,
+            "missing_tool_assessor": self._assess_missing_tool_call,
+            "extract_tool_calls_fn": self._extract_tool_calls,
+            "record_llm_call": data.get("record_llm_call"),
+            "classifier_model": model_for_stage("classifier"),
+            "policy_state": data.get("policy_state"),
+            "default_model": default_model,
+            "registry_snapshot": data.get("registry_snapshot"),
+            "user_concept_id": data.get("user_concept_id"),
+            "org_concept_id": data.get("org_concept_id"),
+            "missing_tool_call_retry_attempts": data.get(
+                "missing_tool_call_retry_attempts"
+            ),
+            "missing_tool_call_retry_budget": data.get("missing_tool_call_retry_budget"),
+            "emit_progress": data.get("emit_progress"),
+        }
+
+        recovery_model_raw = model_for_stage("tool_recovery")
+        recovery_model = (
+            recovery_model_raw if isinstance(recovery_model_raw, str) else None
+        )
+        recovery_env = WorkflowEnvironment(
+            llm_client=environment.llm_client,
+            gateway=self._gateway,
+            model=recovery_model,
+            user_namespace=environment.user_namespace,
+            auxiliary_system_prompt=environment.auxiliary_system_prompt,
+            max_tool_invocations=environment.max_tool_invocations,
+            default_gmail_profile=(
+                data.get("gmail_profile") or environment.default_gmail_profile
+            ),
+        )
+        workflow_result = self._workflow_executor.run(
+            workflow_def,
+            environment=recovery_env,
+            data=workflow_context,
+            trace=request.trace,
+        )
+        return workflow_result.data
+
     def _action_narration_classify(self, request: Any) -> WorkflowActionResult:
         required = bool(
             request.data.get("presenter_mode_requested")
@@ -2136,7 +2246,6 @@ class InternalMCPChatOrchestrator:
         emit_phase_transition = data.get("emit_phase_transition")
         aux_llm_calls = data["aux_llm_calls"]
         llm_calls = data["llm_calls"]
-        gmail_profile = data.get("gmail_profile") or env.default_gmail_profile
         missing_tool_call_retry_attempts = self._coerce_non_negative_int(
             data.get("missing_tool_call_retry_attempts"),
             default=0,
@@ -2246,57 +2355,26 @@ class InternalMCPChatOrchestrator:
 
         # Missing-tool-call recovery.
         if not has_valid_tool_call:
-            workflow_def = self._workflow_registry.get(MISSING_TOOL_CALL_WORKFLOW_ID)
-            if workflow_def is not None:
-                workflow_context = {
-                    "user_prompt": prompt,
-                    "response_text": (
-                        response if isinstance(response, str) else str(response)
-                    ),
-                    "interpretation": interpretation,
-                    "use_structured": use_structured,
-                    "tool_call_parse_error": tool_call_parse_error,
-                    "aux_llm_calls": aux_llm_calls,
-                    "augmented_context": augmented_context,
-                    "tool_calls": tool_calls,
-                    "missing_tool_assessor": self._assess_missing_tool_call,
-                    "extract_tool_calls_fn": self._extract_tool_calls,
-                    "record_llm_call": record_llm_call,
-                    "classifier_model": model_for_stage("classifier"),
-                    "policy_state": policy_state,
-                    "default_model": tool_call_model,
-                    "registry_snapshot": registry_snapshot,
-                    "user_concept_id": user_concept_id,
-                    "org_concept_id": org_concept_id,
-                    "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
-                    "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
-                }
-                recovery_model = model_for_stage("tool_recovery")
-                recovery_env = WorkflowEnvironment(
-                    llm_client=llm_client,
-                    gateway=self._gateway,
-                    model=recovery_model,
-                    user_namespace=env.user_namespace,
-                    auxiliary_system_prompt=env.auxiliary_system_prompt,
-                    max_tool_invocations=env.max_tool_invocations,
-                    default_gmail_profile=gmail_profile,
-                )
-                workflow_result = self._workflow_executor.run(
-                    workflow_def,
-                    environment=recovery_env,
-                    data=workflow_context,
-                    trace=request.trace,
-                )
-                response = workflow_result.data.get("response_text", response)
-                interpretation = workflow_result.data.get(
-                    "interpretation", interpretation
-                )
-                tool_calls = workflow_result.data.get("tool_calls", tool_calls)
-                tool_call_parse_error = workflow_result.data.get(
+            recovery_data = self._run_missing_tool_call_recovery_workflow(
+                request=request,
+                environment=env,
+                data=data,
+                response_text=(response if isinstance(response, str) else str(response)),
+                interpretation=interpretation,
+                use_structured=use_structured,
+                tool_call_parse_error=tool_call_parse_error,
+                tool_calls=tool_calls,
+                default_model=tool_call_model,
+            )
+            if recovery_data is not None:
+                response = recovery_data.get("response_text", response)
+                interpretation = recovery_data.get("interpretation", interpretation)
+                tool_calls = recovery_data.get("tool_calls", tool_calls)
+                tool_call_parse_error = recovery_data.get(
                     "tool_call_parse_error", tool_call_parse_error
                 )
                 missing_tool_call_retry_attempts = self._coerce_non_negative_int(
-                    workflow_result.data.get(
+                    recovery_data.get(
                         "missing_tool_call_retry_attempts",
                         missing_tool_call_retry_attempts,
                     ),
@@ -2304,7 +2382,7 @@ class InternalMCPChatOrchestrator:
                     max_value=20,
                 )
                 missing_tool_call_retry_budget = self._coerce_non_negative_int(
-                    workflow_result.data.get(
+                    recovery_data.get(
                         "missing_tool_call_retry_budget",
                         missing_tool_call_retry_budget,
                     ),
@@ -2312,7 +2390,7 @@ class InternalMCPChatOrchestrator:
                     max_value=20,
                 )
                 missing_tool_call_retry_suppressed = bool(
-                    workflow_result.data.get("missing_tool_call_retry_suppressed")
+                    recovery_data.get("missing_tool_call_retry_suppressed")
                 )
                 has_valid_tool_call = bool(tool_calls)
 
@@ -2688,6 +2766,7 @@ class InternalMCPChatOrchestrator:
                 continue
 
             try:
+                payload_before_invoke = dict(payload)
                 schema = self._tool_schema_for_name(tool_name, method_catalogue)
                 self._apply_payload_defaults(
                     tool_name,
@@ -2699,6 +2778,45 @@ class InternalMCPChatOrchestrator:
                 )
 
                 result = self._gateway.invoke(tool_name, payload)
+                auto_retry_details: dict[str, Any] | None = None
+                if tool_name == "add_relationship" and isinstance(
+                    result.payload, Mapping
+                ):
+                    retry_payload, retry_context = (
+                        self._retry_add_relationship_on_target_not_found(
+                            payload=payload,
+                            result_payload=cast(Mapping[str, Any], result.payload),
+                        )
+                    )
+                    if retry_payload is not None and retry_context is not None:
+                        auto_retry_details = dict(retry_context)
+                        if callable(emit_progress):
+                            emit_progress(
+                                {
+                                    "status": "tool_retry",
+                                    "tool": tool_name,
+                                    "batch_size": current_batch_size,
+                                    "tool_calls_done": iteration_count,
+                                    "tool_calls_cap": int(max_tool_invocations),
+                                    "tool_calls_remaining": max(
+                                        0, max_tool_invocations - iteration_count
+                                    ),
+                                    "call_id": call_id,
+                                    "retry_reason": retry_context.get("reason"),
+                                }
+                            )
+                        try:
+                            retry_result = self._gateway.invoke(tool_name, retry_payload)
+                        except Exception as retry_exc:
+                            auto_retry_details["retry_error"] = str(retry_exc)
+                        else:
+                            result = retry_result
+                            payload = retry_payload
+                            tool_request[self._PAYLOAD_FIELD] = payload
+                            auto_retry_details["retry_success"] = bool(
+                                isinstance(result.payload, Mapping)
+                                and result.payload.get("success")
+                            )
                 tool_payload = self._format_tool_result(
                     tool_name, result.payload, result.duration_ms, "ok"
                 )
@@ -2706,8 +2824,12 @@ class InternalMCPChatOrchestrator:
 
                 invocation_record: dict[str, Any] = {
                     "tool": tool_name,
-                    "payload": dict(payload),
+                    "payload": payload_before_invoke,
                 }
+                if payload != payload_before_invoke:
+                    invocation_record["effective_payload"] = dict(payload)
+                if auto_retry_details:
+                    invocation_record["auto_retry"] = auto_retry_details
                 if call_id:
                     invocation_record["call_id"] = call_id
                 invocations.append(invocation_record)
@@ -2894,60 +3016,82 @@ class InternalMCPChatOrchestrator:
                     }
                 )
 
-            if interpretation.tool_call_parse_error is not None:
-                exc = interpretation.tool_call_parse_error
-                workflow_def = self._workflow_registry.get(
-                    MISSING_TOOL_CALL_WORKFLOW_ID
+            auto_proceed_enabled = bool(
+                data.get("auto_proceed_minimal_imposition_enabled", True)
+            )
+            auto_proceed_assessment = self._assess_minimal_imposition_auto_proceed(
+                current_response
+            )
+            auto_proceed_gate_passed = auto_proceed_enabled and bool(
+                auto_proceed_assessment.get("should_auto_proceed")
+            )
+
+            if isinstance(aux_llm_calls, list):
+                try:
+                    aux_llm_calls.append(
+                        {
+                            "type": "auto_proceed_minimal_imposition",
+                            "enabled": auto_proceed_enabled,
+                            "should_auto_proceed": bool(
+                                auto_proceed_assessment.get("should_auto_proceed")
+                            ),
+                            "reason": str(auto_proceed_assessment.get("reason") or ""),
+                            "has_progress_promise": bool(
+                                auto_proceed_assessment.get("has_progress_promise")
+                            ),
+                            "has_intent_language": bool(
+                                auto_proceed_assessment.get("has_intent_language")
+                            ),
+                            "has_remaining_work_signal": bool(
+                                auto_proceed_assessment.get(
+                                    "has_remaining_work_signal"
+                                )
+                            ),
+                            "asks_for_user_decision": bool(
+                                auto_proceed_assessment.get("asks_for_user_decision")
+                            ),
+                            "contains_question_mark": bool(
+                                auto_proceed_assessment.get("contains_question_mark")
+                            ),
+                        }
+                    )
+                except Exception:
+                    pass
+
+            exc = interpretation.tool_call_parse_error
+            recovery_reason: str | None = None
+            if exc is not None:
+                recovery_reason = "parse_error"
+            elif auto_proceed_gate_passed:
+                recovery_reason = "minimal_imposition"
+
+            if recovery_reason is not None:
+                recovery_data = self._run_missing_tool_call_recovery_workflow(
+                    request=request,
+                    environment=env,
+                    data=data,
+                    response_text=(
+                        current_response
+                        if isinstance(current_response, str)
+                        else str(current_response)
+                    ),
+                    interpretation=interpretation,
+                    use_structured=False,
+                    tool_call_parse_error=exc,
+                    tool_calls=interpretation.tool_calls,
+                    default_model=summariser_model,
                 )
-                if workflow_def is not None:
-                    workflow_context = {
-                        "user_prompt": data.get("prompt") or "",
-                        "response_text": (
-                            current_response
-                            if isinstance(current_response, str)
-                            else str(current_response)
-                        ),
-                        "interpretation": interpretation,
-                        "use_structured": False,
-                        "tool_call_parse_error": exc,
-                        "aux_llm_calls": aux_llm_calls,
-                        "augmented_context": augmented_context,
-                        "tool_calls": None,
-                        "missing_tool_assessor": self._assess_missing_tool_call,
-                        "extract_tool_calls_fn": self._extract_tool_calls,
-                        "record_llm_call": record_llm_call,
-                        "classifier_model": model_for_stage("classifier"),
-                        "policy_state": policy_state,
-                        "default_model": summariser_model,
-                        "registry_snapshot": registry_snapshot,
-                        "user_concept_id": user_concept_id,
-                        "org_concept_id": org_concept_id,
-                        "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
-                        "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
-                    }
-                    recovery_model = model_for_stage("tool_recovery")
-                    recovery_env = WorkflowEnvironment(
-                        llm_client=llm_client,
-                        gateway=self._gateway,
-                        model=recovery_model,
-                        user_namespace=env.user_namespace,
-                        auxiliary_system_prompt=env.auxiliary_system_prompt,
-                        max_tool_invocations=env.max_tool_invocations,
-                        default_gmail_profile=env.default_gmail_profile,
+
+                recovered_calls = None
+                if recovery_data is not None:
+                    current_response = recovery_data.get(
+                        "response_text",
+                        current_response,
                     )
-                    workflow_result = self._workflow_executor.run(
-                        workflow_def,
-                        environment=recovery_env,
-                        data=workflow_context,
-                        trace=request.trace,
-                    )
-                    current_response = workflow_result.data.get(
-                        "response_text", current_response
-                    )
-                    recovered_calls = workflow_result.data.get("tool_calls")
-                    exc = workflow_result.data.get("tool_call_parse_error", exc)
+                    recovered_calls = recovery_data.get("tool_calls")
+                    exc = recovery_data.get("tool_call_parse_error", exc)
                     missing_tool_call_retry_attempts = self._coerce_non_negative_int(
-                        workflow_result.data.get(
+                        recovery_data.get(
                             "missing_tool_call_retry_attempts",
                             missing_tool_call_retry_attempts,
                         ),
@@ -2955,7 +3099,7 @@ class InternalMCPChatOrchestrator:
                         max_value=20,
                     )
                     missing_tool_call_retry_budget = self._coerce_non_negative_int(
-                        workflow_result.data.get(
+                        recovery_data.get(
                             "missing_tool_call_retry_budget",
                             missing_tool_call_retry_budget,
                         ),
@@ -2963,7 +3107,7 @@ class InternalMCPChatOrchestrator:
                         max_value=20,
                     )
                     missing_tool_call_retry_suppressed = bool(
-                        workflow_result.data.get("missing_tool_call_retry_suppressed")
+                        recovery_data.get("missing_tool_call_retry_suppressed")
                     )
                     data["missing_tool_call_retry_attempts"] = (
                         missing_tool_call_retry_attempts
@@ -2994,35 +3138,36 @@ class InternalMCPChatOrchestrator:
                             }
                         )
 
-                build_error = data.get("build_parse_error_result")
-                if callable(build_error):
-                    invocations = data.get("invocations") or []
-                    tool_messages = data.get("tool_messages") or []
-                    error_result = build_error(
-                        exc,
-                        invocations_override=tuple(invocations),
-                        tool_messages_override=tuple(tool_messages),
-                    )
-                    return WorkflowActionResult(
-                        outputs={
-                            "orchestrator_result": error_result,
-                            "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
-                            "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
-                            "missing_tool_call_retry_remaining": max(
-                                0,
-                                missing_tool_call_retry_budget
-                                - missing_tool_call_retry_attempts,
-                            ),
-                            "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
-                        }
-                    )
+                if interpretation.tool_call_parse_error is not None:
+                    build_error = data.get("build_parse_error_result")
+                    if callable(build_error):
+                        invocations = data.get("invocations") or []
+                        tool_messages = data.get("tool_messages") or []
+                        error_result = build_error(
+                            exc,
+                            invocations_override=tuple(invocations),
+                            tool_messages_override=tuple(tool_messages),
+                        )
+                        return WorkflowActionResult(
+                            outputs={
+                                "orchestrator_result": error_result,
+                                "missing_tool_call_retry_attempts": missing_tool_call_retry_attempts,
+                                "missing_tool_call_retry_budget": missing_tool_call_retry_budget,
+                                "missing_tool_call_retry_remaining": max(
+                                    0,
+                                    missing_tool_call_retry_budget
+                                    - missing_tool_call_retry_attempts,
+                                ),
+                                "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+                            }
+                        )
 
-                # Parse error during chained extraction — treat as done
-                # rather than failing the whole flow.
-                self._logger.debug(
-                    "[mcp_orchestrator] Chained tool-call extraction failed; "
-                    "treating summariser response as final."
-                )
+                    # Parse error during chained extraction — treat as done
+                    # rather than failing the whole flow.
+                    self._logger.debug(
+                        "[mcp_orchestrator] Chained tool-call extraction failed; "
+                        "treating summariser response as final."
+                    )
 
         # Log if we hit the iteration limit.
         if iteration_count >= max_tool_invocations and self._is_json_action_response(
@@ -4546,6 +4691,267 @@ class InternalMCPChatOrchestrator:
         resolved = resolution.get("resolved_concept_id")
         return resolved if isinstance(resolved, str) else None
 
+    @staticmethod
+    def _looks_like_concept_id(value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and value.startswith("#V#")
+            and len(value) > 3
+            and bool(re.match(r"^#V#[A-Za-z0-9][A-Za-z0-9._-]*$", value))
+        )
+
+    def _concept_exists_via_tool(self, concept_id: str) -> bool:
+        if not self._looks_like_concept_id(concept_id):
+            return False
+        try:
+            result = self._gateway.invoke("concept_exists", {"concept_id": concept_id})
+        except Exception:
+            return False
+
+        payload = (
+            result.payload
+            if hasattr(result, "payload")
+            else (result if isinstance(result, Mapping) else None)
+        )
+        if not isinstance(payload, Mapping):
+            return False
+
+        exists = bool(payload.get("exists"))
+        accessible = payload.get("accessible")
+        if isinstance(accessible, bool):
+            return exists and accessible
+        return exists
+
+    @staticmethod
+    def _candidate_names_from_concept_id(concept_id: str) -> list[str]:
+        if not isinstance(concept_id, str):
+            return []
+        stem = concept_id[3:] if concept_id.startswith("#V#") else concept_id
+        stem = re.sub(r"[^A-Za-z0-9._-]+", " ", stem)
+        stem = re.sub(r"[._-]+", " ", stem)
+        stem = re.sub(r"\s+", " ", stem).strip()
+        if not stem:
+            return []
+
+        candidates: list[str] = [stem]
+        title_case = " ".join(part.capitalize() for part in stem.split(" "))
+        if title_case and title_case not in candidates:
+            candidates.append(title_case)
+
+        if len(stem.split(" ")) > 1:
+            no_article = re.sub(r"^(the|a|an)\s+", "", stem, flags=re.IGNORECASE)
+            no_article_title = " ".join(
+                part.capitalize() for part in no_article.split(" ")
+            )
+            for candidate in (no_article, no_article_title):
+                if candidate and candidate not in candidates:
+                    candidates.append(candidate)
+
+        return candidates
+
+    def _resolve_concept_id_via_tool(
+        self,
+        name: str,
+        *,
+        preferred_language: str | None = None,
+    ) -> str | None:
+        if not isinstance(name, str) or not name.strip():
+            return None
+
+        payload: dict[str, Any] = {
+            "name": name.strip(),
+            "match_code_strings": True,
+        }
+        if isinstance(preferred_language, str) and preferred_language.strip():
+            payload["preferred_languages"] = [preferred_language.strip()]
+
+        try:
+            result = self._gateway.invoke("resolve_concept_by_name", payload)
+        except Exception:
+            return None
+
+        body = (
+            result.payload
+            if hasattr(result, "payload")
+            else (result if isinstance(result, Mapping) else None)
+        )
+        if not isinstance(body, Mapping):
+            return None
+        if body.get("status") != "resolved":
+            return None
+
+        resolved_id = body.get("resolved_concept_id")
+        if not isinstance(resolved_id, str):
+            resolved_id = body.get("concept_id")
+        if isinstance(resolved_id, str) and self._looks_like_concept_id(resolved_id):
+            return resolved_id
+        return None
+
+    def _resolve_missing_concept_id(
+        self,
+        concept_id: str,
+        *,
+        preferred_language: str | None = None,
+        exists_cache: MutableMapping[str, bool] | None = None,
+        resolution_cache: MutableMapping[str, str | None] | None = None,
+    ) -> str | None:
+        if not self._looks_like_concept_id(concept_id):
+            return None
+
+        if resolution_cache is not None and concept_id in resolution_cache:
+            return resolution_cache[concept_id]
+
+        def _exists(candidate_id: str) -> bool:
+            if exists_cache is not None and candidate_id in exists_cache:
+                return bool(exists_cache[candidate_id])
+            exists_value = self._concept_exists_via_tool(candidate_id)
+            if exists_cache is not None:
+                exists_cache[candidate_id] = exists_value
+            return exists_value
+
+        if _exists(concept_id):
+            if resolution_cache is not None:
+                resolution_cache[concept_id] = concept_id
+            return concept_id
+
+        for candidate_name in self._candidate_names_from_concept_id(concept_id):
+            resolved = self._resolve_concept_id_via_tool(
+                candidate_name,
+                preferred_language=preferred_language,
+            )
+            if isinstance(resolved, str) and _exists(resolved):
+                if resolution_cache is not None:
+                    resolution_cache[concept_id] = resolved
+                return resolved
+
+        if resolution_cache is not None:
+            resolution_cache[concept_id] = None
+        return None
+
+    def _is_write_tool(
+        self,
+        tool_name: str,
+        method_catalogue: Mapping[str, Any],
+    ) -> bool:
+        metadata = method_catalogue.get(tool_name)
+        if isinstance(metadata, Mapping):
+            category = metadata.get("category")
+            if isinstance(category, str) and category.strip().lower() == "write":
+                return True
+        return tool_name in self._WRITE_TOOL_CONCEPT_ID_FIELDS
+
+    def _rewrite_write_payload_concept_ids(
+        self,
+        *,
+        tool_name: str,
+        payload: MutableMapping[str, Any],
+        method_catalogue: Mapping[str, Any],
+        warnings: list[str],
+        preferred_language: str | None = None,
+        exists_cache: MutableMapping[str, bool] | None = None,
+        resolution_cache: MutableMapping[str, str | None] | None = None,
+    ) -> None:
+        if not self._is_write_tool(tool_name, method_catalogue):
+            return
+
+        concept_fields = self._WRITE_TOOL_CONCEPT_ID_FIELDS.get(tool_name, ())
+        if not concept_fields:
+            return
+
+        for field_name in concept_fields:
+            raw_value = payload.get(field_name)
+            if not self._looks_like_concept_id(raw_value):
+                continue
+            raw_concept_id = cast(str, raw_value)
+
+            resolved = self._resolve_missing_concept_id(
+                raw_concept_id,
+                preferred_language=preferred_language,
+                exists_cache=exists_cache,
+                resolution_cache=resolution_cache,
+            )
+            if isinstance(resolved, str) and resolved != raw_concept_id:
+                payload[field_name] = resolved
+                warnings.append(
+                    f"{tool_name}: resolved {field_name} from {raw_concept_id} to {resolved}"
+                )
+            elif resolved is None:
+                warnings.append(
+                    f"{tool_name}: unresolved concept ID in {field_name}: {raw_concept_id}"
+                )
+
+    @staticmethod
+    def _extract_add_relationship_missing_concept_id(
+        result_payload: Mapping[str, Any],
+    ) -> str | None:
+        error_details = result_payload.get("error_details")
+        if not isinstance(error_details, Mapping):
+            return None
+
+        nested = error_details.get("details")
+        if isinstance(nested, Mapping):
+            nested_concept_id = nested.get("concept_id")
+            if isinstance(nested_concept_id, str):
+                return nested_concept_id
+
+        for key in ("target", "source_id", "predicate"):
+            value = error_details.get(key)
+            if isinstance(value, str):
+                return value
+        return None
+
+    def _retry_add_relationship_on_target_not_found(
+        self,
+        *,
+        payload: MutableMapping[str, Any],
+        result_payload: Mapping[str, Any],
+        preferred_language: str | None = None,
+    ) -> tuple[MutableMapping[str, Any] | None, Mapping[str, Any] | None]:
+        error_code = result_payload.get("error_code") or result_payload.get("error")
+        if (
+            not isinstance(error_code, str)
+            or error_code.strip().lower() != "target_not_found"
+        ):
+            return None, None
+
+        missing_concept_id = self._extract_add_relationship_missing_concept_id(
+            result_payload
+        )
+        candidate_fields = ("target", "source_id", "predicate")
+        exists_cache: dict[str, bool] = {}
+        resolution_cache: dict[str, str | None] = {}
+
+        for field_name in candidate_fields:
+            current_value = payload.get(field_name)
+            if not self._looks_like_concept_id(current_value):
+                continue
+            current_concept_id = cast(str, current_value)
+            if (
+                isinstance(missing_concept_id, str)
+                and missing_concept_id != current_concept_id
+            ):
+                continue
+
+            resolved = self._resolve_missing_concept_id(
+                current_concept_id,
+                preferred_language=preferred_language,
+                exists_cache=exists_cache,
+                resolution_cache=resolution_cache,
+            )
+            if not isinstance(resolved, str) or resolved == current_concept_id:
+                continue
+
+            retry_payload = dict(payload)
+            retry_payload[field_name] = resolved
+            return retry_payload, {
+                "reason": "target_not_found",
+                "field": field_name,
+                "from": current_concept_id,
+                "to": resolved,
+            }
+
+        return None, None
+
     def _load_workflow_model_policy(
         self, preferred_language: str | None
     ) -> tuple[_WorkflowModelPolicyState, Mapping[str, Any] | None]:
@@ -5406,6 +5812,13 @@ class InternalMCPChatOrchestrator:
             if isinstance(parsed, list):
                 if not parsed:
                     return False
+                for item in parsed:
+                    if not isinstance(item, dict):
+                        continue
+                    if isinstance(item.get("recipient_name"), str) and isinstance(
+                        item.get("parameters"), dict
+                    ):
+                        return True
                 return any(
                     self._is_json_action_response(json.dumps(item)) for item in parsed
                 )
@@ -5421,6 +5834,15 @@ class InternalMCPChatOrchestrator:
                 parsed[self._PAYLOAD_FIELD], dict
             )
 
+            tool_uses = parsed.get("tool_uses")
+            has_tool_uses_shape = (
+                isinstance(tool_uses, list)
+                and bool(tool_uses)
+                and isinstance(tool_uses[0], dict)
+                and isinstance(tool_uses[0].get("recipient_name"), str)
+                and isinstance(tool_uses[0].get("parameters"), dict)
+            )
+
             # Some models omit the action field or emit tool-call-like JSON with
             # extra diagnostics keys (e.g., status/duration_ms). Treat these as a
             # likely tool-call attempt for diagnostics/recovery.
@@ -5432,6 +5854,7 @@ class InternalMCPChatOrchestrator:
                 "duration_ms",
                 "error",
                 "_call_id",
+                "tool_uses",
             }
             missing_action_but_tool_shape = (
                 self._ACTION_FIELD not in parsed
@@ -5442,7 +5865,7 @@ class InternalMCPChatOrchestrator:
 
             return (
                 has_action and has_tool and has_payload
-            ) or missing_action_but_tool_shape
+            ) or missing_action_but_tool_shape or has_tool_uses_shape
         except (json.JSONDecodeError, TypeError):
             return False
 
@@ -5451,6 +5874,9 @@ class InternalMCPChatOrchestrator:
 
         Accepts either a single tool-call JSON object or a JSON array of tool-call
         objects. Returns None if the response is not a pure tool call.
+
+        Also accepts a compatibility envelope used by some agent hosts:
+        ``{"tool_uses":[{"recipient_name":"functions.tool","parameters":{...}}]}``.
 
         This keeps the original safety constraints:
         - Tool calls must be the first JSON value in the response.
@@ -5463,6 +5889,189 @@ class InternalMCPChatOrchestrator:
 
         raw = text.strip()
         if not raw:
+            return None
+
+        method_catalogue: Mapping[str, Any] = {}
+        describe_methods = getattr(self._gateway, "describe_methods", None)
+        if callable(describe_methods):
+            try:
+                described = describe_methods()
+                if isinstance(described, Mapping):
+                    method_catalogue = described
+            except Exception:
+                method_catalogue = {}
+        available_tools = {
+            name for name in method_catalogue.keys() if isinstance(name, str)
+        }
+
+        structural_predicate_aliases = {
+            "instance_of",
+            "instanceOf",
+            "type_of",
+            "typeOf",
+            "subtype",
+            "instance",
+            "is_a_type_of",
+            "is_an_instance_of",
+            "has_subtype",
+            "has_instance",
+        }
+        concept_like_fields = {
+            "source_id",
+            "target",
+            "target_id",
+            "concept_id",
+            "parent_id",
+            "assignee_concept_id",
+            "creator_concept_id",
+            "organisation_concept_id",
+            "task_concept_id",
+            "predicate",
+        }
+        for fields in self._WRITE_TOOL_CONCEPT_ID_FIELDS.values():
+            concept_like_fields.update(fields)
+
+        def _normalise_tool_name(raw_name: Any) -> str | None:
+            if not isinstance(raw_name, str):
+                return None
+            cleaned = raw_name.strip()
+            if not cleaned:
+                return None
+
+            candidates: list[str] = [cleaned]
+            if cleaned.startswith("functions."):
+                candidates.append(cleaned[len("functions.") :].strip())
+            if cleaned.startswith("functions/"):
+                candidates.append(cleaned[len("functions/") :].strip())
+            if cleaned.startswith("tools."):
+                candidates.append(cleaned[len("tools.") :].strip())
+
+            for candidate in list(candidates):
+                if candidate.startswith("mcp__") and "__" in candidate:
+                    suffix = candidate.split("__")[-1].strip()
+                    if suffix:
+                        candidates.append(suffix)
+                if "." in candidate:
+                    tail = candidate.rsplit(".", 1)[-1].strip()
+                    if tail:
+                        candidates.append(tail)
+
+            ordered: list[str] = []
+            for candidate in candidates:
+                if candidate and candidate not in ordered:
+                    ordered.append(candidate)
+
+            if available_tools:
+                for candidate in ordered:
+                    if candidate in available_tools:
+                        return candidate
+
+            for candidate in ordered:
+                if candidate != cleaned:
+                    return candidate
+            return cleaned
+
+        def _clean_payload_scalar(value: str, *, field_name: str | None) -> str:
+            cleaned = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+            if not cleaned:
+                return cleaned
+
+            lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
+            if len(lines) >= 2 and lines[-1].lower() in {
+                "individual",
+                "predicate",
+                "type",
+                "instance",
+            }:
+                lines = lines[:-1]
+
+            if lines:
+                cleaned = "\n".join(lines).strip()
+
+            cleaned = re.sub(
+                r"\s+(?:individual|predicate|type|instance)\s*$",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            ).strip()
+
+            if (
+                isinstance(field_name, str)
+                and field_name in concept_like_fields
+                and cleaned
+                and not cleaned.startswith("#V#")
+                and bool(re.match(r"^[A-Za-z][A-Za-z0-9._-]*$", cleaned))
+            ):
+                if field_name == "predicate" and cleaned in structural_predicate_aliases:
+                    return cleaned
+                return f"#V#{cleaned}"
+
+            return cleaned
+
+        def _clean_payload_value(value: Any, *, field_name: str | None = None) -> Any:
+            if isinstance(value, str):
+                return _clean_payload_scalar(value, field_name=field_name)
+            if isinstance(value, MutableMapping):
+                cleaned_map: dict[str, Any] = {}
+                for key, nested_value in value.items():
+                    key_name = key if isinstance(key, str) else None
+                    cleaned_map[str(key)] = _clean_payload_value(
+                        nested_value, field_name=key_name
+                    )
+                return cleaned_map
+            if isinstance(value, list):
+                return [
+                    _clean_payload_value(item, field_name=field_name) for item in value
+                ]
+            return value
+
+        def _extract_tool_uses_batch(raw_text: str) -> list[Any] | None:
+            marker = '"tool_uses"'
+            marker_index = raw_text.find(marker)
+            if marker_index == -1:
+                return None
+
+            array_start = raw_text.find("[", marker_index)
+            if array_start == -1:
+                return None
+
+            depth = 0
+            in_string = False
+            escaped = False
+
+            for index in range(array_start, len(raw_text)):
+                char = raw_text[index]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                    continue
+
+                if char == '"':
+                    in_string = True
+                    continue
+                if char == "[":
+                    depth += 1
+                    continue
+                if char == "]":
+                    depth -= 1
+                    if depth == 0:
+                        array_text = raw_text[array_start : index + 1]
+                        try:
+                            parsed_array = json.loads(array_text)
+                        except json.JSONDecodeError:
+                            repaired = self._repair_truncated_json(array_text)
+                            if repaired is None:
+                                return None
+                            try:
+                                parsed_array = json.loads(repaired)
+                            except json.JSONDecodeError:
+                                return None
+                        return parsed_array if isinstance(parsed_array, list) else None
+
             return None
 
         post_fence_trailing: str = ""
@@ -5502,43 +6111,53 @@ class InternalMCPChatOrchestrator:
                 f'"{self._PAYLOAD_FIELD}"',
                 '"call_tool"',
                 '"tool_calls"',
+                '"tool_uses"',
+                '"recipient_name"',
+                '"parameters"',
             )
         )
 
-        if not (raw.startswith("{") or raw.startswith("[")):
-            return None
-
-        # Avoid raising parse errors for non-tool JSON (e.g., when the model
-        # returns a JSON answer or the user pasted JSON). Only attempt to parse
-        # tool calls when the response looks tool-shaped.
-        if not looks_like_tool_call:
-            return None
-
         decoder = json.JSONDecoder()
-        try:
-            parsed, end = decoder.raw_decode(raw)
-        except json.JSONDecodeError as exc:
-            repaired = self._repair_truncated_json(raw)
-            if repaired is not None:
-                try:
-                    parsed, end = decoder.raw_decode(repaired)
-                    raw = repaired
-                    self._logger.warning(
-                        "[mcp_orchestrator] Repaired truncated tool-call JSON payload."
-                    )
-                except json.JSONDecodeError as repair_exc:
+        tool_uses_batch = _extract_tool_uses_batch(raw)
+        raw_trailing = ""
+        trailing = ""
+
+        if tool_uses_batch is not None:
+            parsed: Any = {"tool_uses": tool_uses_batch}
+        else:
+            if not (raw.startswith("{") or raw.startswith("[")):
+                return None
+
+            # Avoid raising parse errors for non-tool JSON (e.g., when the model
+            # returns a JSON answer or the user pasted JSON). Only attempt to parse
+            # tool calls when the response looks tool-shaped.
+            if not looks_like_tool_call:
+                return None
+
+            try:
+                parsed, end = decoder.raw_decode(raw)
+            except json.JSONDecodeError as exc:
+                repaired = self._repair_truncated_json(raw)
+                if repaired is not None:
+                    try:
+                        parsed, end = decoder.raw_decode(repaired)
+                        raw = repaired
+                        self._logger.warning(
+                            "[mcp_orchestrator] Repaired truncated tool-call JSON payload."
+                        )
+                    except json.JSONDecodeError as repair_exc:
+                        raise ToolCallParsingError(
+                            "Tool call was not executed: invalid JSON in tool call response.",
+                            raw_response=text,
+                        ) from repair_exc
+                else:
                     raise ToolCallParsingError(
                         "Tool call was not executed: invalid JSON in tool call response.",
                         raw_response=text,
-                    ) from repair_exc
-            else:
-                raise ToolCallParsingError(
-                    "Tool call was not executed: invalid JSON in tool call response.",
-                    raw_response=text,
-                ) from exc
+                    ) from exc
 
-        raw_trailing = raw[end:]
-        trailing = raw_trailing.strip()
+            raw_trailing = raw[end:]
+            trailing = raw_trailing.strip()
 
         def _normalise_tool_call(candidate: Any) -> _ToolCallRequest | None:
             if not isinstance(candidate, MutableMapping):
@@ -5546,13 +6165,16 @@ class InternalMCPChatOrchestrator:
 
             tool_name = candidate.get(self._TOOL_FIELD)
             if not isinstance(tool_name, str):
-                alt_name = candidate.get("name")
-                if isinstance(alt_name, str) and alt_name:
-                    tool_name = alt_name
+                for key in ("name", "recipient_name", "recipient", "method"):
+                    alt_name = candidate.get(key)
+                    if isinstance(alt_name, str) and alt_name.strip():
+                        tool_name = alt_name.strip()
+                        break
+            tool_name = _normalise_tool_name(tool_name)
             payload_value = candidate.get(self._PAYLOAD_FIELD)
             action_value = candidate.get(self._ACTION_FIELD)
             if not isinstance(payload_value, MutableMapping):
-                for alt_key in ("params", "arguments", "args"):
+                for alt_key in ("params", "parameters", "arguments", "args"):
                     alt_value = candidate.get(alt_key)
                     if isinstance(alt_value, str) and alt_value.strip():
                         try:
@@ -5570,6 +6192,17 @@ class InternalMCPChatOrchestrator:
             has_payload = isinstance(payload_value, MutableMapping)
             has_action = action_value == self._CALL_ACTION
 
+            use_compat_cleaning = any(
+                key in candidate
+                for key in ("recipient_name", "parameters", "params", "arguments", "args")
+            )
+
+            if has_payload and use_compat_cleaning:
+                payload_value = cast(
+                    MutableMapping[str, Any],
+                    _clean_payload_value(payload_value, field_name=None),
+                )
+
             missing_action = self._ACTION_FIELD not in candidate
             strict_shape = set(candidate.keys()) <= {
                 self._TOOL_FIELD,
@@ -5578,6 +6211,10 @@ class InternalMCPChatOrchestrator:
                 "arguments",
                 "args",
                 "name",
+                "recipient_name",
+                "recipient",
+                "method",
+                "parameters",
                 "id",
                 "tool_call_id",
             }
@@ -5615,6 +6252,8 @@ class InternalMCPChatOrchestrator:
         parsed_list: list[Any] | None = None
         if isinstance(parsed, MutableMapping):
             wrapped_calls = parsed.get("tool_calls")
+            if not isinstance(wrapped_calls, list):
+                wrapped_calls = parsed.get("tool_uses")
             if isinstance(wrapped_calls, list):
                 parsed_list = wrapped_calls
             else:
@@ -5844,6 +6483,8 @@ class InternalMCPChatOrchestrator:
 
         available_tools = set(method_catalogue.keys())
         enforce_availability = bool(available_tools)
+        exists_cache: dict[str, bool] = {}
+        resolution_cache: dict[str, str | None] = {}
 
         for tool_call in tool_calls:
             tool_name = tool_call.get(self._TOOL_FIELD)
@@ -5871,6 +6512,16 @@ class InternalMCPChatOrchestrator:
                 user_namespace=user_namespace,
                 selected_gmail_profile=selected_gmail_profile,
                 conversation_session_id=conversation_session_id,
+            )
+            # Deterministically resolve close-but-invalid concept IDs for
+            # write tools before schema validation/execution.
+            self._rewrite_write_payload_concept_ids(
+                tool_name=tool_name,
+                payload=payload,
+                method_catalogue=method_catalogue,
+                warnings=warnings,
+                exists_cache=exists_cache,
+                resolution_cache=resolution_cache,
             )
             if schema is None:
                 continue
@@ -8324,6 +8975,92 @@ class InternalMCPChatOrchestrator:
             trace=trace,
         )
 
+    def _get_auto_proceed_minimal_imposition_enabled(self) -> bool:
+        """Return whether minimal-imposition auto-proceed is enabled.
+
+        Defaults to enabled so the assistant avoids avoidable human hand-offs.
+        """
+
+        try:
+            from src.backend.services.settings_service import (
+                get_auto_proceed_minimal_imposition_enabled,
+            )
+
+            return bool(get_auto_proceed_minimal_imposition_enabled())
+        except Exception:
+            return self._env_flag_enabled(
+                "VON_AUTO_PROCEED_MINIMAL_IMPOSITION_ENABLE",
+                default="1",
+            )
+
+    @classmethod
+    def _assess_minimal_imposition_auto_proceed(
+        cls,
+        response_text: str,
+    ) -> Mapping[str, Any]:
+        """Assess whether autonomous continuation minimises user imposition."""
+
+        if not isinstance(response_text, str) or not response_text.strip():
+            return {
+                "should_auto_proceed": False,
+                "reason": "empty_response",
+                "has_progress_promise": False,
+                "has_intent_language": False,
+                "has_remaining_work_signal": False,
+                "asks_for_user_decision": False,
+                "contains_question_mark": False,
+            }
+
+        text = response_text.strip()
+        normalised = (
+            text.replace("\u2019", "'")
+            .replace("\u2018", "'")
+            .replace("\u2032", "'")
+            .replace("\u201c", '"')
+            .replace("\u201d", '"')
+        )
+        lowered = normalised.lower()
+
+        has_progress_promise = bool(
+            cls._AUTO_PROCEED_PROGRESS_PROMISE_PATTERN.search(lowered)
+        )
+        has_intent_language = bool(cls._COMPLETION_CLAIM_INTENT_PATTERN.search(lowered))
+        has_remaining_work_signal = any(
+            token in lowered
+            for token in (
+                "remaining",
+                "still need",
+                "next",
+                "to complete",
+                "to finish",
+                "continue",
+            )
+        )
+        asks_for_user_decision = bool(
+            cls._AUTO_PROCEED_USER_DECISION_PATTERN.search(lowered)
+        )
+        contains_question_mark = "?" in normalised
+
+        should_auto_proceed = False
+        reason = "no_progress_signal"
+        if asks_for_user_decision:
+            reason = "user_decision_requested"
+        elif contains_question_mark and not has_progress_promise:
+            reason = "question_without_progress_promise"
+        elif has_progress_promise or (has_intent_language and has_remaining_work_signal):
+            should_auto_proceed = True
+            reason = "minimal_imposition_pass"
+
+        return {
+            "should_auto_proceed": should_auto_proceed,
+            "reason": reason,
+            "has_progress_promise": has_progress_promise,
+            "has_intent_language": has_intent_language,
+            "has_remaining_work_signal": has_remaining_work_signal,
+            "asks_for_user_decision": asks_for_user_decision,
+            "contains_question_mark": contains_question_mark,
+        }
+
     @staticmethod
     def _env_flag_enabled(name: str, *, default: str = "0") -> bool:
         value = os.getenv(name, default)
@@ -9298,6 +10035,20 @@ class InternalMCPChatOrchestrator:
             max_tool_invocations=self._max_tool_invocations,
             default_gmail_profile=gmail_profile or self._default_gmail_profile,
         )
+        auto_proceed_minimal_imposition_enabled = (
+            self._get_auto_proceed_minimal_imposition_enabled()
+        )
+        try:
+            aux_llm_calls.append(
+                {
+                    "type": "auto_proceed_minimal_imposition_setting",
+                    "enabled": bool(auto_proceed_minimal_imposition_enabled),
+                    "source": "settings",
+                }
+            )
+        except Exception:
+            pass
+
         tc_data: dict[str, Any] = {
             # Inputs.
             "prompt": prompt,
@@ -9309,6 +10060,9 @@ class InternalMCPChatOrchestrator:
             "conversation_session_id": conversation_session_id,
             "recent_user_prompts": recent_user_prompts,
             "gmail_profile": gmail_profile or self._default_gmail_profile,
+            "auto_proceed_minimal_imposition_enabled": bool(
+                auto_proceed_minimal_imposition_enabled
+            ),
             # Closures from run().
             "model_for_stage": _model_for_stage,
             "record_llm_call": _record_llm_call,

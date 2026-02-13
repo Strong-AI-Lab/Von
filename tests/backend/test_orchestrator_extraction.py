@@ -34,6 +34,11 @@ class _DummyGateway:
         return Result()
 
 
+class _RelationshipGateway(_DummyGateway):
+    def describe_methods(self):
+        return {"add_relationship": {"description": "relationship write"}}
+
+
 class _RecorderLLM:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -372,6 +377,39 @@ def test_extract_tool_calls_accepts_missing_action_when_tool_is_known_in_batch()
     assert calls[0]["action"] == "call_tool"
     assert calls[1]["action"] == "call_tool"
     assert calls[1]["payload"]["x"] == 2
+
+
+def test_extract_tool_calls_accepts_tool_uses_recipient_envelope():
+    text = (
+        '{"tool_uses": ['
+        '{"recipient_name": "functions.test", "parameters": {"x": 1}},'
+        '{"recipient_name": "test", "parameters": {"x": 2}}'
+        "]}"
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_DummyGateway())  # type: ignore[arg-type]
+    calls = orchestrator._extract_tool_calls(text)
+    assert calls is not None
+    assert [call["tool"] for call in calls] == ["test", "test"]
+    assert [call["payload"]["x"] for call in calls] == [1, 2]
+
+
+def test_extract_tool_calls_recovers_tool_uses_from_corrupted_wrapper_and_cleans_payload():
+    text = (
+        '{"commentary to=multi_tool_use.parallel malformed wrapper"}'
+        '{"tool_uses":[{"recipient_name":"functions.add_relationship","parameters":'
+        '{"source_id":"\\nsalient_predicate_governance_workflow\\nIndividual\\n",'
+        '"predicate":"\\nhas_step\\nPredicate\\n",'
+        '"target":"\\nsalience_step_identify_type\\nIndividual\\n"}}]}'
+        "json to=multi_tool_use.parallel"
+    )
+    orchestrator = InternalMCPChatOrchestrator(gateway=_RelationshipGateway())  # type: ignore[arg-type]
+    calls = orchestrator._extract_tool_calls(text)
+    assert calls is not None
+    assert len(calls) == 1
+    assert calls[0]["tool"] == "add_relationship"
+    assert calls[0]["payload"]["source_id"] == "#V#salient_predicate_governance_workflow"
+    assert calls[0]["payload"]["predicate"] == "#V#has_step"
+    assert calls[0]["payload"]["target"] == "#V#salience_step_identify_type"
 
 
 def test_extract_tool_calls_rejects_concatenated_json_objects():
@@ -730,6 +768,87 @@ def test_run_retries_when_classifier_misses_but_heuristic_triggers():
     assert result.tool_invocations
     assert result.response_text == "Final response"
     assert result.aux_llm_calls
+
+
+def test_run_backfill_autoproceeds_on_minimal_imposition_signal():
+    gateway = _DummyGateway()
+    llm = _RecorderLLM(
+        [
+            # Initial plan response: first tool call executes.
+            '{"action":"call_tool","tool":"test","payload":{"step":1}}',
+            # Backfill response: claims it is continuing now but emits no tool JSON.
+            "I will now continue wiring the remaining workflow links. Proceeding now.",
+            # Recovery response for missing-tool-call workflow.
+            '{"action":"call_tool","tool":"test","payload":{"step":2}}',
+            # Final follow-up after second tool execution.
+            "Workflow wiring complete.",
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=2,
+    )
+
+    result = orchestrator.run(
+        prompt="wire the workflow end-to-end",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert len(gateway.calls) == 2
+    assert result.response_text == "Workflow wiring complete."
+
+    aux_types = [
+        entry.get("type")
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+    ]
+    assert "auto_proceed_minimal_imposition" in aux_types
+    assert "missing_tool_call_retry" in aux_types
+
+
+def test_run_backfill_does_not_autoproceed_when_setting_disabled(monkeypatch):
+    gateway = _DummyGateway()
+    llm = _RecorderLLM(
+        [
+            '{"action":"call_tool","tool":"test","payload":{"step":1}}',
+            "I will now continue wiring the remaining workflow links. Proceeding now.",
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=2,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_get_auto_proceed_minimal_imposition_enabled",
+        lambda: False,
+    )
+
+    result = orchestrator.run(
+        prompt="wire the workflow end-to-end",
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert len(gateway.calls) == 1
+    assert "Proceeding now." in result.response_text
+
+    gate_entries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "auto_proceed_minimal_imposition"
+    ]
+    assert gate_entries
+    assert gate_entries[-1].get("enabled") is False
+    assert gate_entries[-1].get("should_auto_proceed") is True
 
 
 def test_run_retries_when_response_uses_smart_quotes_promising_tool_use():
