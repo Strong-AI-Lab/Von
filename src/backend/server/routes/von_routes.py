@@ -1664,10 +1664,73 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
     return unique_warnings
 
 
+_FENCED_CODE_BLOCK_PATTERN = re.compile(
+    r"```[\w+\-]*\n.*?(?:```|$)",
+    flags=re.DOTALL,
+)
+
+
 def _strip_fenced_code_blocks(text: str) -> str:
     if not isinstance(text, str) or not text:
         return ""
-    return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    return _FENCED_CODE_BLOCK_PATTERN.sub("", text)
+
+
+def _mask_fenced_code_blocks(text: str) -> tuple[str, dict[str, str]]:
+    """Replace fenced code blocks with placeholders for safe tag matching.
+
+    This allows presenter-tag extraction to ignore tags *inside* fenced code
+    while still restoring fenced content that belongs inside a valid <screen>
+    block.
+    """
+
+    if not isinstance(text, str) or not text:
+        return "", {}
+
+    replacements: dict[str, str] = {}
+    counter = 0
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal counter
+        token = f"__VON_FENCED_BLOCK_{counter}__"
+        replacements[token] = match.group(0)
+        counter += 1
+        return token
+
+    masked = _FENCED_CODE_BLOCK_PATTERN.sub(_replace, text)
+    return masked, replacements
+
+
+def _restore_masked_fenced_code_blocks(
+    text: str,
+    replacements: dict[str, str],
+) -> str:
+    if not isinstance(text, str) or not text:
+        return ""
+    restored = text
+    for token, block in replacements.items():
+        restored = restored.replace(token, block)
+    return restored
+
+
+def _extract_tagged_block(text: str, tag: str) -> str | None:
+    """Extract a presenter tag value while preserving fenced code in content."""
+
+    if not isinstance(text, str) or not text:
+        return None
+    if not isinstance(tag, str) or not tag:
+        return None
+
+    searchable, replacements = _mask_fenced_code_blocks(text)
+    pattern = rf"<{re.escape(tag)}>\s*(.*?)\s*</{re.escape(tag)}>"
+    match = re.search(pattern, searchable, flags=re.DOTALL | re.IGNORECASE)
+    if not match:
+        return None
+    value = match.group(1)
+    if not isinstance(value, str):
+        return None
+    value = _restore_masked_fenced_code_blocks(value, replacements).strip()
+    return value if value else None
 
 
 def _extract_presenter_channels(text: str) -> dict[str, object] | None:
@@ -1683,21 +1746,8 @@ def _extract_presenter_channels(text: str) -> dict[str, object] | None:
     if not isinstance(text, str) or not text:
         return None
 
-    searchable = _strip_fenced_code_blocks(text)
-
-    def _find_block(tag: str) -> str | None:
-        pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
-        match = re.search(pattern, searchable, flags=re.DOTALL | re.IGNORECASE)
-        if not match:
-            return None
-        value = match.group(1)
-        if not isinstance(value, str):
-            return None
-        value = value.strip()
-        return value if value else None
-
-    spoken = _find_block("spoken")
-    screen = _find_block("screen")
+    spoken = _extract_tagged_block(text, "spoken")
+    screen = _extract_tagged_block(text, "screen")
 
     if spoken is None and screen is None:
         return None
@@ -1720,11 +1770,7 @@ def _extract_presenter_channels(text: str) -> dict[str, object] | None:
 
 
 def _presenter_tag_present(text: str, tag: str) -> bool:
-    if not isinstance(text, str) or not text:
-        return False
-    pattern = rf"<{tag}>\s*(.*?)\s*</{tag}>"
-    searchable = _strip_fenced_code_blocks(text)
-    return bool(re.search(pattern, searchable, flags=re.DOTALL | re.IGNORECASE))
+    return _extract_tagged_block(text, tag) is not None
 
 
 def _build_presenter_screen_from_tool_messages(
@@ -1790,19 +1836,7 @@ def _build_presenter_screen_from_tool_messages(
 
 
 def _extract_screen_only(text: str) -> str | None:
-    if not isinstance(text, str) or not text:
-        return None
-    searchable = _strip_fenced_code_blocks(text)
-    m = re.search(
-        r"<screen>\s*(.*?)\s*</screen>", searchable, flags=re.DOTALL | re.IGNORECASE
-    )
-    if not m:
-        return None
-    value = m.group(1)
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip()
-    return cleaned or None
+    return _extract_tagged_block(text, "screen")
 
 
 def _build_presenter_screen_summary_from_tool_messages(
@@ -4419,23 +4453,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
 
         def _extract_spoken_only(text: str) -> str | None:
-            if not isinstance(text, str) or not text:
-                return None
-            import re
-
-            searchable = _strip_fenced_code_blocks(text)
-            m = re.search(
-                r"<spoken>\s*(.*?)\s*</spoken>",
-                searchable,
-                flags=re.DOTALL | re.IGNORECASE,
-            )
-            if not m:
-                return None
-            value = m.group(1)
-            if not isinstance(value, str):
-                return None
-            cleaned = value.strip()
-            return cleaned or None
+            return _extract_tagged_block(text, "spoken")
 
         def _coerce_spoken_text(text: object) -> str | None:
             """Best-effort normalisation for narration responses.
@@ -5696,22 +5714,7 @@ def history_backfill_spoken():
         model_name = get_active_model_name()
 
         def _extract_spoken_only(text: str) -> str | None:
-            if not isinstance(text, str) or not text:
-                return None
-            import re
-
-            m = re.search(
-                r"<spoken>\s*(.*?)\s*</spoken>",
-                text,
-                flags=re.DOTALL | re.IGNORECASE,
-            )
-            if not m:
-                return None
-            value = m.group(1)
-            if not isinstance(value, str):
-                return None
-            cleaned = value.strip()
-            return cleaned or None
+            return _extract_tagged_block(text, "spoken")
 
         # Include a small client-reported timing hint for narration generation.
         # (Non-authoritative; used only for guidance.)

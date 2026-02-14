@@ -700,7 +700,6 @@ def _fetch_concepts_by_id(concept_ids: List[str]) -> Dict[str, Dict[str, Any]]:
             "name": 1,
             "relationships": 1,
             "concept_data.preserved_fields": 1,
-            "concept_data.preserved_fields.description": 1,
         },
         limit=len(concept_ids),
     )

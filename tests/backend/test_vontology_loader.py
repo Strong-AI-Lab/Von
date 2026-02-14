@@ -26,6 +26,7 @@ from src.backend.workflows.engine import (
     WorkflowTransitionSpec,
 )
 from src.backend.workflows.vontology_loader import (
+    _fetch_concepts_by_id,
     build_workflow_process_graph,
     discover_workflow_ids,
     load_workflow_definition_from_vontology,
@@ -165,6 +166,34 @@ class TestNormaliseInvokedActionTarget:
             _normalise_invoked_action_target("#V#fetch_concept_tool")
             == "fetch_concept"
         )
+
+
+class TestFetchConceptProjection:
+    def test_fetch_concepts_projection_avoids_parent_child_path_collision(self):
+        captured: Dict[str, Any] = {}
+
+        def _fake_find(_query, projection, limit=None):
+            captured["projection"] = dict(projection or {})
+            return iter(
+                [
+                    {
+                        "concept_id": "#V#example",
+                        "name": "Example",
+                        "relationships": {},
+                    }
+                ]
+            )
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find",
+            side_effect=_fake_find,
+        ):
+            docs = _fetch_concepts_by_id(["#V#example"])
+
+        assert "#V#example" in docs
+        projection = captured["projection"]
+        assert "concept_data.preserved_fields" in projection
+        assert "concept_data.preserved_fields.description" not in projection
 
 
 class TestWorkflowGraphPredicateCompatibility:

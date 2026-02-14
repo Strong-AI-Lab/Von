@@ -112,6 +112,53 @@ def test_generate_extracts_presenter_blocks_and_returns_response_channels(monkey
     assert "PRESENTER MODE PROTOCOL" in sent_context[0]["content"]
 
 
+def test_generate_preserves_fenced_code_inside_screen_block(monkeypatch):
+    llm = _StubLLM(
+        "<spoken>Talk track.</spoken>\n"
+        "<screen>Strict JSON schema:\n"
+        "```json\n"
+        '{"mapping_type": "input"}\n'
+        "```\n"
+        "Done.</screen>"
+    )
+    app = _make_app(monkeypatch, llm)
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": "Hello", "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    expected_screen = (
+        "Strict JSON schema:\n"
+        "```json\n"
+        '{"mapping_type": "input"}\n'
+        "```\n"
+        "Done."
+    )
+    assert body["response"] == expected_screen
+    assert body["response_channels"]["screen"] == expected_screen
+    assert body["response_channels"]["spoken"] == "Talk track."
+
+
+def test_extract_presenter_channels_ignores_tags_inside_fenced_blocks():
+    from src.backend.server.routes.von_routes import _extract_presenter_channels
+
+    text = (
+        "```html\n"
+        "<screen>Ignore this fake block.</screen>\n"
+        "```\n"
+        "<spoken>Real spoken.</spoken>\n"
+        "<screen>Real screen.</screen>"
+    )
+    channels = _extract_presenter_channels(text)
+    assert channels is not None
+    assert channels["spoken"] == "Real spoken."
+    assert channels["screen"] == "Real screen."
+
+
 def test_generate_generates_spoken_when_only_screen_tag_present(monkeypatch):
     llm = _StubLLMSequence(
         [
