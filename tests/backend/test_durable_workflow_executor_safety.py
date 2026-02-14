@@ -361,3 +361,71 @@ def test_durable_executor_off_mode_skips_metadata_checks(monkeypatch) -> None:
         event.get("skip_reason") == "disabled_by_rollout_mode" for event in events
     )
 
+
+def test_durable_executor_applies_output_mapping_before_metadata_validation() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_output_mapping_validation",
+        initial_state="write",
+        states={
+            "write": WorkflowStateSpec(
+                state_id="write",
+                actions=(WorkflowActionInvocation(action_id="tool.write"),),
+                terminal=True,
+                metadata={
+                    "writes_context_keys": [
+                        "#V#workflow_context_key_validated_type_id",
+                    ],
+                    "tool_output_context_mappings": [
+                        {
+                            "mapping_concept_id": "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id",
+                            "tool_output_field": "concept_id",
+                            "context_key": "validated_type_id",
+                        }
+                    ],
+                },
+            ),
+        },
+    )
+
+    registry = ActionRegistry()
+
+    def write_handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(outputs={"result": {"concept_id": "#V#person"}})
+
+    registry.register(ActionSpec(action_id="tool.write", handler=write_handler))
+
+    instance = _build_instance(definition.workflow_id)
+    manager = MagicMock()
+    manager.get_instance.return_value = instance
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.data.get("validated_type_id") == "#V#person"
+    events = result.data.get("workflow_tool_output_mapping_events")
+    assert isinstance(events, list)
+    assert len(events) == 1
+    assert events[0].get("tool_output_field") == "concept_id"
+    assert events[0].get("context_key") == "validated_type_id"
+    assert events[0].get("value_present") is True
+

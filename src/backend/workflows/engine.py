@@ -34,6 +34,8 @@ _NESTED_CONTEXT_KEYS: tuple[str, ...] = (
     "preconditions",
     "conditions",
 )
+WORKFLOW_TOOL_OUTPUT_MAPPING_EVENTS_KEY = "workflow_tool_output_mapping_events"
+LAST_WORKFLOW_TOOL_OUTPUT_MAPPING_EVENT_KEY = "last_workflow_tool_output_mapping_event"
 
 
 def _extract_context_binding_symbol(value: Any) -> str | None:
@@ -88,6 +90,161 @@ def resolve_action_inputs_from_context(
         found, concrete_value = _resolve_context_symbol(context=context, symbol=symbol)
         resolved[input_key] = concrete_value if found else None
     return resolved
+
+
+def _normalise_context_key_for_mapping(raw_symbol: str) -> str:
+    symbol = str(raw_symbol or "").strip()
+    if symbol.startswith("#V#workflow_context_key_"):
+        return symbol[len("#V#workflow_context_key_") :]
+    if symbol.startswith("workflow_context_key_"):
+        return symbol[len("workflow_context_key_") :]
+    if symbol.startswith("#V#"):
+        return symbol[3:]
+    return symbol
+
+
+def _normalise_tool_output_context_mappings(
+    value: Any,
+) -> List[Dict[str, str]]:
+    raw_items: List[Mapping[str, Any]] = []
+    if isinstance(value, Mapping):
+        raw_items = [value]
+    elif isinstance(value, list):
+        raw_items = [item for item in value if isinstance(item, Mapping)]
+    else:
+        return []
+
+    normalised: List[Dict[str, str]] = []
+    for item in raw_items:
+        tool_output_field = str(
+            item.get("tool_output_field")
+            or item.get("tool_field")
+            or item.get("output_field")
+            or ""
+        ).strip()
+        context_key_raw = str(
+            item.get("context_key")
+            or item.get("workflow_context_key")
+            or item.get("target_context_key")
+            or ""
+        ).strip()
+        context_key = _normalise_context_key_for_mapping(context_key_raw)
+        mapping_concept_id = str(item.get("mapping_concept_id") or "").strip()
+        if not tool_output_field or not context_key:
+            continue
+        mapping_spec = {
+            "tool_output_field": tool_output_field,
+            "context_key": context_key,
+        }
+        if mapping_concept_id:
+            mapping_spec["mapping_concept_id"] = mapping_concept_id
+        normalised.append(mapping_spec)
+    return normalised
+
+
+def _lookup_nested_field(
+    root: Mapping[str, Any],
+    path_parts: Sequence[str],
+) -> tuple[bool, Any]:
+    current: Any = root
+    for part in path_parts:
+        if not isinstance(current, Mapping) or part not in current:
+            return False, None
+        current = current.get(part)
+    return True, current
+
+
+def _extract_tool_output_field_value(
+    *,
+    action_outputs: Mapping[str, Any],
+    tool_output_field: str,
+) -> tuple[bool, Any, str | None]:
+    field = str(tool_output_field or "").strip()
+    if not field:
+        return False, None, None
+
+    path_parts = [part.strip() for part in field.split(".") if part.strip()]
+    output_roots: List[tuple[str, Mapping[str, Any]]] = [("outputs", action_outputs)]
+
+    for root_name in ("result", "mcp_result", "payload", "data"):
+        nested = action_outputs.get(root_name)
+        if isinstance(nested, Mapping):
+            output_roots.append((root_name, nested))
+
+    for root_name, root in output_roots:
+        if field in root:
+            resolved_path = field if root_name == "outputs" else f"{root_name}.{field}"
+            return True, root[field], resolved_path
+        if path_parts:
+            found, value = _lookup_nested_field(root, path_parts)
+            if found:
+                joined = ".".join(path_parts)
+                resolved_path = joined if root_name == "outputs" else f"{root_name}.{joined}"
+                return True, value, resolved_path
+
+    return False, None, None
+
+
+def apply_tool_output_context_mappings(
+    *,
+    context: Dict[str, Any],
+    metadata: Mapping[str, Any],
+    action_outputs: Mapping[str, Any],
+    state_id: str,
+    action_id: str,
+) -> List[Dict[str, Any]]:
+    """Apply declared tool-output→context mappings for a workflow state.
+
+    Mapping declarations are carried in ``metadata["tool_output_context_mappings"]``.
+    This helper executes those declarations after each action so metadata
+    validation can enforce ``writes_context_keys`` contracts deterministically.
+    """
+
+    mapping_specs = _normalise_tool_output_context_mappings(
+        metadata.get("tool_output_context_mappings")
+    )
+    if not mapping_specs:
+        return []
+
+    events: List[Dict[str, Any]] = []
+    for mapping_spec in mapping_specs:
+        tool_output_field = mapping_spec["tool_output_field"]
+        context_key = mapping_spec["context_key"]
+        mapping_concept_id = mapping_spec.get("mapping_concept_id")
+
+        found, value, resolved_path = _extract_tool_output_field_value(
+            action_outputs=action_outputs,
+            tool_output_field=tool_output_field,
+        )
+        if found:
+            context[context_key] = value
+
+        event: Dict[str, Any] = {
+            "status": "tool_output_mapping",
+            "state_id": state_id,
+            "action_id": action_id,
+            "tool_output_field": tool_output_field,
+            "context_key": context_key,
+            "value_present": found,
+            "applied": found,
+        }
+        if mapping_concept_id:
+            event["mapping_concept_id"] = mapping_concept_id
+        if resolved_path:
+            event["resolved_path"] = resolved_path
+        if not found:
+            event["reason_code"] = "tool_output_field_missing"
+        events.append(event)
+
+    if events:
+        existing = context.get(WORKFLOW_TOOL_OUTPUT_MAPPING_EVENTS_KEY)
+        if not isinstance(existing, list):
+            existing = []
+            context[WORKFLOW_TOOL_OUTPUT_MAPPING_EVENTS_KEY] = existing
+        existing.extend(events)
+        context[LAST_WORKFLOW_TOOL_OUTPUT_MAPPING_EVENT_KEY] = events[-1]
+
+    return events
 
 
 @dataclass(frozen=True)
@@ -270,7 +427,15 @@ class WorkflowExecutor:
                         final_state=current_state,
                         error=result.error or "action_failed",
                     )
-                context.update(result.outputs)
+                if isinstance(result.outputs, Mapping):
+                    context.update(result.outputs)
+                    apply_tool_output_context_mappings(
+                        context=context,
+                        metadata=state_spec.metadata,
+                        action_outputs=result.outputs,
+                        state_id=current_state,
+                        action_id=action.action_id,
+                    )
 
             if state_has_failure_route and bool(context.get("last_action_failed")):
                 post_validation = skipped_metadata_validation(

@@ -87,6 +87,12 @@ WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
         "#V#workflowStepWritesContextKey",
         "workflowStepWritesContextKey",
     ),
+    "workflowStepMapsToolOutputFieldToContextKey": (
+        "#V#workflow_step_maps_tool_output_field_to_context_key",
+        "workflow_step_maps_tool_output_field_to_context_key",
+        "#V#workflowStepMapsToolOutputFieldToContextKey",
+        "workflowStepMapsToolOutputFieldToContextKey",
+    ),
 }
 
 # Preferred roots for workflow type discovery.
@@ -105,6 +111,14 @@ _WORKFLOW_MAPPING_ID_RE = re.compile(
 )
 _WORKFLOW_MAPPING_DESCRIPTION_RE = re.compile(
     r"context key\s+['\"]([^'\"]+)['\"].*?['\"]([^'\"]+)['\"]\s+parameter",
+    re.IGNORECASE,
+)
+_WORKFLOW_OUTPUT_MAPPING_ID_RE = re.compile(
+    r"^#V#workflow_mapping_tool_field_([a-z0-9_]+)_to_([a-z0-9_]+)$",
+    re.IGNORECASE,
+)
+_WORKFLOW_OUTPUT_MAPPING_DESCRIPTION_RE = re.compile(
+    r"tool output field\s+['\"]([^'\"]+)['\"].*?context key\s+['\"]([^'\"]+)['\"]",
     re.IGNORECASE,
 )
 
@@ -187,6 +201,7 @@ def detect_vacuous_workflow_steps(
         reads_variables = step.get("reads_variables") or []
         writes_variables = step.get("writes_variables") or []
         context_input_mappings = step.get("context_input_mappings") or []
+        tool_output_context_mappings = step.get("tool_output_context_mappings") or []
         writes_context_keys = step.get("writes_context_keys") or []
 
         has_contract = bool(
@@ -196,6 +211,7 @@ def detect_vacuous_workflow_steps(
             or reads_variables
             or writes_variables
             or context_input_mappings
+            or tool_output_context_mappings
             or writes_context_keys
         )
         if has_contract:
@@ -369,6 +385,69 @@ def _extract_mapping_pair(
     context_key, tool_param = _mapping_pair_from_description(str(description or ""))
     if context_key and tool_param:
         return context_key, tool_param
+
+    return None, None
+
+
+def _tool_output_mapping_pair_from_concept_id(
+    mapping_concept_id: str,
+) -> tuple[str | None, str | None]:
+    if not isinstance(mapping_concept_id, str):
+        return None, None
+    match = _WORKFLOW_OUTPUT_MAPPING_ID_RE.match(mapping_concept_id.strip())
+    if not match:
+        return None, None
+    tool_output_field = match.group(1).strip()
+    context_key = _normalise_context_key_symbol(match.group(2))
+    if tool_output_field and context_key:
+        return tool_output_field, context_key
+    return None, None
+
+
+def _tool_output_mapping_pair_from_description(
+    description: str,
+) -> tuple[str | None, str | None]:
+    if not isinstance(description, str):
+        return None, None
+    match = _WORKFLOW_OUTPUT_MAPPING_DESCRIPTION_RE.search(description)
+    if not match:
+        return None, None
+    tool_output_field = match.group(1).strip()
+    context_key = _normalise_context_key_symbol(match.group(2))
+    if tool_output_field and context_key:
+        return tool_output_field, context_key
+    return None, None
+
+
+def _extract_tool_output_mapping(
+    *,
+    mapping_concept_id: str,
+    mapping_doc: Dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    tool_output_field, context_key = _tool_output_mapping_pair_from_concept_id(
+        mapping_concept_id
+    )
+    if tool_output_field and context_key:
+        return tool_output_field, context_key
+
+    concept_data = (
+        mapping_doc.get("concept_data", {}) if isinstance(mapping_doc, dict) else {}
+    )
+    preserved_fields = (
+        concept_data.get("preserved_fields", {})
+        if isinstance(concept_data, dict)
+        else {}
+    )
+    description = (
+        preserved_fields.get("description")
+        if isinstance(preserved_fields, dict)
+        else None
+    )
+    tool_output_field, context_key = _tool_output_mapping_pair_from_description(
+        str(description or "")
+    )
+    if tool_output_field and context_key:
+        return tool_output_field, context_key
 
     return None, None
 
@@ -633,6 +712,21 @@ def build_workflow_process_graph(
             matched_predicates=writes_context_predicates,
         )
 
+        output_mapping_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES[
+            "workflowStepMapsToolOutputFieldToContextKey"
+        ]
+        tool_output_context_mappings, output_mapping_predicates = (
+            _all_relationship_targets_with_predicates(
+                step_rels,
+                output_mapping_candidates,
+            )
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=output_mapping_candidates[0],
+            matched_predicates=output_mapping_predicates,
+        )
+
         step_items.append(
             {
                 "step_id": step_id,
@@ -643,6 +737,7 @@ def build_workflow_process_graph(
                 "reads_variables": reads_vars,
                 "writes_variables": writes_vars,
                 "context_input_mappings": context_input_mappings,
+                "tool_output_context_mappings": tool_output_context_mappings,
                 "writes_context_keys": writes_context_keys,
                 "control_flow": {
                     "next": next_step,
@@ -693,6 +788,9 @@ def load_workflow_definition_from_vontology(
       from step concepts to populate ``WorkflowActionInvocation.inputs``.
     - Context mapping: reads ``workflow_step_maps_context_key_to_tool_param``
       mapping concepts and encodes dynamic input bindings resolved at runtime.
+    - Output mapping: reads
+      ``workflow_step_maps_tool_output_field_to_context_key`` mapping concepts
+      and carries structured tool-output→context write contracts.
     - Metadata: preconditions, effects, and variable read/write lists are
       carried through as ``WorkflowStateSpec.metadata`` for introspection, along
       with context read/write contract hints.
@@ -716,8 +814,13 @@ def load_workflow_definition_from_vontology(
     step_docs = _fetch_concepts_by_id(step_ids) if step_ids else {}
     mapping_ids: list[str] = []
     for step in graph.get("steps", []):
-        raw_mapping_ids = step.get("context_input_mappings")
-        if isinstance(raw_mapping_ids, list):
+        for mapping_key in (
+            "context_input_mappings",
+            "tool_output_context_mappings",
+        ):
+            raw_mapping_ids = step.get(mapping_key)
+            if not isinstance(raw_mapping_ids, list):
+                continue
             for item in raw_mapping_ids:
                 if isinstance(item, str) and item.strip():
                     mapping_ids.append(item.strip())
@@ -733,6 +836,8 @@ def load_workflow_definition_from_vontology(
         actions: list[WorkflowActionInvocation] = []
         reads_context_keys: list[str] = []
         unresolved_input_mappings: list[str] = []
+        tool_output_context_mappings: list[Dict[str, str]] = []
+        unresolved_output_mappings: list[str] = []
         if invokes_action:
             # Read input mapping from Vontology (hasInputMap relationships).
             input_map: Dict[str, Any] = {}
@@ -780,6 +885,26 @@ def load_workflow_definition_from_vontology(
                     inputs=input_map if input_map else {},
                 )
             )
+
+            semantic_output_mapping_ids = step.get("tool_output_context_mappings") or []
+            if isinstance(semantic_output_mapping_ids, list):
+                for mapping_concept_id in semantic_output_mapping_ids:
+                    if not isinstance(mapping_concept_id, str) or not mapping_concept_id:
+                        continue
+                    tool_output_field, context_key = _extract_tool_output_mapping(
+                        mapping_concept_id=mapping_concept_id,
+                        mapping_doc=mapping_docs.get(mapping_concept_id),
+                    )
+                    if not tool_output_field or not context_key:
+                        unresolved_output_mappings.append(mapping_concept_id)
+                        continue
+                    tool_output_context_mappings.append(
+                        {
+                            "tool_output_field": tool_output_field,
+                            "context_key": context_key,
+                            "mapping_concept_id": mapping_concept_id,
+                        }
+                    )
 
         transitions: list[WorkflowTransitionSpec] = []
 
@@ -857,8 +982,12 @@ def load_workflow_definition_from_vontology(
             step_metadata["writes_variables"] = writes_vars
         if writes_context_keys:
             step_metadata["writes_context_keys"] = writes_context_keys
+        if tool_output_context_mappings:
+            step_metadata["tool_output_context_mappings"] = tool_output_context_mappings
         if unresolved_input_mappings:
             step_metadata["unresolved_input_mappings"] = unresolved_input_mappings
+        if unresolved_output_mappings:
+            step_metadata["unresolved_output_mappings"] = unresolved_output_mappings
 
         states[step_id] = WorkflowStateSpec(
             state_id=step_id,

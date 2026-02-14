@@ -311,6 +311,56 @@ def test_metadata_validation_writes_context_keys_accepts_symbol_aliases() -> Non
     assert result.error is None
 
 
+def test_output_context_mapping_applies_before_post_action_validation() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#writes_context_key_mapping_positive",
+        initial_state="write",
+        states={
+            "write": WorkflowStateSpec(
+                state_id="write",
+                actions=(WorkflowActionInvocation(action_id="tool.write"),),
+                terminal=True,
+                metadata={
+                    "writes_context_keys": ["#V#workflow_context_key_validated_type_id"],
+                    "tool_output_context_mappings": [
+                        {
+                            "mapping_concept_id": "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id",
+                            "tool_output_field": "concept_id",
+                            "context_key": "validated_type_id",
+                        }
+                    ],
+                },
+            )
+        },
+    )
+    registry = ActionRegistry()
+
+    def handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(outputs={"result": {"concept_id": "#V#person"}})
+
+    registry.register(ActionSpec(action_id="tool.write", handler=handler))
+    executor = WorkflowExecutor(registry=registry, max_transitions=5)
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.data.get("validated_type_id") == "#V#person"
+    events = result.data.get("workflow_tool_output_mapping_events")
+    assert isinstance(events, list)
+    assert len(events) == 1
+    assert events[0].get("mapping_concept_id") == (
+        "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id"
+    )
+    assert events[0].get("tool_output_field") == "concept_id"
+    assert events[0].get("context_key") == "validated_type_id"
+    assert events[0].get("value_present") is True
+
+
 def test_metadata_validation_blocks_missing_writes_context_key() -> None:
     definition = WorkflowDefinition(
         workflow_id="#V#writes_context_key_validation_negative",

@@ -9,10 +9,11 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from ..engine import (
     WorkflowDefinition,
+    apply_tool_output_context_mappings,
     resolve_action_inputs_from_context,
     state_has_on_failure_transition,
 )
@@ -320,7 +321,15 @@ class DurableWorkflowExecutor:
                         step_count=step_index,
                     )
 
-                context.update(result.outputs)
+                if isinstance(result.outputs, Mapping):
+                    context.update(result.outputs)
+                    apply_tool_output_context_mappings(
+                        context=context,
+                        metadata=state_spec.metadata,
+                        action_outputs=result.outputs,
+                        state_id=current_state,
+                        action_id=action.action_id,
+                    )
 
             if state_has_failure_route and bool(context.get("last_action_failed")):
                 post_validation = skipped_metadata_validation(
