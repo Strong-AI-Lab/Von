@@ -13,6 +13,7 @@ from typing import Any
 
 from ..engine import (
     WorkflowDefinition,
+    resolve_action_inputs_from_context,
     state_has_on_failure_transition,
 )
 from ..metadata_validation import (
@@ -268,9 +269,13 @@ class DurableWorkflowExecutor:
             state_has_failure_route = state_has_on_failure_transition(state_spec)
             context_before_actions = dict(context)
             for action in state_spec.actions:
+                resolved_inputs = resolve_action_inputs_from_context(
+                    action_inputs=action.inputs,
+                    context=context,
+                )
                 result = self._registry.execute(
                     action.action_id,
-                    inputs=action.inputs,
+                    inputs=resolved_inputs,
                     context=context,
                     env=environment,
                     trace=trace,
@@ -278,7 +283,7 @@ class DurableWorkflowExecutor:
 
                 trace.record_action(
                     action_id=action.action_id,
-                    inputs=action.inputs,
+                    inputs=resolved_inputs,
                     outputs=result.outputs,
                     status=result.status,
                     error=result.error,

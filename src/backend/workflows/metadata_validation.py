@@ -17,8 +17,10 @@ from typing import Any, Dict, List, Mapping, MutableMapping, Sequence, Tuple
 
 REASON_PRECONDITION_UNSATISFIED = "metadata_precondition_unsatisfied"
 REASON_READ_VARIABLE_MISSING = "metadata_read_variable_missing"
+REASON_READ_CONTEXT_KEY_MISSING = "metadata_read_context_key_missing"
 REASON_EFFECT_UNSATISFIED = "metadata_effect_unsatisfied"
 REASON_WRITE_VARIABLE_MISSING = "metadata_write_variable_missing"
+REASON_WRITE_CONTEXT_KEY_MISSING = "metadata_write_context_key_missing"
 
 WORKFLOW_METADATA_EVENTS_KEY = "workflow_metadata_validation_events"
 LAST_METADATA_EVENT_KEY = "last_metadata_validation"
@@ -170,6 +172,16 @@ def _symbol_candidates(symbol: str) -> List[str]:
         if normalised:
             candidates.append(normalised)
             candidates.append(normalised.lower())
+            if normalised.startswith("workflow_context_key_"):
+                suffix = normalised[len("workflow_context_key_") :]
+                if suffix:
+                    candidates.append(suffix)
+                    candidates.append(suffix.lower())
+            if normalised.startswith("context_key_"):
+                suffix = normalised[len("context_key_") :]
+                if suffix:
+                    candidates.append(suffix)
+                    candidates.append(suffix.lower())
 
     unique: List[str] = []
     seen: set[str] = set()
@@ -274,7 +286,8 @@ def validate_state_metadata_pre_action(
     metadata = metadata or {}
     preconditions = _normalise_metadata_items(metadata.get("preconditions"))
     reads = _normalise_metadata_items(metadata.get("reads_variables"))
-    applied = bool(preconditions or reads)
+    reads_context_keys = _normalise_metadata_items(metadata.get("reads_context_keys"))
+    applied = bool(preconditions or reads or reads_context_keys)
     checks: List[Mapping[str, Any]] = []
 
     for symbol in preconditions:
@@ -337,6 +350,27 @@ def validate_state_metadata_pre_action(
                 checks=checks,
             )
 
+    for symbol in reads_context_keys:
+        found, _, matched_key, source = _lookup_symbol(context, symbol)
+        checks.append(
+            _build_check(
+                check_type="read_context_key",
+                symbol=symbol,
+                status="available" if found else "missing",
+                matched_key=matched_key,
+                source=source,
+            )
+        )
+        if not found:
+            return _failure(
+                state_id=state_id,
+                phase="pre_action",
+                reason_code=REASON_READ_CONTEXT_KEY_MISSING,
+                symbol=symbol,
+                check_type="read_context_key",
+                checks=checks,
+            )
+
     return MetadataValidationResult(
         state_id=state_id,
         phase="pre_action",
@@ -356,7 +390,10 @@ def validate_state_metadata_post_action(
     metadata = metadata or {}
     effects = _normalise_metadata_items(metadata.get("effects"))
     writes = _normalise_metadata_items(metadata.get("writes_variables"))
-    applied = bool(effects or writes)
+    writes_context_keys = _normalise_metadata_items(
+        metadata.get("writes_context_keys")
+    )
+    applied = bool(effects or writes or writes_context_keys)
     checks: List[Mapping[str, Any]] = []
 
     for symbol in effects:
@@ -423,6 +460,39 @@ def validate_state_metadata_post_action(
         checks.append(
             _build_check(
                 check_type="write_variable",
+                symbol=symbol,
+                status="available",
+                matched_key=matched_key,
+                source=source,
+                changed=changed,
+            )
+        )
+
+    for symbol in writes_context_keys:
+        after_found, after_value, matched_key, source = _lookup_symbol(
+            context_after, symbol
+        )
+        if not after_found:
+            checks.append(
+                _build_check(
+                    check_type="write_context_key",
+                    symbol=symbol,
+                    status="missing",
+                )
+            )
+            return _failure(
+                state_id=state_id,
+                phase="post_action",
+                reason_code=REASON_WRITE_CONTEXT_KEY_MISSING,
+                symbol=symbol,
+                check_type="write_context_key",
+                checks=checks,
+            )
+        before_found, before_value, _, _ = _lookup_symbol(context_before, symbol)
+        changed = (not before_found) or before_value != after_value
+        checks.append(
+            _build_check(
+                check_type="write_context_key",
                 symbol=symbol,
                 status="available",
                 matched_key=matched_key,

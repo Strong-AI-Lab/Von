@@ -230,3 +230,120 @@ def test_metadata_validation_off_mode_skips_checks(monkeypatch) -> None:
     assert all(
         event.get("skip_reason") == "disabled_by_rollout_mode" for event in events
     )
+
+
+def test_engine_resolves_dynamic_action_inputs_from_context() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#dynamic_input_resolution_workflow",
+        initial_state="resolve",
+        states={
+            "resolve": WorkflowStateSpec(
+                state_id="resolve",
+                actions=(
+                    WorkflowActionInvocation(
+                        action_id="tool.fetch",
+                        inputs={
+                            "concept_id": {"$context_key": "target_type_id"},
+                            "fixed": "literal",
+                        },
+                    ),
+                ),
+                terminal=True,
+                metadata={"reads_context_keys": ["target_type_id"]},
+            )
+        },
+    )
+    registry = ActionRegistry()
+
+    def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            outputs={
+                "resolved_concept_id": request.inputs.get("concept_id"),
+                "fixed": request.inputs.get("fixed"),
+            }
+        )
+
+    registry.register(ActionSpec(action_id="tool.fetch", handler=handler))
+    executor = WorkflowExecutor(registry=registry, max_transitions=5)
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={"target_type_id": "#V#person"},
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.data["resolved_concept_id"] == "#V#person"
+    assert result.data["fixed"] == "literal"
+
+
+def test_metadata_validation_writes_context_keys_accepts_symbol_aliases() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#writes_context_key_validation_workflow",
+        initial_state="write",
+        states={
+            "write": WorkflowStateSpec(
+                state_id="write",
+                actions=(WorkflowActionInvocation(action_id="tool.write"),),
+                terminal=True,
+                metadata={
+                    "writes_context_keys": ["#V#workflow_context_key_validated_type_id"]
+                },
+            )
+        },
+    )
+    registry = ActionRegistry()
+
+    def handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(outputs={"validated_type_id": "#V#person"})
+
+    registry.register(ActionSpec(action_id="tool.write", handler=handler))
+    executor = WorkflowExecutor(registry=registry, max_transitions=5)
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.error is None
+
+
+def test_metadata_validation_blocks_missing_writes_context_key() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#writes_context_key_validation_negative",
+        initial_state="write",
+        states={
+            "write": WorkflowStateSpec(
+                state_id="write",
+                actions=(WorkflowActionInvocation(action_id="tool.write"),),
+                terminal=True,
+                metadata={
+                    "writes_context_keys": [
+                        "#V#workflow_context_key_validated_type_name"
+                    ]
+                },
+            )
+        },
+    )
+    registry = ActionRegistry()
+
+    def handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(outputs={"validated_type_id": "#V#person"})
+
+    registry.register(ActionSpec(action_id="tool.write", handler=handler))
+    executor = WorkflowExecutor(registry=registry, max_transitions=5)
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is False
+    assert result.error is not None
+    assert result.error.startswith(
+        "metadata_validation_failed:metadata_write_context_key_missing:write:"
+    )

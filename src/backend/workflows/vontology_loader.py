@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
@@ -74,6 +75,18 @@ WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
         "#V#has_input_map",
         "has_input_map",
     ),
+    "workflowStepMapsContextKeyToToolParam": (
+        "#V#workflow_step_maps_context_key_to_tool_param",
+        "workflow_step_maps_context_key_to_tool_param",
+        "#V#workflowStepMapsContextKeyToToolParam",
+        "workflowStepMapsContextKeyToToolParam",
+    ),
+    "workflowStepWritesContextKey": (
+        "#V#workflow_step_writes_context_key",
+        "workflow_step_writes_context_key",
+        "#V#workflowStepWritesContextKey",
+        "workflowStepWritesContextKey",
+    ),
 }
 
 # Preferred roots for workflow type discovery.
@@ -85,6 +98,15 @@ WORKFLOW_DISCOVERY_BASE_TYPE_IDS: Tuple[str, ...] = (
 )
 
 WORKFLOW_STEP_VACUITY_REASON_CODE = "workflow_step_vacuous"
+
+_WORKFLOW_MAPPING_ID_RE = re.compile(
+    r"^#V#workflow_mapping_([a-z0-9_]+)_to_([a-z0-9_]+?)(?:_param(?:eter)?)?$",
+    re.IGNORECASE,
+)
+_WORKFLOW_MAPPING_DESCRIPTION_RE = re.compile(
+    r"context key\s+['\"]([^'\"]+)['\"].*?['\"]([^'\"]+)['\"]\s+parameter",
+    re.IGNORECASE,
+)
 
 
 def _normalise_relationship_targets(value: Any) -> List[str]:
@@ -164,6 +186,8 @@ def detect_vacuous_workflow_steps(
         effects = step.get("effects") or []
         reads_variables = step.get("reads_variables") or []
         writes_variables = step.get("writes_variables") or []
+        context_input_mappings = step.get("context_input_mappings") or []
+        writes_context_keys = step.get("writes_context_keys") or []
 
         has_contract = bool(
             invokes_action
@@ -171,6 +195,8 @@ def detect_vacuous_workflow_steps(
             or effects
             or reads_variables
             or writes_variables
+            or context_input_mappings
+            or writes_context_keys
         )
         if has_contract:
             continue
@@ -210,7 +236,8 @@ def detect_vacuous_workflow_steps(
                 "cause": (
                     "No executable contract found for step. "
                     "Expected invokesAction, preconditions/effects, "
-                    "or variable read/write declarations."
+                    "variable read/write declarations, "
+                    "or context mapping declarations."
                 ),
                 "previous_steps": previous_step_context,
                 "previous_step_count": len(previous_step_context),
@@ -280,6 +307,72 @@ def _record_legacy_alias_use(
             legacy_aliases.add(matched)
 
 
+def _normalise_context_key_symbol(raw_symbol: str) -> str:
+    symbol = str(raw_symbol or "").strip()
+    if symbol.startswith("#V#workflow_context_key_"):
+        return symbol[len("#V#workflow_context_key_") :]
+    if symbol.startswith("workflow_context_key_"):
+        return symbol[len("workflow_context_key_") :]
+    if symbol.startswith("#V#"):
+        return symbol[3:]
+    return symbol
+
+
+def _mapping_pair_from_concept_id(mapping_concept_id: str) -> tuple[str | None, str | None]:
+    if not isinstance(mapping_concept_id, str):
+        return None, None
+    match = _WORKFLOW_MAPPING_ID_RE.match(mapping_concept_id.strip())
+    if not match:
+        return None, None
+    context_key = _normalise_context_key_symbol(match.group(1))
+    tool_param = match.group(2).strip()
+    if context_key and tool_param:
+        return context_key, tool_param
+    return None, None
+
+
+def _mapping_pair_from_description(description: str) -> tuple[str | None, str | None]:
+    if not isinstance(description, str):
+        return None, None
+    match = _WORKFLOW_MAPPING_DESCRIPTION_RE.search(description)
+    if not match:
+        return None, None
+    context_key = _normalise_context_key_symbol(match.group(1))
+    tool_param = match.group(2).strip()
+    if context_key and tool_param:
+        return context_key, tool_param
+    return None, None
+
+
+def _extract_mapping_pair(
+    *,
+    mapping_concept_id: str,
+    mapping_doc: Dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    context_key, tool_param = _mapping_pair_from_concept_id(mapping_concept_id)
+    if context_key and tool_param:
+        return context_key, tool_param
+
+    concept_data = (
+        mapping_doc.get("concept_data", {}) if isinstance(mapping_doc, dict) else {}
+    )
+    preserved_fields = (
+        concept_data.get("preserved_fields", {})
+        if isinstance(concept_data, dict)
+        else {}
+    )
+    description = (
+        preserved_fields.get("description")
+        if isinstance(preserved_fields, dict)
+        else None
+    )
+    context_key, tool_param = _mapping_pair_from_description(str(description or ""))
+    if context_key and tool_param:
+        return context_key, tool_param
+
+    return None, None
+
+
 def best_effort_workflow_narrative_text(workflow_id: str) -> Optional[str]:
     """Fetch a stored workflow definition *narrative* text from Vontology.
 
@@ -319,7 +412,12 @@ def _fetch_concepts_by_id(concept_ids: List[str]) -> Dict[str, Dict[str, Any]]:
 
     cursor = ConceptsRepository.find(
         {"concept_id": {"$in": concept_ids}},
-        {"concept_id": 1, "name": 1, "relationships": 1},
+        {
+            "concept_id": 1,
+            "name": 1,
+            "relationships": 1,
+            "concept_data.preserved_fields.description": 1,
+        },
         limit=len(concept_ids),
     )
     docs = list(cursor)
@@ -505,6 +603,36 @@ def build_workflow_process_graph(
             matched_predicates=writes_predicates,
         )
 
+        input_mapping_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES[
+            "workflowStepMapsContextKeyToToolParam"
+        ]
+        context_input_mappings, input_mapping_predicates = (
+            _all_relationship_targets_with_predicates(
+                step_rels,
+                input_mapping_candidates,
+            )
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=input_mapping_candidates[0],
+            matched_predicates=input_mapping_predicates,
+        )
+
+        writes_context_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES[
+            "workflowStepWritesContextKey"
+        ]
+        writes_context_keys, writes_context_predicates = (
+            _all_relationship_targets_with_predicates(
+                step_rels,
+                writes_context_candidates,
+            )
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=writes_context_candidates[0],
+            matched_predicates=writes_context_predicates,
+        )
+
         step_items.append(
             {
                 "step_id": step_id,
@@ -514,6 +642,8 @@ def build_workflow_process_graph(
                 "effects": effects,
                 "reads_variables": reads_vars,
                 "writes_variables": writes_vars,
+                "context_input_mappings": context_input_mappings,
+                "writes_context_keys": writes_context_keys,
                 "control_flow": {
                     "next": next_step,
                     "on_true": on_true,
@@ -561,8 +691,11 @@ def load_workflow_definition_from_vontology(
       ``last_action_failed`` context flag (set by the action registry on error).
     - Input mapping: reads ``hasInputMap`` / ``has_input_map`` relationships
       from step concepts to populate ``WorkflowActionInvocation.inputs``.
+    - Context mapping: reads ``workflow_step_maps_context_key_to_tool_param``
+      mapping concepts and encodes dynamic input bindings resolved at runtime.
     - Metadata: preconditions, effects, and variable read/write lists are
-      carried through as ``WorkflowStateSpec.metadata`` for introspection.
+      carried through as ``WorkflowStateSpec.metadata`` for introspection, along
+      with context read/write contract hints.
     """
     graph, warnings = build_workflow_process_graph(workflow_id)
     if not graph:
@@ -581,6 +714,14 @@ def load_workflow_definition_from_vontology(
     # Pre-fetch step docs for input-map reading.
     step_ids = [s["step_id"] for s in graph.get("steps", []) if s.get("step_id")]
     step_docs = _fetch_concepts_by_id(step_ids) if step_ids else {}
+    mapping_ids: list[str] = []
+    for step in graph.get("steps", []):
+        raw_mapping_ids = step.get("context_input_mappings")
+        if isinstance(raw_mapping_ids, list):
+            for item in raw_mapping_ids:
+                if isinstance(item, str) and item.strip():
+                    mapping_ids.append(item.strip())
+    mapping_docs = _fetch_concepts_by_id(mapping_ids) if mapping_ids else {}
 
     states: Dict[str, WorkflowStateSpec] = {}
 
@@ -590,6 +731,8 @@ def load_workflow_definition_from_vontology(
         control_flow = step.get("control_flow", {})
 
         actions: list[WorkflowActionInvocation] = []
+        reads_context_keys: list[str] = []
+        unresolved_input_mappings: list[str] = []
         if invokes_action:
             # Read input mapping from Vontology (hasInputMap relationships).
             input_map: Dict[str, Any] = {}
@@ -611,6 +754,25 @@ def load_workflow_definition_from_vontology(
                     k, v = k.strip(), v.strip()
                     if k:
                         input_map[k] = v
+
+            # Read semantic context mappings from dedicated mapping concepts.
+            semantic_mapping_ids = step.get("context_input_mappings") or []
+            if isinstance(semantic_mapping_ids, list):
+                for mapping_concept_id in semantic_mapping_ids:
+                    if not isinstance(mapping_concept_id, str) or not mapping_concept_id:
+                        continue
+                    context_key, tool_param = _extract_mapping_pair(
+                        mapping_concept_id=mapping_concept_id,
+                        mapping_doc=mapping_docs.get(mapping_concept_id),
+                    )
+                    if not context_key or not tool_param:
+                        unresolved_input_mappings.append(mapping_concept_id)
+                        continue
+                    input_map[tool_param] = {
+                        "$context_key": context_key,
+                        "$mapping_concept_id": mapping_concept_id,
+                    }
+                    reads_context_keys.append(context_key)
 
             actions.append(
                 WorkflowActionInvocation(
@@ -682,14 +844,21 @@ def load_workflow_definition_from_vontology(
         effects = step.get("effects")
         reads_vars = step.get("reads_variables")
         writes_vars = step.get("writes_variables")
+        writes_context_keys = step.get("writes_context_keys")
         if preconditions:
             step_metadata["preconditions"] = preconditions
         if effects:
             step_metadata["effects"] = effects
         if reads_vars:
             step_metadata["reads_variables"] = reads_vars
+        if reads_context_keys:
+            step_metadata["reads_context_keys"] = reads_context_keys
         if writes_vars:
             step_metadata["writes_variables"] = writes_vars
+        if writes_context_keys:
+            step_metadata["writes_context_keys"] = writes_context_keys
+        if unresolved_input_mappings:
+            step_metadata["unresolved_input_mappings"] = unresolved_input_mappings
 
         states[step_id] = WorkflowStateSpec(
             state_id=step_id,

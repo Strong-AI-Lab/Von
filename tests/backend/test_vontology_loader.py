@@ -7,6 +7,8 @@ including:
 - Lambda closure correctness (no late-binding bugs)
 - on_failure transition support
 - Input mapping via hasInputMap
+- Semantic context mapping via workflow_step_maps_context_key_to_tool_param
+- Output context contracts via workflow_step_writes_context_key
 - Preconditions/effects carried as state metadata
 """
 
@@ -68,6 +70,8 @@ def _make_step(
     effects: List[str] | None = None,
     reads_variables: List[str] | None = None,
     writes_variables: List[str] | None = None,
+    context_input_mappings: List[str] | None = None,
+    writes_context_keys: List[str] | None = None,
 ) -> Dict[str, Any]:
     return {
         "step_id": step_id,
@@ -77,6 +81,8 @@ def _make_step(
         "effects": effects or [],
         "reads_variables": reads_variables or [],
         "writes_variables": writes_variables or [],
+        "context_input_mappings": context_input_mappings or [],
+        "writes_context_keys": writes_context_keys or [],
         "control_flow": {
             "next": next_step,
             "on_true": on_true,
@@ -184,6 +190,51 @@ class TestWorkflowGraphPredicateCompatibility:
             str(item).startswith("legacy_workflow_predicates_used:")
             for item in warnings
         )
+
+    def test_build_graph_reads_semantic_mapping_and_output_contract_predicates(self):
+        workflow_doc = {
+            "concept_id": "#V#workflow_semantic_contract",
+            "relationships": {
+                "hasInitialStep": "#V#step_a",
+                "hasStep": ["#V#step_a"],
+            },
+        }
+        step_docs = {
+            "#V#step_a": {
+                "concept_id": "#V#step_a",
+                "name": "Step A",
+                "relationships": {
+                    "invokesAction": "fetch_concept",
+                    "workflow_step_maps_context_key_to_tool_param": [
+                        "#V#workflow_mapping_target_type_id_to_concept_id_param"
+                    ],
+                    "workflow_step_writes_context_key": [
+                        "#V#workflow_context_key_validated_type_id"
+                    ],
+                },
+            }
+        }
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            return_value=workflow_doc,
+        ):
+            with patch(
+                "src.backend.workflows.vontology_loader._fetch_concepts_by_id",
+                return_value=step_docs,
+            ):
+                graph, _warnings = build_workflow_process_graph(
+                    "#V#workflow_semantic_contract"
+                )
+
+        assert graph is not None
+        step = graph["steps"][0]
+        assert step["context_input_mappings"] == [
+            "#V#workflow_mapping_target_type_id_to_concept_id_param"
+        ]
+        assert step["writes_context_keys"] == [
+            "#V#workflow_context_key_validated_type_id"
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +489,121 @@ class TestInputMapping:
         assert defn is not None
         action = defn.states["#V#step"].actions[0]
         assert action.inputs == {}
+
+
+class TestSemanticContextMapping:
+    def test_mapping_concept_id_pattern_becomes_dynamic_input_binding(self):
+        mapping_id = "#V#workflow_mapping_target_type_id_to_concept_id_param"
+        docs = {
+            "#V#step": {
+                "concept_id": "#V#step",
+                "relationships": {},
+            },
+            mapping_id: {
+                "concept_id": mapping_id,
+                "relationships": {},
+            },
+        }
+        steps = [
+            _make_step(
+                "#V#step",
+                invokes_action="fetch_concept",
+                context_input_mappings=[mapping_id],
+            )
+        ]
+        graph = _make_graph(initial_step="#V#step", steps=steps)
+
+        with _stub_fetch_concepts(docs), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        action = defn.states["#V#step"].actions[0]
+        assert action.inputs == {
+            "concept_id": {
+                "$context_key": "target_type_id",
+                "$mapping_concept_id": mapping_id,
+            }
+        }
+        assert defn.states["#V#step"].metadata["reads_context_keys"] == [
+            "target_type_id"
+        ]
+
+    def test_mapping_description_fallback_is_supported(self):
+        mapping_id = "#V#mapping_for_identify_type_step"
+        docs = {
+            "#V#step": {
+                "concept_id": "#V#step",
+                "relationships": {},
+            },
+            mapping_id: {
+                "concept_id": mapping_id,
+                "concept_data": {
+                    "preserved_fields": {
+                        "description": (
+                            "Bind context key 'target_type_id' to the "
+                            "'concept_id' parameter for deterministic lookup."
+                        )
+                    }
+                },
+                "relationships": {},
+            },
+        }
+        steps = [
+            _make_step(
+                "#V#step",
+                invokes_action="fetch_concept",
+                context_input_mappings=[mapping_id],
+            )
+        ]
+        graph = _make_graph(initial_step="#V#step", steps=steps)
+
+        with _stub_fetch_concepts(docs), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        action = defn.states["#V#step"].actions[0]
+        assert action.inputs == {
+            "concept_id": {
+                "$context_key": "target_type_id",
+                "$mapping_concept_id": mapping_id,
+            }
+        }
+
+
+class TestContextOutputContractMetadata:
+    def test_writes_context_keys_are_carried_to_state_metadata(self):
+        steps = [
+            _make_step(
+                "#V#step",
+                invokes_action="fetch_concept",
+                writes_context_keys=[
+                    "#V#workflow_context_key_validated_type_id",
+                    "#V#workflow_context_key_validated_type_name",
+                ],
+            ),
+        ]
+        graph = _make_graph(initial_step="#V#step", steps=steps)
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        assert defn.states["#V#step"].metadata["writes_context_keys"] == [
+            "#V#workflow_context_key_validated_type_id",
+            "#V#workflow_context_key_validated_type_name",
+        ]
 
 
 # ---------------------------------------------------------------------------

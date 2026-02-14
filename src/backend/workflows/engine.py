@@ -19,6 +19,76 @@ from .metadata_validation import (
 )
 from .trace_model import WorkflowExecutionTrace
 
+_CONTEXT_BINDING_KEYS: tuple[str, ...] = (
+    "$context_key",
+    "context_key",
+    "workflow_context_key",
+    "from_context_key",
+)
+_NESTED_CONTEXT_KEYS: tuple[str, ...] = (
+    "facts",
+    "state",
+    "flags",
+    "variables",
+    "effects",
+    "preconditions",
+    "conditions",
+)
+
+
+def _extract_context_binding_symbol(value: Any) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    for key in _CONTEXT_BINDING_KEYS:
+        symbol = value.get(key)
+        if isinstance(symbol, str) and symbol.strip():
+            return symbol.strip()
+    return None
+
+
+def _resolve_context_symbol(
+    *,
+    context: Mapping[str, Any],
+    symbol: str,
+) -> tuple[bool, Any]:
+    if symbol in context:
+        return True, context[symbol]
+
+    symbol_without_prefix = symbol[3:] if symbol.startswith("#V#") else symbol
+    if symbol_without_prefix in context:
+        return True, context[symbol_without_prefix]
+
+    for container_key in _NESTED_CONTEXT_KEYS:
+        container = context.get(container_key)
+        if isinstance(container, Mapping):
+            if symbol in container:
+                return True, container[symbol]
+            if symbol_without_prefix in container:
+                return True, container[symbol_without_prefix]
+    return False, None
+
+
+def resolve_action_inputs_from_context(
+    *,
+    action_inputs: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Resolve dynamic action input bindings against the current workflow context.
+
+    Vontology mappings may encode input values as mapping objects such as
+    ``{"$context_key": "target_type_id"}``. These are resolved to concrete
+    payload values before action execution.
+    """
+    resolved: Dict[str, Any] = {}
+    for input_key, input_value in action_inputs.items():
+        symbol = _extract_context_binding_symbol(input_value)
+        if not symbol:
+            resolved[input_key] = input_value
+            continue
+        found, concrete_value = _resolve_context_symbol(context=context, symbol=symbol)
+        resolved[input_key] = concrete_value if found else None
+    return resolved
+
 
 @dataclass(frozen=True)
 class WorkflowActionInvocation:
@@ -166,9 +236,13 @@ class WorkflowExecutor:
             state_has_failure_route = state_has_on_failure_transition(state_spec)
             context_before_actions = dict(context)
             for action in state_spec.actions:
+                resolved_inputs = resolve_action_inputs_from_context(
+                    action_inputs=action.inputs,
+                    context=context,
+                )
                 result = self._registry.execute(
                     action.action_id,
-                    inputs=action.inputs,
+                    inputs=resolved_inputs,
                     context=context,
                     env=environment,
                     trace=trace,
@@ -176,7 +250,7 @@ class WorkflowExecutor:
                 if trace is not None:
                     trace.record_action(
                         action_id=action.action_id,
-                        inputs=action.inputs,
+                        inputs=resolved_inputs,
                         outputs=result.outputs,
                         status=result.status,
                         error=result.error,
