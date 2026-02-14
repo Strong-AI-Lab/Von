@@ -417,3 +417,47 @@ def test_presenter_mode_rejects_hallucinated_description_write_in_screen_backfil
     assert len(llm.calls) == 2
     assert llm.calls[0]["prompt"] == "Generate <screen> display content"
     assert llm.calls[1]["prompt"] == "Generate <spoken> talk track"
+
+
+def test_presenter_mode_preserves_required_screen_json_fence_from_prompt(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    app = _make_app(monkeypatch, llm)
+
+    orchestrator_result = OrchestratorResult(
+        response_text="Tool-grounded facts only.",
+        extra_messages=[],
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(orchestrator_result)
+
+    prompt = (
+        "Please include this exact fenced block verbatim:\n\n"
+        "```json\n"
+        '{"sentinel":"FENCE_MUST_SURVIVE","check":"presenter_screen_code_fence_preserved"}\n'
+        "If anything fails, include exact error text/reason_code."
+    )
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": prompt, "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    screen_text = body["response_channels"]["screen"]
+    expected_fence = (
+        "```json\n"
+        '{"sentinel":"FENCE_MUST_SURVIVE","check":"presenter_screen_code_fence_preserved"}\n'
+        "```"
+    )
+
+    assert expected_fence in screen_text
+    assert body["llm_debug"].get("screen_backfill_second_pass_attempted") is True
+    assert body["llm_debug"].get("screen_backfill_second_pass_reason") in {
+        "missing_screen",
+        "missing_screen_fence",
+    }

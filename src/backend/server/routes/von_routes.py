@@ -1835,6 +1835,62 @@ def _build_presenter_screen_from_tool_messages(
     return "Tool results:\n\n" + "\n\n".join(entries)
 
 
+def _extract_required_screen_json_fence(prompt_text: str | None) -> str | None:
+    """Extract a required JSON fence requested by the user prompt.
+
+    Handles both well-formed fenced blocks and partially rendered prompts where
+    the closing code fence may have been stripped by transport/presenter layers.
+    """
+
+    if not isinstance(prompt_text, str) or not prompt_text.strip():
+        return None
+
+    text = prompt_text
+    lowered = text.lower()
+    if "fenced block" not in lowered and "```json" not in lowered:
+        return None
+
+    fenced_match = re.search(
+        r"```json\s*\n(?P<body>[\s\S]*?)\n```",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if fenced_match:
+        body = str(fenced_match.group("body") or "").strip()
+        if body:
+            return f"```json\n{body}\n```"
+
+    sentinel_json_match = re.search(
+        r"\{\s*\"sentinel\"\s*:\s*\"[^\"]+\"\s*,\s*\"check\"\s*:\s*\"[^\"]+\"\s*\}",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if sentinel_json_match:
+        body = str(sentinel_json_match.group(0) or "").strip()
+        if body:
+            return f"```json\n{body}\n```"
+
+    return None
+
+
+def _ensure_required_screen_json_fence(
+    screen_text: str | None,
+    required_fence: str | None,
+) -> str | None:
+    """Append a required JSON fence when the screen output is missing it."""
+
+    if not isinstance(required_fence, str) or not required_fence.strip():
+        return screen_text
+
+    required_value = required_fence.strip()
+    base = screen_text.strip() if isinstance(screen_text, str) else ""
+    if required_value in base:
+        return base
+    if not base:
+        return required_value
+    return f"{base}\n\n{required_value}"
+
+
 def _extract_screen_only(text: str) -> str | None:
     return _extract_tagged_block(text, "screen")
 
@@ -4123,6 +4179,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         if presenter_mode_requested:
             has_tool_messages = bool(tool_messages)
             screen_tag_present = _presenter_tag_present(response_text, "screen")
+            required_screen_json_fence = _extract_required_screen_json_fence(prompt_text)
             screen_text = None
             spoken_text = None
             if isinstance(presenter_channels, dict):
@@ -4163,6 +4220,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     isinstance(screen_text, str)
                     and _screen_looks_like_tool_dump(screen_text)
                 )
+                or (
+                    isinstance(required_screen_json_fence, str)
+                    and required_screen_json_fence.strip()
+                    and (
+                        not isinstance(screen_text, str)
+                        or required_screen_json_fence.strip() not in screen_text
+                    )
+                )
                 or _screen_too_similar_to_spoken(screen_text, spoken_text)
             )
 
@@ -4192,6 +4257,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
                 if not screen_tag_present or not screen_text:
                     screen_backfill_second_pass_reason = "missing_screen"
+                elif (
+                    isinstance(required_screen_json_fence, str)
+                    and required_screen_json_fence.strip()
+                    and required_screen_json_fence.strip() not in (screen_text or "")
+                ):
+                    screen_backfill_second_pass_reason = "missing_screen_fence"
                 elif _screen_looks_like_tool_dump(screen_text or ""):
                     screen_backfill_second_pass_reason = "tool_payload_screen"
                 else:
@@ -4430,6 +4501,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         screen_backfill_source = "tool_summary"
 
                 if screen_candidate:
+                    screen_candidate = _ensure_required_screen_json_fence(
+                        str(screen_candidate).strip(),
+                        required_screen_json_fence,
+                    )
                     base_channels = (
                         dict(presenter_channels)
                         if isinstance(presenter_channels, dict)
