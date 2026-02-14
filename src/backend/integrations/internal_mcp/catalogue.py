@@ -6196,6 +6196,24 @@ def _jira_generic_output_schema(action: str) -> Schema:
     )
 
 
+def _task_generic_output_schema(action: str) -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "count": (int, type(None)),
+            "total": (int, type(None)),
+            "offset": (int, type(None)),
+            "limit": (int, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            f"task_{action} output: task operation response with success/error fields and operation-specific payload."
+        ),
+    )
+
+
 # RAG metadata/content MCP tools
 def _rag_get_status(**kwargs):
     import requests
@@ -8524,6 +8542,650 @@ def _task_delete(**kwargs):
         return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
 
 
+def _resolve_task_identifier(payload: dict[str, Any]) -> str | None:
+    task_id = payload.get("task_concept_id") or payload.get("task_id")
+    if not isinstance(task_id, str):
+        return None
+    cleaned = task_id.strip()
+    return cleaned or None
+
+
+def _task_search(**kwargs):
+    """Search tasks with Jira-like rich filtering."""
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        search_tasks,
+    )
+
+    try:
+        result = search_tasks(
+            query=kwargs.get("query"),
+            status_filter=kwargs.get("status_filter") or kwargs.get("status"),
+            statuses=kwargs.get("statuses"),
+            assignee_concept_id=kwargs.get("assignee_concept_id")
+            or kwargs.get("assignee_id")
+            or kwargs.get("user_concept_id"),
+            labels=kwargs.get("labels"),
+            parent_task_concept_id=kwargs.get("parent_task_concept_id"),
+            has_parent=kwargs.get("has_parent"),
+            has_subtasks=kwargs.get("has_subtasks"),
+            due_from=kwargs.get("due_from"),
+            due_to=kwargs.get("due_to"),
+            created_from=kwargs.get("created_from"),
+            created_to=kwargs.get("created_to"),
+            updated_from=kwargs.get("updated_from"),
+            updated_to=kwargs.get("updated_to"),
+            dependency_state=kwargs.get("dependency_state"),
+            organisation_concept_id=kwargs.get("organisation_concept_id"),
+            limit=kwargs.get("limit", 50),
+            offset=kwargs.get("offset", 0),
+        )
+        result["success"] = True
+        return result
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_update_fields(**kwargs):
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        update_task_fields,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+
+    fields = kwargs.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: fields (non-empty dict)",
+            suggestions=["Provide fields to update, e.g. {'status': 'in_progress'}"],
+        )
+
+    try:
+        result = update_task_fields(
+            task_id,
+            fields=fields,
+            actor_concept_id=kwargs.get("actor_concept_id") or kwargs.get("namespace"),
+        )
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_get_transitions(**kwargs):
+    from ...services.task_management_service import (
+        TaskNotFoundError,
+        get_task_transitions,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+
+    try:
+        result = get_task_transitions(task_id)
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_transition(**kwargs):
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        transition_task,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+
+    transition_id = kwargs.get("transition_id")
+    to_status = kwargs.get("to_status")
+    if not (isinstance(transition_id, str) and transition_id.strip()) and not (
+        isinstance(to_status, str) and to_status.strip()
+    ):
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: transition_id or to_status",
+            suggestions=[
+                "Call task_get_transitions first, then pass transition_id",
+                "Or pass to_status directly",
+            ],
+        )
+
+    try:
+        result = transition_task(
+            task_id,
+            transition_id=transition_id,
+            to_status=to_status,
+            actor_concept_id=kwargs.get("actor_concept_id") or kwargs.get("namespace"),
+        )
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_unassign(**kwargs):
+    from ...services.task_management_service import (
+        TaskNotFoundError,
+        unassign_task,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+    try:
+        result = unassign_task(task_id)
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_set_parent(**kwargs):
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        set_task_parent,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+    try:
+        result = set_task_parent(
+            task_id,
+            kwargs.get("parent_task_concept_id"),
+            actor_concept_id=kwargs.get("actor_concept_id") or kwargs.get("namespace"),
+        )
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_create_subtask(**kwargs):
+    from datetime import datetime
+
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        create_subtask,
+    )
+
+    parent_task_concept_id = kwargs.get("parent_task_concept_id")
+    title = kwargs.get("title")
+    description = kwargs.get("description")
+    if (
+        not isinstance(parent_task_concept_id, str)
+        or not parent_task_concept_id.strip()
+    ):
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: parent_task_concept_id",
+            suggestions=["Provide parent_task_concept_id"],
+        )
+    if not isinstance(title, str) or not title.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: title",
+            suggestions=["Provide a non-empty title string for the subtask"],
+        )
+    if not isinstance(description, str) or not description.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: description",
+            suggestions=["Provide a non-empty description string for the subtask"],
+        )
+
+    due_date = None
+    due_str = kwargs.get("due_date")
+    if due_str and isinstance(due_str, str):
+        try:
+            due_date = datetime.fromisoformat(due_str.replace("Z", "+00:00"))
+        except ValueError:
+            return make_error_response(
+                "INVALID_DATE",
+                f"Invalid due_date format: {due_str}",
+                suggestions=[
+                    "Use ISO format (e.g. '2025-12-31' or '2025-12-31T23:59:59Z')"
+                ],
+            )
+
+    try:
+        result = create_subtask(
+            parent_task_concept_id=parent_task_concept_id.strip(),
+            title=title.strip(),
+            description=description.strip(),
+            assignee_concept_id=kwargs.get("assignee_concept_id")
+            or kwargs.get("assignee_id"),
+            created_by_concept_id=kwargs.get("created_by_concept_id")
+            or kwargs.get("namespace"),
+            due_date=due_date,
+            priority=kwargs.get("priority", "medium"),
+            organisation_concept_id=kwargs.get("organisation_concept_id"),
+            originating_session_id=kwargs.get("originating_session_id")
+            or kwargs.get("session_id"),
+        )
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_link(**kwargs):
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        link_tasks,
+    )
+
+    source_id = kwargs.get("source_task_concept_id") or kwargs.get("source_task_id")
+    target_id = kwargs.get("target_task_concept_id") or kwargs.get("target_task_id")
+    link_type = kwargs.get("link_type")
+    if not isinstance(source_id, str) or not source_id.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: source_task_concept_id",
+            suggestions=["Provide source_task_concept_id (or source_task_id)"],
+        )
+    if not isinstance(target_id, str) or not target_id.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: target_task_concept_id",
+            suggestions=["Provide target_task_concept_id (or target_task_id)"],
+        )
+    if not isinstance(link_type, str) or not link_type.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: link_type",
+            suggestions=[
+                "Provide a link_type such as depends_on, blocks, relates_to, blocked_by, required_by"
+            ],
+        )
+
+    try:
+        result = link_tasks(
+            source_id.strip(),
+            target_id.strip(),
+            link_type=link_type.strip(),
+            actor_concept_id=kwargs.get("actor_concept_id") or kwargs.get("namespace"),
+        )
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_unlink(**kwargs):
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        unlink_tasks,
+    )
+
+    source_id = kwargs.get("source_task_concept_id") or kwargs.get("source_task_id")
+    target_id = kwargs.get("target_task_concept_id") or kwargs.get("target_task_id")
+    link_type = kwargs.get("link_type")
+    if not isinstance(source_id, str) or not source_id.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: source_task_concept_id",
+            suggestions=["Provide source_task_concept_id (or source_task_id)"],
+        )
+    if not isinstance(target_id, str) or not target_id.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: target_task_concept_id",
+            suggestions=["Provide target_task_concept_id (or target_task_id)"],
+        )
+    if not isinstance(link_type, str) or not link_type.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: link_type",
+            suggestions=[
+                "Provide a link_type such as depends_on, blocks, relates_to, blocked_by, required_by"
+            ],
+        )
+
+    try:
+        result = unlink_tasks(
+            source_id.strip(),
+            target_id.strip(),
+            link_type=link_type.strip(),
+            actor_concept_id=kwargs.get("actor_concept_id") or kwargs.get("namespace"),
+        )
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_add_comment(**kwargs):
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        add_task_comment,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    body = kwargs.get("body") or kwargs.get("comment")
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+    if not isinstance(body, str) or not body.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: body",
+            suggestions=["Provide comment body text (or use 'comment')"],
+        )
+    try:
+        comment = add_task_comment(
+            task_id,
+            body=body.strip(),
+            author_concept_id=kwargs.get("author_concept_id") or kwargs.get("namespace"),
+        )
+        return {"success": True, "task_concept_id": task_id, "comment": comment}
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_list_comments(**kwargs):
+    from ...services.task_management_service import (
+        TaskNotFoundError,
+        list_task_comments,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+    try:
+        result = list_task_comments(
+            task_id,
+            limit=kwargs.get("limit", 100),
+            offset=kwargs.get("offset", 0),
+        )
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_add_attachment(**kwargs):
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        add_task_attachment,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    filename = kwargs.get("filename") or kwargs.get("name")
+    uri = kwargs.get("uri")
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+    if not isinstance(filename, str) or not filename.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: filename",
+            suggestions=["Provide filename (or name)"],
+        )
+    if not isinstance(uri, str) or not uri.strip():
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: uri",
+            suggestions=["Provide attachment URI"],
+        )
+    try:
+        attachment = add_task_attachment(
+            task_id,
+            filename=filename.strip(),
+            uri=uri.strip(),
+            media_type=kwargs.get("media_type") or kwargs.get("mime_type"),
+            size_bytes=kwargs.get("size_bytes"),
+            added_by_concept_id=kwargs.get("added_by_concept_id")
+            or kwargs.get("author_concept_id")
+            or kwargs.get("namespace"),
+            note=kwargs.get("note"),
+        )
+        return {"success": True, "task_concept_id": task_id, "attachment": attachment}
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_list_attachments(**kwargs):
+    from ...services.task_management_service import (
+        TaskNotFoundError,
+        list_task_attachments,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+    try:
+        result = list_task_attachments(
+            task_id,
+            limit=kwargs.get("limit", 100),
+            offset=kwargs.get("offset", 0),
+        )
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_add_worklog(**kwargs):
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        TaskNotFoundError,
+        add_task_worklog,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    time_spent_minutes = kwargs.get("time_spent_minutes")
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+    if not isinstance(time_spent_minutes, int) or time_spent_minutes <= 0:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: time_spent_minutes",
+            suggestions=["Provide a positive integer time_spent_minutes value"],
+        )
+    try:
+        worklog = add_task_worklog(
+            task_id,
+            time_spent_minutes=time_spent_minutes,
+            author_concept_id=kwargs.get("author_concept_id")
+            or kwargs.get("added_by_concept_id")
+            or kwargs.get("namespace"),
+            comment=kwargs.get("comment"),
+            started_at=kwargs.get("started_at"),
+        )
+        return {"success": True, "task_concept_id": task_id, "worklog": worklog}
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_list_worklog(**kwargs):
+    from ...services.task_management_service import (
+        TaskNotFoundError,
+        list_task_worklog,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+    try:
+        result = list_task_worklog(
+            task_id,
+            limit=kwargs.get("limit", 100),
+            offset=kwargs.get("offset", 0),
+        )
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_get_history(**kwargs):
+    from ...services.task_management_service import (
+        TaskNotFoundError,
+        get_task_history,
+    )
+
+    task_id = _resolve_task_identifier(kwargs)
+    if not task_id:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_id",
+            suggestions=["Provide task_concept_id (or task_id)"],
+        )
+    try:
+        result = get_task_history(
+            task_id,
+            limit=kwargs.get("limit", 200),
+            offset=kwargs.get("offset", 0),
+        )
+        result["success"] = True
+        return result
+    except TaskNotFoundError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
+def _task_bulk_update(**kwargs):
+    from ...services.task_management_service import (
+        InvalidTaskDataError,
+        bulk_update_tasks,
+    )
+
+    task_ids = kwargs.get("task_concept_ids") or kwargs.get("task_ids")
+    fields = kwargs.get("fields")
+    if not isinstance(task_ids, list) or not task_ids:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: task_concept_ids (non-empty list)",
+            suggestions=["Provide a list of task IDs to update"],
+        )
+    if not isinstance(fields, dict) or not fields:
+        return make_error_response(
+            "MISSING_PARAM",
+            "Missing required parameter: fields (non-empty dict)",
+            suggestions=["Provide fields to apply to all task IDs"],
+        )
+    try:
+        result = bulk_update_tasks(
+            task_ids,
+            fields=fields,
+            actor_concept_id=kwargs.get("actor_concept_id") or kwargs.get("namespace"),
+        )
+        result["success"] = True
+        return result
+    except InvalidTaskDataError as exc:
+        return make_error_response("INVALID_DATA", str(exc))
+    except Exception as exc:
+        return make_error_response("UNEXPECTED_ERROR", f"Unexpected error: {exc}")
+
+
 def build_default_catalogue() -> MethodCatalogue:
     """Return a catalogue pre-populated with the baseline method set."""
 
@@ -8540,6 +9202,31 @@ def build_default_catalogue() -> MethodCatalogue:
     jira_link_issue_output_schema = _jira_generic_output_schema("link_issue")
     jira_get_myself_output_schema = _jira_generic_output_schema("get_myself")
     jira_get_auth_config_output_schema = _jira_get_auth_config_output_schema()
+    task_create_output_schema = _task_generic_output_schema("create")
+    task_get_output_schema = _task_generic_output_schema("get")
+    task_list_output_schema = _task_generic_output_schema("list")
+    task_search_output_schema = _task_generic_output_schema("search")
+    task_update_status_output_schema = _task_generic_output_schema("update_status")
+    task_update_fields_output_schema = _task_generic_output_schema("update_fields")
+    task_get_transitions_output_schema = _task_generic_output_schema("get_transitions")
+    task_transition_output_schema = _task_generic_output_schema("transition")
+    task_assign_output_schema = _task_generic_output_schema("assign")
+    task_unassign_output_schema = _task_generic_output_schema("unassign")
+    task_set_parent_output_schema = _task_generic_output_schema("set_parent")
+    task_create_subtask_output_schema = _task_generic_output_schema("create_subtask")
+    task_link_output_schema = _task_generic_output_schema("link")
+    task_unlink_output_schema = _task_generic_output_schema("unlink")
+    task_add_comment_output_schema = _task_generic_output_schema("add_comment")
+    task_list_comments_output_schema = _task_generic_output_schema("list_comments")
+    task_add_attachment_output_schema = _task_generic_output_schema("add_attachment")
+    task_list_attachments_output_schema = _task_generic_output_schema(
+        "list_attachments"
+    )
+    task_add_worklog_output_schema = _task_generic_output_schema("add_worklog")
+    task_list_worklog_output_schema = _task_generic_output_schema("list_worklog")
+    task_get_history_output_schema = _task_generic_output_schema("get_history")
+    task_bulk_update_output_schema = _task_generic_output_schema("bulk_update")
+    task_delete_output_schema = _task_generic_output_schema("delete")
     gmail_list_messages_input_schema = Schema(
         required={"profile": str},
         optional={
@@ -9427,7 +10114,7 @@ def build_default_catalogue() -> MethodCatalogue:
                 allow_unknown=True,
                 description="Create a new task in Vontology.",
             ),
-            output_schema=None,
+            output_schema=task_create_output_schema,
             category="write",
             description=(
                 "Create a Von task (stored as a Vontology concept). Use this to track work items, "
@@ -9447,7 +10134,7 @@ def build_default_catalogue() -> MethodCatalogue:
                 allow_unknown=True,
                 description="Get a task by its concept_id.",
             ),
-            output_schema=None,
+            output_schema=task_get_output_schema,
             category="read",
             description=(
                 "Retrieve a Von task by its concept_id. Returns title, description, status, "
@@ -9473,12 +10160,190 @@ def build_default_catalogue() -> MethodCatalogue:
                 allow_unknown=True,
                 description="List tasks with optional filters.",
             ),
-            output_schema=None,
+            output_schema=task_list_output_schema,
             category="read",
             description=(
                 "List Von tasks. Filter by user (assignee), status, priority, or organisation. "
                 "If user_concept_id is provided, returns tasks assigned to that user. "
                 "Valid statuses: pending, in_progress, completed, cancelled, blocked."
+            ),
+        ),
+        MethodDefinition(
+            name="task_search",
+            handler=_task_search,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "query": (str, type(None)),
+                    "status_filter": (str, type(None)),
+                    "status": (str, type(None)),
+                    "statuses": (list, type(None)),
+                    "assignee_concept_id": (str, type(None)),
+                    "assignee_id": (str, type(None)),
+                    "user_concept_id": (str, type(None)),
+                    "labels": (list, type(None)),
+                    "parent_task_concept_id": (str, type(None)),
+                    "has_parent": (bool, type(None)),
+                    "has_subtasks": (bool, type(None)),
+                    "due_from": (str, type(None)),
+                    "due_to": (str, type(None)),
+                    "created_from": (str, type(None)),
+                    "created_to": (str, type(None)),
+                    "updated_from": (str, type(None)),
+                    "updated_to": (str, type(None)),
+                    "dependency_state": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                    "limit": (int, type(None)),
+                    "offset": (int, type(None)),
+                },
+                allow_unknown=True,
+                description="Search tasks with Jira-like rich filtering.",
+            ),
+            output_schema=task_search_output_schema,
+            category="read",
+            description=(
+                "Search Von tasks with rich filters (status, assignee, labels, hierarchy, "
+                "date ranges, dependency state) to support Jira-like triage and planning."
+            ),
+        ),
+        MethodDefinition(
+            name="task_update_fields",
+            handler=_task_update_fields,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "fields": (dict,),
+                    "actor_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Update multiple task fields in one operation. "
+                    "Supported fields: status, assignee_concept_id, title, description, "
+                    "priority, due_date, labels, parent_task_concept_id."
+                ),
+            ),
+            output_schema=task_update_fields_output_schema,
+            category="write",
+            description=(
+                "Update multiple task fields atomically from an MCP perspective. "
+                "Useful for Jira-style edit operations."
+            ),
+        ),
+        MethodDefinition(
+            name="task_get_transitions",
+            handler=_task_get_transitions,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                },
+                allow_unknown=True,
+                description="List available transitions for the task's current status.",
+            ),
+            output_schema=task_get_transitions_output_schema,
+            category="read",
+            description=(
+                "Return available task status transitions (Jira-style), including "
+                "transition IDs and resulting statuses."
+            ),
+        ),
+        MethodDefinition(
+            name="task_transition",
+            handler=_task_transition,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "transition_id": (str, type(None)),
+                    "to_status": (str, type(None)),
+                    "actor_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Transition a task by transition_id or directly by to_status."
+                ),
+            ),
+            output_schema=task_transition_output_schema,
+            category="write",
+            description=(
+                "Apply a status transition to a task (Jira-style transition operation). "
+                "Use task_get_transitions first for valid transition IDs."
+            ),
+        ),
+        MethodDefinition(
+            name="task_unassign",
+            handler=_task_unassign,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                },
+                allow_unknown=True,
+                description="Unassign all current assignees from a task.",
+            ),
+            output_schema=task_unassign_output_schema,
+            category="write",
+            description="Remove task assignee links (Jira-style unassign operation).",
+        ),
+        MethodDefinition(
+            name="task_set_parent",
+            handler=_task_set_parent,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "parent_task_concept_id": (str, type(None)),
+                    "actor_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Set or clear parent task relationship for hierarchy management."
+                ),
+            ),
+            output_schema=task_set_parent_output_schema,
+            category="write",
+            description=(
+                "Set or clear a task's parent. Supports parent reassignment and "
+                "hierarchy cycle protection."
+            ),
+        ),
+        MethodDefinition(
+            name="task_create_subtask",
+            handler=_task_create_subtask,
+            input_schema=Schema(
+                required={
+                    "parent_task_concept_id": str,
+                    "title": str,
+                    "description": str,
+                },
+                optional={
+                    "assignee_concept_id": (str, type(None)),
+                    "assignee_id": (str, type(None)),
+                    "originating_session_id": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "created_by_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                    "priority": (str,),
+                    "due_date": (str, type(None)),
+                    "organisation_concept_id": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Create a task and attach it as a subtask of a parent task.",
+            ),
+            output_schema=task_create_subtask_output_schema,
+            category="write",
+            description=(
+                "Create a subtask under an existing parent task using the same core "
+                "task creation pathway."
             ),
         ),
         MethodDefinition(
@@ -9493,7 +10358,7 @@ def build_default_catalogue() -> MethodCatalogue:
                 allow_unknown=True,
                 description="Update a task's status.",
             ),
-            output_schema=None,
+            output_schema=task_update_status_output_schema,
             category="write",
             description=(
                 "Update the status of a Von task. Valid statuses: pending, in_progress, "
@@ -9514,11 +10379,223 @@ def build_default_catalogue() -> MethodCatalogue:
                 allow_unknown=True,
                 description="Assign a task to a user.",
             ),
-            output_schema=None,
+            output_schema=task_assign_output_schema,
             category="write",
             description=(
                 "Assign or reassign a Von task to a user. The assignee_concept_id should be "
                 "a person or agent concept_id (e.g., #V#michael_witbrock)."
+            ),
+        ),
+        MethodDefinition(
+            name="task_link",
+            handler=_task_link,
+            input_schema=Schema(
+                required={
+                    "source_task_concept_id": str,
+                    "target_task_concept_id": str,
+                    "link_type": str,
+                },
+                optional={
+                    "source_task_id": (str, type(None)),
+                    "target_task_id": (str, type(None)),
+                    "actor_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Create a typed dependency link between two tasks.",
+            ),
+            output_schema=task_link_output_schema,
+            category="write",
+            description=(
+                "Create typed task dependencies (e.g., depends_on, blocks, relates_to) "
+                "for Jira-like task graph management."
+            ),
+        ),
+        MethodDefinition(
+            name="task_unlink",
+            handler=_task_unlink,
+            input_schema=Schema(
+                required={
+                    "source_task_concept_id": str,
+                    "target_task_concept_id": str,
+                    "link_type": str,
+                },
+                optional={
+                    "source_task_id": (str, type(None)),
+                    "target_task_id": (str, type(None)),
+                    "actor_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Remove a typed dependency link between two tasks.",
+            ),
+            output_schema=task_unlink_output_schema,
+            category="write",
+            description="Remove typed task dependency links.",
+        ),
+        MethodDefinition(
+            name="task_add_comment",
+            handler=_task_add_comment,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "body": (str,),
+                    "comment": (str,),
+                    "author_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Add a comment to a task.",
+            ),
+            output_schema=task_add_comment_output_schema,
+            category="write",
+            description="Add a task comment (Jira-style comment operation).",
+        ),
+        MethodDefinition(
+            name="task_list_comments",
+            handler=_task_list_comments,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "limit": (int, type(None)),
+                    "offset": (int, type(None)),
+                },
+                allow_unknown=True,
+                description="List comments for a task.",
+            ),
+            output_schema=task_list_comments_output_schema,
+            category="read",
+            description="List task comments with offset/limit pagination.",
+        ),
+        MethodDefinition(
+            name="task_add_attachment",
+            handler=_task_add_attachment,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "filename": (str,),
+                    "name": (str,),
+                    "uri": (str,),
+                    "media_type": (str, type(None)),
+                    "mime_type": (str, type(None)),
+                    "size_bytes": (int, type(None)),
+                    "note": (str, type(None)),
+                    "added_by_concept_id": (str, type(None)),
+                    "author_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Add attachment metadata to a task.",
+            ),
+            output_schema=task_add_attachment_output_schema,
+            category="write",
+            description=(
+                "Record task attachment metadata (filename/URI/media type/size) in a "
+                "Jira-like attachment operation."
+            ),
+        ),
+        MethodDefinition(
+            name="task_list_attachments",
+            handler=_task_list_attachments,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "limit": (int, type(None)),
+                    "offset": (int, type(None)),
+                },
+                allow_unknown=True,
+                description="List attachments recorded on a task.",
+            ),
+            output_schema=task_list_attachments_output_schema,
+            category="read",
+            description="List task attachments with offset/limit pagination.",
+        ),
+        MethodDefinition(
+            name="task_add_worklog",
+            handler=_task_add_worklog,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "time_spent_minutes": (int,),
+                    "comment": (str, type(None)),
+                    "started_at": (str, type(None)),
+                    "author_concept_id": (str, type(None)),
+                    "added_by_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Add a worklog entry for a task.",
+            ),
+            output_schema=task_add_worklog_output_schema,
+            category="write",
+            description="Add a task worklog entry for effort tracking.",
+        ),
+        MethodDefinition(
+            name="task_list_worklog",
+            handler=_task_list_worklog,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "limit": (int, type(None)),
+                    "offset": (int, type(None)),
+                },
+                allow_unknown=True,
+                description="List task worklog entries.",
+            ),
+            output_schema=task_list_worklog_output_schema,
+            category="read",
+            description="List task worklog entries with aggregate effort totals.",
+        ),
+        MethodDefinition(
+            name="task_get_history",
+            handler=_task_get_history,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_id": (str,),
+                    "task_id": (str,),
+                    "limit": (int, type(None)),
+                    "offset": (int, type(None)),
+                },
+                allow_unknown=True,
+                description="Get task audit history/timeline entries.",
+            ),
+            output_schema=task_get_history_output_schema,
+            category="read",
+            description="Return task history/audit timeline.",
+        ),
+        MethodDefinition(
+            name="task_bulk_update",
+            handler=_task_bulk_update,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "task_concept_ids": (list,),
+                    "task_ids": (list, type(None)),
+                    "fields": (dict,),
+                    "actor_concept_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description="Apply the same field updates to multiple tasks.",
+            ),
+            output_schema=task_bulk_update_output_schema,
+            category="write",
+            description=(
+                "Bulk-update multiple tasks with the same field patch. Useful for "
+                "high-throughput maintenance operations."
             ),
         ),
         MethodDefinition(
@@ -9533,7 +10610,7 @@ def build_default_catalogue() -> MethodCatalogue:
                 allow_unknown=True,
                 description="Delete (cancel) a task.",
             ),
-            output_schema=None,
+            output_schema=task_delete_output_schema,
             category="write",
             description=(
                 "Delete a Von task by marking it as cancelled. The task remains in the system "

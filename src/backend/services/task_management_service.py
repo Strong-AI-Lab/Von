@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..services.text_value_service import (
@@ -19,7 +19,6 @@ from ..services.text_value_service import (
     upsert_text_for_concept,
 )
 from ..utils.concept_id_utils import (
-    canonicalise_vontology_concept_id,
     ensure_v_concept_prefix,
 )
 from .workflow_event_integration_service import (
@@ -43,6 +42,41 @@ PREDICATE_HAS_PRIORITY = "#V#hasPriority"
 PREDICATE_HAS_TASK_STATUS = "#V#hasTaskStatus"
 PREDICATE_HAS_DESCRIPTION = "#V#hasDescription"
 PREDICATE_HAS_NAME = "#V#hasName"
+PREDICATE_HAS_PARENT_TASK = "#V#hasParentTask"
+PREDICATE_HAS_SUBTASK = "#V#hasSubtask"
+
+# Task dependency/link predicates
+PREDICATE_TASK_DEPENDS_ON = "#V#dependsOnTask"
+PREDICATE_TASK_REQUIRED_BY = "#V#isRequiredByTask"
+PREDICATE_TASK_BLOCKS = "#V#blocksTask"
+PREDICATE_TASK_BLOCKED_BY = "#V#isBlockedByTask"
+PREDICATE_TASK_RELATED_TO = "#V#relatesToTask"
+
+TASK_LINK_TYPE_TO_PREDICATE: Dict[str, str] = {
+    "depends_on": PREDICATE_TASK_DEPENDS_ON,
+    "required_by": PREDICATE_TASK_REQUIRED_BY,
+    "blocks": PREDICATE_TASK_BLOCKS,
+    "blocked_by": PREDICATE_TASK_BLOCKED_BY,
+    "relates_to": PREDICATE_TASK_RELATED_TO,
+}
+
+TASK_LINK_TYPE_INVERSES: Dict[str, str] = {
+    "depends_on": "required_by",
+    "required_by": "depends_on",
+    "blocks": "blocked_by",
+    "blocked_by": "blocks",
+}
+
+TASK_LINK_PREDICATES: set[str] = set(TASK_LINK_TYPE_TO_PREDICATE.values())
+
+# Metadata keys
+TASK_METADATA_KEY_CONCEPT_TYPE = "concept_type"
+TASK_METADATA_KEY_ORGANISATION = "organisation_concept_id"
+TASK_METADATA_KEY_LABELS = "labels"
+TASK_METADATA_KEY_COMMENTS = "comments"
+TASK_METADATA_KEY_ATTACHMENTS = "attachments"
+TASK_METADATA_KEY_WORKLOG = "worklog"
+TASK_METADATA_KEY_HISTORY = "task_history"
 
 # Valid task statuses
 TASK_STATUS_PENDING = "pending"
@@ -66,6 +100,86 @@ PRIORITY_HIGH = "high"
 PRIORITY_CRITICAL = "critical"
 
 VALID_PRIORITIES = {PRIORITY_LOW, PRIORITY_MEDIUM, PRIORITY_HIGH, PRIORITY_CRITICAL}
+
+# Transition IDs intentionally mirror Jira-style "get transitions" and
+# "transition" operations while preserving Von-native status values.
+TASK_TRANSITION_DEFINITIONS: Dict[str, List[Dict[str, str]]] = {
+    TASK_STATUS_PENDING: [
+        {
+            "transition_id": "start_progress",
+            "name": "Start progress",
+            "to_status": TASK_STATUS_IN_PROGRESS,
+        },
+        {
+            "transition_id": "mark_blocked",
+            "name": "Mark blocked",
+            "to_status": TASK_STATUS_BLOCKED,
+        },
+        {
+            "transition_id": "cancel_task",
+            "name": "Cancel task",
+            "to_status": TASK_STATUS_CANCELLED,
+        },
+    ],
+    TASK_STATUS_IN_PROGRESS: [
+        {
+            "transition_id": "complete_task",
+            "name": "Complete task",
+            "to_status": TASK_STATUS_COMPLETED,
+        },
+        {
+            "transition_id": "mark_blocked",
+            "name": "Mark blocked",
+            "to_status": TASK_STATUS_BLOCKED,
+        },
+        {
+            "transition_id": "move_to_pending",
+            "name": "Move to pending",
+            "to_status": TASK_STATUS_PENDING,
+        },
+        {
+            "transition_id": "cancel_task",
+            "name": "Cancel task",
+            "to_status": TASK_STATUS_CANCELLED,
+        },
+    ],
+    TASK_STATUS_BLOCKED: [
+        {
+            "transition_id": "resume_progress",
+            "name": "Resume progress",
+            "to_status": TASK_STATUS_IN_PROGRESS,
+        },
+        {
+            "transition_id": "move_to_pending",
+            "name": "Move to pending",
+            "to_status": TASK_STATUS_PENDING,
+        },
+        {
+            "transition_id": "cancel_task",
+            "name": "Cancel task",
+            "to_status": TASK_STATUS_CANCELLED,
+        },
+    ],
+    TASK_STATUS_COMPLETED: [
+        {
+            "transition_id": "reopen_pending",
+            "name": "Reopen to pending",
+            "to_status": TASK_STATUS_PENDING,
+        },
+        {
+            "transition_id": "reopen_in_progress",
+            "name": "Reopen to in progress",
+            "to_status": TASK_STATUS_IN_PROGRESS,
+        },
+    ],
+    TASK_STATUS_CANCELLED: [
+        {
+            "transition_id": "reopen_pending",
+            "name": "Reopen to pending",
+            "to_status": TASK_STATUS_PENDING,
+        }
+    ],
+}
 
 
 class TaskManagementError(Exception):
@@ -103,6 +217,290 @@ def _generate_task_concept_id(title: str) -> str:
     concept_id = f"#V#task_{slug}_{short_uuid}"
 
     return concept_id
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _normalise_task_concept_id(task_concept_id: str) -> str:
+    normalised = ensure_v_concept_prefix(task_concept_id)
+    if not normalised:
+        raise TaskNotFoundError(f"Invalid task_concept_id: {task_concept_id}")
+    return normalised
+
+
+def _normalise_optional_concept_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return ensure_v_concept_prefix(cleaned)
+
+
+def _normalise_transition_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().lower().replace("-", "_").replace(" ", "_")
+    return cleaned or None
+
+
+def _normalise_link_type(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidTaskDataError("link_type is required")
+    cleaned = value.strip()
+    if cleaned.startswith("#V#"):
+        return cleaned
+
+    normalised = (
+        cleaned.lower()
+        .replace("-", "_")
+        .replace(" ", "_")
+        .replace("__", "_")
+        .strip("_")
+    )
+    aliases = {
+        "is_blocked_by": "blocked_by",
+        "is_required_by": "required_by",
+        "depends": "depends_on",
+        "related": "relates_to",
+        "relation": "relates_to",
+    }
+    return aliases.get(normalised, normalised)
+
+
+def _resolve_link_predicate(link_type: str) -> tuple[str, str, str | None]:
+    normalised = _normalise_link_type(link_type)
+    if normalised.startswith("#V#"):
+        return normalised, normalised, None
+    predicate = TASK_LINK_TYPE_TO_PREDICATE.get(normalised)
+    if not predicate:
+        supported = sorted(TASK_LINK_TYPE_TO_PREDICATE.keys())
+        raise InvalidTaskDataError(
+            f"Unsupported link_type '{link_type}'. Supported values: {supported}"
+        )
+    inverse = TASK_LINK_TYPE_INVERSES.get(normalised)
+    return normalised, predicate, inverse
+
+
+def _isoformat(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    try:
+        parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _normalise_labels(labels: Any) -> list[str]:
+    if labels is None:
+        return []
+    if not isinstance(labels, list):
+        raise InvalidTaskDataError("labels must be a list of non-empty strings")
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in labels:
+        if not isinstance(raw, str):
+            continue
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        result.append(cleaned)
+    return result
+
+
+def _is_task_doc(doc: Dict[str, Any]) -> bool:
+    relationships = doc.get("relationships", {})
+    instance_of = relationships.get("is_an_instance_of", [])
+    return TASK_SPECIFICATION_TYPE_ID in instance_of
+
+
+def _get_task_doc(task_concept_id: str) -> tuple[str, Dict[str, Any]]:
+    normalised_id = _normalise_task_concept_id(task_concept_id)
+    doc = ConceptsRepository.find_one({"concept_id": normalised_id})
+    if not doc:
+        raise TaskNotFoundError(f"Task not found: {normalised_id}")
+    if not _is_task_doc(doc):
+        raise TaskNotFoundError(f"Concept is not a task: {normalised_id}")
+    return normalised_id, doc
+
+
+def _append_task_history_event(
+    *,
+    task_concept_id: str,
+    event_type: str,
+    actor_concept_id: str | None = None,
+    details: Dict[str, Any] | None = None,
+    touch_updated_at: bool = True,
+) -> Dict[str, Any]:
+    event = {
+        "event_id": f"event_{uuid.uuid4().hex[:12]}",
+        "event_type": event_type,
+        "timestamp": _now().isoformat(),
+        "actor_concept_id": _normalise_optional_concept_id(actor_concept_id),
+        "details": details or {},
+    }
+    update_doc: Dict[str, Any] = {"$push": {f"metadata.{TASK_METADATA_KEY_HISTORY}": event}}
+    if touch_updated_at:
+        update_doc.setdefault("$set", {})
+        update_doc["$set"]["updated_at"] = _now()
+    ConceptsRepository.update_one({"concept_id": task_concept_id}, update_doc)
+    return event
+
+
+def _append_task_metadata_entry(
+    *,
+    task_concept_id: str,
+    metadata_key: str,
+    entry: Dict[str, Any],
+) -> None:
+    ConceptsRepository.update_one(
+        {"concept_id": task_concept_id},
+        {
+            "$push": {f"metadata.{metadata_key}": entry},
+            "$set": {"updated_at": _now()},
+        },
+    )
+
+
+def _replace_task_metadata_list(
+    *,
+    task_concept_id: str,
+    metadata_key: str,
+    entries: list[Dict[str, Any]] | list[str],
+) -> None:
+    ConceptsRepository.update_one(
+        {"concept_id": task_concept_id},
+        {
+            "$set": {
+                f"metadata.{metadata_key}": entries,
+                "updated_at": _now(),
+            }
+        },
+    )
+
+
+def _task_parent_id_from_doc(doc: Dict[str, Any]) -> str | None:
+    relationships = doc.get("relationships", {})
+    parent_candidates = relationships.get(PREDICATE_HAS_PARENT_TASK) or []
+    if isinstance(parent_candidates, list):
+        for candidate in parent_candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+    if isinstance(parent_candidates, str) and parent_candidates.strip():
+        return parent_candidates
+    return None
+
+
+def _first_relationship_value(raw: Any) -> str | None:
+    if isinstance(raw, list):
+        for candidate in raw:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+        return None
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    return None
+
+
+def _task_subtask_ids_from_doc(doc: Dict[str, Any]) -> list[str]:
+    relationships = doc.get("relationships", {})
+    raw = relationships.get(PREDICATE_HAS_SUBTASK) or []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, str) and item.strip()]
+
+
+def _task_links_from_doc(doc: Dict[str, Any]) -> list[Dict[str, str]]:
+    relationships = doc.get("relationships", {})
+    links: list[Dict[str, str]] = []
+    for predicate, targets in relationships.items():
+        if not isinstance(predicate, str) or predicate not in TASK_LINK_PREDICATES:
+            continue
+        if isinstance(targets, str):
+            targets = [targets]
+        if not isinstance(targets, list):
+            continue
+        for target in targets:
+            if not isinstance(target, str) or not target.strip():
+                continue
+            normalised_link_type = next(
+                (
+                    link_type
+                    for link_type, link_predicate in TASK_LINK_TYPE_TO_PREDICATE.items()
+                    if link_predicate == predicate
+                ),
+                predicate,
+            )
+            links.append(
+                {
+                    "link_type": normalised_link_type,
+                    "predicate": predicate,
+                    "target_task_concept_id": target,
+                }
+            )
+    return links
+
+
+def _list_metadata_items(doc: Dict[str, Any], key: str) -> list[Dict[str, Any]]:
+    metadata = doc.get("metadata") or {}
+    raw = metadata.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _would_create_parent_cycle(
+    *,
+    task_concept_id: str,
+    candidate_parent_id: str,
+) -> bool:
+    # Walk parent chain of candidate parent. If we encounter task_concept_id
+    # we would create a cycle.
+    seen: set[str] = set()
+    current = candidate_parent_id
+    hop_cap = 256
+    while current and hop_cap > 0:
+        hop_cap -= 1
+        if current == task_concept_id:
+            return True
+        if current in seen:
+            return False
+        seen.add(current)
+        current_doc = ConceptsRepository.find_one(
+            {"concept_id": current},
+            projection={f"relationships.{PREDICATE_HAS_PARENT_TASK}": 1},
+        )
+        if not current_doc:
+            return False
+        current = _task_parent_id_from_doc(current_doc) or ""
+    return False
 
 
 def create_task(
@@ -156,7 +554,7 @@ def create_task(
     if organisation_concept_id:
         organisation_concept_id = ensure_v_concept_prefix(organisation_concept_id)
 
-    now = datetime.now(timezone.utc)
+    now = _now()
 
     # Build relationships
     relationships: Dict[str, Any] = {
@@ -204,8 +602,13 @@ def create_task(
         "created_at": now,
         "updated_at": now,
         "metadata": {
-            "concept_type": "task_specification",
-            "organisation_concept_id": organisation_concept_id,
+            TASK_METADATA_KEY_CONCEPT_TYPE: "task_specification",
+            TASK_METADATA_KEY_ORGANISATION: organisation_concept_id,
+            TASK_METADATA_KEY_LABELS: [],
+            TASK_METADATA_KEY_COMMENTS: [],
+            TASK_METADATA_KEY_ATTACHMENTS: [],
+            TASK_METADATA_KEY_WORKLOG: [],
+            TASK_METADATA_KEY_HISTORY: [],
         },
     }
 
@@ -286,6 +689,22 @@ def create_task(
         "created_at": now.isoformat(),
     }
 
+    try:
+        result["history_event"] = _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_created",
+            actor_concept_id=created_by_concept_id,
+            details={
+                "title": title,
+                "priority": priority,
+                "assignee_concept_id": assignee_concept_id,
+                "originating_conversation_id": conversation_concept_id,
+            },
+            touch_updated_at=False,
+        )
+    except Exception as e:
+        logger.debug("Failed to append task_created history event: %s", e)
+
     workflow_event_launch: dict[str, Any] | None = None
     # Event-driven workflow launch is best-effort and must not block task writes.
     try:
@@ -325,21 +744,7 @@ def get_task(task_concept_id: str) -> Dict[str, Any]:
     Raises:
         TaskNotFoundError: If task not found
     """
-    normalised_id = ensure_v_concept_prefix(task_concept_id)
-    if not normalised_id:
-        raise TaskNotFoundError(f"Invalid task_concept_id: {task_concept_id}")
-    task_concept_id = normalised_id
-
-    doc = ConceptsRepository.find_one({"concept_id": task_concept_id})
-    if not doc:
-        raise TaskNotFoundError(f"Task not found: {task_concept_id}")
-
-    # Check it's actually a task
-    relationships = doc.get("relationships", {})
-    instance_of = relationships.get("is_an_instance_of", [])
-    if TASK_SPECIFICATION_TYPE_ID not in instance_of:
-        raise TaskNotFoundError(f"Concept is not a task: {task_concept_id}")
-
+    task_concept_id, doc = _get_task_doc(task_concept_id)
     return _build_task_response(doc)
 
 
@@ -377,13 +782,29 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
             due_date = text_value
 
     # Get relationship values
-    assignee = (relationships.get(PREDICATE_HAS_ASSIGNEE) or [None])[0]
-    created_by = (relationships.get(PREDICATE_HAS_CREATED_BY) or [None])[0]
-    originating_conversation = (
-        relationships.get(PREDICATE_HAS_ORIGINATING_CONVERSATION) or [None]
-    )[0]
+    assignee = _first_relationship_value(relationships.get(PREDICATE_HAS_ASSIGNEE))
+    created_by = _first_relationship_value(relationships.get(PREDICATE_HAS_CREATED_BY))
+    originating_conversation = _first_relationship_value(
+        relationships.get(PREDICATE_HAS_ORIGINATING_CONVERSATION)
+    )
 
     metadata = doc.get("metadata", {})
+    raw_labels = metadata.get(TASK_METADATA_KEY_LABELS)
+    labels = []
+    if isinstance(raw_labels, list):
+        labels = [label for label in raw_labels if isinstance(label, str) and label.strip()]
+    comments = _list_metadata_items(doc, TASK_METADATA_KEY_COMMENTS)
+    attachments = _list_metadata_items(doc, TASK_METADATA_KEY_ATTACHMENTS)
+    worklog = _list_metadata_items(doc, TASK_METADATA_KEY_WORKLOG)
+    history = _list_metadata_items(doc, TASK_METADATA_KEY_HISTORY)
+    parent_task_id = _task_parent_id_from_doc(doc)
+    subtask_ids = _task_subtask_ids_from_doc(doc)
+    links = _task_links_from_doc(doc)
+    worklog_total_minutes = 0
+    for entry in worklog:
+        spent = entry.get("time_spent_minutes")
+        if isinstance(spent, int):
+            worklog_total_minutes += spent
 
     # Fetch conversation details if available
     conversation_session_id = None
@@ -430,7 +851,16 @@ def _build_task_response(doc: Dict[str, Any]) -> Dict[str, Any]:
         "conversation_session_id": conversation_session_id,
         "conversation_name": conversation_name,
         "due_date": due_date,
-        "organisation_concept_id": metadata.get("organisation_concept_id"),
+        "organisation_concept_id": metadata.get(TASK_METADATA_KEY_ORGANISATION),
+        "labels": labels,
+        "parent_task_concept_id": parent_task_id,
+        "subtask_concept_ids": subtask_ids,
+        "task_links": links,
+        "comments_count": len(comments),
+        "attachments_count": len(attachments),
+        "worklog_entries_count": len(worklog),
+        "worklog_total_minutes": worklog_total_minutes,
+        "history_count": len(history),
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }
@@ -450,20 +880,13 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
         TaskNotFoundError: If task not found
         InvalidTaskDataError: If status is invalid
     """
+    status = str(status or "").strip().lower()
     if status not in VALID_TASK_STATUSES:
         raise InvalidTaskDataError(
             f"Invalid status '{status}'. Must be one of: {VALID_TASK_STATUSES}"
         )
 
-    normalised_id = ensure_v_concept_prefix(task_concept_id)
-    if not normalised_id:
-        raise TaskNotFoundError(f"Invalid task_concept_id: {task_concept_id}")
-    task_concept_id = normalised_id
-
-    # Verify task exists
-    doc = ConceptsRepository.find_one({"concept_id": task_concept_id})
-    if not doc:
-        raise TaskNotFoundError(f"Task not found: {task_concept_id}")
+    task_concept_id, doc = _get_task_doc(task_concept_id)
 
     existing_task = _build_task_response(doc)
     previous_status = existing_task.get("status")
@@ -483,7 +906,7 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
         raise TaskManagementError(f"Failed to update task status: {e}") from e
 
     # Update timestamp
-    now = datetime.now(timezone.utc)
+    now = _now()
     ConceptsRepository.update_one(
         {"concept_id": task_concept_id},
         {
@@ -493,6 +916,18 @@ def update_task_status(task_concept_id: str, status: str) -> Dict[str, Any]:
     )
 
     logger.info(f"Updated task {task_concept_id} status to {status}")
+    try:
+        _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_status_changed",
+            actor_concept_id=existing_task.get("created_by_concept_id"),
+            details={
+                "from_status": previous_status,
+                "to_status": status,
+            },
+        )
+    except Exception as e:
+        logger.debug("Failed to append task status history event: %s", e)
     updated_task = get_task(task_concept_id)
 
     try:
@@ -548,10 +983,8 @@ def assign_task(task_concept_id: str, assignee_concept_id: str) -> Dict[str, Any
     Raises:
         TaskNotFoundError: If task not found
     """
-    normalised_task_id = ensure_v_concept_prefix(task_concept_id)
-    normalised_assignee_id = ensure_v_concept_prefix(assignee_concept_id)
-    if not normalised_task_id:
-        raise TaskNotFoundError(f"Invalid task_concept_id: {task_concept_id}")
+    normalised_task_id = _normalise_task_concept_id(task_concept_id)
+    normalised_assignee_id = _normalise_optional_concept_id(assignee_concept_id)
     if not normalised_assignee_id:
         raise InvalidTaskDataError(
             f"Invalid assignee_concept_id: {assignee_concept_id}"
@@ -560,12 +993,14 @@ def assign_task(task_concept_id: str, assignee_concept_id: str) -> Dict[str, Any
     assignee_concept_id = normalised_assignee_id
 
     # Verify task exists
-    doc = ConceptsRepository.find_one({"concept_id": task_concept_id})
-    if not doc:
-        raise TaskNotFoundError(f"Task not found: {task_concept_id}")
+    _, doc = _get_task_doc(task_concept_id)
 
     # Remove existing assignee(s) first, then add new one
     existing_assignees = doc.get("relationships", {}).get(PREDICATE_HAS_ASSIGNEE, [])
+    if isinstance(existing_assignees, str):
+        existing_assignees = [existing_assignees]
+    if not isinstance(existing_assignees, list):
+        existing_assignees = []
     for old_assignee in existing_assignees:
         ConceptsRepository.mutate_relationship_edge(
             source_id=task_concept_id,
@@ -590,13 +1025,24 @@ def assign_task(task_concept_id: str, assignee_concept_id: str) -> Dict[str, Any
     )
 
     # Update timestamp
-    now = datetime.now(timezone.utc)
+    now = _now()
     ConceptsRepository.update_one(
         {"concept_id": task_concept_id},
         {"$set": {"updated_at": now}},
     )
 
     logger.info(f"Assigned task {task_concept_id} to {assignee_concept_id}")
+    try:
+        _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_assigned",
+            details={
+                "assignee_concept_id": assignee_concept_id,
+                "previous_assignees": existing_assignees,
+            },
+        )
+    except Exception as e:
+        logger.debug("Failed to append task assignment history event: %s", e)
     return get_task(task_concept_id)
 
 
@@ -711,6 +1157,1058 @@ def list_tasks(
     return tasks
 
 
+def search_tasks(
+    *,
+    query: str | None = None,
+    status_filter: str | None = None,
+    statuses: list[str] | None = None,
+    assignee_concept_id: str | None = None,
+    labels: list[str] | None = None,
+    parent_task_concept_id: str | None = None,
+    has_parent: bool | None = None,
+    has_subtasks: bool | None = None,
+    due_from: str | None = None,
+    due_to: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
+    dependency_state: str | None = None,
+    organisation_concept_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """Search tasks with Jira-style filters over Vontology-backed task concepts."""
+
+    try:
+        limit = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
+
+    query_filter: Dict[str, Any] = {
+        "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID
+    }
+    if organisation_concept_id:
+        org_id = _normalise_optional_concept_id(organisation_concept_id)
+        if not org_id:
+            raise InvalidTaskDataError(
+                f"Invalid organisation_concept_id: {organisation_concept_id}"
+            )
+        query_filter[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = org_id
+
+    scan_limit = max(limit + offset, 200)
+    scan_limit = min(scan_limit, 2000)
+    docs = list(ConceptsRepository.find(query_filter, limit=scan_limit))
+    tasks = [_build_task_response(doc) for doc in docs]
+
+    status_values: set[str] = set()
+    if isinstance(status_filter, str) and status_filter.strip():
+        status_values.add(status_filter.strip().lower())
+    if isinstance(statuses, list):
+        for raw in statuses:
+            if isinstance(raw, str) and raw.strip():
+                status_values.add(raw.strip().lower())
+    if status_values:
+        tasks = [
+            task
+            for task in tasks
+            if isinstance(task.get("status"), str)
+            and str(task.get("status")).lower() in status_values
+        ]
+
+    if assignee_concept_id is not None:
+        assignee_id = _normalise_optional_concept_id(assignee_concept_id)
+        if not assignee_id:
+            raise InvalidTaskDataError(
+                f"Invalid assignee_concept_id: {assignee_concept_id}"
+            )
+        tasks = [
+            task
+            for task in tasks
+            if task.get("assignee_concept_id") == assignee_id
+        ]
+
+    if labels is not None:
+        required_labels = {
+            label.lower() for label in _normalise_labels(labels) if label.strip()
+        }
+        if required_labels:
+            tasks = [
+                task
+                for task in tasks
+                if required_labels.issubset(
+                    {
+                        str(item).lower()
+                        for item in (task.get("labels") or [])
+                        if isinstance(item, str)
+                    }
+                )
+            ]
+
+    if parent_task_concept_id is not None:
+        parent_id = _normalise_optional_concept_id(parent_task_concept_id)
+        if not parent_id:
+            raise InvalidTaskDataError(
+                f"Invalid parent_task_concept_id: {parent_task_concept_id}"
+            )
+        tasks = [
+            task
+            for task in tasks
+            if task.get("parent_task_concept_id") == parent_id
+        ]
+
+    if isinstance(has_parent, bool):
+        tasks = [
+            task
+            for task in tasks
+            if bool(task.get("parent_task_concept_id")) is has_parent
+        ]
+
+    if isinstance(has_subtasks, bool):
+        tasks = [
+            task
+            for task in tasks
+            if bool(task.get("subtask_concept_ids")) is has_subtasks
+        ]
+
+    due_from_dt = _parse_datetime(due_from)
+    due_to_dt = _parse_datetime(due_to)
+    if due_from or due_to:
+        tasks = [
+            task
+            for task in tasks
+            if (
+                (parsed_due := _parse_datetime(task.get("due_date"))) is not None
+                and (due_from_dt is None or parsed_due >= due_from_dt)
+                and (due_to_dt is None or parsed_due <= due_to_dt)
+            )
+        ]
+
+    created_from_dt = _parse_datetime(created_from)
+    created_to_dt = _parse_datetime(created_to)
+    if created_from or created_to:
+        tasks = [
+            task
+            for task in tasks
+            if (
+                (parsed_created := _parse_datetime(task.get("created_at"))) is not None
+                and (created_from_dt is None or parsed_created >= created_from_dt)
+                and (created_to_dt is None or parsed_created <= created_to_dt)
+            )
+        ]
+
+    updated_from_dt = _parse_datetime(updated_from)
+    updated_to_dt = _parse_datetime(updated_to)
+    if updated_from or updated_to:
+        tasks = [
+            task
+            for task in tasks
+            if (
+                (parsed_updated := _parse_datetime(task.get("updated_at"))) is not None
+                and (updated_from_dt is None or parsed_updated >= updated_from_dt)
+                and (updated_to_dt is None or parsed_updated <= updated_to_dt)
+            )
+        ]
+
+    if isinstance(query, str) and query.strip():
+        query_lower = query.strip().lower()
+        tasks = [
+            task
+            for task in tasks
+            if query_lower in str(task.get("title") or "").lower()
+            or query_lower in str(task.get("description") or "").lower()
+        ]
+
+    if isinstance(dependency_state, str) and dependency_state.strip():
+        state = _normalise_link_type(dependency_state)
+        if state == "blocking":
+            state = "blocks"
+        if state == "blocked":
+            state = "blocked_by"
+        valid_states = {
+            "depends_on",
+            "required_by",
+            "blocks",
+            "blocked_by",
+            "relates_to",
+        }
+        if state not in valid_states:
+            raise InvalidTaskDataError(
+                f"Invalid dependency_state '{dependency_state}'. Supported values: {sorted(valid_states)}"
+            )
+        tasks = [
+            task
+            for task in tasks
+            if any(
+                isinstance(link, dict) and link.get("link_type") == state
+                for link in (task.get("task_links") or [])
+            )
+        ]
+
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    tasks.sort(
+        key=lambda task: (
+            _parse_datetime(task.get("updated_at")) or floor,
+            _parse_datetime(task.get("created_at")) or floor,
+        ),
+        reverse=True,
+    )
+
+    total = len(tasks)
+    paged = tasks[offset : offset + limit]
+    return {
+        "tasks": paged,
+        "total": total,
+        "count": len(paged),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+def get_task_transitions(task_concept_id: str) -> Dict[str, Any]:
+    task = get_task(task_concept_id)
+    current_status = str(task.get("status") or TASK_STATUS_PENDING).lower()
+    transitions = TASK_TRANSITION_DEFINITIONS.get(current_status, [])
+    return {
+        "task_concept_id": task.get("task_concept_id"),
+        "current_status": current_status,
+        "transitions": transitions,
+        "count": len(transitions),
+    }
+
+
+def transition_task(
+    task_concept_id: str,
+    *,
+    transition_id: str | None = None,
+    to_status: str | None = None,
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
+    transition_set = get_task_transitions(task_concept_id)
+    transitions = transition_set.get("transitions") or []
+    current_status = str(transition_set.get("current_status") or TASK_STATUS_PENDING)
+
+    selected_transition: Dict[str, str] | None = None
+    if isinstance(to_status, str) and to_status.strip():
+        desired_status = to_status.strip().lower()
+        for transition in transitions:
+            if str(transition.get("to_status") or "").lower() == desired_status:
+                selected_transition = transition
+                break
+    elif isinstance(transition_id, str) and transition_id.strip():
+        desired_transition_id = _normalise_transition_id(transition_id)
+        for transition in transitions:
+            if (
+                _normalise_transition_id(transition.get("transition_id"))
+                == desired_transition_id
+            ):
+                selected_transition = transition
+                break
+    else:
+        raise InvalidTaskDataError(
+            "Provide either transition_id or to_status for task transition"
+        )
+
+    if not selected_transition:
+        expected_transitions = [
+            {
+                "transition_id": item.get("transition_id"),
+                "to_status": item.get("to_status"),
+            }
+            for item in transitions
+        ]
+        raise InvalidTaskDataError(
+            f"Transition not available from status '{current_status}'. "
+            f"Expected one of: {expected_transitions}"
+        )
+
+    next_status = str(selected_transition.get("to_status") or "").lower()
+    updated_task = update_task_status(task_concept_id, next_status)
+    try:
+        _append_task_history_event(
+            task_concept_id=str(updated_task.get("task_concept_id")),
+            event_type="task_transitioned",
+            actor_concept_id=actor_concept_id,
+            details={
+                "transition_id": selected_transition.get("transition_id"),
+                "transition_name": selected_transition.get("name"),
+                "from_status": current_status,
+                "to_status": next_status,
+            },
+        )
+    except Exception as e:
+        logger.debug("Failed to append task transition history event: %s", e)
+
+    return {
+        "task_concept_id": updated_task.get("task_concept_id"),
+        "from_status": current_status,
+        "to_status": next_status,
+        "transition": selected_transition,
+        "task": updated_task,
+    }
+
+
+def unassign_task(task_concept_id: str) -> Dict[str, Any]:
+    task_concept_id, doc = _get_task_doc(task_concept_id)
+    current_assignees = doc.get("relationships", {}).get(PREDICATE_HAS_ASSIGNEE, [])
+    if isinstance(current_assignees, str):
+        current_assignees = [current_assignees]
+    if not isinstance(current_assignees, list):
+        current_assignees = []
+
+    removed_assignees = [
+        assignee
+        for assignee in current_assignees
+        if isinstance(assignee, str) and assignee
+    ]
+    if not removed_assignees:
+        return get_task(task_concept_id)
+
+    for assignee in removed_assignees:
+        ConceptsRepository.mutate_relationship_edge(
+            source_id=task_concept_id,
+            kind=PREDICATE_HAS_ASSIGNEE,
+            target_id=assignee,
+            action="remove",
+        )
+
+    ConceptsRepository.update_one(
+        {"concept_id": task_concept_id},
+        {"$set": {"updated_at": _now()}},
+    )
+    try:
+        _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_unassigned",
+            details={"removed_assignees": removed_assignees},
+        )
+    except Exception as e:
+        logger.debug("Failed to append unassign history event: %s", e)
+    return get_task(task_concept_id)
+
+
+def set_task_parent(
+    task_concept_id: str,
+    parent_task_concept_id: str | None,
+    *,
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
+    task_concept_id, task_doc = _get_task_doc(task_concept_id)
+    old_parent_id = _task_parent_id_from_doc(task_doc)
+
+    new_parent_id = _normalise_optional_concept_id(parent_task_concept_id)
+    if parent_task_concept_id and not new_parent_id:
+        raise InvalidTaskDataError(
+            f"Invalid parent_task_concept_id: {parent_task_concept_id}"
+        )
+
+    if new_parent_id == task_concept_id:
+        raise InvalidTaskDataError("A task cannot be its own parent")
+
+    if new_parent_id:
+        _get_task_doc(new_parent_id)
+        if _would_create_parent_cycle(
+            task_concept_id=task_concept_id,
+            candidate_parent_id=new_parent_id,
+        ):
+            raise InvalidTaskDataError(
+                "Cannot assign parent task: this would create a hierarchy cycle"
+            )
+
+    if old_parent_id and old_parent_id != new_parent_id:
+        ConceptsRepository.mutate_relationship_edge(
+            source_id=task_concept_id,
+            kind=PREDICATE_HAS_PARENT_TASK,
+            target_id=old_parent_id,
+            action="remove",
+            maintain_inverse=False,
+        )
+        ConceptsRepository.mutate_relationship_edge(
+            source_id=old_parent_id,
+            kind=PREDICATE_HAS_SUBTASK,
+            target_id=task_concept_id,
+            action="remove",
+            maintain_inverse=False,
+        )
+
+    if new_parent_id and new_parent_id != old_parent_id:
+        ConceptsRepository.mutate_relationship_edge(
+            source_id=task_concept_id,
+            kind=PREDICATE_HAS_PARENT_TASK,
+            target_id=new_parent_id,
+            action="add",
+            maintain_inverse=False,
+        )
+        ConceptsRepository.mutate_relationship_edge(
+            source_id=new_parent_id,
+            kind=PREDICATE_HAS_SUBTASK,
+            target_id=task_concept_id,
+            action="add",
+            maintain_inverse=False,
+        )
+
+    ConceptsRepository.update_one(
+        {"concept_id": task_concept_id},
+        {"$set": {"updated_at": _now()}},
+    )
+    try:
+        _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_parent_changed",
+            actor_concept_id=actor_concept_id,
+            details={
+                "previous_parent_task_concept_id": old_parent_id,
+                "parent_task_concept_id": new_parent_id,
+            },
+        )
+    except Exception as e:
+        logger.debug("Failed to append parent-change history event: %s", e)
+
+    return get_task(task_concept_id)
+
+
+def create_subtask(
+    parent_task_concept_id: str,
+    *,
+    title: str,
+    description: str,
+    assignee_concept_id: str | None = None,
+    created_by_concept_id: str | None = None,
+    due_date: datetime | None = None,
+    priority: str = PRIORITY_MEDIUM,
+    organisation_concept_id: str | None = None,
+    originating_session_id: str | None = None,
+) -> Dict[str, Any]:
+    parent_task_concept_id, _ = _get_task_doc(parent_task_concept_id)
+    created = create_task(
+        title=title,
+        description=description,
+        assignee_concept_id=assignee_concept_id,
+        created_by_concept_id=created_by_concept_id,
+        due_date=due_date,
+        priority=priority,
+        organisation_concept_id=organisation_concept_id,
+        originating_session_id=originating_session_id,
+    )
+    subtask_id = str(created.get("task_concept_id"))
+    subtask = set_task_parent(
+        subtask_id,
+        parent_task_concept_id,
+        actor_concept_id=created_by_concept_id,
+    )
+    return {
+        "task": subtask,
+        "parent_task_concept_id": parent_task_concept_id,
+        "subtask_concept_id": subtask_id,
+    }
+
+
+def link_tasks(
+    source_task_concept_id: str,
+    target_task_concept_id: str,
+    *,
+    link_type: str,
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
+    source_task_concept_id, _ = _get_task_doc(source_task_concept_id)
+    target_task_concept_id, _ = _get_task_doc(target_task_concept_id)
+    if source_task_concept_id == target_task_concept_id:
+        raise InvalidTaskDataError("Cannot link a task to itself")
+
+    normalised_link_type, predicate, inverse_link_type = _resolve_link_predicate(
+        link_type
+    )
+    linked = ConceptsRepository.mutate_relationship_edge(
+        source_id=source_task_concept_id,
+        kind=predicate,
+        target_id=target_task_concept_id,
+        action="add",
+        maintain_inverse=False,
+    )
+
+    inverse_predicate = None
+    if inverse_link_type:
+        inverse_predicate = TASK_LINK_TYPE_TO_PREDICATE.get(inverse_link_type)
+        if inverse_predicate:
+            linked = (
+                ConceptsRepository.mutate_relationship_edge(
+                    source_id=target_task_concept_id,
+                    kind=inverse_predicate,
+                    target_id=source_task_concept_id,
+                    action="add",
+                    maintain_inverse=False,
+                )
+                or linked
+            )
+
+    now = _now()
+    ConceptsRepository.update_one(
+        {"concept_id": source_task_concept_id},
+        {"$set": {"updated_at": now}},
+    )
+    ConceptsRepository.update_one(
+        {"concept_id": target_task_concept_id},
+        {"$set": {"updated_at": now}},
+    )
+    try:
+        _append_task_history_event(
+            task_concept_id=source_task_concept_id,
+            event_type="task_link_added",
+            actor_concept_id=actor_concept_id,
+            details={
+                "target_task_concept_id": target_task_concept_id,
+                "link_type": normalised_link_type,
+                "predicate": predicate,
+            },
+        )
+    except Exception as e:
+        logger.debug("Failed to append source link history event: %s", e)
+
+    return {
+        "source_task_concept_id": source_task_concept_id,
+        "target_task_concept_id": target_task_concept_id,
+        "link_type": normalised_link_type,
+        "predicate": predicate,
+        "inverse_link_type": inverse_link_type,
+        "inverse_predicate": inverse_predicate,
+        "linked": bool(linked),
+    }
+
+
+def unlink_tasks(
+    source_task_concept_id: str,
+    target_task_concept_id: str,
+    *,
+    link_type: str,
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
+    source_task_concept_id, _ = _get_task_doc(source_task_concept_id)
+    target_task_concept_id, _ = _get_task_doc(target_task_concept_id)
+
+    normalised_link_type, predicate, inverse_link_type = _resolve_link_predicate(
+        link_type
+    )
+    unlinked = ConceptsRepository.mutate_relationship_edge(
+        source_id=source_task_concept_id,
+        kind=predicate,
+        target_id=target_task_concept_id,
+        action="remove",
+        maintain_inverse=False,
+    )
+
+    inverse_predicate = None
+    if inverse_link_type:
+        inverse_predicate = TASK_LINK_TYPE_TO_PREDICATE.get(inverse_link_type)
+        if inverse_predicate:
+            unlinked = (
+                ConceptsRepository.mutate_relationship_edge(
+                    source_id=target_task_concept_id,
+                    kind=inverse_predicate,
+                    target_id=source_task_concept_id,
+                    action="remove",
+                    maintain_inverse=False,
+                )
+                or unlinked
+            )
+
+    now = _now()
+    ConceptsRepository.update_one(
+        {"concept_id": source_task_concept_id},
+        {"$set": {"updated_at": now}},
+    )
+    ConceptsRepository.update_one(
+        {"concept_id": target_task_concept_id},
+        {"$set": {"updated_at": now}},
+    )
+    try:
+        _append_task_history_event(
+            task_concept_id=source_task_concept_id,
+            event_type="task_link_removed",
+            actor_concept_id=actor_concept_id,
+            details={
+                "target_task_concept_id": target_task_concept_id,
+                "link_type": normalised_link_type,
+                "predicate": predicate,
+            },
+        )
+    except Exception as e:
+        logger.debug("Failed to append source unlink history event: %s", e)
+
+    return {
+        "source_task_concept_id": source_task_concept_id,
+        "target_task_concept_id": target_task_concept_id,
+        "link_type": normalised_link_type,
+        "predicate": predicate,
+        "inverse_link_type": inverse_link_type,
+        "inverse_predicate": inverse_predicate,
+        "unlinked": bool(unlinked),
+    }
+
+
+def add_task_comment(
+    task_concept_id: str,
+    *,
+    body: str,
+    author_concept_id: str | None = None,
+) -> Dict[str, Any]:
+    task_concept_id, _ = _get_task_doc(task_concept_id)
+    if not isinstance(body, str) or not body.strip():
+        raise InvalidTaskDataError("Comment body must be a non-empty string")
+
+    comment = {
+        "comment_id": f"comment_{uuid.uuid4().hex[:12]}",
+        "body": body.strip(),
+        "author_concept_id": _normalise_optional_concept_id(author_concept_id),
+        "created_at": _now().isoformat(),
+    }
+    _append_task_metadata_entry(
+        task_concept_id=task_concept_id,
+        metadata_key=TASK_METADATA_KEY_COMMENTS,
+        entry=comment,
+    )
+    try:
+        _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_comment_added",
+            actor_concept_id=author_concept_id,
+            details={"comment_id": comment["comment_id"]},
+            touch_updated_at=False,
+        )
+    except Exception as e:
+        logger.debug("Failed to append comment history event: %s", e)
+    return comment
+
+
+def list_task_comments(
+    task_concept_id: str,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    task_concept_id, doc = _get_task_doc(task_concept_id)
+    comments = _list_metadata_items(doc, TASK_METADATA_KEY_COMMENTS)
+    try:
+        limit = max(1, min(int(limit), 500))
+    except (TypeError, ValueError):
+        limit = 100
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
+
+    total = len(comments)
+    window = comments[offset : offset + limit]
+    return {
+        "task_concept_id": task_concept_id,
+        "comments": window,
+        "total": total,
+        "count": len(window),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+def add_task_attachment(
+    task_concept_id: str,
+    *,
+    filename: str,
+    uri: str,
+    media_type: str | None = None,
+    size_bytes: int | None = None,
+    added_by_concept_id: str | None = None,
+    note: str | None = None,
+) -> Dict[str, Any]:
+    task_concept_id, _ = _get_task_doc(task_concept_id)
+    if not isinstance(filename, str) or not filename.strip():
+        raise InvalidTaskDataError("filename is required")
+    if not isinstance(uri, str) or not uri.strip():
+        raise InvalidTaskDataError("uri is required")
+
+    attachment = {
+        "attachment_id": f"attachment_{uuid.uuid4().hex[:12]}",
+        "filename": filename.strip(),
+        "uri": uri.strip(),
+        "media_type": media_type.strip() if isinstance(media_type, str) else None,
+        "size_bytes": (
+            size_bytes if isinstance(size_bytes, int) and size_bytes >= 0 else None
+        ),
+        "note": note.strip() if isinstance(note, str) and note.strip() else None,
+        "added_by_concept_id": _normalise_optional_concept_id(added_by_concept_id),
+        "created_at": _now().isoformat(),
+    }
+    _append_task_metadata_entry(
+        task_concept_id=task_concept_id,
+        metadata_key=TASK_METADATA_KEY_ATTACHMENTS,
+        entry=attachment,
+    )
+    try:
+        _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_attachment_added",
+            actor_concept_id=added_by_concept_id,
+            details={
+                "attachment_id": attachment["attachment_id"],
+                "filename": attachment["filename"],
+            },
+            touch_updated_at=False,
+        )
+    except Exception as e:
+        logger.debug("Failed to append attachment history event: %s", e)
+    return attachment
+
+
+def list_task_attachments(
+    task_concept_id: str,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    task_concept_id, doc = _get_task_doc(task_concept_id)
+    attachments = _list_metadata_items(doc, TASK_METADATA_KEY_ATTACHMENTS)
+    try:
+        limit = max(1, min(int(limit), 500))
+    except (TypeError, ValueError):
+        limit = 100
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
+
+    total = len(attachments)
+    window = attachments[offset : offset + limit]
+    return {
+        "task_concept_id": task_concept_id,
+        "attachments": window,
+        "total": total,
+        "count": len(window),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+def add_task_worklog(
+    task_concept_id: str,
+    *,
+    time_spent_minutes: int,
+    author_concept_id: str | None = None,
+    comment: str | None = None,
+    started_at: str | None = None,
+) -> Dict[str, Any]:
+    task_concept_id, _ = _get_task_doc(task_concept_id)
+    if not isinstance(time_spent_minutes, int) or time_spent_minutes <= 0:
+        raise InvalidTaskDataError("time_spent_minutes must be a positive integer")
+
+    started = _parse_datetime(started_at) if started_at else None
+    entry = {
+        "worklog_id": f"worklog_{uuid.uuid4().hex[:12]}",
+        "time_spent_minutes": time_spent_minutes,
+        "author_concept_id": _normalise_optional_concept_id(author_concept_id),
+        "comment": comment.strip() if isinstance(comment, str) and comment.strip() else None,
+        "started_at": _isoformat(started) or _now().isoformat(),
+        "created_at": _now().isoformat(),
+    }
+    _append_task_metadata_entry(
+        task_concept_id=task_concept_id,
+        metadata_key=TASK_METADATA_KEY_WORKLOG,
+        entry=entry,
+    )
+    try:
+        _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_worklog_added",
+            actor_concept_id=author_concept_id,
+            details={
+                "worklog_id": entry["worklog_id"],
+                "time_spent_minutes": time_spent_minutes,
+            },
+            touch_updated_at=False,
+        )
+    except Exception as e:
+        logger.debug("Failed to append worklog history event: %s", e)
+    return entry
+
+
+def list_task_worklog(
+    task_concept_id: str,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    task_concept_id, doc = _get_task_doc(task_concept_id)
+    worklog = _list_metadata_items(doc, TASK_METADATA_KEY_WORKLOG)
+    try:
+        limit = max(1, min(int(limit), 500))
+    except (TypeError, ValueError):
+        limit = 100
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
+
+    total_minutes = 0
+    for row in worklog:
+        minutes = row.get("time_spent_minutes")
+        if isinstance(minutes, int):
+            total_minutes += minutes
+
+    window = worklog[offset : offset + limit]
+    return {
+        "task_concept_id": task_concept_id,
+        "worklog": window,
+        "total": len(worklog),
+        "count": len(window),
+        "offset": offset,
+        "limit": limit,
+        "total_time_spent_minutes": total_minutes,
+    }
+
+
+def get_task_history(
+    task_concept_id: str,
+    *,
+    limit: int = 200,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    task_concept_id, doc = _get_task_doc(task_concept_id)
+    history = _list_metadata_items(doc, TASK_METADATA_KEY_HISTORY)
+    try:
+        limit = max(1, min(int(limit), 1000))
+    except (TypeError, ValueError):
+        limit = 200
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
+
+    window = history[offset : offset + limit]
+    return {
+        "task_concept_id": task_concept_id,
+        "history": window,
+        "total": len(history),
+        "count": len(window),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+def update_task_fields(
+    task_concept_id: str,
+    *,
+    fields: Dict[str, Any],
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
+    task_concept_id = _normalise_task_concept_id(task_concept_id)
+    _, _ = _get_task_doc(task_concept_id)
+
+    if not isinstance(fields, dict) or not fields:
+        raise InvalidTaskDataError("fields must be a non-empty dict")
+
+    changed_fields: list[str] = []
+    warnings: list[str] = []
+
+    if "status" in fields:
+        update_task_status(task_concept_id, str(fields.get("status") or ""))
+        changed_fields.append("status")
+
+    assignee_field_present = "assignee_concept_id" in fields or "assignee_id" in fields
+    if assignee_field_present:
+        raw_assignee = fields.get("assignee_concept_id", fields.get("assignee_id"))
+        if raw_assignee is None or (
+            isinstance(raw_assignee, str) and not raw_assignee.strip()
+        ):
+            unassign_task(task_concept_id)
+            changed_fields.append("assignee_concept_id")
+        else:
+            assign_task(task_concept_id, str(raw_assignee))
+            changed_fields.append("assignee_concept_id")
+
+    if "title" in fields:
+        title_value = fields.get("title")
+        if not isinstance(title_value, str) or not title_value.strip():
+            raise InvalidTaskDataError("title must be a non-empty string")
+        upsert_text_for_concept(
+            subject_concept_id=task_concept_id,
+            predicate=PREDICATE_HAS_NAME,
+            text=title_value.strip(),
+            lang="en-NZ",
+        )
+        changed_fields.append("title")
+
+    if "description" in fields:
+        description_value = fields.get("description")
+        if not isinstance(description_value, str) or not description_value.strip():
+            raise InvalidTaskDataError("description must be a non-empty string")
+        upsert_text_for_concept(
+            subject_concept_id=task_concept_id,
+            predicate=PREDICATE_HAS_DESCRIPTION,
+            text=description_value.strip(),
+            lang="en-NZ",
+        )
+        changed_fields.append("description")
+
+    if "priority" in fields:
+        priority_value = str(fields.get("priority") or "").strip().lower()
+        if priority_value not in VALID_PRIORITIES:
+            raise InvalidTaskDataError(
+                f"Invalid priority '{priority_value}'. Must be one of: {VALID_PRIORITIES}"
+            )
+        upsert_text_for_concept(
+            subject_concept_id=task_concept_id,
+            predicate=PREDICATE_HAS_PRIORITY,
+            text=priority_value,
+            lang="en",
+        )
+        changed_fields.append("priority")
+
+    if "due_date" in fields:
+        due_value = fields.get("due_date")
+        if due_value is None or (isinstance(due_value, str) and not due_value.strip()):
+            from ..services.text_value_service import delete_text_relation
+
+            for existing in get_texts_for_concept(
+                task_concept_id,
+                predicate=PREDICATE_HAS_DUE_DATE,
+                limit=100,
+            ):
+                relation_id = existing.get("relation_id")
+                if isinstance(relation_id, str) and relation_id:
+                    try:
+                        delete_text_relation(task_concept_id, relation_id)
+                    except Exception as e:
+                        logger.debug("Failed to delete due-date text relation: %s", e)
+            changed_fields.append("due_date")
+        else:
+            parsed_due = _parse_datetime(due_value)
+            if not parsed_due:
+                raise InvalidTaskDataError("due_date must be an ISO 8601 datetime string")
+            upsert_text_for_concept(
+                subject_concept_id=task_concept_id,
+                predicate=PREDICATE_HAS_DUE_DATE,
+                text=parsed_due.isoformat(),
+                lang="en",
+            )
+            changed_fields.append("due_date")
+
+    if "labels" in fields:
+        labels_value = _normalise_labels(fields.get("labels"))
+        _replace_task_metadata_list(
+            task_concept_id=task_concept_id,
+            metadata_key=TASK_METADATA_KEY_LABELS,
+            entries=labels_value,
+        )
+        changed_fields.append("labels")
+
+    if "parent_task_concept_id" in fields:
+        parent_raw = fields.get("parent_task_concept_id")
+        if parent_raw is None or (isinstance(parent_raw, str) and not parent_raw.strip()):
+            set_task_parent(task_concept_id, None, actor_concept_id=actor_concept_id)
+        else:
+            set_task_parent(
+                task_concept_id,
+                str(parent_raw),
+                actor_concept_id=actor_concept_id,
+            )
+        changed_fields.append("parent_task_concept_id")
+
+    unknown_keys = sorted(
+        key
+        for key in fields.keys()
+        if key
+        not in {
+            "status",
+            "assignee_concept_id",
+            "assignee_id",
+            "title",
+            "description",
+            "priority",
+            "due_date",
+            "labels",
+            "parent_task_concept_id",
+        }
+    )
+    if unknown_keys:
+        warnings.append(f"Ignored unsupported fields: {unknown_keys}")
+
+    if changed_fields:
+        ConceptsRepository.update_one(
+            {"concept_id": task_concept_id},
+            {"$set": {"updated_at": _now()}},
+        )
+        try:
+            _append_task_history_event(
+                task_concept_id=task_concept_id,
+                event_type="task_fields_updated",
+                actor_concept_id=actor_concept_id,
+                details={"changed_fields": sorted(set(changed_fields))},
+                touch_updated_at=False,
+            )
+        except Exception as e:
+            logger.debug("Failed to append task field-update history event: %s", e)
+
+    return {
+        "task": get_task(task_concept_id),
+        "changed_fields": sorted(set(changed_fields)),
+        "warnings": warnings,
+    }
+
+
+def bulk_update_tasks(
+    task_concept_ids: Iterable[str],
+    *,
+    fields: Dict[str, Any],
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
+    if not isinstance(fields, dict) or not fields:
+        raise InvalidTaskDataError("fields must be a non-empty dict")
+
+    task_ids = [
+        _normalise_task_concept_id(task_id)
+        for task_id in task_concept_ids
+        if isinstance(task_id, str) and task_id.strip()
+    ]
+    if not task_ids:
+        raise InvalidTaskDataError("task_concept_ids must include at least one task")
+
+    results: list[Dict[str, Any]] = []
+    success_count = 0
+    failure_count = 0
+    for task_id in task_ids:
+        try:
+            update_result = update_task_fields(
+                task_id,
+                fields=fields,
+                actor_concept_id=actor_concept_id,
+            )
+            success_count += 1
+            results.append(
+                {
+                    "task_concept_id": task_id,
+                    "success": True,
+                    "result": update_result,
+                }
+            )
+        except Exception as exc:
+            failure_count += 1
+            results.append(
+                {
+                    "task_concept_id": task_id,
+                    "success": False,
+                    "error": str(exc),
+                }
+            )
+
+    return {
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "total": len(task_ids),
+        "results": results,
+    }
+
+
 def delete_task(task_concept_id: str) -> bool:
     """Delete (archive) a task.
 
@@ -723,19 +2221,19 @@ def delete_task(task_concept_id: str) -> bool:
     Raises:
         TaskNotFoundError: If task not found
     """
-    normalised_id = ensure_v_concept_prefix(task_concept_id)
-    if not normalised_id:
-        raise TaskNotFoundError(f"Invalid task_concept_id: {task_concept_id}")
-    task_concept_id = normalised_id
-
-    # Verify task exists
-    doc = ConceptsRepository.find_one({"concept_id": task_concept_id})
-    if not doc:
-        raise TaskNotFoundError(f"Task not found: {task_concept_id}")
+    task_concept_id, _ = _get_task_doc(task_concept_id)
 
     # Soft delete by setting status to cancelled
     # (In future, could move to an archive collection)
     update_task_status(task_concept_id, TASK_STATUS_CANCELLED)
+    try:
+        _append_task_history_event(
+            task_concept_id=task_concept_id,
+            event_type="task_deleted",
+            details={"deletion_mode": "soft_cancelled"},
+        )
+    except Exception as e:
+        logger.debug("Failed to append task deletion history event: %s", e)
 
     logger.info(f"Deleted (cancelled) task: {task_concept_id}")
     return True
@@ -763,8 +2261,25 @@ __all__ = [
     "get_task",
     "update_task_status",
     "assign_task",
+    "unassign_task",
     "get_tasks_for_user",
     "get_tasks_for_conversation",
     "list_tasks",
+    "search_tasks",
+    "get_task_transitions",
+    "transition_task",
+    "set_task_parent",
+    "create_subtask",
+    "link_tasks",
+    "unlink_tasks",
+    "add_task_comment",
+    "list_task_comments",
+    "add_task_attachment",
+    "list_task_attachments",
+    "add_task_worklog",
+    "list_task_worklog",
+    "get_task_history",
+    "update_task_fields",
+    "bulk_update_tasks",
     "delete_task",
 ]
