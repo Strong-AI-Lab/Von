@@ -907,6 +907,49 @@ def test_run_backfill_recovers_when_prompt_explicitly_requests_missing_tool():
         == "prompt requested tool(s) not yet invoked: workflow_list_instances"
     )
 
+
+def test_run_forces_required_tool_calls_when_retry_response_has_no_tool_json():
+    gateway = _ExplicitPromptToolGateway()
+    llm = _RecorderLLM(
+        [
+            "Proceeding now.",
+            "Final response after deterministic required-tool forcing.",
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=2,
+    )
+
+    result = orchestrator.run(
+        prompt=(
+            "1) Call workflow_list_definitions.\n"
+            "2) Call workflow_list_instances for #V#salient_predicate_governance_workflow."
+        ),
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert len(gateway.calls) == 2
+    assert gateway.calls[0][0] == "workflow_list_definitions"
+    assert gateway.calls[1][0] == "workflow_list_instances"
+    assert (
+        gateway.calls[1][1].get("workflow_id")
+        == "#V#salient_predicate_governance_workflow"
+    )
+
+    retry_entries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "missing_tool_call_retry"
+        and entry.get("stage") == "response"
+    ]
+    assert retry_entries
+    assert retry_entries[0].get("mechanism") == "required_tools"
 def test_run_retries_when_response_uses_smart_quotes_promising_tool_use():
     """Regression test: smart quotes should not bypass missing-tool-call detection.
 

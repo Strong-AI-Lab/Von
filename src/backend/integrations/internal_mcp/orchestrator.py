@@ -1217,6 +1217,14 @@ class InternalMCPChatOrchestrator:
         data = request.data
         aux_log = data.setdefault("aux_llm_calls", [])
         augmented_context = data.get("augmented_context") or []
+        missing_required_tools = data.get("missing_prompt_tools")
+        if not isinstance(missing_required_tools, list):
+            missing_required_tools = []
+        missing_required_tools = [
+            str(item).strip()
+            for item in missing_required_tools
+            if isinstance(item, str) and item.strip()
+        ]
         emit_progress_raw = data.get("emit_progress")
         emit_progress_cb: Callable[[Mapping[str, Any]], None] | None = (
             cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
@@ -1306,16 +1314,20 @@ class InternalMCPChatOrchestrator:
         forced = self._infer_missing_tool_call_retry_tool_calls(
             augmented_context,
             user_prompt=data.get("user_prompt"),
+            missing_required_tools=missing_required_tools,
         )
         if forced:
             import json
+            forced_mechanism = (
+                "required_tools" if missing_required_tools else "heuristic"
+            )
 
             try:
                 aux_log.append(
                     {
                         "type": "missing_tool_call_retry",
                         "path": calling_path,
-                        "mechanism": "heuristic",
+                        "mechanism": forced_mechanism,
                         "stage": "response",
                         "retry_reason": data.get("missing_tool_call_retry_reason")
                         or "",
@@ -1562,6 +1574,8 @@ class InternalMCPChatOrchestrator:
                 "missing_tool_call_retry_attempts"
             ),
             "missing_tool_call_retry_budget": data.get("missing_tool_call_retry_budget"),
+            "required_prompt_tools": data.get("required_prompt_tools"),
+            "missing_prompt_tools": data.get("missing_prompt_tools"),
             "missing_tool_call_retry_reason_override": data.get(
                 "missing_tool_call_retry_reason_override"
             ),
@@ -9059,10 +9073,79 @@ class InternalMCPChatOrchestrator:
             )
         )
 
+    @staticmethod
+    def _extract_concept_ids_from_text(text: str) -> list[str]:
+        if not isinstance(text, str) or not text.strip():
+            return []
+        matches = re.findall(r"#V#[A-Za-z0-9][A-Za-z0-9._-]*", text)
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+        for match in matches:
+            cid = str(match).strip().rstrip(".,;:)")
+            key = cid.lower()
+            if not cid or key in seen:
+                continue
+            seen.add(key)
+            concept_ids.append(cid)
+        return concept_ids
+
+    def _infer_required_prompt_tool_retry_tool_calls(
+        self,
+        *,
+        user_text: str,
+        missing_required_tools: Sequence[str],
+    ) -> list[_ToolCallRequest] | None:
+        """Build deterministic tool calls for still-missing explicit requirements."""
+
+        if not missing_required_tools:
+            return None
+
+        concept_ids = self._extract_concept_ids_from_text(user_text)
+        workflow_ids = [
+            concept_id
+            for concept_id in concept_ids
+            if "workflow" in concept_id.lower()
+        ]
+        primary_workflow_id = workflow_ids[0] if workflow_ids else None
+
+        forced_calls: list[_ToolCallRequest] = []
+        for tool_name in missing_required_tools:
+            name = str(tool_name).strip()
+            if not name:
+                continue
+
+            if name == "workflow_list_definitions":
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {"limit": 50},
+                    }
+                )
+                continue
+
+            if name == "workflow_list_instances":
+                if not primary_workflow_id:
+                    continue
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {
+                            "workflow_id": primary_workflow_id,
+                            "limit": 5,
+                        },
+                    }
+                )
+                continue
+
+        return forced_calls or None
+
     def _infer_missing_tool_call_retry_tool_calls(
         self,
         augmented_context: Sequence[Mapping[str, Any]],
         user_prompt: Any | None = None,
+        missing_required_tools: Sequence[str] | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Best-effort deterministic recovery for common missing-tool-call cases.
 
@@ -9090,6 +9173,15 @@ class InternalMCPChatOrchestrator:
 
         if not last_user_text:
             return None
+
+        required_forced = self._infer_required_prompt_tool_retry_tool_calls(
+            user_text=last_user_text,
+            missing_required_tools=(
+                list(missing_required_tools) if missing_required_tools else []
+            ),
+        )
+        if required_forced:
+            return required_forced
 
         if self._should_trigger_predicate_search(last_user_text):
             predicate_query = self._extract_predicate_query_from_text(last_user_text)
