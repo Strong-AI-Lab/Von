@@ -3668,6 +3668,21 @@ footer {
     border: 1px solid rgba(0, 0, 0, 0.1);
 }
 
+.db-conn-badge.loading {
+    background: #fff7ed;
+    color: #9a3412;
+    border-color: #fdba74;
+}
+
+@keyframes db-conn-loading-pulse {
+    0%, 100% { opacity: 0.55; }
+    50% { opacity: 1; }
+}
+
+.db-conn-badge.loading .db-latency {
+    animation: db-conn-loading-pulse 1.2s ease-in-out infinite;
+}
+
 /* LLM Status badge in footer (Model segment) */
 .llm-status-badge {
     display: inline-flex;

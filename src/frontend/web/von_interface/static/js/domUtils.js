@@ -376,6 +376,20 @@ function updateFooterReadinessState(footerContainer, readinessIssues) {
     : '';
 }
 
+function ensureFooterDbLoadingBadge(footer) {
+  if (!footer) return null;
+  const existing = footer.querySelector('.db-conn-badge');
+  if (existing) return existing;
+
+  const badge = document.createElement('span');
+  badge.className = 'db-conn-badge loading';
+  badge.style.marginLeft = '12px';
+  badge.title = 'Loading database status...';
+  badge.innerHTML = '<span class="db-label">🕓 Mongo: loading...</span> <span class="db-latency" aria-label="DB latency" title="Waiting for DB status">...</span>';
+  footer.appendChild(badge);
+  return badge;
+}
+
 function attachFooterDbBadge(footer, dbInfo) {
   if (!footer || !dbInfo || typeof dbInfo !== 'object') return;
 
@@ -886,6 +900,7 @@ export async function setModelInfoFooterText() {
   // Keep footer visually flagged until DB/Atlas status has been retrieved.
   readinessIssues.add('db');
   updateFooterReadinessState(footerContainer, readinessIssues);
+  ensureFooterDbLoadingBadge(footer);
 
   // Load DB badge asynchronously and retry so transient startup pressure does not
   // permanently suppress the badge for the rest of the session.
@@ -908,6 +923,13 @@ export async function setModelInfoFooterText() {
 
     readinessIssues.add('db');
     updateFooterReadinessState(footerContainer, readinessIssues);
+    const loadingBadge = ensureFooterDbLoadingBadge(footer);
+    if (loadingBadge) {
+      const labelNode = loadingBadge.querySelector('.db-label');
+      if (labelNode) {
+        labelNode.textContent = attempt > 0 ? '🕓 Mongo: retrying...' : '🕓 Mongo: loading...';
+      }
+    }
 
     const inJest = typeof process !== 'undefined' && process.env && process.env.JEST_WORKER_ID;
     if (inJest) return;
