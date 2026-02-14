@@ -34,6 +34,14 @@ class _DummyGateway:
         return Result()
 
 
+class _ExplicitPromptToolGateway(_DummyGateway):
+    def describe_methods(self):
+        return {
+            "workflow_list_definitions": {"description": "list workflow definitions"},
+            "workflow_list_instances": {"description": "list workflow instances"},
+        }
+
+
 class _RelationshipGateway(_DummyGateway):
     def describe_methods(self):
         return {"add_relationship": {"description": "relationship write"}}
@@ -850,6 +858,54 @@ def test_run_backfill_does_not_autoproceed_when_setting_disabled(monkeypatch):
     assert gate_entries[-1].get("enabled") is False
     assert gate_entries[-1].get("should_auto_proceed") is True
 
+
+def test_run_backfill_recovers_when_prompt_explicitly_requests_missing_tool():
+    gateway = _ExplicitPromptToolGateway()
+    llm = _RecorderLLM(
+        [
+            '{"action":"call_tool","tool":"workflow_list_definitions","payload":{}}',
+            "Definitions fetched.",
+            (
+                '{"action":"call_tool","tool":"workflow_list_instances",'
+                '"payload":{"workflow_id":"#V#salient_predicate_governance_workflow"}}'
+            ),
+            "Both requested checks are complete.",
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=2,
+    )
+
+    result = orchestrator.run(
+        prompt=(
+            "Re-inspect runtime.\n"
+            "1) Call workflow_list_definitions.\n"
+            "2) Call workflow_list_instances."
+        ),
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    assert len(gateway.calls) == 2
+    assert gateway.calls[0][0] == "workflow_list_definitions"
+    assert gateway.calls[1][0] == "workflow_list_instances"
+    assert result.response_text == "Both requested checks are complete."
+
+    detection_entries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "missing_tool_call_detection"
+    ]
+    assert detection_entries
+    assert (
+        detection_entries[-1].get("retry_reason")
+        == "prompt requested tool(s) not yet invoked: workflow_list_instances"
+    )
 
 def test_run_retries_when_response_uses_smart_quotes_promising_tool_use():
     """Regression test: smart quotes should not bypass missing-tool-call detection.

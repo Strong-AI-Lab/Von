@@ -465,6 +465,10 @@ class InternalMCPChatOrchestrator:
         r"if you prefer)\b",
         flags=re.IGNORECASE,
     )
+    _PROMPT_EXPLICIT_TOOL_CALL_PATTERN = re.compile(
+        r"\bcall\s+`?([a-z_][a-z0-9_]*)`?\b",
+        flags=re.IGNORECASE,
+    )
     # Deterministic concept-id fields for write-category tools.
     #
     # We normalise these before execution so writable operations are robust to
@@ -1008,19 +1012,61 @@ class InternalMCPChatOrchestrator:
         data["missing_tool_call_retry_attempts"] = retry_attempts
         data["missing_tool_call_retry_budget"] = retry_budget
 
-        assessment = cast(
-            _MissingToolCallAssessment,
-            assessor(
-                response_text=data.get("response_text", ""),
-                use_structured=bool(data.get("use_structured")),
-                interpretation=data.get("interpretation"),
-                llm_client=request.environment.llm_client,
-                model=request.environment.model,
-                classifier_model=data.get("classifier_model"),
-                aux_log=aux_log,
-                tool_call_parse_error=data.get("tool_call_parse_error"),
-            ),
+        override_retry_reason_raw = data.get("missing_tool_call_retry_reason_override")
+        override_retry_reason = (
+            override_retry_reason_raw.strip()
+            if isinstance(override_retry_reason_raw, str)
+            else ""
         )
+        if override_retry_reason:
+            interpretation = data.get("interpretation")
+            use_structured = bool(data.get("use_structured"))
+            response_text = (
+                data.get("response_text", "")
+                if isinstance(data.get("response_text", ""), str)
+                else str(data.get("response_text", ""))
+            )
+            is_json_action = (
+                interpretation.is_json_action
+                if (
+                    not use_structured
+                    and isinstance(interpretation, _ModelTurnInterpretation)
+                )
+                else self._is_json_action_response(response_text)
+            )
+            fenced_detected = (
+                interpretation.fenced_tool_call_json
+                if (
+                    not use_structured
+                    and isinstance(interpretation, _ModelTurnInterpretation)
+                )
+                else self._contains_fenced_tool_call_json(response_text)
+            )
+            assessment = _MissingToolCallAssessment(
+                path="structured" if use_structured else "legacy",
+                is_json_action=bool(is_json_action),
+                fenced_json=bool(fenced_detected),
+                classifier_invoked=False,
+                classifier_has_verdict=False,
+                classifier_used=False,
+                classifier_verdict=None,
+                retry_reason=override_retry_reason,
+                tool_call_parse_error=data.get("tool_call_parse_error"),
+            )
+        else:
+            assessment = cast(
+                _MissingToolCallAssessment,
+                assessor(
+                    response_text=data.get("response_text", ""),
+                    use_structured=bool(data.get("use_structured")),
+                    interpretation=data.get("interpretation"),
+                    llm_client=request.environment.llm_client,
+                    model=request.environment.model,
+                    classifier_model=data.get("classifier_model"),
+                    aux_log=aux_log,
+                    tool_call_parse_error=data.get("tool_call_parse_error"),
+                ),
+            )
 
         try:
             aux_log.append(
@@ -1042,6 +1088,7 @@ class InternalMCPChatOrchestrator:
                         )
                     ),
                     "retry_reason": assessment.retry_reason or "",
+                    "retry_reason_override_applied": bool(override_retry_reason),
                     "parse_error": (
                         str(assessment.tool_call_parse_error)
                         if assessment.tool_call_parse_error is not None
@@ -1515,6 +1562,9 @@ class InternalMCPChatOrchestrator:
                 "missing_tool_call_retry_attempts"
             ),
             "missing_tool_call_retry_budget": data.get("missing_tool_call_retry_budget"),
+            "missing_tool_call_retry_reason_override": data.get(
+                "missing_tool_call_retry_reason_override"
+            ),
             "emit_progress": data.get("emit_progress"),
         }
 
@@ -2373,8 +2423,38 @@ class InternalMCPChatOrchestrator:
             tool_call_parse_error = interpretation.tool_call_parse_error
             has_valid_tool_call = bool(tool_calls)
 
+        method_catalogue_for_requirements = data.get("method_catalogue")
+        if not isinstance(method_catalogue_for_requirements, Mapping):
+            try:
+                method_catalogue_for_requirements = self._gateway.describe_methods()
+            except Exception:
+                method_catalogue_for_requirements = None
+
+        required_prompt_tools = self._extract_explicit_prompt_tool_requirements(
+            prompt,
+            method_catalogue=(
+                method_catalogue_for_requirements
+                if isinstance(method_catalogue_for_requirements, Mapping)
+                else None
+            ),
+        )
+        data["required_prompt_tools"] = list(required_prompt_tools)
+
         # Missing-tool-call recovery.
         if not has_valid_tool_call:
+            missing_prompt_tools = self._missing_prompt_tool_requirements(
+                required_tools=required_prompt_tools,
+                tool_invocations=(),
+            )
+            data["missing_prompt_tools"] = list(missing_prompt_tools)
+            if missing_prompt_tools:
+                data["missing_tool_call_retry_reason_override"] = (
+                    "prompt requested tool(s) not yet invoked: "
+                    + ", ".join(missing_prompt_tools)
+                )
+            else:
+                data.pop("missing_tool_call_retry_reason_override", None)
+
             recovery_data = self._run_missing_tool_call_recovery_workflow(
                 request=request,
                 environment=env,
@@ -3039,6 +3119,66 @@ class InternalMCPChatOrchestrator:
                     }
                 )
 
+            required_prompt_tools_raw = data.get("required_prompt_tools")
+            required_prompt_tools: list[str] = []
+            if isinstance(required_prompt_tools_raw, list):
+                required_prompt_tools = [
+                    str(item).strip()
+                    for item in required_prompt_tools_raw
+                    if isinstance(item, str) and item.strip()
+                ]
+            if not required_prompt_tools:
+                method_catalogue_for_requirements = data.get("method_catalogue")
+                if not isinstance(method_catalogue_for_requirements, Mapping):
+                    try:
+                        method_catalogue_for_requirements = (
+                            self._gateway.describe_methods()
+                        )
+                    except Exception:
+                        method_catalogue_for_requirements = None
+                required_prompt_tools = self._extract_explicit_prompt_tool_requirements(
+                    data.get("prompt"),
+                    method_catalogue=(
+                        method_catalogue_for_requirements
+                        if isinstance(method_catalogue_for_requirements, Mapping)
+                        else None
+                    ),
+                )
+                data["required_prompt_tools"] = list(required_prompt_tools)
+
+            invocations_for_requirements = cast(
+                Sequence[Mapping[str, Any]], data.get("invocations") or []
+            )
+            missing_prompt_tools = self._missing_prompt_tool_requirements(
+                required_tools=required_prompt_tools,
+                tool_invocations=invocations_for_requirements,
+            )
+            data["missing_prompt_tools"] = list(missing_prompt_tools)
+            if missing_prompt_tools:
+                data["missing_tool_call_retry_reason_override"] = (
+                    "prompt requested tool(s) not yet invoked: "
+                    + ", ".join(missing_prompt_tools)
+                )
+            else:
+                data.pop("missing_tool_call_retry_reason_override", None)
+
+            if isinstance(aux_llm_calls, list) and required_prompt_tools:
+                try:
+                    aux_llm_calls.append(
+                        {
+                            "type": "prompt_tool_requirements",
+                            "required_tools": list(required_prompt_tools),
+                            "missing_tools": list(missing_prompt_tools),
+                            "invoked_tools": [
+                                str(item.get("tool"))
+                                for item in invocations_for_requirements
+                                if isinstance(item.get("tool"), str)
+                            ],
+                        }
+                    )
+                except Exception:
+                    pass
+
             auto_proceed_enabled = bool(
                 data.get("auto_proceed_minimal_imposition_enabled", True)
             )
@@ -3083,8 +3223,14 @@ class InternalMCPChatOrchestrator:
 
             exc = interpretation.tool_call_parse_error
             recovery_reason: str | None = None
+            override_retry_reason = data.get("missing_tool_call_retry_reason_override")
+            has_override_retry_reason = isinstance(
+                override_retry_reason, str
+            ) and bool(str(override_retry_reason).strip())
             if exc is not None:
                 recovery_reason = "parse_error"
+            elif has_override_retry_reason:
+                recovery_reason = "required_prompt_tools_missing"
             elif auto_proceed_gate_passed:
                 recovery_reason = "minimal_imposition"
 
@@ -4020,6 +4166,70 @@ class InternalMCPChatOrchestrator:
                 seen_success.add(lowered)
 
         return successful, failed
+
+    @classmethod
+    def _extract_explicit_prompt_tool_requirements(
+        cls,
+        user_prompt: Any,
+        *,
+        method_catalogue: Mapping[str, Any] | None = None,
+    ) -> list[str]:
+        """Return tool names explicitly requested via "call <tool>" phrases."""
+
+        if not isinstance(user_prompt, str) or not user_prompt.strip():
+            return []
+
+        catalogue_lookup: dict[str, str] = {}
+        if isinstance(method_catalogue, Mapping):
+            for tool_name in method_catalogue.keys():
+                if isinstance(tool_name, str) and tool_name.strip():
+                    canonical = tool_name.strip()
+                    catalogue_lookup[canonical.lower()] = canonical
+
+        required_tools: list[str] = []
+        seen: set[str] = set()
+        for match in cls._PROMPT_EXPLICIT_TOOL_CALL_PATTERN.finditer(user_prompt):
+            candidate = str(match.group(1) or "").strip()
+            if not candidate:
+                continue
+            lowered = candidate.lower()
+            if catalogue_lookup and lowered not in catalogue_lookup:
+                continue
+            resolved = catalogue_lookup.get(lowered, candidate)
+            key = resolved.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            required_tools.append(resolved)
+
+        return required_tools
+
+    @staticmethod
+    def _missing_prompt_tool_requirements(
+        *,
+        required_tools: Sequence[str],
+        tool_invocations: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        """Return required prompt tools not yet seen in invocation history."""
+
+        if not required_tools:
+            return []
+
+        observed_tools: set[str] = set()
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_tool = invocation.get("tool")
+            if isinstance(raw_tool, str) and raw_tool.strip():
+                observed_tools.add(raw_tool.strip().lower())
+
+        return [
+            tool_name
+            for tool_name in required_tools
+            if isinstance(tool_name, str)
+            and tool_name.strip()
+            and tool_name.strip().lower() not in observed_tools
+        ]
 
     @classmethod
     def _validate_completion_claims(
