@@ -118,12 +118,15 @@ def _normalise_tool_output_context_mappings(
     for item in raw_items:
         tool_output_field = str(
             item.get("tool_output_field")
+            or item.get("tool_output_field_name")
             or item.get("tool_field")
             or item.get("output_field")
             or ""
         ).strip()
         context_key_raw = str(
             item.get("context_key")
+            or item.get("target_context_key_concept_id")
+            or item.get("context_key_concept_id")
             or item.get("workflow_context_key")
             or item.get("target_context_key")
             or ""

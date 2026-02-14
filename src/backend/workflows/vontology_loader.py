@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -30,6 +31,12 @@ WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
         "invokesAction",
         "#V#invokes_action",
         "invokes_action",
+    ),
+    "workflowStepInvokesTool": (
+        "#V#workflow_step_invokes_tool",
+        "workflow_step_invokes_tool",
+        "#V#workflowStepInvokesTool",
+        "workflowStepInvokesTool",
     ),
     "nextStep": ("#V#nextStep", "nextStep", "#V#next_step", "next_step"),
     "onTrueNextStep": (
@@ -121,6 +128,126 @@ _WORKFLOW_OUTPUT_MAPPING_DESCRIPTION_RE = re.compile(
     r"tool output field\s+['\"]([^'\"]+)['\"].*?context key\s+['\"]([^'\"]+)['\"]",
     re.IGNORECASE,
 )
+
+_WORKFLOW_MAPPING_SCHEMA_VERSION = 1
+_WORKFLOW_MAPPING_SPEC_CANDIDATE_KEYS: Tuple[str, ...] = (
+    "workflow_mapping_spec",
+    "workflow_mapping_spec_json",
+    "workflow_mapping_json",
+    "mapping_spec",
+    "mapping_spec_json",
+    "mapping_json",
+)
+_WORKFLOW_MAPPING_SPEC_ALLOWED_KEYS: Tuple[str, ...] = (
+    "schema_version",
+    "mapping_type",
+    "workflow_step_id",
+    "tool_id",
+    "context_key_concept_id",
+    "tool_param_name",
+    "tool_output_field_name",
+    "target_context_key_concept_id",
+)
+_WORKFLOW_INPUT_MAPPING_TYPES: Tuple[str, ...] = (
+    "context_key_to_tool_param",
+    "workflow_step_maps_context_key_to_tool_param",
+)
+_WORKFLOW_OUTPUT_MAPPING_TYPES: Tuple[str, ...] = (
+    "tool_output_field_to_context_key",
+    "workflow_step_maps_tool_output_field_to_context_key",
+)
+
+
+def _normalise_mapping_type(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _coerce_mapping_spec_object(value: Any) -> Dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _extract_structured_mapping_spec(
+    mapping_doc: Dict[str, Any] | None,
+) -> tuple[Dict[str, Any] | None, str | None]:
+    """Extract a structured mapping spec from a mapping concept document.
+
+    Preferred path for deterministic runtime behaviour:
+    - read explicit schema fields from concept_data/preserved_fields
+    - fall back to legacy concept-id and description parsing only when absent
+    """
+
+    if not isinstance(mapping_doc, dict):
+        return None, None
+
+    concept_data = mapping_doc.get("concept_data")
+    preserved_fields: Dict[str, Any] = {}
+    if isinstance(concept_data, dict):
+        raw_preserved = concept_data.get("preserved_fields")
+        if isinstance(raw_preserved, dict):
+            preserved_fields = raw_preserved
+
+    candidate_values: List[Any] = []
+    for key in _WORKFLOW_MAPPING_SPEC_CANDIDATE_KEYS:
+        candidate_values.extend(
+            (
+                mapping_doc.get(key),
+                concept_data.get(key) if isinstance(concept_data, dict) else None,
+                preserved_fields.get(key),
+            )
+        )
+
+    saw_candidate = False
+    for raw_value in candidate_values:
+        if raw_value is None:
+            continue
+        saw_candidate = True
+        spec_object = _coerce_mapping_spec_object(raw_value)
+        if isinstance(spec_object, dict):
+            return spec_object, None
+
+    if saw_candidate:
+        return None, "schema_invalid_format"
+    return None, None
+
+
+def _validate_mapping_spec_common(
+    *,
+    spec: Dict[str, Any],
+    step_id: str | None,
+    action_id: str | None,
+) -> str | None:
+    unknown_keys = [key for key in spec.keys() if key not in _WORKFLOW_MAPPING_SPEC_ALLOWED_KEYS]
+    if unknown_keys:
+        return "schema_unknown_fields"
+
+    schema_version = spec.get("schema_version")
+    if schema_version is not None:
+        version_text = str(schema_version).strip()
+        if version_text != str(_WORKFLOW_MAPPING_SCHEMA_VERSION):
+            return "schema_version_unsupported"
+
+    spec_step_id = str(spec.get("workflow_step_id") or "").strip()
+    if step_id and spec_step_id and spec_step_id != step_id:
+        return "schema_step_mismatch"
+
+    spec_tool_id = _normalise_invoked_action_target(str(spec.get("tool_id") or ""))
+    expected_action_id = _normalise_invoked_action_target(action_id or "")
+    if expected_action_id and spec_tool_id and spec_tool_id != expected_action_id:
+        return "schema_tool_mismatch"
+
+    return None
 
 
 def _normalise_relationship_targets(value: Any) -> List[str]:
@@ -364,10 +491,34 @@ def _extract_mapping_pair(
     *,
     mapping_concept_id: str,
     mapping_doc: Dict[str, Any] | None,
-) -> tuple[str | None, str | None]:
+    step_id: str | None,
+    action_id: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    structured_spec, structured_error = _extract_structured_mapping_spec(mapping_doc)
+    if structured_spec:
+        mapping_type = _normalise_mapping_type(structured_spec.get("mapping_type"))
+        if mapping_type not in _WORKFLOW_INPUT_MAPPING_TYPES:
+            return None, None, "schema_mapping_type_mismatch"
+        validation_error = _validate_mapping_spec_common(
+            spec=structured_spec,
+            step_id=step_id,
+            action_id=action_id,
+        )
+        if validation_error:
+            return None, None, validation_error
+        context_key = _normalise_context_key_symbol(
+            str(structured_spec.get("context_key_concept_id") or "")
+        )
+        tool_param = str(structured_spec.get("tool_param_name") or "").strip()
+        if not context_key or not tool_param:
+            return None, None, "schema_required_fields_missing"
+        return context_key, tool_param, None
+    if structured_error:
+        return None, None, structured_error
+
     context_key, tool_param = _mapping_pair_from_concept_id(mapping_concept_id)
     if context_key and tool_param:
-        return context_key, tool_param
+        return context_key, tool_param, None
 
     concept_data = (
         mapping_doc.get("concept_data", {}) if isinstance(mapping_doc, dict) else {}
@@ -384,9 +535,9 @@ def _extract_mapping_pair(
     )
     context_key, tool_param = _mapping_pair_from_description(str(description or ""))
     if context_key and tool_param:
-        return context_key, tool_param
+        return context_key, tool_param, None
 
-    return None, None
+    return None, None, "mapping_pattern_not_detected"
 
 
 def _tool_output_mapping_pair_from_concept_id(
@@ -423,12 +574,38 @@ def _extract_tool_output_mapping(
     *,
     mapping_concept_id: str,
     mapping_doc: Dict[str, Any] | None,
-) -> tuple[str | None, str | None]:
+    step_id: str | None,
+    action_id: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    structured_spec, structured_error = _extract_structured_mapping_spec(mapping_doc)
+    if structured_spec:
+        mapping_type = _normalise_mapping_type(structured_spec.get("mapping_type"))
+        if mapping_type not in _WORKFLOW_OUTPUT_MAPPING_TYPES:
+            return None, None, "schema_mapping_type_mismatch"
+        validation_error = _validate_mapping_spec_common(
+            spec=structured_spec,
+            step_id=step_id,
+            action_id=action_id,
+        )
+        if validation_error:
+            return None, None, validation_error
+        tool_output_field = str(
+            structured_spec.get("tool_output_field_name") or ""
+        ).strip()
+        context_key = _normalise_context_key_symbol(
+            str(structured_spec.get("target_context_key_concept_id") or "")
+        )
+        if not tool_output_field or not context_key:
+            return None, None, "schema_required_fields_missing"
+        return tool_output_field, context_key, None
+    if structured_error:
+        return None, None, structured_error
+
     tool_output_field, context_key = _tool_output_mapping_pair_from_concept_id(
         mapping_concept_id
     )
     if tool_output_field and context_key:
-        return tool_output_field, context_key
+        return tool_output_field, context_key, None
 
     concept_data = (
         mapping_doc.get("concept_data", {}) if isinstance(mapping_doc, dict) else {}
@@ -447,9 +624,36 @@ def _extract_tool_output_mapping(
         str(description or "")
     )
     if tool_output_field and context_key:
-        return tool_output_field, context_key
+        return tool_output_field, context_key, None
 
-    return None, None
+    return None, None, "mapping_pattern_not_detected"
+
+
+def _normalise_invoked_action_target(raw_target: str) -> str | None:
+    """Normalise workflow action/tool relation targets into executable action IDs.
+
+    Vontology may encode step actions directly as MCP method names
+    (e.g. ``fetch_concept``) or as tool concept IDs
+    (e.g. ``#V#fetch_concept_tool``).  The runtime action registry expects
+    action IDs/method names, so concept IDs are reduced to their method form.
+    """
+
+    if not isinstance(raw_target, str):
+        return None
+    target = raw_target.strip()
+    if not target:
+        return None
+
+    if target.startswith("#V#"):
+        token = target[3:].strip()
+        if token.endswith("_tool"):
+            token = token[: -len("_tool")]
+        elif token.endswith(" tool"):
+            token = token[: -len(" tool")]
+        token = token.strip()
+        return token or None
+
+    return target
 
 
 def best_effort_workflow_narrative_text(workflow_id: str) -> Optional[str]:
@@ -495,6 +699,7 @@ def _fetch_concepts_by_id(concept_ids: List[str]) -> Dict[str, Dict[str, Any]]:
             "concept_id": 1,
             "name": 1,
             "relationships": 1,
+            "concept_data.preserved_fields": 1,
             "concept_data.preserved_fields.description": 1,
         },
         limit=len(concept_ids),
@@ -583,14 +788,18 @@ def build_workflow_process_graph(
         if not isinstance(step_rels, dict):
             step_rels = {}
 
-        invokes_action_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"]
-        invokes_action, invokes_action_predicate = _first_relationship_target_with_predicate(
+        invokes_action_candidates = (
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"],
+            *WORKFLOW_GRAPH_PREDICATE_ALIASES["workflowStepInvokesTool"],
+        )
+        invokes_action_raw, invokes_action_predicate = _first_relationship_target_with_predicate(
             step_rels,
             invokes_action_candidates,
         )
+        invokes_action = _normalise_invoked_action_target(invokes_action_raw or "")
         _record_legacy_alias_use(
             legacy_aliases=legacy_aliases,
-            canonical_predicate=invokes_action_candidates[0],
+            canonical_predicate=WORKFLOW_GRAPH_PREDICATE_ALIASES["invokesAction"][0],
             matched_predicates=(invokes_action_predicate,),
         )
 
@@ -836,8 +1045,10 @@ def load_workflow_definition_from_vontology(
         actions: list[WorkflowActionInvocation] = []
         reads_context_keys: list[str] = []
         unresolved_input_mappings: list[str] = []
+        invalid_input_mapping_specs: list[Dict[str, str]] = []
         tool_output_context_mappings: list[Dict[str, str]] = []
         unresolved_output_mappings: list[str] = []
+        invalid_output_mapping_specs: list[Dict[str, str]] = []
         if invokes_action:
             # Read input mapping from Vontology (hasInputMap relationships).
             input_map: Dict[str, Any] = {}
@@ -866,12 +1077,21 @@ def load_workflow_definition_from_vontology(
                 for mapping_concept_id in semantic_mapping_ids:
                     if not isinstance(mapping_concept_id, str) or not mapping_concept_id:
                         continue
-                    context_key, tool_param = _extract_mapping_pair(
+                    context_key, tool_param, parse_error = _extract_mapping_pair(
                         mapping_concept_id=mapping_concept_id,
                         mapping_doc=mapping_docs.get(mapping_concept_id),
+                        step_id=step_id,
+                        action_id=invokes_action,
                     )
                     if not context_key or not tool_param:
                         unresolved_input_mappings.append(mapping_concept_id)
+                        if parse_error:
+                            invalid_input_mapping_specs.append(
+                                {
+                                    "mapping_concept_id": mapping_concept_id,
+                                    "reason_code": parse_error,
+                                }
+                            )
                         continue
                     input_map[tool_param] = {
                         "$context_key": context_key,
@@ -891,12 +1111,21 @@ def load_workflow_definition_from_vontology(
                 for mapping_concept_id in semantic_output_mapping_ids:
                     if not isinstance(mapping_concept_id, str) or not mapping_concept_id:
                         continue
-                    tool_output_field, context_key = _extract_tool_output_mapping(
+                    tool_output_field, context_key, parse_error = _extract_tool_output_mapping(
                         mapping_concept_id=mapping_concept_id,
                         mapping_doc=mapping_docs.get(mapping_concept_id),
+                        step_id=step_id,
+                        action_id=invokes_action,
                     )
                     if not tool_output_field or not context_key:
                         unresolved_output_mappings.append(mapping_concept_id)
+                        if parse_error:
+                            invalid_output_mapping_specs.append(
+                                {
+                                    "mapping_concept_id": mapping_concept_id,
+                                    "reason_code": parse_error,
+                                }
+                            )
                         continue
                     tool_output_context_mappings.append(
                         {
@@ -986,8 +1215,12 @@ def load_workflow_definition_from_vontology(
             step_metadata["tool_output_context_mappings"] = tool_output_context_mappings
         if unresolved_input_mappings:
             step_metadata["unresolved_input_mappings"] = unresolved_input_mappings
+        if invalid_input_mapping_specs:
+            step_metadata["invalid_input_mapping_specs"] = invalid_input_mapping_specs
         if unresolved_output_mappings:
             step_metadata["unresolved_output_mappings"] = unresolved_output_mappings
+        if invalid_output_mapping_specs:
+            step_metadata["invalid_output_mapping_specs"] = invalid_output_mapping_specs
 
         states[step_id] = WorkflowStateSpec(
             state_id=step_id,
