@@ -57,6 +57,28 @@ The agent receives authentication status in system prompt:
 - Add database-level row-level security (RLS) as defense in depth
 - Audit logging for all cross-namespace queries (currently missing)
 
+### 2A. Namespace Component Discipline (User + Organisation)
+
+**Intent**: Namespace is not only a storage partition key. It is intended to become a primary access-safety primitive and will interact with future microtheory/theory-inclusion work.
+
+**Current model (research phase)**:
+- Support both user-only namespaces (`#V#<user>`) and user@org namespaces (`#V#<user>@<org>`).
+- Treat namespace as a structured identity scope with two components:
+  - user component (`user_concept_id`)
+  - organisation component (`organisation_concept_id`, optional)
+- Respect both the combined namespace string and its components. They are related but not interchangeable.
+
+**Engineering guidance (now)**:
+- Derive and normalise namespaces via shared namespace helpers (`namespace_service`) rather than ad-hoc string handling.
+- Preserve org scope when present; do not silently degrade `#V#user@org` flows to user-only scope in downstream tool calls or persistence.
+- Carry component context alongside namespace where practical (`namespace`, `user_concept_id`, `organisation_concept_id`, `namespace_source`) for traceability and future policy enforcement.
+- Keep fail-closed behaviour for missing namespace on user-scoped operations (especially RAG).
+
+**Tightening path (later)**:
+- During the current experimental phase, prefer visibility and diagnostics for non-critical mismatches over aggressive hard failures.
+- Keep one authoritative effective-namespace resolver and one validation pathway so stricter enforcement can be enabled later with minimal refactoring.
+- Design new handlers so switching from “diagnose mismatch” to “reject mismatch” is a policy change, not a codebase-wide rewrite.
+
 ### 3. Session Management
 
 **Current**: Flask server-side sessions with secret key.
@@ -171,6 +193,8 @@ If `jira_get_myself` returns `401 Unauthorised`, confirm the configured email/ba
 - [x] **Remove client-provided user_id fallback** in `von_routes.py` ✅ (Dec 2024)
 - [x] **Require authentication** for all user-scoped endpoints ✅ (Dec 2024)
 - [x] **Inform agent about authentication status** ✅ (Dec 2024)
+- [ ] **Use one authoritative effective namespace resolver** (namespace + user/org components) across generate, MCP, persistence, and sync paths
+- [ ] **Emit namespace-component provenance consistently** (`namespace_source`, user component, org component) for auditing and migration to stricter policy
 - [ ] **Add admin authentication** to `/admin/*` endpoints
 - [ ] **Implement audit logging** for RAG access and concept mutations
 - [ ] **Add rate limiting** per user/namespace
@@ -215,6 +239,7 @@ If `jira_get_myself` returns `401 Unauthorised`, confirm the configured email/ba
 TODO: Implement security test suite covering:
 - Cross-user data access attempts
 - Unauthenticated access to protected resources
+- Namespace component consistency (user-only vs user@org, and mismatch handling)
 - Session fixation/hijacking scenarios
 - SQL injection in namespace filters
 - XSS in chat responses
@@ -239,3 +264,6 @@ For security issues, contact: [Add security contact information]
   - Documented client-provided user_id risk
   - Added namespace requirement to RAG tools
   - Added security warnings to code
+- **2026-02-14**: Clarified namespace component security intent
+  - Added guidance to treat namespace as structured user+organisation scope
+  - Documented phased tightening approach (diagnose now, enforce later)
