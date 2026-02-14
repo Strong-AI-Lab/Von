@@ -42,6 +42,16 @@ class _ExplicitPromptToolGateway(_DummyGateway):
         }
 
 
+class _ChecklistPromptToolGateway(_DummyGateway):
+    def describe_methods(self):
+        return {
+            "workflow_list_definitions": {"description": "list workflow definitions"},
+            "workflow_list_instances": {"description": "list workflow instances"},
+            "create_concepts": {"description": "create concepts"},
+            "fetch_concept": {"description": "fetch concept"},
+        }
+
+
 class _RelationshipGateway(_DummyGateway):
     def describe_methods(self):
         return {"add_relationship": {"description": "relationship write"}}
@@ -950,6 +960,148 @@ def test_run_forces_required_tool_calls_when_retry_response_has_no_tool_json():
     ]
     assert retry_entries
     assert retry_entries[0].get("mechanism") == "required_tools"
+
+
+def test_derive_prompt_tool_requirements_adds_checklist_create_and_fetch_tools():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_ChecklistPromptToolGateway()  # type: ignore[arg-type]
+    )
+    prompt = (
+        "1) Call workflow_list_definitions.\n"
+        "2) Create a fresh test type under #V#event (e.g. #V#test_workflow_trigger_type_for_identify_step_fix_1).\n"
+        "3) Call workflow_list_instances for #V#salient_predicate_governance_workflow.\n"
+        "4) Verify migration by checking these concepts:\n"
+        "- #V#workflow_mapping_target_type_id_to_concept_id_param\n"
+        "- #V#workflow_mapping_tool_field_concept_id_to_validated_type_id\n"
+        "- #V#workflow_mapping_tool_field_name_to_validated_type_name\n"
+    )
+
+    requirements = orchestrator._derive_prompt_tool_requirements(
+        prompt,
+        method_catalogue=orchestrator._gateway.describe_methods(),
+    )
+
+    required_tools = requirements.get("required_tools") or []
+    assert "workflow_list_definitions" in required_tools
+    assert "workflow_list_instances" in required_tools
+    assert "create_concepts" in required_tools
+    assert "fetch_concept" in required_tools
+    assert requirements.get("required_create_type_name") == (
+        "test_workflow_trigger_type_for_identify_step_fix_1"
+    )
+    assert requirements.get("required_fetch_concept_ids") == [
+        "#V#workflow_mapping_target_type_id_to_concept_id_param",
+        "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id",
+        "#V#workflow_mapping_tool_field_name_to_validated_type_name",
+    ]
+
+
+def test_derive_missing_prompt_requirements_tracks_missing_fetch_targets():
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=_ChecklistPromptToolGateway()  # type: ignore[arg-type]
+    )
+    required_fetch_ids = [
+        "#V#workflow_mapping_target_type_id_to_concept_id_param",
+        "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id",
+    ]
+
+    missing_tools, missing_fetch_ids = orchestrator._derive_missing_prompt_requirements(
+        required_tools=["fetch_concept"],
+        required_fetch_concept_ids=required_fetch_ids,
+        tool_invocations=[
+            {
+                "tool": "fetch_concept",
+                "payload": {
+                    "concept_id": "#V#workflow_mapping_target_type_id_to_concept_id_param"
+                },
+            }
+        ],
+    )
+
+    assert missing_tools == ["fetch_concept"]
+    assert missing_fetch_ids == [
+        "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id"
+    ]
+    reason = orchestrator._build_missing_prompt_retry_reason(
+        missing_tools=missing_tools,
+        missing_fetch_concept_ids=missing_fetch_ids,
+    )
+    assert reason == (
+        "prompt requested tool(s) not yet invoked: "
+        "fetch_concept; "
+        "fetch_concept targets: #V#workflow_mapping_tool_field_concept_id_to_validated_type_id"
+    )
+
+
+def test_run_forces_checklist_tools_when_retry_response_has_no_tool_json():
+    gateway = _ChecklistPromptToolGateway()
+    llm = _RecorderLLM(
+        [
+            "I will do that now.",
+            "Checklist complete.",
+        ]
+    )
+
+    orchestrator = InternalMCPChatOrchestrator(
+        gateway=gateway,  # type: ignore[arg-type]
+        max_tool_invocations=8,
+        tool_batch_cap=8,
+    )
+
+    result = orchestrator.run(
+        prompt=(
+            "1) Call workflow_list_definitions.\n"
+            "2) Create a fresh test type under #V#event (e.g. #V#test_workflow_trigger_type_for_identify_step_fix_1).\n"
+            "3) Call workflow_list_instances for #V#salient_predicate_governance_workflow.\n"
+            "4) Verify migration by checking these concepts:\n"
+            "- #V#workflow_mapping_target_type_id_to_concept_id_param\n"
+            "- #V#workflow_mapping_tool_field_concept_id_to_validated_type_id\n"
+            "- #V#workflow_mapping_tool_field_name_to_validated_type_name\n"
+        ),
+        context=None,
+        llm_client=llm,
+        model="primary-model",
+        user_namespace="#V#user",
+    )
+
+    called_tools = [tool for tool, _ in gateway.calls]
+    assert called_tools.count("workflow_list_definitions") == 1
+    assert called_tools.count("workflow_list_instances") == 1
+    assert called_tools.count("create_concepts") == 1
+    assert called_tools.count("fetch_concept") == 3
+
+    create_payload = next(
+        payload for tool, payload in gateway.calls if tool == "create_concepts"
+    )
+    assert create_payload.get("parent_id") == "#V#event"
+    concepts = create_payload.get("concepts")
+    assert isinstance(concepts, list) and concepts
+    assert concepts[0].get("name") == "test_workflow_trigger_type_for_identify_step_fix_1"
+    assert concepts[0].get("kind") == "type"
+
+    fetch_concept_ids = {
+        payload.get("concept_id")
+        for tool, payload in gateway.calls
+        if tool == "fetch_concept"
+    }
+    assert fetch_concept_ids == {
+        "#V#workflow_mapping_target_type_id_to_concept_id_param",
+        "#V#workflow_mapping_tool_field_concept_id_to_validated_type_id",
+        "#V#workflow_mapping_tool_field_name_to_validated_type_name",
+    }
+
+    retry_entries = [
+        entry
+        for entry in result.aux_llm_calls
+        if isinstance(entry, dict)
+        and entry.get("type") == "missing_tool_call_retry"
+        and entry.get("stage") == "response"
+    ]
+    assert retry_entries
+    assert retry_entries[0].get("mechanism") == "required_tools"
+    assert result.response_text == "Checklist complete."
+
+
 def test_run_retries_when_response_uses_smart_quotes_promising_tool_use():
     """Regression test: smart quotes should not bypass missing-tool-call detection.
 

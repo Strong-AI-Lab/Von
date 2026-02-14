@@ -1225,6 +1225,20 @@ class InternalMCPChatOrchestrator:
             for item in missing_required_tools
             if isinstance(item, str) and item.strip()
         ]
+        missing_required_fetch_concept_ids = data.get("missing_prompt_fetch_concept_ids")
+        if not isinstance(missing_required_fetch_concept_ids, list):
+            missing_required_fetch_concept_ids = []
+        missing_required_fetch_concept_ids = [
+            str(item).strip()
+            for item in missing_required_fetch_concept_ids
+            if isinstance(item, str) and item.strip()
+        ]
+        required_create_type_name_raw = data.get("required_prompt_create_type_name")
+        required_create_type_name = (
+            str(required_create_type_name_raw).strip()
+            if isinstance(required_create_type_name_raw, str)
+            else None
+        )
         emit_progress_raw = data.get("emit_progress")
         emit_progress_cb: Callable[[Mapping[str, Any]], None] | None = (
             cast(Callable[[Mapping[str, Any]], None], emit_progress_raw)
@@ -1315,6 +1329,8 @@ class InternalMCPChatOrchestrator:
             augmented_context,
             user_prompt=data.get("user_prompt"),
             missing_required_tools=missing_required_tools,
+            missing_required_fetch_concept_ids=missing_required_fetch_concept_ids,
+            required_create_type_name=required_create_type_name,
         )
         if forced:
             import json
@@ -1575,7 +1591,16 @@ class InternalMCPChatOrchestrator:
             ),
             "missing_tool_call_retry_budget": data.get("missing_tool_call_retry_budget"),
             "required_prompt_tools": data.get("required_prompt_tools"),
+            "required_prompt_fetch_concept_ids": data.get(
+                "required_prompt_fetch_concept_ids"
+            ),
+            "required_prompt_create_type_name": data.get(
+                "required_prompt_create_type_name"
+            ),
             "missing_prompt_tools": data.get("missing_prompt_tools"),
+            "missing_prompt_fetch_concept_ids": data.get(
+                "missing_prompt_fetch_concept_ids"
+            ),
             "missing_tool_call_retry_reason_override": data.get(
                 "missing_tool_call_retry_reason_override"
             ),
@@ -2444,7 +2469,7 @@ class InternalMCPChatOrchestrator:
             except Exception:
                 method_catalogue_for_requirements = None
 
-        required_prompt_tools = self._extract_explicit_prompt_tool_requirements(
+        prompt_requirement_state = self._derive_prompt_tool_requirements(
             prompt,
             method_catalogue=(
                 method_catalogue_for_requirements
@@ -2452,20 +2477,48 @@ class InternalMCPChatOrchestrator:
                 else None
             ),
         )
+        required_prompt_tools = list(
+            cast(list[str], prompt_requirement_state.get("required_tools") or [])
+        )
+        required_prompt_fetch_concept_ids = list(
+            cast(
+                list[str],
+                prompt_requirement_state.get("required_fetch_concept_ids") or [],
+            )
+        )
+        required_prompt_create_type_name_raw = prompt_requirement_state.get(
+            "required_create_type_name"
+        )
+        required_prompt_create_type_name = (
+            str(required_prompt_create_type_name_raw).strip()
+            if isinstance(required_prompt_create_type_name_raw, str)
+            else None
+        )
         data["required_prompt_tools"] = list(required_prompt_tools)
+        data["required_prompt_fetch_concept_ids"] = list(
+            required_prompt_fetch_concept_ids
+        )
+        data["required_prompt_create_type_name"] = required_prompt_create_type_name
 
         # Missing-tool-call recovery.
         if not has_valid_tool_call:
-            missing_prompt_tools = self._missing_prompt_tool_requirements(
-                required_tools=required_prompt_tools,
-                tool_invocations=(),
+            missing_prompt_tools, missing_prompt_fetch_concept_ids = (
+                self._derive_missing_prompt_requirements(
+                    required_tools=required_prompt_tools,
+                    required_fetch_concept_ids=required_prompt_fetch_concept_ids,
+                    tool_invocations=(),
+                )
+            )
+            data["missing_prompt_fetch_concept_ids"] = list(
+                missing_prompt_fetch_concept_ids
+            )
+            missing_retry_reason = self._build_missing_prompt_retry_reason(
+                missing_tools=missing_prompt_tools,
+                missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
             )
             data["missing_prompt_tools"] = list(missing_prompt_tools)
-            if missing_prompt_tools:
-                data["missing_tool_call_retry_reason_override"] = (
-                    "prompt requested tool(s) not yet invoked: "
-                    + ", ".join(missing_prompt_tools)
-                )
+            if missing_retry_reason:
+                data["missing_tool_call_retry_reason_override"] = missing_retry_reason
             else:
                 data.pop("missing_tool_call_retry_reason_override", None)
 
@@ -3133,46 +3186,64 @@ class InternalMCPChatOrchestrator:
                     }
                 )
 
-            required_prompt_tools_raw = data.get("required_prompt_tools")
-            required_prompt_tools: list[str] = []
-            if isinstance(required_prompt_tools_raw, list):
-                required_prompt_tools = [
-                    str(item).strip()
-                    for item in required_prompt_tools_raw
-                    if isinstance(item, str) and item.strip()
-                ]
-            if not required_prompt_tools:
-                method_catalogue_for_requirements = data.get("method_catalogue")
-                if not isinstance(method_catalogue_for_requirements, Mapping):
-                    try:
-                        method_catalogue_for_requirements = (
-                            self._gateway.describe_methods()
-                        )
-                    except Exception:
-                        method_catalogue_for_requirements = None
-                required_prompt_tools = self._extract_explicit_prompt_tool_requirements(
-                    data.get("prompt"),
-                    method_catalogue=(
-                        method_catalogue_for_requirements
-                        if isinstance(method_catalogue_for_requirements, Mapping)
-                        else None
-                    ),
+            method_catalogue_for_requirements = data.get("method_catalogue")
+            if not isinstance(method_catalogue_for_requirements, Mapping):
+                try:
+                    method_catalogue_for_requirements = self._gateway.describe_methods()
+                except Exception:
+                    method_catalogue_for_requirements = None
+
+            prompt_requirement_state = self._derive_prompt_tool_requirements(
+                data.get("prompt"),
+                method_catalogue=(
+                    method_catalogue_for_requirements
+                    if isinstance(method_catalogue_for_requirements, Mapping)
+                    else None
+                ),
+            )
+            required_prompt_tools = list(
+                cast(list[str], prompt_requirement_state.get("required_tools") or [])
+            )
+            required_prompt_fetch_concept_ids = list(
+                cast(
+                    list[str],
+                    prompt_requirement_state.get("required_fetch_concept_ids") or [],
                 )
-                data["required_prompt_tools"] = list(required_prompt_tools)
+            )
+            required_prompt_create_type_name_raw = prompt_requirement_state.get(
+                "required_create_type_name"
+            )
+            required_prompt_create_type_name = (
+                str(required_prompt_create_type_name_raw).strip()
+                if isinstance(required_prompt_create_type_name_raw, str)
+                else None
+            )
+            data["required_prompt_tools"] = list(required_prompt_tools)
+            data["required_prompt_fetch_concept_ids"] = list(
+                required_prompt_fetch_concept_ids
+            )
+            data["required_prompt_create_type_name"] = required_prompt_create_type_name
 
             invocations_for_requirements = cast(
                 Sequence[Mapping[str, Any]], data.get("invocations") or []
             )
-            missing_prompt_tools = self._missing_prompt_tool_requirements(
-                required_tools=required_prompt_tools,
-                tool_invocations=invocations_for_requirements,
+            missing_prompt_tools, missing_prompt_fetch_concept_ids = (
+                self._derive_missing_prompt_requirements(
+                    required_tools=required_prompt_tools,
+                    required_fetch_concept_ids=required_prompt_fetch_concept_ids,
+                    tool_invocations=invocations_for_requirements,
+                )
             )
             data["missing_prompt_tools"] = list(missing_prompt_tools)
-            if missing_prompt_tools:
-                data["missing_tool_call_retry_reason_override"] = (
-                    "prompt requested tool(s) not yet invoked: "
-                    + ", ".join(missing_prompt_tools)
-                )
+            data["missing_prompt_fetch_concept_ids"] = list(
+                missing_prompt_fetch_concept_ids
+            )
+            missing_retry_reason = self._build_missing_prompt_retry_reason(
+                missing_tools=missing_prompt_tools,
+                missing_fetch_concept_ids=missing_prompt_fetch_concept_ids,
+            )
+            if missing_retry_reason:
+                data["missing_tool_call_retry_reason_override"] = missing_retry_reason
             else:
                 data.pop("missing_tool_call_retry_reason_override", None)
 
@@ -3183,6 +3254,15 @@ class InternalMCPChatOrchestrator:
                             "type": "prompt_tool_requirements",
                             "required_tools": list(required_prompt_tools),
                             "missing_tools": list(missing_prompt_tools),
+                            "required_fetch_concept_ids": list(
+                                required_prompt_fetch_concept_ids
+                            ),
+                            "missing_fetch_concept_ids": list(
+                                missing_prompt_fetch_concept_ids
+                            ),
+                            "required_create_type_name": (
+                                required_prompt_create_type_name
+                            ),
                             "invoked_tools": [
                                 str(item.get("tool"))
                                 for item in invocations_for_requirements
@@ -4181,6 +4261,80 @@ class InternalMCPChatOrchestrator:
 
         return successful, failed
 
+    @staticmethod
+    def _normalise_concept_id_candidate(raw_value: Any) -> str | None:
+        """Normalise #V# concept IDs (or concept slug names) to canonical form."""
+
+        if not isinstance(raw_value, str):
+            return None
+        value = raw_value.strip().rstrip(".,;:)")
+        if not value:
+            return None
+
+        lowered = value.lower()
+        if lowered.startswith("#v#"):
+            return "#V#" + value[3:]
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{2,}", value):
+            return f"#V#{value}"
+        return None
+
+    @classmethod
+    def _extract_required_fetch_concept_ids_from_prompt(
+        cls,
+        user_prompt: Any,
+    ) -> list[str]:
+        """Extract concept IDs/slugs that imply required fetch_concept checks."""
+
+        if not isinstance(user_prompt, str) or not user_prompt.strip():
+            return []
+
+        # Require multiple suffix segments so field names like
+        # "workflow_mapping_spec" are not treated as concept IDs.
+        matches = re.findall(
+            r"(#V#workflow_mapping_[A-Za-z0-9]+(?:_[A-Za-z0-9]+){2,}"
+            r"|\bworkflow_mapping_[A-Za-z0-9]+(?:_[A-Za-z0-9]+){2,}\b)",
+            user_prompt,
+            flags=re.IGNORECASE,
+        )
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+        for match in matches:
+            concept_id = cls._normalise_concept_id_candidate(match)
+            if not concept_id:
+                continue
+            key = concept_id.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            concept_ids.append(concept_id)
+        return concept_ids
+
+    @classmethod
+    def _extract_required_create_type_name_from_prompt(
+        cls,
+        user_prompt: Any,
+    ) -> str | None:
+        """Extract a requested test type name for deterministic create_concepts."""
+
+        if not isinstance(user_prompt, str) or not user_prompt.strip():
+            return None
+        lowered = user_prompt.lower()
+        if "create" not in lowered or "type" not in lowered:
+            return None
+
+        pattern = re.compile(
+            r"(?:#V#)?(test_workflow_trigger_type_[A-Za-z0-9_]+)",
+            flags=re.IGNORECASE,
+        )
+        match = pattern.search(user_prompt)
+        if not match:
+            return None
+
+        raw_name = str(match.group(1) or "").strip()
+        if not raw_name:
+            return None
+        return raw_name.lstrip("#").lstrip("V#")
+
     @classmethod
     def _extract_explicit_prompt_tool_requirements(
         cls,
@@ -4244,6 +4398,165 @@ class InternalMCPChatOrchestrator:
             and tool_name.strip()
             and tool_name.strip().lower() not in observed_tools
         ]
+
+    @classmethod
+    def _extract_fetch_concept_ids_from_invocations(
+        cls,
+        tool_invocations: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        """Collect concept IDs already fetched via fetch_concept calls."""
+
+        concept_ids: list[str] = []
+        seen: set[str] = set()
+
+        for invocation in tool_invocations:
+            if not isinstance(invocation, Mapping):
+                continue
+            raw_tool = invocation.get("tool")
+            if not isinstance(raw_tool, str) or raw_tool.strip().lower() != "fetch_concept":
+                continue
+
+            payload = invocation.get("effective_payload")
+            if not isinstance(payload, Mapping):
+                payload = invocation.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+
+            concept_id = cls._normalise_concept_id_candidate(payload.get("concept_id"))
+            if not concept_id:
+                continue
+            key = concept_id.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            concept_ids.append(concept_id)
+
+        return concept_ids
+
+    @classmethod
+    def _derive_prompt_tool_requirements(
+        cls,
+        user_prompt: Any,
+        *,
+        method_catalogue: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Derive deterministic prompt requirements for tool recovery."""
+
+        required_tools = cls._extract_explicit_prompt_tool_requirements(
+            user_prompt,
+            method_catalogue=method_catalogue,
+        )
+
+        available_tools: set[str] = set()
+        if isinstance(method_catalogue, Mapping):
+            for tool_name in method_catalogue.keys():
+                if isinstance(tool_name, str) and tool_name.strip():
+                    available_tools.add(tool_name.strip().lower())
+
+        def _tool_available(tool_name: str) -> bool:
+            if not available_tools:
+                return True
+            return tool_name.lower() in available_tools
+
+        required_fetch_concept_ids = cls._extract_required_fetch_concept_ids_from_prompt(
+            user_prompt
+        )
+        if not _tool_available("fetch_concept"):
+            required_fetch_concept_ids = []
+
+        required_create_type_name = cls._extract_required_create_type_name_from_prompt(
+            user_prompt
+        )
+        if not _tool_available("create_concepts"):
+            required_create_type_name = None
+
+        seen_required = {
+            str(tool_name).strip().lower()
+            for tool_name in required_tools
+            if isinstance(tool_name, str) and tool_name.strip()
+        }
+        if required_create_type_name and "create_concepts" not in seen_required:
+            required_tools.append("create_concepts")
+            seen_required.add("create_concepts")
+        if required_fetch_concept_ids and "fetch_concept" not in seen_required:
+            required_tools.append("fetch_concept")
+
+        return {
+            "required_tools": required_tools,
+            "required_fetch_concept_ids": required_fetch_concept_ids,
+            "required_create_type_name": required_create_type_name,
+        }
+
+    @classmethod
+    def _derive_missing_prompt_requirements(
+        cls,
+        *,
+        required_tools: Sequence[str],
+        required_fetch_concept_ids: Sequence[str],
+        tool_invocations: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[str], list[str]]:
+        """Determine missing prompt requirements from invocation history."""
+
+        missing_tools = cls._missing_prompt_tool_requirements(
+            required_tools=required_tools,
+            tool_invocations=tool_invocations,
+        )
+
+        missing_fetch_concept_ids: list[str] = []
+        if required_fetch_concept_ids:
+            fetched_concept_ids = cls._extract_fetch_concept_ids_from_invocations(
+                tool_invocations
+            )
+            fetched_lookup = {concept_id.lower() for concept_id in fetched_concept_ids}
+            for concept_id in required_fetch_concept_ids:
+                if (
+                    isinstance(concept_id, str)
+                    and concept_id.strip()
+                    and concept_id.lower() not in fetched_lookup
+                ):
+                    missing_fetch_concept_ids.append(concept_id)
+
+        if missing_fetch_concept_ids:
+            missing_lookup = {
+                tool_name.lower()
+                for tool_name in missing_tools
+                if isinstance(tool_name, str) and tool_name.strip()
+            }
+            if "fetch_concept" not in missing_lookup:
+                missing_tools.append("fetch_concept")
+
+        return missing_tools, missing_fetch_concept_ids
+
+    @staticmethod
+    def _build_missing_prompt_retry_reason(
+        *,
+        missing_tools: Sequence[str],
+        missing_fetch_concept_ids: Sequence[str],
+    ) -> str | None:
+        """Build a stable retry reason for unmet prompt requirements."""
+
+        missing_names = [
+            str(tool_name).strip()
+            for tool_name in missing_tools
+            if isinstance(tool_name, str) and tool_name.strip()
+        ]
+        if not missing_names and not missing_fetch_concept_ids:
+            return None
+
+        details: list[str] = list(missing_names)
+        if missing_fetch_concept_ids:
+            details.append(
+                "fetch_concept targets: "
+                + ", ".join(
+                    str(concept_id).strip()
+                    for concept_id in missing_fetch_concept_ids
+                    if isinstance(concept_id, str) and concept_id.strip()
+                )
+            )
+
+        if not details:
+            return None
+        return "prompt requested tool(s) not yet invoked: " + "; ".join(details)
 
     @classmethod
     def _validate_completion_claims(
@@ -9094,11 +9407,19 @@ class InternalMCPChatOrchestrator:
         *,
         user_text: str,
         missing_required_tools: Sequence[str],
+        missing_required_fetch_concept_ids: Sequence[str] | None = None,
+        required_create_type_name: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Build deterministic tool calls for still-missing explicit requirements."""
 
         if not missing_required_tools:
             return None
+
+        missing_required_fetch_concept_ids = [
+            str(item).strip()
+            for item in (missing_required_fetch_concept_ids or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
 
         concept_ids = self._extract_concept_ids_from_text(user_text)
         workflow_ids = [
@@ -9139,6 +9460,50 @@ class InternalMCPChatOrchestrator:
                 )
                 continue
 
+            if name == "create_concepts":
+                requested_name = required_create_type_name
+                if not requested_name:
+                    requested_name = self._extract_required_create_type_name_from_prompt(
+                        user_text
+                    )
+                if not requested_name:
+                    continue
+                forced_calls.append(
+                    {
+                        "action": "call_tool",
+                        "tool": name,
+                        "payload": {
+                            "parent_id": "#V#event",
+                            "concepts": [
+                                {
+                                    "name": requested_name,
+                                    "kind": "type",
+                                    "description": (
+                                        "Fresh test type for workflow runtime verification."
+                                    ),
+                                }
+                            ],
+                        },
+                    }
+                )
+                continue
+
+            if name == "fetch_concept":
+                fetch_concept_ids = list(missing_required_fetch_concept_ids)
+                if not fetch_concept_ids:
+                    fetch_concept_ids = (
+                        self._extract_required_fetch_concept_ids_from_prompt(user_text)
+                    )
+                for concept_id in fetch_concept_ids:
+                    forced_calls.append(
+                        {
+                            "action": "call_tool",
+                            "tool": name,
+                            "payload": {"concept_id": concept_id},
+                        }
+                    )
+                continue
+
         return forced_calls or None
 
     def _infer_missing_tool_call_retry_tool_calls(
@@ -9146,6 +9511,8 @@ class InternalMCPChatOrchestrator:
         augmented_context: Sequence[Mapping[str, Any]],
         user_prompt: Any | None = None,
         missing_required_tools: Sequence[str] | None = None,
+        missing_required_fetch_concept_ids: Sequence[str] | None = None,
+        required_create_type_name: str | None = None,
     ) -> list[_ToolCallRequest] | None:
         """Best-effort deterministic recovery for common missing-tool-call cases.
 
@@ -9178,6 +9545,17 @@ class InternalMCPChatOrchestrator:
             user_text=last_user_text,
             missing_required_tools=(
                 list(missing_required_tools) if missing_required_tools else []
+            ),
+            missing_required_fetch_concept_ids=(
+                list(missing_required_fetch_concept_ids)
+                if missing_required_fetch_concept_ids
+                else []
+            ),
+            required_create_type_name=(
+                str(required_create_type_name).strip()
+                if isinstance(required_create_type_name, str)
+                and str(required_create_type_name).strip()
+                else None
             ),
         )
         if required_forced:
