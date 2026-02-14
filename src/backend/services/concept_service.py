@@ -243,6 +243,9 @@ def create_concept(
     instance_of_type: Optional[
         str
     ] = None,  # JVNAUTOSCI-689: explicit instance_of relationship
+    created_by_concept_id: Optional[str] = None,
+    organisation_concept_id: Optional[str] = None,
+    event_namespace: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Creates a new concept in the 'concepts' collection.
     REFACTORING_NOTE: This is the first CRUD operation for the new generalized concept model.
@@ -415,15 +418,18 @@ def create_concept(
                     resolve_event_actor_context,
                 )
 
-                created_by_concept_id, organisation_concept_id = (
-                    resolve_event_actor_context()
+                actor_user_id, actor_org_id = resolve_event_actor_context(
+                    user_id=created_by_concept_id,
+                    org_id=organisation_concept_id,
+                    namespace=event_namespace,
                 )
                 workflow_event_launches[EVENT_TYPE_CONCEPT_CREATED] = (
                     maybe_launch_vontology_mutation_workflow(
                         mutation_event_type=EVENT_TYPE_CONCEPT_CREATED,
                         mutation_id=concept_identifier,
-                        user_id=created_by_concept_id,
-                        org_id=organisation_concept_id,
+                        user_id=actor_user_id,
+                        org_id=actor_org_id,
+                        namespace=event_namespace,
                         event_payload={
                             "concept_id": concept_identifier,
                             "instance_of_type": instance_of_type,
@@ -443,8 +449,9 @@ def create_concept(
                     workflow_event_launches["type.created"] = (
                         maybe_launch_type_created_workflow(
                             type_concept_id=concept_identifier,
-                            created_by_concept_id=created_by_concept_id,
-                            organisation_concept_id=organisation_concept_id,
+                            created_by_concept_id=actor_user_id,
+                            organisation_concept_id=actor_org_id,
+                            namespace=event_namespace,
                             parent_type_ids=list(parent_ids),
                         )
                     )

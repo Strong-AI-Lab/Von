@@ -3561,6 +3561,9 @@ def create_vontology_concept(
     notes: Optional[str] = None,
     description: Optional[str] = None,
     instance_of_type: Optional[str] = None,
+    created_by_concept_id: Optional[str] = None,
+    organisation_concept_id: Optional[str] = None,
+    event_namespace: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Creates a new concept in the Vontology.
@@ -3576,6 +3579,9 @@ def create_vontology_concept(
                          When provided, the concept will be BOTH a subtype of parent_id
                          AND an instance of instance_of_type. This is useful for predicates
                          that need to be instances of a specific predicate type.
+        created_by_concept_id: Optional actor override for event-triggered workflows.
+        organisation_concept_id: Optional organisation override for event-triggered workflows.
+        event_namespace: Optional namespace override for event-triggered workflows.
 
     Returns:
         Dict with keys:
@@ -3646,6 +3652,9 @@ def create_vontology_concept(
             description=description,
             notes=notes,
             instance_of_type=instance_of_type,
+            created_by_concept_id=created_by_concept_id,
+            organisation_concept_id=organisation_concept_id,
+            event_namespace=event_namespace,
         )
 
         if created_concept:

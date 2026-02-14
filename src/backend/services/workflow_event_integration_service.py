@@ -94,10 +94,61 @@ def _build_namespace(user_id: str | None, org_id: str | None) -> str:
     return f"{safe_user}/{safe_org}"
 
 
+def _normalise_namespace_override(namespace: str | None) -> str | None:
+    if not isinstance(namespace, str):
+        return None
+    cleaned = namespace.strip()
+    return cleaned or None
+
+
+def _derive_actor_context_from_namespace(
+    namespace: str | None,
+) -> tuple[str | None, str | None]:
+    """Infer user/org hints from a namespace string when available.
+
+    Supported forms:
+    - ``#V#user``
+    - ``#V#user@org`` (org may optionally include ``#V#``)
+    - ``user/org`` or ``user@org`` (legacy/internal forms)
+    """
+
+    namespace_clean = _normalise_namespace_override(namespace)
+    if namespace_clean is None:
+        return None, None
+
+    if namespace_clean.startswith("#V#"):
+        body = namespace_clean[3:]
+        if "@" in body:
+            user_raw, org_raw = body.split("@", 1)
+            user_clean = user_raw.strip()
+            org_clean = org_raw.strip()
+            user_value = f"#V#{user_clean}" if user_clean else None
+            if not org_clean:
+                return user_value, None
+            org_value = org_clean if org_clean.startswith("#V#") else f"#V#{org_clean}"
+            return user_value, org_value
+        return namespace_clean, None
+
+    if "@" in namespace_clean:
+        user_raw, org_raw = namespace_clean.split("@", 1)
+        user_value = user_raw.strip() or None
+        org_value = org_raw.strip() or None
+        return user_value, org_value
+
+    if "/" in namespace_clean:
+        user_raw, org_raw = namespace_clean.split("/", 1)
+        user_value = user_raw.strip() or None
+        org_value = org_raw.strip() or None
+        return user_value, org_value
+
+    return namespace_clean, None
+
+
 def resolve_event_actor_context(
     *,
     user_id: str | None = None,
     org_id: str | None = None,
+    namespace: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Resolve actor context for event emission in request/non-request code paths."""
 
@@ -105,6 +156,11 @@ def resolve_event_actor_context(
         user_id.strip() if isinstance(user_id, str) and user_id.strip() else None
     )
     resolved_org = org_id.strip() if isinstance(org_id, str) and org_id.strip() else None
+    namespace_user, namespace_org = _derive_actor_context_from_namespace(namespace)
+    if resolved_user is None and namespace_user is not None:
+        resolved_user = namespace_user
+    if resolved_org is None and namespace_org is not None:
+        resolved_org = namespace_org
 
     if resolved_user is None:
         try:
@@ -381,6 +437,14 @@ def _resolve_mapping_value(
     text = str(expression or "").strip()
     if not text:
         return False, None
+    # Backward compatibility: persistent bindings may store template-style
+    # expressions (e.g. "{{event.concept_id}}"). Treat these as plain mapping
+    # expressions so they resolve deterministically instead of flowing through
+    # as literal strings.
+    if text.startswith("{{") and text.endswith("}}"):
+        inner = text[2:-2].strip()
+        if inner:
+            text = inner
     if text.startswith("event."):
         return _extract_path_value(event_payload, text.removeprefix("event."))
     if text.startswith("inputs."):
@@ -418,13 +482,17 @@ def _launch_single_event_binding(
     event_id: str,
     user_id: str | None,
     org_id: str | None,
+    namespace_override: str | None,
     workflow_id: str,
     inputs: dict[str, Any],
     event_payload: dict[str, Any],
 ) -> dict[str, Any]:
     safe_event_id = str(event_id or "").strip()
     resolved_workflow_id = str(workflow_id or "").strip()
-    namespace = _build_namespace(user_id, org_id)
+    namespace = _normalise_namespace_override(namespace_override) or _build_namespace(
+        user_id,
+        org_id,
+    )
     event_idempotency_key = _build_event_idempotency_key(
         workflow_id=resolved_workflow_id,
         event_type=event_type,
@@ -479,6 +547,7 @@ def launch_event_workflow(
     event_id: str,
     user_id: str | None,
     org_id: str | None,
+    namespace: str | None = None,
     inputs: dict[str, Any] | None = None,
     workflow_id: str | None = None,
     event_payload: dict[str, Any] | None = None,
@@ -512,6 +581,12 @@ def launch_event_workflow(
             "event_type": event_type,
             "reason": "missing_event_id",
         }
+    resolved_user, resolved_org = resolve_event_actor_context(
+        user_id=user_id,
+        org_id=org_id,
+        namespace=namespace,
+    )
+    resolved_namespace = _normalise_namespace_override(namespace)
 
     if isinstance(workflow_id, str) and workflow_id.strip():
         resolved_bindings = [
@@ -575,8 +650,9 @@ def launch_event_workflow(
             launch = _launch_single_event_binding(
                 event_type=event_type,
                 event_id=safe_event_id,
-                user_id=user_id,
-                org_id=org_id,
+                user_id=resolved_user,
+                org_id=resolved_org,
+                namespace_override=resolved_namespace,
                 workflow_id=binding_workflow_id,
                 inputs=mapped_inputs,
                 event_payload=raw_event_payload,
@@ -637,6 +713,7 @@ def maybe_launch_task_created_workflow(
     task_concept_id: str,
     created_by_concept_id: str | None,
     organisation_concept_id: str | None,
+    namespace: str | None = None,
     title: str | None = None,
     priority: str | None = None,
 ) -> dict[str, Any]:
@@ -645,6 +722,7 @@ def maybe_launch_task_created_workflow(
         event_id=str(task_concept_id),
         user_id=created_by_concept_id,
         org_id=organisation_concept_id,
+        namespace=namespace,
         event_payload={
             "task_concept_id": task_concept_id,
             "task_title": title,
@@ -666,6 +744,7 @@ def maybe_launch_task_status_workflow(
     updated_at_iso: str | None,
     created_by_concept_id: str | None,
     organisation_concept_id: str | None,
+    namespace: str | None = None,
 ) -> dict[str, Any]:
     # "Key status changes" are configurable and default to high-signal states.
     if new_status.strip().lower() not in _task_status_trigger_values():
@@ -688,6 +767,7 @@ def maybe_launch_task_status_workflow(
         event_id=event_id,
         user_id=created_by_concept_id,
         org_id=organisation_concept_id,
+        namespace=namespace,
         event_payload={
             "task_concept_id": task_concept_id,
             "previous_status": previous_status,
@@ -710,12 +790,14 @@ def maybe_launch_direct_message_workflow(
     sender_id: str,
     recipient_ids: list[str],
     org_id: str | None,
+    namespace: str | None = None,
 ) -> dict[str, Any]:
     return launch_event_workflow(
         event_type=EVENT_TYPE_DIRECT_MESSAGE_CREATED,
         event_id=str(message_concept_id),
         user_id=sender_id,
         org_id=org_id,
+        namespace=namespace,
         event_payload={
             "message_concept_id": message_concept_id,
             "sender_id": sender_id,
@@ -735,6 +817,7 @@ def maybe_launch_type_created_workflow(
     type_concept_id: str,
     created_by_concept_id: str | None,
     organisation_concept_id: str | None,
+    namespace: str | None = None,
     parent_type_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Launch workflow(s) bound to type.created for new type concepts."""
@@ -744,6 +827,7 @@ def maybe_launch_type_created_workflow(
         event_id=str(type_concept_id),
         user_id=created_by_concept_id,
         org_id=organisation_concept_id,
+        namespace=namespace,
         event_payload={
             "concept_id": type_concept_id,
             "type_concept_id": type_concept_id,
@@ -765,6 +849,7 @@ def maybe_launch_vontology_mutation_workflow(
     inputs: dict[str, Any] | None = None,
     user_id: str | None = None,
     org_id: str | None = None,
+    namespace: str | None = None,
 ) -> dict[str, Any]:
     """Emit both specific and catch-all Vontology mutation events.
 
@@ -791,6 +876,7 @@ def maybe_launch_vontology_mutation_workflow(
     resolved_user, resolved_org = resolve_event_actor_context(
         user_id=user_id,
         org_id=org_id,
+        namespace=namespace,
     )
 
     payload = dict(event_payload or {})
@@ -806,6 +892,7 @@ def maybe_launch_vontology_mutation_workflow(
         event_id=safe_mutation_id,
         user_id=resolved_user,
         org_id=resolved_org,
+        namespace=namespace,
         event_payload=payload,
         inputs=specific_inputs,
     )
@@ -820,6 +907,7 @@ def maybe_launch_vontology_mutation_workflow(
         event_id=f"{mutation_type}:{safe_mutation_id}",
         user_id=resolved_user,
         org_id=resolved_org,
+        namespace=namespace,
         event_payload=catch_all_payload,
         inputs=catch_all_inputs,
     )

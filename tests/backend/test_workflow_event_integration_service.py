@@ -197,6 +197,85 @@ def test_launch_event_workflow_uses_persistent_binding_input_mapping(
     assert workflow_inputs["event"]["event_type"] == "type.created"
 
 
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_launch_event_workflow_resolves_braced_event_mapping_expression(
+    mock_get_instance_manager: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+    monkeypatch.delenv("VON_EVENT_TYPE_CREATED_WORKFLOW_ID", raising=False)
+
+    binding = EventWorkflowBinding.create(
+        event_type="type.created",
+        workflow_id="#V#salient_predicate_governance_workflow",
+        input_mapping={
+            "target_type_id": "{{event.concept_id}}",
+        },
+        enabled=True,
+        actor="test",
+    )
+    mock_manager = MagicMock()
+    mock_manager.list_event_bindings.return_value = [binding]
+    mock_manager.create_instance_for_event.return_value = ("instance-1000", True)
+    mock_get_instance_manager.return_value = mock_manager
+
+    result = launch_event_workflow(
+        event_type="type.created",
+        event_id="#V#my_new_type",
+        user_id="#V#user_alice",
+        org_id="#V#org_nao",
+        event_payload={"concept_id": "#V#my_new_type"},
+    )
+
+    assert result["success"] is True
+    assert result["triggered"] is True
+    called_args = mock_manager.create_instance_for_event.call_args
+    assert called_args is not None
+    workflow_inputs = called_args.kwargs["inputs"]
+    assert workflow_inputs["target_type_id"] == "#V#my_new_type"
+
+
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_launch_event_workflow_uses_namespace_override_for_tenancy(
+    mock_get_instance_manager: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+    monkeypatch.delenv("VON_EVENT_TYPE_CREATED_WORKFLOW_ID", raising=False)
+
+    binding = EventWorkflowBinding.create(
+        event_type="type.created",
+        workflow_id="#V#salient_predicate_governance_workflow",
+        input_mapping={"target_type_id": "event.concept_id"},
+        enabled=True,
+        actor="test",
+    )
+    mock_manager = MagicMock()
+    mock_manager.list_event_bindings.return_value = [binding]
+    mock_manager.create_instance_for_event.return_value = ("instance-ns-1", True)
+    mock_get_instance_manager.return_value = mock_manager
+
+    result = launch_event_workflow(
+        event_type="type.created",
+        event_id="#V#my_new_type",
+        user_id=None,
+        org_id=None,
+        namespace="#V#user_alice@org_nao",
+        event_payload={"concept_id": "#V#my_new_type"},
+    )
+
+    assert result["success"] is True
+    assert result["triggered"] is True
+
+    called_args = mock_manager.create_instance_for_event.call_args
+    assert called_args is not None
+    assert called_args.kwargs["user_id"] == "#V#user_alice"
+    assert called_args.kwargs["org_id"] == "#V#org_nao"
+    assert called_args.kwargs["namespace"] == "#V#user_alice@org_nao"
+
+
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
 def test_maybe_launch_vontology_mutation_workflow_emits_specific_and_catch_all(
     mock_launch_event_workflow: MagicMock,

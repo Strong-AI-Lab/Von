@@ -560,6 +560,12 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
 
     parent_id = arguments.get("parent_id")
     concepts = arguments.get("concepts", [])
+    raw_namespace = arguments.get("namespace")
+    namespace = (
+        raw_namespace.strip()
+        if isinstance(raw_namespace, str) and raw_namespace.strip()
+        else None
+    )
     allow_duplicate_instances_raw = arguments.get("allow_duplicate_instances", False)
     allow_duplicate_instances = (
         allow_duplicate_instances_raw
@@ -674,6 +680,7 @@ async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent
             description=description,
             notes=notes,
             instance_of_type=instance_of_type,
+            event_namespace=namespace,
         )
         if isinstance(result, dict):
             result["requested_name"] = str(name_val)

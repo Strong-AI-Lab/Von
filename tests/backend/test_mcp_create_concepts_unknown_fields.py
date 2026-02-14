@@ -1,8 +1,8 @@
 """
-Test that create_concepts tolerates unknown top-level fields (e.g., namespace).
+Test that create_concepts tolerates orchestrator context fields (including namespace).
 
 This validates the fix for the "Unexpected field 'namespace'" error that occurred
-when the MCP orchestrator or other callers included extra context fields.
+when callers included additional top-level context.
 """
 
 import pytest
@@ -48,19 +48,19 @@ def seed_core_concepts():
 
 def test_create_concepts_accepts_namespace_field():
     """
-    Verify that create_concepts ignores unknown top-level fields like namespace.
+    Verify that create_concepts accepts namespace as top-level context.
 
     Context: JVNAUTOSCI-760 - MCP orchestrator was adding namespace to create_concepts
-    calls, causing "Unexpected field 'namespace'" errors. The fix allows unknown fields
-    to be ignored while still validating required fields.
+    calls, causing "Unexpected field 'namespace'" errors. The fix allows namespace
+    while still validating required fields.
     """
     import uuid
 
-    # Arrange: payload with extra 'namespace' field and unique concept name
+    # Arrange: payload with top-level 'namespace' context and unique concept name
     unique_name = f"test_concept_ns_{uuid.uuid4().hex[:8]}"
     payload = {
         "parent_id": "#V#abstract_object",
-        "namespace": "#V#test_user",  # Extra field that should be ignored
+        "namespace": "#V#test_user",
         "concepts": [
             {
                 "name": unique_name,
@@ -70,7 +70,7 @@ def test_create_concepts_accepts_namespace_field():
         ],
     }
 
-    # Act: call create_concepts with extra field
+    # Act: call create_concepts with namespace field
     result = _create_concepts(**payload)
 
     # Assert: should succeed and create concept

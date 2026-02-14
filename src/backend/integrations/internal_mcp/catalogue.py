@@ -229,6 +229,12 @@ def _create_concepts(**kwargs):
 
     parent_id: str | None = kwargs.get("parent_id")
     concepts = kwargs.get("concepts", [])
+    raw_namespace = kwargs.get("namespace")
+    namespace = (
+        raw_namespace.strip()
+        if isinstance(raw_namespace, str) and raw_namespace.strip()
+        else None
+    )
     allow_duplicate_instances_raw = kwargs.get("allow_duplicate_instances", False)
     allow_duplicate_instances = (
         allow_duplicate_instances_raw
@@ -398,6 +404,7 @@ def _create_concepts(**kwargs):
             create_as_instance=create_as_instance,
             description=concept_data.get("description"),
             notes=concept_data.get("notes"),
+            event_namespace=namespace,
         )
         # Enrich result with the requested name for traceability and surface
         # the canonical created concept_id at a stable top-level key so UI
@@ -3557,6 +3564,7 @@ def _concepts_create_input_schema() -> Schema:
         },
         optional={
             "allow_duplicate_instances": (bool,),
+            "namespace": (str, type(None)),
         },
         allow_unknown=True,
         description=(
@@ -3564,7 +3572,8 @@ def _concepts_create_input_schema() -> Schema:
             "kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. "
             "By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; "
             "set allow_duplicate_instances=true to opt into legacy instance suffixing. "
-            "Unknown top-level fields are ignored to accommodate orchestrator-added context (e.g., namespace)."
+            "Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. "
+            "Unknown top-level fields are still tolerated for orchestrator-added context."
         ),
     )
 
