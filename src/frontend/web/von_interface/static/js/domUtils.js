@@ -257,6 +257,42 @@ export function getCurrentUserConceptId() {
   return stored?.concept_id || null;
 }
 
+// Bound non-critical footer calls so one stalled endpoint cannot block footer rendering indefinitely.
+async function fetchJsonWithTimeout(url, options = {}) {
+  const { timeoutMs = 6000, ...fetchOptions } = options || {};
+  const init = { ...fetchOptions };
+  let timeoutId = null;
+
+  try {
+    if (typeof AbortController === 'function' && timeoutMs > 0) {
+      const controller = new AbortController();
+      timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      init.signal = controller.signal;
+    }
+    const response = await fetch(url, init);
+    if (!response?.ok) return null;
+    return await response.json();
+  } catch (_) {
+    return null;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+async function withTimeout(promiseFactory, timeoutMs, fallback = null) {
+  let timeoutId = null;
+  try {
+    const timeoutPromise = new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve(fallback), timeoutMs);
+    });
+    return await Promise.race([promiseFactory(), timeoutPromise]);
+  } catch (_) {
+    return fallback;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 async function getSettings() {
   try {
     // Pass user context to get properly resolved LLM setting (user > org precedence, no global)
@@ -270,9 +306,8 @@ async function getSettings() {
     if (orgConceptId) params.set('organisation_concept_id', orgConceptId);
 
     const url = '/api/settings/' + (params.toString() ? '?' + params.toString() : '');
-    const response = await fetch(url);
-    if (response.ok) {
-      const settings = await response.json();
+    const settings = await fetchJsonWithTimeout(url, { timeoutMs: 6000 });
+    if (settings) {
       // Use resolved_llm as the active_llm (no global fallback)
       settings.active_llm = settings.resolved_llm || null;
       return settings;
@@ -293,16 +328,16 @@ function readSessionScopedJson(key) {
     return JSON.parse(localStorage.getItem(key) || 'null');
   } catch { return null; }
 }
-async function getCurrentUserInfo() {
+async function getCurrentUserInfo(settingsOverride = null) {
   const stored = readStoredJson('von_current_user');
   if (stored) {
     return { id: stored.id || null, conceptId: stored.concept_id || null, name: stored.name || null };
   }
-  const settings = await getSettings();
+  const settings = settingsOverride || await getSettings();
   return { id: settings.current_user_person_id || null, conceptId: settings.current_user_person_concept_id || null, name: settings.current_user_person_name || null };
 }
 
-async function getCurrentOrganisationInfo() {
+async function getCurrentOrganisationInfo(settingsOverride = null) {
   // JVNAUTOSCI-1011: Use session-scoped reads for org context (per-window isolation)
   const switching = readSessionScopedJson('von_org_switching');
   if (switching) {
@@ -317,18 +352,204 @@ async function getCurrentOrganisationInfo() {
   if (storedCtx) {
     return { id: storedCtx.id || null, conceptId: storedCtx.concept_id || null, name: storedCtx.name || null };
   }
-  const settings = await getSettings();
+  const settings = settingsOverride || await getSettings();
   return { id: settings.current_organisation_id || null, conceptId: settings.current_organisation_concept_id || null, name: settings.current_organisation_name || null };
+}
+
+let footerDbRetryTimerId = null;
+let footerDbLoadGeneration = 0;
+
+function clearFooterDbRetryTimer() {
+  if (footerDbRetryTimerId) {
+    clearTimeout(footerDbRetryTimerId);
+    footerDbRetryTimerId = null;
+  }
+}
+
+function updateFooterReadinessState(footerContainer, readinessIssues) {
+  if (!footerContainer) return;
+  const issueList = Array.from(readinessIssues || []);
+  const notReady = issueList.length > 0;
+  footerContainer.classList.toggle('footer-not-ready', notReady);
+  footerContainer.title = notReady
+    ? `Footer partially ready. Waiting on: ${issueList.join(', ')}`
+    : '';
+}
+
+function attachFooterDbBadge(footer, dbInfo) {
+  if (!footer || !dbInfo || typeof dbInfo !== 'object') return;
+
+  const sanitized = dbInfo.sanitized_uri || '';
+  const dbName = dbInfo.database_name || 'Unknown';
+  const pingOk = !!dbInfo.ping_ok;
+  const classification = dbInfo.classification || 'unknown';
+  const usingFallback = !!dbInfo.using_fallback;
+  const primarySanitized = dbInfo.primary_uri_sanitized || null;
+  const serverPublicIp = dbInfo.server_public_ip || null;
+  const badge = document.createElement('span');
+  const baseClass = classification === 'local' ? 'local' : (classification === 'atlas' ? 'atlas' : 'remote');
+  badge.className = `db-conn-badge ${baseClass}`;
+  let labelIcon = '🌐';
+  if (classification === 'local') labelIcon = '🏠';
+  else if (classification === 'atlas') labelIcon = '🗺️';
+  const buildLabelText = (icon, text) => `${icon} ${text}`;
+  const fallbackNote = usingFallback ? ' (fallback)' : '';
+  // Build badge content with dedicated label span so we can mutate text later
+  badge.innerHTML = `<span class="db-label">${buildLabelText(labelIcon, `Mongo: ${classification}${fallbackNote}`)}</span> <span class="db-latency" aria-label="DB latency" title="Recent DB ping latency">…</span>`;
+  const latencySpan = () => badge.querySelector('.db-latency');
+  const labelSpan = () => badge.querySelector('.db-label');
+  let lastClassification = classification;
+  let lastUsingFallback = usingFallback;
+  let lastPingOk = !!pingOk;
+
+  const applyBadgeState = (currentPingOk, currentClassification, currentFallback) => {
+    lastClassification = currentClassification;
+    lastUsingFallback = currentFallback;
+    lastPingOk = currentPingOk;
+    const fatalAtlasOutage = currentClassification === 'atlas' && !currentFallback && !currentPingOk;
+    const labelNode = labelSpan();
+    const iconFor = fatalAtlasOutage ? '🚨' : (currentClassification === 'local' ? '🏠' : (currentClassification === 'atlas' ? '🗺️' : '🌐'));
+    const fallbackSuffix = !fatalAtlasOutage && currentFallback ? ' (fallback)' : '';
+    if (labelNode) {
+      labelNode.textContent = buildLabelText(iconFor, fatalAtlasOutage ? 'MongoDB Atlas unreachable' : `Mongo: ${currentClassification}${fallbackSuffix}`);
+    }
+    badge.classList.toggle('degraded', fatalAtlasOutage || currentFallback || currentClassification === 'local');
+    badge.classList.toggle('fallback', currentFallback && !fatalAtlasOutage);
+    badge.classList.toggle('fatal', fatalAtlasOutage);
+  };
+
+  applyBadgeState(lastPingOk, lastClassification, lastUsingFallback);
+
+  // Latency measurement (lightweight HEAD /db/info ping timing)
+  async function measureLatency() {
+    const span = latencySpan(); if (!span) return;
+    try {
+      const t0 = performance.now();
+      const resp = await fetch('/api/settings/db/info', { cache: 'no-store', method: 'GET' });
+      if (!resp.ok) throw new Error('bad status ' + resp.status);
+      const payload = await resp.json().catch(() => null);
+      const elapsed = Math.round(performance.now() - t0);
+      const nextClassification = (payload && typeof payload.classification === 'string') ? payload.classification : lastClassification;
+      const nextFallback = (payload && typeof payload.using_fallback === 'boolean') ? payload.using_fallback : lastUsingFallback;
+      const nextPingOk = (payload && typeof payload.ping_ok === 'boolean') ? payload.ping_ok : lastPingOk;
+      applyBadgeState(!!nextPingOk, nextClassification, !!nextFallback);
+      if (badge.classList.contains('fatal')) {
+        span.textContent = 'offline';
+        span.classList.add('fatal');
+        span.classList.remove('warn', 'slow');
+        span.title = 'MongoDB Atlas unreachable';
+      } else {
+        span.textContent = `${elapsed}ms`;
+        span.classList.remove('fatal');
+        span.classList.toggle('warn', elapsed > 250);
+        span.classList.toggle('slow', elapsed > 600);
+        span.title = `Recent DB latency: ${elapsed} ms`;
+      }
+    } catch (e) {
+      applyBadgeState(false, lastClassification, lastUsingFallback);
+      const span2 = latencySpan();
+      if (span2) {
+        span2.textContent = 'offline';
+        span2.title = 'Database unreachable';
+        span2.classList.add('fatal');
+        span2.classList.remove('warn', 'slow');
+      }
+    }
+  }
+
+  // Initial measure & periodic refresh
+  measureLatency();
+  let latencyTimer = null;
+  function scheduleLatency() {
+    latencyTimer = setTimeout(() => { measureLatency().finally(scheduleLatency); }, 20000); // 20s cadence
+  }
+  scheduleLatency();
+
+  // Clear timer if badge removed
+  const observer = new MutationObserver(() => {
+    if (!document?.body) { if (latencyTimer) clearTimeout(latencyTimer); observer.disconnect(); return; }
+    if (!document.body.contains(badge)) { if (latencyTimer) clearTimeout(latencyTimer); observer.disconnect(); }
+  });
+  if (document?.body) {
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  const status = pingOk ? 'Connected' : 'Unavailable';
+  const err = dbInfo.error ? `\nError: ${String(dbInfo.error).slice(0, 300)}` : '';
+  let tooltip = `Database: ${dbName}\nEffective URI: ${sanitized || 'Unknown'}\nClassification: ${classification}\nStatus: ${status}`;
+  if (usingFallback) {
+    if (primarySanitized) {
+      tooltip += `\nPrimary URI: ${primarySanitized}`;
+    }
+    const pubIp = serverPublicIp || '(unknown)';
+    tooltip += `\nFallback Reason: Primary unreachable or DNS issue.`;
+    tooltip += `\nWhitelist Tip: If this should connect to Atlas, ensure IP ${pubIp} is whitelisted in the correct Project.`;
+  }
+  if (serverPublicIp) {
+    tooltip += `\nRight-click or Alt+Click to copy server public IP (${serverPublicIp}).`;
+  }
+  tooltip += err;
+  badge.title = tooltip;
+  badge.style.marginLeft = '12px';
+
+  // Compact mode toggler – shrink label when width constrained
+  function applyCompactIfNeeded() {
+    try {
+      const footerRect = footer.getBoundingClientRect();
+      if (!footerRect.width) return;
+      const crowded = footerRect.width < 760; // heuristic threshold
+      badge.classList.toggle('compact', crowded);
+    } catch (_) { }
+  }
+  window.addEventListener('resize', applyCompactIfNeeded, { passive: true });
+  setTimeout(applyCompactIfNeeded, 0);
+
+  function copyServerIp(withEvent) {
+    if (!serverPublicIp) return;
+    const finish = () => {
+      const oldTitle = badge.title;
+      badge.title = `Copied IP: ${serverPublicIp}`;
+      setTimeout(() => { badge.title = oldTitle; }, 1800);
+    };
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(serverPublicIp).then(finish).catch(() => {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = serverPublicIp; ta.style.position = 'fixed'; ta.style.opacity = '0';
+          document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); finish();
+        } catch (_) { }
+      });
+    } else {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = serverPublicIp; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); finish();
+      } catch (_) { }
+    }
+    if (withEvent) withEvent.preventDefault();
+  }
+
+  badge.addEventListener('contextmenu', (e) => { if (!serverPublicIp) return; copyServerIp(e); });
+  badge.addEventListener('click', (e) => { if (!serverPublicIp) return; if (e.altKey || e.metaKey) copyServerIp(e); });
+  footer.appendChild(badge);
 }
 
 export async function setModelInfoFooterText() {
   const footer = document.getElementById('modelInfoFooter');
   if (!footer) return;
+  const footerContainer = footer.closest('.footer-container');
+  const readinessIssues = new Set();
+  footerDbLoadGeneration += 1;
+  const dbLoadGeneration = footerDbLoadGeneration;
+  clearFooterDbRetryTimer();
 
   const settings = await getSettings();
+  if (!settings || Object.keys(settings).length === 0) {
+    readinessIssues.add('settings');
+  }
   const activeLlm = settings.active_llm;
-  const userInfo = await getCurrentUserInfo();
-  const orgInfo = await getCurrentOrganisationInfo();
+  const userInfo = await getCurrentUserInfo(settings);
+  const orgInfo = await getCurrentOrganisationInfo(settings);
 
   // Fetch LLM connection info early for merging into Model segment
   // Pass user context for proper per-user resolution
@@ -338,11 +559,11 @@ export async function setModelInfoFooterText() {
     if (userInfo.conceptId) llmParams.set('user_concept_id', userInfo.conceptId);
     if (orgInfo.conceptId) llmParams.set('organisation_concept_id', orgInfo.conceptId);
     const llmUrl = '/api/settings/llm/info' + (llmParams.toString() ? '?' + llmParams.toString() : '');
-    const res = await fetch(llmUrl);
-    if (res?.ok) {
-      llmInfo = await res.json();
-    }
+    llmInfo = await fetchJsonWithTimeout(llmUrl, { timeoutMs: 6000 });
   } catch (e) { }
+  if (!llmInfo) {
+    readinessIssues.add('llm');
+  }
 
   let modelText = 'Model: Not Set';
   if (activeLlm?.provider && activeLlm?.model) {
@@ -361,9 +582,11 @@ export async function setModelInfoFooterText() {
     // Helper: verify candidate individual is (directly or via parent) under LLM type
     async function isLlmInstance(conceptId) {
       try {
-        const resp = await fetch(`/vontology/api/vontology/node_content?identifier=${encodeURIComponent(conceptId)}`);
-        if (!resp.ok) return false;
-        const data = await resp.json();
+        const data = await fetchJsonWithTimeout(
+          `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(conceptId)}`,
+          { timeoutMs: 4000 }
+        );
+        if (!data) return false;
         const instOf = data?.is_an_instance_of || data?.is_a || [];
         const directIds = [];
         if (Array.isArray(instOf)) {
@@ -379,12 +602,12 @@ export async function setModelInfoFooterText() {
         // Indirect: fetch parents of first type and see if chain contains LLM_TYPE_ID
         for (const typeId of directIds.slice(0, 3)) { // limit breadth
           try {
-            const pResp = await fetch(`/vontology/api/vontology/parents?identifier=${encodeURIComponent(typeId)}`);
-            if (pResp.ok) {
-              const pdata = await pResp.json();
-              const parentList = pdata?.parents || [];
-              if (parentList.some(p => (p.concept_id || p.id) === LLM_TYPE_ID)) return true;
-            }
+            const pdata = await fetchJsonWithTimeout(
+              `/vontology/api/vontology/parents?identifier=${encodeURIComponent(typeId)}`,
+              { timeoutMs: 4000 }
+            );
+            const parentList = pdata?.parents || [];
+            if (parentList.some(p => (p.concept_id || p.id) === LLM_TYPE_ID)) return true;
           } catch (_) { }
         }
       } catch (_) { }
@@ -392,9 +615,11 @@ export async function setModelInfoFooterText() {
     }
     for (const q of queries) {
       try {
-        const resp = await fetch(`/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=6&include_individuals=true`);
-        if (!resp.ok) continue;
-        const data = await resp.json();
+        const data = await fetchJsonWithTimeout(
+          `/vontology/api/vontology/search?q=${encodeURIComponent(q)}&limit=6&include_individuals=true`,
+          { timeoutMs: 4000 }
+        );
+        if (!data) continue;
         const results = Array.isArray(data?.results) ? data.results : [];
         for (const r of results) {
           if (r?.kind === 'individual' && r.id) {
@@ -407,7 +632,7 @@ export async function setModelInfoFooterText() {
     }
     return null;
   }
-  const resolvedModelConcept = await resolveLlmConcept(activeLlm);
+  const resolvedModelConcept = await withTimeout(() => resolveLlmConcept(activeLlm), 5000, null);
 
   // Determine LLM status styles
   const status = llmInfo?.status || 'unknown';
@@ -560,17 +785,6 @@ export async function setModelInfoFooterText() {
     }
   } catch (_) { }
 
-  // Fetch DB connection info for footer badge (local vs remote)
-  let dbInfo = null;
-  try {
-    const res = await fetch('/api/settings/db/info');
-    if (res?.ok) {
-      dbInfo = await res.json();
-    }
-  } catch (e) {
-    // Non-fatal; just skip badge if unavailable
-  }
-
   // Build footer content: segments first (auth highlight depends on DOM order)
   footer.innerHTML = '';
 
@@ -592,12 +806,11 @@ export async function setModelInfoFooterText() {
   // If authenticated, highlight the User button (visual cue) BEFORE any long-latency calls (DB info) so tests see it.
   try {
     // Attempt legacy-prefixed route first (historical behaviour) for minimal timing impact in tests
-    let authResp = await fetch('/von/api/auth/status', { cache: 'no-store' });
-    if (!authResp?.ok) {
-      try { authResp = await fetch('/api/auth/status', { cache: 'no-store' }); } catch (_) { /* ignore */ }
+    let authData = await fetchJsonWithTimeout('/von/api/auth/status', { cache: 'no-store', timeoutMs: 4000 });
+    if (!authData) {
+      try { authData = await fetchJsonWithTimeout('/api/auth/status', { cache: 'no-store', timeoutMs: 4000 }); } catch (_) { /* ignore */ }
     }
-    if (authResp?.ok) {
-      const authData = await authResp.json();
+    if (authData) {
       const userSegments = [...footer.querySelectorAll('.footer-segment')]
         .filter(seg => seg.querySelector('.footer-label-inline')?.textContent?.trim().startsWith('User:'));
       userSegments.forEach(seg => {
@@ -661,157 +874,6 @@ export async function setModelInfoFooterText() {
     }
   } catch (_) { /* non-fatal */ }
 
-  // Restore DB connection badge (classification + tooltip + copy IP) next to segments
-  if (dbInfo) {
-    const sanitized = dbInfo.sanitized_uri || '';
-    const dbName = dbInfo.database_name || 'Unknown';
-    const pingOk = !!dbInfo.ping_ok;
-    const classification = dbInfo.classification || 'unknown';
-    const usingFallback = !!dbInfo.using_fallback;
-    const primarySanitized = dbInfo.primary_uri_sanitized || null;
-    const serverPublicIp = dbInfo.server_public_ip || null;
-    const badge = document.createElement('span');
-    const baseClass = classification === 'local' ? 'local' : (classification === 'atlas' ? 'atlas' : 'remote');
-    badge.className = `db-conn-badge ${baseClass}`;
-    let labelIcon = '🌐';
-    if (classification === 'local') labelIcon = '🏠';
-    else if (classification === 'atlas') labelIcon = '🗺️';
-    const buildLabelText = (icon, text) => `${icon} ${text}`;
-    const fallbackNote = usingFallback ? ' (fallback)' : '';
-    // Build badge content with dedicated label span so we can mutate text later
-    badge.innerHTML = `<span class="db-label">${buildLabelText(labelIcon, `Mongo: ${classification}${fallbackNote}`)}</span> <span class="db-latency" aria-label="DB latency" title="Recent DB ping latency">…</span>`;
-    const latencySpan = () => badge.querySelector('.db-latency');
-    const labelSpan = () => badge.querySelector('.db-label');
-    let lastClassification = classification;
-    let lastUsingFallback = usingFallback;
-    let lastPingOk = !!pingOk;
-
-    const applyBadgeState = (currentPingOk, currentClassification, currentFallback) => {
-      lastClassification = currentClassification;
-      lastUsingFallback = currentFallback;
-      lastPingOk = currentPingOk;
-      const fatalAtlasOutage = currentClassification === 'atlas' && !currentFallback && !currentPingOk;
-      const labelNode = labelSpan();
-      const iconFor = fatalAtlasOutage ? '🚨' : (currentClassification === 'local' ? '🏠' : (currentClassification === 'atlas' ? '🗺️' : '🌐'));
-      const fallbackSuffix = !fatalAtlasOutage && currentFallback ? ' (fallback)' : '';
-      if (labelNode) {
-        labelNode.textContent = buildLabelText(iconFor, fatalAtlasOutage ? 'MongoDB Atlas unreachable' : `Mongo: ${currentClassification}${fallbackSuffix}`);
-      }
-      badge.classList.toggle('degraded', fatalAtlasOutage || currentFallback || currentClassification === 'local');
-      badge.classList.toggle('fallback', currentFallback && !fatalAtlasOutage);
-      badge.classList.toggle('fatal', fatalAtlasOutage);
-    };
-
-    applyBadgeState(lastPingOk, lastClassification, lastUsingFallback);
-    // Latency measurement (lightweight HEAD /db/info ping timing)
-    async function measureLatency() {
-      const span = latencySpan(); if (!span) return;
-      try {
-        const t0 = performance.now();
-        const resp = await fetch('/api/settings/db/info', { cache: 'no-store', method: 'GET' });
-        if (!resp.ok) throw new Error('bad status ' + resp.status);
-        const payload = await resp.json().catch(() => null);
-        const elapsed = Math.round(performance.now() - t0);
-        const nextClassification = (payload && typeof payload.classification === 'string') ? payload.classification : lastClassification;
-        const nextFallback = (payload && typeof payload.using_fallback === 'boolean') ? payload.using_fallback : lastUsingFallback;
-        const nextPingOk = (payload && typeof payload.ping_ok === 'boolean') ? payload.ping_ok : lastPingOk;
-        applyBadgeState(!!nextPingOk, nextClassification, !!nextFallback);
-        if (badge.classList.contains('fatal')) {
-          span.textContent = 'offline';
-          span.classList.add('fatal');
-          span.classList.remove('warn', 'slow');
-          span.title = 'MongoDB Atlas unreachable';
-        } else {
-          span.textContent = `${elapsed}ms`;
-          span.classList.remove('fatal');
-          span.classList.toggle('warn', elapsed > 250);
-          span.classList.toggle('slow', elapsed > 600);
-          span.title = `Recent DB latency: ${elapsed} ms`;
-        }
-      } catch (e) {
-        applyBadgeState(false, lastClassification, lastUsingFallback);
-        const span2 = latencySpan();
-        if (span2) {
-          span2.textContent = 'offline';
-          span2.title = 'Database unreachable';
-          span2.classList.add('fatal');
-          span2.classList.remove('warn', 'slow');
-        }
-      }
-    }
-    // Initial measure & periodic refresh
-    measureLatency();
-    let latencyTimer = null;
-    function scheduleLatency() {
-      latencyTimer = setTimeout(() => { measureLatency().finally(scheduleLatency); }, 20000); // 20s cadence
-    }
-    scheduleLatency();
-    // Clear timer if badge removed
-    const observer = new MutationObserver(() => {
-      if (!document?.body) { if (latencyTimer) clearTimeout(latencyTimer); observer.disconnect(); return; }
-      if (!document.body.contains(badge)) { if (latencyTimer) clearTimeout(latencyTimer); observer.disconnect(); }
-    });
-    if (document?.body) {
-      observer.observe(document.body, { childList: true, subtree: true });
-    }
-    const status = pingOk ? 'Connected' : 'Unavailable';
-    const err = dbInfo.error ? `\nError: ${String(dbInfo.error).slice(0, 300)}` : '';
-    let tooltip = `Database: ${dbName}\nEffective URI: ${sanitized || 'Unknown'}\nClassification: ${classification}\nStatus: ${status}`;
-    if (usingFallback) {
-      if (primarySanitized) {
-        tooltip += `\nPrimary URI: ${primarySanitized}`;
-      }
-      const pubIp = serverPublicIp || '(unknown)';
-      tooltip += `\nFallback Reason: Primary unreachable or DNS issue.`;
-      tooltip += `\nWhitelist Tip: If this should connect to Atlas, ensure IP ${pubIp} is whitelisted in the correct Project.`;
-    }
-    if (serverPublicIp) {
-      tooltip += `\nRight-click or Alt+Click to copy server public IP (${serverPublicIp}).`;
-    }
-    tooltip += err;
-    badge.title = tooltip;
-    badge.style.marginLeft = '12px';
-    // Compact mode toggler – shrink label when width constrained
-    function applyCompactIfNeeded() {
-      try {
-        const footerRect = footer.getBoundingClientRect();
-        if (!footerRect.width) return;
-        const crowded = footerRect.width < 760; // heuristic threshold
-        badge.classList.toggle('compact', crowded);
-      } catch (_) { }
-    }
-    window.addEventListener('resize', applyCompactIfNeeded, { passive: true });
-    // Defer initial compact check until after layout
-    setTimeout(applyCompactIfNeeded, 0);
-    function copyServerIp(withEvent) {
-      if (!serverPublicIp) return;
-      const finish = () => {
-        const oldTitle = badge.title;
-        badge.title = `Copied IP: ${serverPublicIp}`;
-        setTimeout(() => { badge.title = oldTitle; }, 1800);
-      };
-      if (navigator?.clipboard?.writeText) {
-        navigator.clipboard.writeText(serverPublicIp).then(finish).catch(() => {
-          try {
-            const ta = document.createElement('textarea');
-            ta.value = serverPublicIp; ta.style.position = 'fixed'; ta.style.opacity = '0';
-            document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); finish();
-          } catch (_) { }
-        });
-      } else {
-        try {
-          const ta = document.createElement('textarea');
-          ta.value = serverPublicIp; ta.style.position = 'fixed'; ta.style.opacity = '0';
-          document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); finish();
-        } catch (_) { }
-      }
-      if (withEvent) withEvent.preventDefault();
-    }
-    badge.addEventListener('contextmenu', (e) => { if (!serverPublicIp) return; copyServerIp(e); });
-    badge.addEventListener('click', (e) => { if (!serverPublicIp) return; if (e.altKey || e.metaKey) copyServerIp(e); });
-    footer.appendChild(badge);
-  }
-
   // Clicking empty space (not concept buttons) still opens settings
   footer.style.cursor = 'pointer';
   footer.title = 'Click empty area to open settings';
@@ -820,6 +882,43 @@ export async function setModelInfoFooterText() {
     const settingsTabButton = document.querySelector('.tab-button[data-tab="settingsTab"]');
     if (settingsTabButton) { settingsTabButton.click(); }
   });
+
+  // Keep footer visually flagged until DB/Atlas status has been retrieved.
+  readinessIssues.add('db');
+  updateFooterReadinessState(footerContainer, readinessIssues);
+
+  // Load DB badge asynchronously and retry so transient startup pressure does not
+  // permanently suppress the badge for the rest of the session.
+  async function loadDbBadge(attempt = 0) {
+    if (dbLoadGeneration !== footerDbLoadGeneration) return;
+    const dbInfo = await fetchJsonWithTimeout('/api/settings/db/info', { timeoutMs: 5000 });
+    if (dbLoadGeneration !== footerDbLoadGeneration) return;
+
+    if (dbInfo) {
+      const existingBadge = footer.querySelector('.db-conn-badge');
+      if (existingBadge) {
+        try { existingBadge.remove(); } catch (_) { /* ignore */ }
+      }
+      attachFooterDbBadge(footer, dbInfo);
+      readinessIssues.delete('db');
+      updateFooterReadinessState(footerContainer, readinessIssues);
+      clearFooterDbRetryTimer();
+      return;
+    }
+
+    readinessIssues.add('db');
+    updateFooterReadinessState(footerContainer, readinessIssues);
+
+    const inJest = typeof process !== 'undefined' && process.env && process.env.JEST_WORKER_ID;
+    if (inJest) return;
+
+    const delayMs = Math.min(10000 * Math.pow(2, attempt), 60000);
+    clearFooterDbRetryTimer();
+    footerDbRetryTimerId = setTimeout(() => { void loadDbBadge(attempt + 1); }, delayMs);
+  }
+
+  void loadDbBadge();
+  updateFooterReadinessState(footerContainer, readinessIssues);
 }
 
 // Expose this function globally so it can be called from iframe

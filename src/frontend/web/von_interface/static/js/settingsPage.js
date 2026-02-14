@@ -1008,12 +1008,35 @@ export function __testOnly_getPreferredRagNamespace() {
   return getPreferredRagNamespace();
 }
 
+function isSettingsRuntimePanelVisible() {
+  try {
+    const frameEl = window.frameElement;
+    if (!frameEl) return true;
+    const parentView = window.parent;
+    const style = parentView?.getComputedStyle ? parentView.getComputedStyle(frameEl) : null;
+    if (style && (style.display === 'none' || style.visibility === 'hidden')) {
+      return false;
+    }
+    if (typeof frameEl.getClientRects === 'function' && frameEl.getClientRects().length === 0) {
+      return false;
+    }
+    return true;
+  } catch (_) {
+    // Fail open if the host environment does not expose parent/frame visibility details.
+    return true;
+  }
+}
+
 async function loadRuntimeStatus(manualRefresh = false) {
   const localEl = document.getElementById('settingsLocalIpValue');
   const publicEl = document.getElementById('settingsPublicIpValue');
   const pidEl = document.getElementById('settingsPidValue');
   const uptimeEl = document.getElementById('settingsUptimeValue');
   const refreshBtn = document.getElementById('refreshRuntimeButton');
+
+  if (!manualRefresh && !isSettingsRuntimePanelVisible()) {
+    return;
+  }
 
   if (runtimeStatusInFlight && !manualRefresh) {
     return;

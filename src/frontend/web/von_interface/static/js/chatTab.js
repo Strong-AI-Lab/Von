@@ -89,6 +89,8 @@ let incomingInviteState = {
 
 const INCOMING_INVITE_POLL_INTERVAL_MS = 60_000;
 let incomingInvitePollTimerId = null;
+let incomingInviteLoadInFlight = false;
+let incomingInviteAbortController = null;
 
 // JVNAUTOSCI-1002: SSE streaming for shared conversation turn updates
 const sharedConversationStreams = new Map();
@@ -7507,18 +7509,31 @@ async function renderIncomingInvitesList() {
 }
 
 async function loadIncomingInvites({ silent = false } = {}) {
+    if (incomingInviteLoadInFlight) {
+        if (silent) return;
+        try { incomingInviteAbortController?.abort(); } catch (_) { }
+    }
+
     if (!silent) {
         setIncomingInviteStatus('Loading invites…');
     }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    incomingInviteAbortController = controller;
+    incomingInviteLoadInFlight = true;
+
     try {
         const [pendingResp, acceptedResp] = await Promise.all([
             fetch('/von/api/shared_conversations/invites?status=pending', {
                 cache: 'no-store',
-                headers: buildChatFetchHeaders()
+                headers: buildChatFetchHeaders(),
+                signal: controller.signal
             }),
             fetch('/von/api/shared_conversations/invites?status=accepted', {
                 cache: 'no-store',
-                headers: buildChatFetchHeaders()
+                headers: buildChatFetchHeaders(),
+                signal: controller.signal
             })
         ]);
 
@@ -7547,9 +7562,21 @@ async function loadIncomingInvites({ silent = false } = {}) {
         }
         await renderIncomingInvitesList();
     } catch (e) {
+        if (e && e.name === 'AbortError') {
+            if (!silent) {
+                setIncomingInviteStatus('Invite loading timed out.');
+            }
+            return;
+        }
         console.error('Invite list error', e);
         if (!silent) {
             setIncomingInviteStatus('Unable to load invites.');
+        }
+    } finally {
+        clearTimeout(timeoutId);
+        if (incomingInviteAbortController === controller) {
+            incomingInviteAbortController = null;
+            incomingInviteLoadInFlight = false;
         }
     }
 }

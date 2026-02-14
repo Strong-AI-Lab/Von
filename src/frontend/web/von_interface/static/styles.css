@@ -3553,6 +3553,11 @@ footer {
     z-index: 100;
 }
 
+.footer-container.footer-not-ready {
+    background-color: rgba(255, 243, 224, 0.96);
+    border-top-color: #f59e0b;
+}
+
 .footer-info {
     margin: 0;
     /* REMOVED: margin as it's in flex container */
