@@ -4459,6 +4459,22 @@ footer {
     justify-content: center;
 }
 
+.chat-session-tab-more {
+    background: #f8fafc;
+    border-style: dashed;
+    border-color: #94a3b8;
+    color: #334155;
+    align-items: center;
+    justify-content: center;
+    max-width: none;
+    padding: 6px 10px;
+}
+
+.chat-session-tab-more:hover {
+    background: #f1f5f9;
+    border-color: #64748b;
+}
+
 .chat-session-tab-header {
     display: flex;
     align-items: baseline;
@@ -4552,6 +4568,11 @@ footer {
 
 .chat-session-tabs-placeholder.is-loading {
     color: #64748b;
+}
+
+.chat-session-tabs-placeholder-filtered {
+    border-style: dotted;
+    min-width: 320px;
 }
 
 .chat-session-loading {

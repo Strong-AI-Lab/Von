@@ -87,6 +87,30 @@
             </div>
         </section>
 
+        <section id="conversation-history-settings">
+            <h2>Conversations</h2>
+            <p class="settings-note">These preferences are stored in this browser and control which conversations appear
+                in the conversation history tabs.</p>
+
+            <div class="speech-settings-panel">
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="settingsConversationRecentLimitInput">Max recent
+                        conversations (N)</label>
+                    <input id="settingsConversationRecentLimitInput" class="speech-settings-input" type="number" min="1"
+                        max="200" step="1" inputmode="numeric" />
+                </div>
+                <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="settingsConversationRecentWindowDaysInput">Recent window
+                        (days)</label>
+                    <input id="settingsConversationRecentWindowDaysInput" class="speech-settings-input" type="number"
+                        min="1" max="3650" step="1" inputmode="numeric" />
+                </div>
+            </div>
+            <small class="settings-note">Conversation history shows at most N recently accessed conversations that also
+                have activity in the selected window. When additional matching conversations exist, use
+                <code>[...] Show all</code> from the history tabs.</small>
+        </section>
+
         <section id="speech-settings">
             <h2>Speech</h2>
             <p class="settings-note">These preferences are stored in this browser and used by the Conversations tab for

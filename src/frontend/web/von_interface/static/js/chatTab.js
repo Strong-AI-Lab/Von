@@ -18,6 +18,13 @@ import {
 } from './speech.js';
 import { getPreferredLanguage, selectBestNameForContext, selectShortestNameForContext } from './utils/nameSelection.js';
 import { resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
+import {
+    CHAT_HISTORY_RECENT_LIMIT_STORAGE_KEY,
+    CHAT_HISTORY_RECENT_WINDOW_DAYS_STORAGE_KEY,
+    loadConversationHistorySettings,
+    parseIsoTimestampMs,
+    selectConversationHistorySessions
+} from './utils/conversationHistoryPreferences.js';
 import { getSessionScopedNamespace, getSessionScopedOrgContext } from './utils/sessionScopedStorage.js';
 import { applyCartoucheAppearance, cartouchifyElementText, cartouchifyVontologyTokensInElement, getCartoucheAppearanceSettings, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
 import { showToast } from './utils/toast.js';
@@ -151,10 +158,14 @@ const HISTORY_TAIL_SEGMENT_SIZE = 30;
 
 // JVNAUTOSCI-1014: Hidden conversations (localStorage per user)
 const LS_HIDDEN_CHAT_SESSIONS_PREFIX = 'von:hiddenChatSessionIds';
+const LS_CHAT_SESSION_LAST_ACCESSED_PREFIX = 'von:chatSessionLastAccessed';
 const MAX_DELETABLE_TURNS = 4;
 let hiddenChatSessionIds = new Set();
 let showHiddenSessions = false;
 let _hiddenSessionsUserKey = null; // Track current user's localStorage key
+let chatSessionLastAccessedMap = new Map();
+let _chatSessionLastAccessedUserKey = null;
+let showAllConversationHistoryMatches = false;
 
 /**
  * Get the user-scoped localStorage key for hidden sessions.
@@ -198,6 +209,99 @@ function saveHiddenChatSessionIds() {
     } catch (e) {
         console.warn('[chatTab] Failed to save hidden session IDs to localStorage:', e);
     }
+}
+
+function getChatSessionLastAccessedStorageKey() {
+    const userConceptId = getCurrentUserConceptId();
+    if (userConceptId) {
+        const sanitised = String(userConceptId).replace(/[^a-zA-Z0-9_#-]/g, '_');
+        return `${LS_CHAT_SESSION_LAST_ACCESSED_PREFIX}:${sanitised}`;
+    }
+    return LS_CHAT_SESSION_LAST_ACCESSED_PREFIX;
+}
+
+function loadChatSessionLastAccessedMap() {
+    const storageKey = getChatSessionLastAccessedStorageKey();
+    _chatSessionLastAccessedUserKey = storageKey;
+    try {
+        const stored = localStorage.getItem(storageKey);
+        if (!stored) {
+            chatSessionLastAccessedMap = new Map();
+            return;
+        }
+
+        const parsed = JSON.parse(stored);
+        if (!parsed || typeof parsed !== 'object') {
+            chatSessionLastAccessedMap = new Map();
+            return;
+        }
+
+        const next = new Map();
+        Object.entries(parsed).forEach(([sessionId, isoTimestamp]) => {
+            if (typeof sessionId !== 'string' || !sessionId.trim()) {
+                return;
+            }
+            if (typeof isoTimestamp !== 'string' || !isoTimestamp.trim()) {
+                return;
+            }
+            if (parseIsoTimestampMs(isoTimestamp) === null) {
+                return;
+            }
+            next.set(sessionId, isoTimestamp);
+        });
+        chatSessionLastAccessedMap = next;
+    } catch (e) {
+        console.warn('[chatTab] Failed to load conversation last-accessed map from localStorage:', e);
+        chatSessionLastAccessedMap = new Map();
+    }
+}
+
+function saveChatSessionLastAccessedMap() {
+    const storageKey = _chatSessionLastAccessedUserKey || getChatSessionLastAccessedStorageKey();
+    try {
+        const payload = {};
+        chatSessionLastAccessedMap.forEach((isoTimestamp, sessionId) => {
+            payload[sessionId] = isoTimestamp;
+        });
+        localStorage.setItem(storageKey, JSON.stringify(payload));
+    } catch (e) {
+        console.warn('[chatTab] Failed to save conversation last-accessed map to localStorage:', e);
+    }
+}
+
+function markConversationSessionAccessed(sessionId) {
+    const sid = (typeof sessionId === 'string') ? sessionId.trim() : '';
+    if (!sid) {
+        return;
+    }
+
+    chatSessionLastAccessedMap.set(sid, new Date().toISOString());
+
+    // Keep this cache bounded to avoid unbounded localStorage growth.
+    if (chatSessionLastAccessedMap.size > 1000) {
+        const ordered = Array.from(chatSessionLastAccessedMap.entries())
+            .sort((a, b) => (parseIsoTimestampMs(b[1]) || 0) - (parseIsoTimestampMs(a[1]) || 0));
+        chatSessionLastAccessedMap = new Map(ordered.slice(0, 1000));
+    }
+
+    saveChatSessionLastAccessedMap();
+}
+
+function getConversationHistoryAccessLookup(sessions) {
+    const lookup = {};
+    if (Array.isArray(sessions)) {
+        sessions.forEach((session) => {
+            const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+            if (!sid) {
+                return;
+            }
+            const localIso = chatSessionLastAccessedMap.get(sid);
+            if (typeof localIso === 'string' && localIso.trim()) {
+                lookup[sid] = localIso;
+            }
+        });
+    }
+    return lookup;
 }
 
 function hideConversation(sessionId) {
@@ -3214,6 +3318,24 @@ try {
     // Ignore missing window in tests.
 }
 
+try {
+    window.addEventListener('von-preferences-changed', (event) => {
+        const key = event?.detail?.key;
+        if (
+            key !== CHAT_HISTORY_RECENT_LIMIT_STORAGE_KEY
+            && key !== CHAT_HISTORY_RECENT_WINDOW_DAYS_STORAGE_KEY
+        ) {
+            return;
+        }
+        showAllConversationHistoryMatches = false;
+        if (Array.isArray(sessionTabsCache)) {
+            renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+        }
+    });
+} catch (_) {
+    // Ignore missing window in tests.
+}
+
 // Export for testing.
 export function __testOnly_convertQuotedInstructionBlockquotesToButtons(root) {
     convertQuotedInstructionBlockquotesToButtons(root);
@@ -3988,6 +4110,7 @@ function setActiveChatSession(sessionId, sessionName) {
         if (cachedSession?.shared_owner_user_id) {
             activeChatSessionOwnerId = String(cachedSession.shared_owner_user_id || '').trim() || null;
         }
+        markConversationSessionAccessed(activeChatSessionId);
     }
 
     // JVNAUTOSCI-1040: Update task panel with new session
@@ -5668,17 +5791,25 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         return;
     }
 
-    // JVNAUTOSCI-1014: Filter hidden sessions unless showHiddenSessions is enabled
-    const visibleSessions = showHiddenSessions
+    // JVNAUTOSCI-1014: Filter hidden sessions unless showHiddenSessions is enabled.
+    const sessionsAfterHiddenFilter = showHiddenSessions
         ? sessions
         : sessions.filter(s => !isConversationHidden(s?.session_id));
+
+    const conversationHistorySettings = loadConversationHistorySettings((key) => safeLocalStorageGet(key));
+    const filteredResult = selectConversationHistorySessions({
+        sessions: sessionsAfterHiddenFilter,
+        accessTimestampBySessionId: getConversationHistoryAccessLookup(sessionsAfterHiddenFilter),
+        recentLimit: conversationHistorySettings.recentLimit,
+        recentWindowDays: conversationHistorySettings.recentWindowDays,
+        showAll: showAllConversationHistoryMatches
+    });
+    const visibleSessions = filteredResult.sessionsToRender;
 
     container.hidden = false;
     container.innerHTML = '';
     lastRenderedSessionCount = visibleSessions.length;
-    // Count excludes hidden sessions
-    const nonHiddenCount = sessions.filter(s => !isConversationHidden(s?.session_id)).length;
-    setChatSessionCount(nonHiddenCount);
+    setChatSessionCount(filteredResult.totalMatchingCount);
 
     const fragment = document.createDocumentFragment();
 
@@ -5693,6 +5824,13 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         void promptAndCreateChatSession();
     });
     fragment.appendChild(newTab);
+
+    if (visibleSessions.length === 0) {
+        const placeholder = document.createElement('div');
+        placeholder.className = 'chat-session-tabs-placeholder chat-session-tabs-placeholder-filtered';
+        placeholder.textContent = `No conversations match the current ${filteredResult.recentWindowDays}-day window. Adjust in Settings > Conversations.`;
+        fragment.appendChild(placeholder);
+    }
 
     visibleSessions.forEach((session) => {
         const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
@@ -5883,6 +6021,24 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         fragment.appendChild(tab);
     });
+
+    if (filteredResult.totalMatchingCount > filteredResult.recentLimit) {
+        const toggleMoreButton = document.createElement('button');
+        toggleMoreButton.type = 'button';
+        toggleMoreButton.className = 'chat-session-tab chat-session-tab-more';
+        if (showAllConversationHistoryMatches) {
+            toggleMoreButton.textContent = '[...] Show less';
+            toggleMoreButton.title = `Collapse to ${filteredResult.recentLimit} conversations`;
+        } else {
+            toggleMoreButton.textContent = `[...] Show all (${filteredResult.hiddenByLimitCount} more)`;
+            toggleMoreButton.title = `Show all ${filteredResult.totalMatchingCount} matching conversations`;
+        }
+        toggleMoreButton.addEventListener('click', () => {
+            showAllConversationHistoryMatches = !showAllConversationHistoryMatches;
+            renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+        });
+        fragment.appendChild(toggleMoreButton);
+    }
 
     container.appendChild(fragment);
 
@@ -9214,6 +9370,7 @@ function startIncomingInvitePolling() {
 
 async function handleOrgSwitchForChatTab(_detail) {
     const container = getChatSessionTabsContainer();
+    showAllConversationHistoryMatches = false;
     sessionTabsCache = [];
     lastRenderedSessionCount = 0;
     chatSessionMetadataOpenKey = null;
@@ -9283,6 +9440,10 @@ try {
 }
 
 function handleAuthStatusChangeForChatTab(detail) {
+    loadHiddenChatSessionIds();
+    loadChatSessionLastAccessedMap();
+    showAllConversationHistoryMatches = false;
+
     const container = getChatSessionTabsContainer();
     sessionTabsCache = [];
     lastRenderedSessionCount = 0;
@@ -9312,18 +9473,30 @@ export function initializeChatTab() {
 
     // JVNAUTOSCI-1014: Load hidden session IDs from localStorage (user-scoped)
     loadHiddenChatSessionIds();
+    loadChatSessionLastAccessedMap();
 
     // Reload hidden sessions when user changes (settings change event)
     try {
         document.addEventListener('von:settingsChanged', () => {
-            const newKey = getHiddenSessionsStorageKey();
-            if (newKey !== _hiddenSessionsUserKey) {
-                console.log(`[chatTab] User changed, reloading hidden sessions (${_hiddenSessionsUserKey} -> ${newKey})`);
+            const newHiddenKey = getHiddenSessionsStorageKey();
+            const newAccessKey = getChatSessionLastAccessedStorageKey();
+            let shouldRerenderTabs = false;
+
+            if (newHiddenKey !== _hiddenSessionsUserKey) {
+                console.log(`[chatTab] User changed, reloading hidden sessions (${_hiddenSessionsUserKey} -> ${newHiddenKey})`);
                 loadHiddenChatSessionIds();
-                // Re-render tabs to apply new hidden set
-                if (Array.isArray(sessionTabsCache)) {
-                    renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
-                }
+                shouldRerenderTabs = true;
+            }
+
+            if (newAccessKey !== _chatSessionLastAccessedUserKey) {
+                console.log(`[chatTab] User changed, reloading conversation last-accessed map (${_chatSessionLastAccessedUserKey} -> ${newAccessKey})`);
+                loadChatSessionLastAccessedMap();
+                showAllConversationHistoryMatches = false;
+                shouldRerenderTabs = true;
+            }
+
+            if (shouldRerenderTabs && Array.isArray(sessionTabsCache)) {
+                renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
             }
         });
     } catch (_) {

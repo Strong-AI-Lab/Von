@@ -18,6 +18,13 @@ import {
   isTextToSpeechSupported,
   speakText
 } from './speech.js';
+import {
+  CHAT_HISTORY_RECENT_LIMIT_STORAGE_KEY,
+  CHAT_HISTORY_RECENT_WINDOW_DAYS_STORAGE_KEY,
+  clampConversationHistoryRecentLimit,
+  clampConversationHistoryRecentWindowDays,
+  loadConversationHistorySettings
+} from './utils/conversationHistoryPreferences.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
 function buildSettingsFetchHeaders(extraHeaders = {}) {
@@ -482,6 +489,44 @@ function getSpeechSettingsFromStorage() {
       interimResults: sttInterimResults
     }
   };
+}
+
+function setupConversationHistorySettingsSection() {
+  const recentLimitInput = document.getElementById('settingsConversationRecentLimitInput');
+  const recentWindowDaysInput = document.getElementById('settingsConversationRecentWindowDaysInput');
+  if (!recentLimitInput && !recentWindowDaysInput) {
+    return;
+  }
+
+  const refreshUiFromSettings = () => {
+    const settings = loadConversationHistorySettings((key) => safeLocalStorageGet(key));
+    if (recentLimitInput) {
+      recentLimitInput.value = String(settings.recentLimit);
+    }
+    if (recentWindowDaysInput) {
+      recentWindowDaysInput.value = String(settings.recentWindowDays);
+    }
+  };
+
+  refreshUiFromSettings();
+
+  if (recentLimitInput) {
+    recentLimitInput.addEventListener('change', (event) => {
+      const nextValue = clampConversationHistoryRecentLimit(event?.target?.value);
+      safeLocalStorageSet(CHAT_HISTORY_RECENT_LIMIT_STORAGE_KEY, String(nextValue));
+      recentLimitInput.value = String(nextValue);
+      notifyPreferenceChanged(CHAT_HISTORY_RECENT_LIMIT_STORAGE_KEY, nextValue);
+    });
+  }
+
+  if (recentWindowDaysInput) {
+    recentWindowDaysInput.addEventListener('change', (event) => {
+      const nextValue = clampConversationHistoryRecentWindowDays(event?.target?.value);
+      safeLocalStorageSet(CHAT_HISTORY_RECENT_WINDOW_DAYS_STORAGE_KEY, String(nextValue));
+      recentWindowDaysInput.value = String(nextValue);
+      notifyPreferenceChanged(CHAT_HISTORY_RECENT_WINDOW_DAYS_STORAGE_KEY, nextValue);
+    });
+  }
 }
 
 function formatVoiceOptionLabel(voice) {
@@ -1202,6 +1247,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupRuntimeSection();
   // Initialize all settings sections
   await loadAndDisplaySettings();
+  setupConversationHistorySettingsSection();
   setupSpeechSettingsSection();
   setupConceptUiSettings();
   // Load DB info
