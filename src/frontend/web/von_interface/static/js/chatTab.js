@@ -129,7 +129,10 @@ const workflowEpisodesState = {
     workflowName: '',
     loading: false,
     error: '',
-    items: []
+    items: [],
+    lastPayload: null,
+    lastRequestQuery: '',
+    lastFetchedAt: 0
 };
 
 // Lightweight client-side telemetry for chat session tab loading (elapsed + ETA).
@@ -8115,7 +8118,8 @@ function getWorkflowEpisodesElements() {
         title: document.getElementById('workflowEpisodesTitle'),
         status: document.getElementById('workflowEpisodesStatus'),
         list: document.getElementById('workflowEpisodesList'),
-        closeButton: document.getElementById('closeWorkflowEpisodes')
+        closeButton: document.getElementById('closeWorkflowEpisodes'),
+        copyJsonButton: document.getElementById('copyWorkflowEpisodesJson')
     };
 }
 
@@ -8183,6 +8187,256 @@ function renderWorkflowEpisodesPopup() {
     }).join('');
 }
 
+async function fetchWorkflowEpisodesSnapshot(workflowId, { limit = 60 } = {}) {
+    const cleanWorkflowId = typeof workflowId === 'string' ? workflowId.trim() : '';
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 60, 200));
+    const params = buildWorkflowStatusQuery();
+    params.set('workflow_id', cleanWorkflowId);
+    params.set('limit', String(safeLimit));
+    const requestQuery = params.toString();
+
+    try {
+        const resp = await fetch(
+            `/api/workflows/episodes?${requestQuery}`,
+            { method: 'GET', headers: buildChatFetchHeaders() }
+        );
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        const payload = await resp.json();
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        const totalRaw = Number(payload?.total);
+        const total = Number.isFinite(totalRaw) ? Math.max(0, Math.trunc(totalRaw)) : items.length;
+        return {
+            ok: true,
+            requestQuery,
+            fetchedAt: Date.now(),
+            payload,
+            items,
+            total,
+            hasMore: Boolean(total > items.length),
+            error: ''
+        };
+    } catch (err) {
+        return {
+            ok: false,
+            requestQuery,
+            fetchedAt: Date.now(),
+            payload: {
+                error: 'workflow_episodes_fetch_failed',
+                detail: err instanceof Error ? err.message : String(err || 'unknown_error'),
+                request_query: requestQuery
+            },
+            items: [],
+            total: 0,
+            hasMore: false,
+            error: 'Could not load workflow episodes'
+        };
+    }
+}
+
+function buildWorkflowEpisodesExportPayload() {
+    const namespace = getSessionScopedNamespace();
+    const orgContext = getSessionScopedOrgContext();
+    const userId = getCurrentUserConceptId();
+    const definitionItem = workflowDefinitionsState.items.find(
+        (item) => String(item?.workflow_id || '').trim() === workflowEpisodesState.workflowId
+    ) || null;
+
+    return {
+        schema_version: 1,
+        exported_at: new Date().toISOString(),
+        namespace_context: {
+            namespace: namespace || null,
+            user_id: userId || null,
+            org_id: orgContext?.concept_id || orgContext?.id || null
+        },
+        workflow: {
+            workflow_id: workflowEpisodesState.workflowId || null,
+            workflow_name: workflowEpisodesState.workflowName || null,
+            definition_summary: definitionItem
+        },
+        episodes_state: {
+            loading: Boolean(workflowEpisodesState.loading),
+            error: workflowEpisodesState.error || null,
+            count: Array.isArray(workflowEpisodesState.items) ? workflowEpisodesState.items.length : 0,
+            total: Number.isFinite(Number(workflowEpisodesState.lastPayload?.total))
+                ? Math.max(0, Math.trunc(Number(workflowEpisodesState.lastPayload.total)))
+                : (Array.isArray(workflowEpisodesState.items) ? workflowEpisodesState.items.length : 0),
+            has_more: Boolean(workflowEpisodesState.lastPayload?.has_more),
+            last_fetched_at: workflowEpisodesState.lastFetchedAt
+                ? new Date(workflowEpisodesState.lastFetchedAt).toISOString()
+                : null,
+            request_query: workflowEpisodesState.lastRequestQuery || null
+        },
+        episodes_payload: workflowEpisodesState.lastPayload
+    };
+}
+
+function buildWorkflowDefinitionExportPayload({
+    workflowId,
+    workflowName,
+    definitionSummary,
+    episodesSnapshot
+}) {
+    const namespace = getSessionScopedNamespace();
+    const orgContext = getSessionScopedOrgContext();
+    const userId = getCurrentUserConceptId();
+    const monitorPayload = buildWorkflowMonitorExportPayload();
+
+    return {
+        schema_version: 1,
+        exported_at: new Date().toISOString(),
+        namespace_context: {
+            namespace: namespace || null,
+            user_id: userId || null,
+            org_id: orgContext?.concept_id || orgContext?.id || null
+        },
+        workflow: {
+            workflow_id: workflowId || null,
+            workflow_name: workflowName || null,
+            definition_summary: definitionSummary || null
+        },
+        telemetry: {
+            attempts: Number.isFinite(Number(definitionSummary?.attempts))
+                ? Number(definitionSummary.attempts)
+                : 0,
+            completions: Number.isFinite(Number(definitionSummary?.completions))
+                ? Number(definitionSummary.completions)
+                : 0,
+            completion_rate: Number.isFinite(Number(definitionSummary?.completion_rate))
+                ? Number(definitionSummary.completion_rate)
+                : null,
+            last_episode_at: definitionSummary?.last_episode_at || null,
+            episodes_count: Number.isFinite(Number(definitionSummary?.episodes_count))
+                ? Math.max(0, Math.trunc(Number(definitionSummary.episodes_count)))
+                : null,
+            is_executable: Boolean(definitionSummary?.is_executable),
+            executability_reason: definitionSummary?.executability_reason || null,
+            executability_detail: definitionSummary?.executability_detail || null
+        },
+        episodes_state: {
+            loading: false,
+            error: episodesSnapshot?.error || null,
+            count: Array.isArray(episodesSnapshot?.items) ? episodesSnapshot.items.length : 0,
+            total: Number.isFinite(Number(episodesSnapshot?.total))
+                ? Math.max(0, Math.trunc(Number(episodesSnapshot.total)))
+                : (Array.isArray(episodesSnapshot?.items) ? episodesSnapshot.items.length : 0),
+            has_more: Boolean(episodesSnapshot?.hasMore),
+            last_fetched_at: Number.isFinite(Number(episodesSnapshot?.fetchedAt))
+                ? new Date(Number(episodesSnapshot.fetchedAt)).toISOString()
+                : null,
+            request_query: episodesSnapshot?.requestQuery || null
+        },
+        episodes_payload: episodesSnapshot?.payload || null,
+        monitor_context: {
+            mode: monitorPayload?.monitor_state?.mode || null,
+            show_available: Boolean(monitorPayload?.monitor_state?.show_available),
+            show_designs: Boolean(monitorPayload?.monitor_state?.show_designs),
+            definitions_request_query: monitorPayload?.definitions_snapshot?.request_query || null,
+            available_last_fetched_at: monitorPayload?.monitor_state?.available_last_fetched_at || null
+        },
+        diagnostics: monitorPayload?.diagnostics || null
+    };
+}
+
+async function handleCopyWorkflowEpisodesJson() {
+    const { copyJsonButton } = getWorkflowEpisodesElements();
+    if (!copyJsonButton) return;
+    const originalContent = copyJsonButton.textContent || 'Copy JSON';
+    const payload = buildWorkflowEpisodesExportPayload();
+    const jsonString = JSON.stringify(payload, null, 2);
+
+    const markSuccess = () => {
+        indicateClipboardResult(copyJsonButton, originalContent, true);
+        showToast('Workflow episodes JSON copied', 'success');
+    };
+    const markFailure = (err) => {
+        console.error('[workflowStatus] Failed to copy workflow episodes JSON:', err);
+        indicateClipboardResult(copyJsonButton, originalContent, false);
+        showToast('Failed to copy workflow episodes JSON', 'error');
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        try {
+            await navigator.clipboard.writeText(jsonString);
+            markSuccess();
+            return;
+        } catch (err) {
+            if (copyTextFallback(jsonString)) {
+                markSuccess();
+                return;
+            }
+            markFailure(err);
+            return;
+        }
+    }
+
+    if (copyTextFallback(jsonString)) {
+        markSuccess();
+    } else {
+        markFailure(new Error('Clipboard unsupported'));
+    }
+}
+
+async function handleCopyWorkflowDefinitionJson(workflowId, workflowName) {
+    const cleanWorkflowId = typeof workflowId === 'string' ? workflowId.trim() : '';
+    if (!cleanWorkflowId) return;
+
+    const copyButton = document.querySelector(
+        `.workflow-status-copy-card-json-btn[data-workflow-id="${cssEscape(cleanWorkflowId)}"]`
+    );
+    const originalContent = copyButton?.textContent || 'Copy JSON';
+    const definitionSummary = workflowDefinitionsState.items.find(
+        (item) => String(item?.workflow_id || '').trim() === cleanWorkflowId
+    ) || null;
+    const resolvedWorkflowName = workflowName || formatWorkflowName(cleanWorkflowId);
+    const episodesSnapshot = await fetchWorkflowEpisodesSnapshot(cleanWorkflowId, { limit: 200 });
+
+    const payload = buildWorkflowDefinitionExportPayload({
+        workflowId: cleanWorkflowId,
+        workflowName: resolvedWorkflowName,
+        definitionSummary,
+        episodesSnapshot
+    });
+    const jsonString = JSON.stringify(payload, null, 2);
+
+    const markSuccess = () => {
+        if (copyButton) {
+            indicateClipboardResult(copyButton, originalContent, true);
+        }
+        showToast(`Workflow JSON copied: ${resolvedWorkflowName}`, 'success');
+    };
+    const markFailure = (err) => {
+        console.error('[workflowStatus] Failed to copy workflow JSON:', err);
+        if (copyButton) {
+            indicateClipboardResult(copyButton, originalContent, false);
+        }
+        showToast('Failed to copy workflow JSON', 'error');
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        try {
+            await navigator.clipboard.writeText(jsonString);
+            markSuccess();
+            return;
+        } catch (err) {
+            if (copyTextFallback(jsonString)) {
+                markSuccess();
+                return;
+            }
+            markFailure(err);
+            return;
+        }
+    }
+
+    if (copyTextFallback(jsonString)) {
+        markSuccess();
+    } else {
+        markFailure(new Error('Clipboard unsupported'));
+    }
+}
+
 async function openWorkflowEpisodesPopup(workflowId, workflowName) {
     if (!workflowId) return;
     workflowEpisodesState.workflowId = String(workflowId).trim();
@@ -8190,32 +8444,26 @@ async function openWorkflowEpisodesPopup(workflowId, workflowName) {
     workflowEpisodesState.loading = true;
     workflowEpisodesState.error = '';
     workflowEpisodesState.items = [];
+    workflowEpisodesState.lastPayload = null;
+    workflowEpisodesState.lastRequestQuery = '';
+    workflowEpisodesState.lastFetchedAt = 0;
     setWorkflowEpisodesPopupVisible(true);
     renderWorkflowEpisodesPopup();
 
-    const params = buildWorkflowStatusQuery();
-    params.set('workflow_id', workflowEpisodesState.workflowId);
-    params.set('limit', '60');
-
-    try {
-        const resp = await fetch(
-            `/api/workflows/episodes?${params.toString()}`,
-            { method: 'GET', headers: buildChatFetchHeaders() }
-        );
-        if (!resp.ok) {
-            throw new Error(`HTTP ${resp.status}`);
-        }
-        const payload = await resp.json();
-        workflowEpisodesState.items = Array.isArray(payload?.items) ? payload.items : [];
+    const snapshot = await fetchWorkflowEpisodesSnapshot(workflowEpisodesState.workflowId, { limit: 60 });
+    workflowEpisodesState.lastRequestQuery = snapshot.requestQuery;
+    workflowEpisodesState.lastPayload = snapshot.payload;
+    workflowEpisodesState.items = snapshot.items;
+    workflowEpisodesState.lastFetchedAt = snapshot.fetchedAt;
+    if (snapshot.ok) {
         workflowEpisodesState.error = '';
-    } catch (err) {
+    } else {
         workflowEpisodesState.items = [];
-        workflowEpisodesState.error = 'Could not load workflow episodes';
-        console.warn('[workflowStatus] Episode fetch failed', err);
-    } finally {
-        workflowEpisodesState.loading = false;
-        renderWorkflowEpisodesPopup();
+        workflowEpisodesState.error = snapshot.error;
+        console.warn('[workflowStatus] Episode fetch failed', snapshot.payload?.detail || 'unknown_error');
     }
+    workflowEpisodesState.loading = false;
+    renderWorkflowEpisodesPopup();
 }
 
 function updateWorkflowStatusActionButtons() {
@@ -8242,6 +8490,14 @@ function formatWorkflowName(workflowId) {
 function formatWorkflowStatusLabel(status) {
     if (!status) return 'unknown';
     return String(status).replace(/_/g, ' ');
+}
+
+function cssEscape(value) {
+    const raw = String(value ?? '');
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+        return CSS.escape(raw);
+    }
+    return raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 function formatWorkflowDefinitionStatus(item) {
@@ -8614,11 +8870,17 @@ function renderWorkflowDefinitionsList(items) {
         const completionRate = Number.isFinite(completionRateRaw)
             ? `${Math.round(Math.max(0, Math.min(1, completionRateRaw)) * 100)}%`
             : '—';
-        const usageMeta = `Attempts: ${attempts} · Completions: ${completions} · Completion: ${completionRate}`;
+        const episodesCountRaw = Number(item?.episodes_count);
+        const episodesCount = Number.isFinite(episodesCountRaw) && episodesCountRaw >= 0
+            ? Math.max(0, Math.trunc(episodesCountRaw))
+            : null;
+        const usageMeta = `Attempts: ${attempts} · Completions: ${completions} · Episodes: ${episodesCount === null ? '—' : episodesCount} · Completion: ${completionRate}`;
         const executionMeta = executableSummary
             ? `<div class="workflow-status-definition-meta">Status detail: ${escapeHtml(executableSummary)}</div>`
             : '';
-        const episodesButton = `<button type="button" class="btn-mini workflow-status-episodes-btn" data-workflow-id="${escapeHtml(workflowIdRaw)}" data-workflow-name="${escapeHtml(workflowNameText)}">Episodes</button>`;
+        const episodesDisabled = episodesCount === 0;
+        const episodesButton = `<button type="button" class="btn-mini workflow-status-episodes-btn" data-workflow-id="${escapeHtml(workflowIdRaw)}" data-workflow-name="${escapeHtml(workflowNameText)}"${episodesDisabled ? ' disabled' : ''} title="${escapeHtml(episodesDisabled ? 'No episodes in current scope' : 'Open workflow episodes')}">Episodes</button>`;
+        const copyCardJsonButton = `<button type="button" class="btn-mini workflow-status-copy-card-json-btn" data-workflow-id="${escapeHtml(workflowIdRaw)}" data-workflow-name="${escapeHtml(workflowNameText)}" title="Copy workflow summary and episodes JSON">Copy JSON</button>`;
         return `
             <div class="workflow-status-item status-${statusClass}">
               <div class="workflow-status-item-header">
@@ -8631,7 +8893,7 @@ function renderWorkflowDefinitionsList(items) {
               </div>
               <div class="workflow-status-definition-meta">${escapeHtml(usageMeta)}</div>
               ${executionMeta}
-              <div class="workflow-status-definition-actions">${episodesButton}</div>
+              <div class="workflow-status-definition-actions">${copyCardJsonButton}${episodesButton}</div>
             </div>
         `;
     }).join('');
@@ -8653,10 +8915,23 @@ function bindWorkflowStatusConceptLinks() {
         const episodesButton = target.closest('.workflow-status-episodes-btn');
         if (episodesButton) {
             event.preventDefault();
+            if (episodesButton.hasAttribute('disabled')) {
+                return;
+            }
             const workflowId = episodesButton.dataset.workflowId;
             const workflowName = episodesButton.dataset.workflowName || '';
             if (workflowId) {
                 void openWorkflowEpisodesPopup(workflowId, workflowName);
+            }
+            return;
+        }
+        const copyJsonButton = target.closest('.workflow-status-copy-card-json-btn');
+        if (copyJsonButton) {
+            event.preventDefault();
+            const workflowId = copyJsonButton.dataset.workflowId;
+            const workflowName = copyJsonButton.dataset.workflowName || '';
+            if (workflowId) {
+                void handleCopyWorkflowDefinitionJson(workflowId, workflowName);
             }
             return;
         }
@@ -8747,7 +9022,7 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
         renderWorkflowStatusBody();
     }
 
-    const params = new URLSearchParams();
+    const params = buildWorkflowStatusQuery();
     params.set('limit', '200');
     workflowDefinitionsState.lastRequestQuery = params.toString();
 
@@ -8845,7 +9120,10 @@ function startWorkflowStatusStream() {
 function initializeWorkflowStatusPanel() {
     const { panel, refreshButton, toggleAvailableButton, showDesignsCheckbox, copyJsonButton } = getWorkflowStatusElements();
     if (!panel) return;
-    const { closeButton: closeEpisodesButton } = getWorkflowEpisodesElements();
+    const {
+        closeButton: closeEpisodesButton,
+        copyJsonButton: copyEpisodesJsonButton
+    } = getWorkflowEpisodesElements();
 
     updateWorkflowStatusActionButtons();
 
@@ -8867,6 +9145,13 @@ function initializeWorkflowStatusPanel() {
             setWorkflowEpisodesPopupVisible(false);
         });
         closeEpisodesButton.dataset.bound = 'true';
+    }
+
+    if (copyEpisodesJsonButton && copyEpisodesJsonButton.dataset.bound !== 'true') {
+        copyEpisodesJsonButton.addEventListener('click', () => {
+            void handleCopyWorkflowEpisodesJson();
+        });
+        copyEpisodesJsonButton.dataset.bound = 'true';
     }
 
     if (refreshButton) {

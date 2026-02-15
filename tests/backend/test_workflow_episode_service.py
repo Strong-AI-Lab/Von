@@ -9,6 +9,7 @@ from src.backend.services import concept_service
 from src.backend.services.workflow_episode_service import (
     build_workflow_episode_stable_key,
     finalise_workflow_use_episode,
+    get_workflow_episode_counts_for_workflows,
     get_workflow_usage_aggregates_for_workflows,
     list_workflow_use_episodes,
     start_workflow_use_episode,
@@ -152,3 +153,61 @@ def test_workflow_episode_aggregates_sync_to_workflow_concept():
     assert usage.get("attempts") == 2
     assert usage.get("completions") == 1
     assert usage.get("completion_rate") == pytest.approx(0.5)
+
+
+def test_list_workflow_use_episodes_matches_equivalent_namespace_forms():
+    workflow_id = "#V#workflow_episode_namespace_equivalence"
+    stable_key = build_workflow_episode_stable_key(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        turn_id="turn-ns",
+        session_id="session-ns",
+        stage="tool_calling",
+    )
+
+    created = start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=stable_key,
+        namespace="#V#michael_witbrock/#V#university_of_auckland_strong_ai_lab",
+        turn_id="turn-ns",
+        session_id="session-ns",
+    )
+    assert created is not None
+
+    # Query using the modern user@org form should still match the stored slash form.
+    episodes = list_workflow_use_episodes(
+        workflow_id=workflow_id,
+        namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+        limit=20,
+    )
+    assert len(episodes) == 1
+    assert episodes[0]["episode_id"] == created["episode_id"]
+
+
+def test_get_workflow_episode_counts_for_workflows_matches_namespace_equivalents():
+    workflow_id = "#V#workflow_episode_counts_namespace_equivalence"
+    stable_key = build_workflow_episode_stable_key(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        turn_id="turn-counts",
+        session_id="session-counts",
+        stage="tool_calling",
+    )
+
+    created = start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=stable_key,
+        namespace="#V#michael_witbrock/#V#university_of_auckland_strong_ai_lab",
+        turn_id="turn-counts",
+        session_id="session-counts",
+    )
+    assert created is not None
+
+    counts = get_workflow_episode_counts_for_workflows(
+        [workflow_id, "#V#missing_workflow_id"],
+        namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+    )
+    assert counts[workflow_id] == 1
+    assert counts["#V#missing_workflow_id"] == 0

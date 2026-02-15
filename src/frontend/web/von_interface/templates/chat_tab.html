@@ -205,7 +205,10 @@
   <div id="workflowEpisodesPopup" class="llm-popup hidden workflow-episodes-popup" aria-hidden="true">
     <div class="llm-popup-header">
       <span id="workflowEpisodesTitle">Workflow episodes</span>
-      <button id="closeWorkflowEpisodes" class="btn-mini" title="Close">✕</button>
+      <div class="workflow-episodes-header-actions">
+        <button id="copyWorkflowEpisodesJson" class="btn-mini" title="Copy episodes JSON">Copy JSON</button>
+        <button id="closeWorkflowEpisodes" class="btn-mini" title="Close">✕</button>
+      </div>
     </div>
     <div class="llm-popup-body">
       <div id="workflowEpisodesStatus" class="invite-status" aria-live="polite"></div>

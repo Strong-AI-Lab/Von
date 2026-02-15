@@ -43,6 +43,89 @@ def _safe_str(value: Any) -> str | None:
     return cleaned or None
 
 
+def _namespace_equivalents(namespace: str | None) -> list[str]:
+    """Return deterministic namespace variants for cross-format compatibility.
+
+    Workflow episodes have historically used both ``user/org`` and
+    ``#V#user@org`` forms. The monitor should treat these as equivalent when
+    querying episodes, while still remaining namespace-scoped.
+    """
+    clean_namespace = _safe_str(namespace)
+    if clean_namespace is None:
+        return []
+
+    values: list[str] = [clean_namespace]
+
+    def _add(candidate: str | None) -> None:
+        candidate_clean = _safe_str(candidate)
+        if candidate_clean and candidate_clean not in values:
+            values.append(candidate_clean)
+
+    if "@" in clean_namespace:
+        user_raw, org_raw = clean_namespace.split("@", 1)
+        user_part = user_raw.strip()
+        org_part = org_raw.strip()
+        if user_part and org_part:
+            _add(f"{user_part}/{org_part}")
+            if user_part.startswith("#V#") and org_part and not org_part.startswith("#V#"):
+                _add(f"{user_part}/#V#{org_part}")
+    if "/" in clean_namespace:
+        user_raw, org_raw = clean_namespace.split("/", 1)
+        user_part = user_raw.strip()
+        org_part = org_raw.strip()
+        if user_part and org_part:
+            _add(f"{user_part}@{org_part}")
+            if user_part.startswith("#V#") and org_part.startswith("#V#"):
+                _add(f"{user_part}@{org_part[3:]}")
+            if user_part.startswith("#V#") and org_part and not org_part.startswith("#V#"):
+                _add(f"{user_part}@{org_part}")
+
+    return values
+
+
+def _build_episode_query(
+    *,
+    workflow_id: str | None = None,
+    workflow_ids: Iterable[str] | None = None,
+    namespace: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a normalised Mongo query for workflow episode filtering."""
+
+    query: dict[str, Any] = {}
+
+    cleaned_ids = [
+        item.strip()
+        for item in (workflow_ids or [])
+        if isinstance(item, str) and item.strip()
+    ]
+    if cleaned_ids:
+        query["workflow_id"] = {"$in": sorted(set(cleaned_ids))}
+    else:
+        clean_workflow_id = _safe_str(workflow_id)
+        if clean_workflow_id:
+            query["workflow_id"] = clean_workflow_id
+
+    clean_namespace = _safe_str(namespace)
+    if clean_namespace:
+        namespace_values = _namespace_equivalents(clean_namespace)
+        if len(namespace_values) <= 1:
+            query["namespace"] = clean_namespace
+        else:
+            query["namespace"] = {"$in": namespace_values}
+
+    clean_session_id = _safe_str(session_id)
+    if clean_session_id:
+        query["session_id"] = clean_session_id
+
+    clean_turn_id = _safe_str(turn_id)
+    if clean_turn_id:
+        query["turn_id"] = clean_turn_id
+
+    return query
+
+
 def _iso_or_none(value: Any) -> str | None:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -439,22 +522,79 @@ def list_workflow_use_episodes(
         return []
 
     safe_limit = max(1, min(int(limit), 200))
-    clean_workflow_id = _safe_str(workflow_id)
-    clean_namespace = _safe_str(namespace)
-    clean_session_id = _safe_str(session_id)
-    clean_turn_id = _safe_str(turn_id)
-    query: dict[str, Any] = {}
-    if clean_workflow_id:
-        query["workflow_id"] = clean_workflow_id
-    if clean_namespace:
-        query["namespace"] = clean_namespace
-    if clean_session_id:
-        query["session_id"] = clean_session_id
-    if clean_turn_id:
-        query["turn_id"] = clean_turn_id
+    query = _build_episode_query(
+        workflow_id=workflow_id,
+        namespace=namespace,
+        session_id=session_id,
+        turn_id=turn_id,
+    )
 
     cursor = coll.find(query).sort("attempt_started_at", DESCENDING).limit(safe_limit)
     return [_serialise_episode(doc) for doc in cursor]
+
+
+def count_workflow_use_episodes(
+    *,
+    workflow_id: str | None = None,
+    namespace: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+) -> int:
+    """Return the number of workflow-use episodes matching supplied filters."""
+
+    coll = _get_collection()
+    if coll is None:
+        return 0
+
+    query = _build_episode_query(
+        workflow_id=workflow_id,
+        namespace=namespace,
+        session_id=session_id,
+        turn_id=turn_id,
+    )
+    return int(coll.count_documents(query))
+
+
+def get_workflow_episode_counts_for_workflows(
+    workflow_ids: Iterable[str],
+    *,
+    namespace: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+) -> dict[str, int]:
+    """Return episode counts keyed by workflow ID for monitor summaries."""
+
+    ids = [
+        item.strip()
+        for item in workflow_ids
+        if isinstance(item, str) and item.strip()
+    ]
+    if not ids:
+        return {}
+
+    unique_ids = sorted(set(ids))
+    counts: dict[str, int] = {workflow_id: 0 for workflow_id in unique_ids}
+
+    coll = _get_collection()
+    if coll is None:
+        return counts
+
+    query = _build_episode_query(
+        workflow_ids=unique_ids,
+        namespace=namespace,
+        session_id=session_id,
+        turn_id=turn_id,
+    )
+    pipeline = [
+        {"$match": query},
+        {"$group": {"_id": "$workflow_id", "count": {"$sum": 1}}},
+    ]
+    for row in coll.aggregate(pipeline):
+        workflow_id = _safe_str(row.get("_id"))
+        if workflow_id is None or workflow_id not in counts:
+            continue
+        counts[workflow_id] = int(row.get("count", 0))
+    return counts
 
 
 def get_workflow_usage_aggregates_for_workflows(

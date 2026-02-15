@@ -9,6 +9,8 @@ from flask import Blueprint, jsonify, request
 from ...db.repositories.concepts_repository import ConceptsRepository
 from ...services.text_value_service import get_texts_for_concept
 from ...services.workflow_episode_service import (
+    count_workflow_use_episodes,
+    get_workflow_episode_counts_for_workflows,
     get_workflow_usage_aggregates_for_workflows,
     list_workflow_use_episodes,
 )
@@ -81,6 +83,9 @@ def api_list_workflow_definitions():
     except Exception:
         limit = 200
     limit = max(1, min(limit, 500))
+    namespace = request.args.get("namespace")
+    session_id = request.args.get("session_id")
+    turn_id = request.args.get("turn_id")
 
     try:
         from ...workflows.durable.registry_factory import (
@@ -99,6 +104,12 @@ def api_list_workflow_definitions():
         workflow_ids = sorted(list(registry.all_workflow_ids()))
         selected_ids = workflow_ids[:limit]
         usage_aggregate_map = get_workflow_usage_aggregates_for_workflows(selected_ids)
+        episode_count_map = get_workflow_episode_counts_for_workflows(
+            selected_ids,
+            namespace=namespace or None,
+            session_id=session_id or None,
+            turn_id=turn_id or None,
+        )
 
         items: List[Dict[str, Any]] = []
         for workflow_id in selected_ids:
@@ -177,6 +188,7 @@ def api_list_workflow_definitions():
                         if usage.get("last_episode_at") is not None
                         else None
                     ),
+                    "episodes_count": int(episode_count_map.get(workflow_id, 0)),
                     "is_executable": bool(is_executable),
                     "executability_reason": executability_reason,
                     "executability_detail": executability_detail,
@@ -188,6 +200,11 @@ def api_list_workflow_definitions():
                 "items": items,
                 "count": len(items),
                 "total": len(workflow_ids),
+                "episodes_scope": {
+                    "namespace": namespace or None,
+                    "session_id": session_id or None,
+                    "turn_id": turn_id or None,
+                },
                 "parity_inventory": inventory_snapshot,
             }
         )
@@ -245,10 +262,18 @@ def api_list_workflow_use_episodes():
         turn_id=turn_id or None,
         limit=limit,
     )
+    total = count_workflow_use_episodes(
+        workflow_id=workflow_id or None,
+        namespace=namespace or None,
+        session_id=session_id or None,
+        turn_id=turn_id or None,
+    )
     return jsonify(
         {
             "items": items,
             "count": len(items),
+            "total": int(total),
+            "has_more": bool(total > len(items)),
             "filters": {
                 "workflow_id": workflow_id or None,
                 "namespace": namespace or None,

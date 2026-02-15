@@ -290,6 +290,50 @@ describe('workflow monitor concept links', () => {
         expect(document.body.textContent).toContain('salient predicate governance workflow');
         expect(document.body.textContent).toContain('chat assistant workflow');
     });
+
+    test('shows episodes count and disables episodes button when count is zero', () => {
+        __testOnly_setWorkflowShowDesigns(true);
+        __testOnly_renderWorkflowDefinitionsBody([
+            {
+                workflow_id: '#V#salient_predicate_governance_workflow',
+                description: 'Salient workflow.',
+                initial_state: '#V#salience_step_identify_type',
+                source: 'vontology',
+                is_executable: false,
+                executability_reason: 'workflow_step_partially_vacuous',
+                episodes_count: 0
+            }
+        ]);
+
+        expect(document.body.textContent).toContain('Episodes: 0');
+        const episodesButton = document.querySelector('.workflow-status-episodes-btn');
+        expect(episodesButton).toBeTruthy();
+        expect(episodesButton.disabled).toBe(true);
+    });
+
+    test('enables episodes button and renders per-card copy button when episodes exist', () => {
+        __testOnly_setWorkflowShowDesigns(true);
+        __testOnly_renderWorkflowDefinitionsBody([
+            {
+                workflow_id: '#V#salient_predicate_governance_workflow',
+                description: 'Salient workflow.',
+                initial_state: '#V#salience_step_identify_type',
+                source: 'vontology',
+                is_executable: false,
+                executability_reason: 'workflow_step_partially_vacuous',
+                episodes_count: 5
+            }
+        ]);
+
+        expect(document.body.textContent).toContain('Episodes: 5');
+        const episodesButton = document.querySelector('.workflow-status-episodes-btn');
+        expect(episodesButton).toBeTruthy();
+        expect(episodesButton.disabled).toBe(false);
+
+        const copyButton = document.querySelector('.workflow-status-copy-card-json-btn');
+        expect(copyButton).toBeTruthy();
+        expect(copyButton.textContent).toContain('Copy JSON');
+    });
 });
 
 describe('thinking liveness presentation', () => {

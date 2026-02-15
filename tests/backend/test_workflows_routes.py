@@ -286,6 +286,14 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
             },
         },
     )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_episode_counts_for_workflows",
+        lambda workflow_ids, namespace=None, session_id=None, turn_id=None: {
+            "#V#alpha_workflow": 3,
+            "#V#beta_workflow": 0,
+        },
+    )
     classification_map = {
         "#V#alpha_workflow": (
             True,
@@ -320,6 +328,11 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
 
     assert payload["count"] == 2
     assert payload["total"] == 2
+    assert payload["episodes_scope"] == {
+        "namespace": None,
+        "session_id": None,
+        "turn_id": None,
+    }
     assert payload["parity_inventory"]["counts"]["registry"] == 2
     assert "#V#salient_predicate_governance_workflow" in payload["parity_inventory"]["vontology_only_workflow_ids"]
 
@@ -332,6 +345,7 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert items[0]["completions"] == 6
     assert items[0]["completion_rate"] == pytest.approx(0.75)
     assert items[0]["last_episode_at"] == "2026-02-13T10:22:00+00:00"
+    assert items[0]["episodes_count"] == 3
     assert items[0]["is_executable"] is True
     assert items[0]["executability_reason"] == "executable_now"
     assert items[0]["executability_detail"] is None
@@ -345,6 +359,7 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert items[1]["completions"] == 1
     assert items[1]["completion_rate"] == pytest.approx(0.5)
     assert items[1]["last_episode_at"] == "2026-02-13T11:00:00+00:00"
+    assert items[1]["episodes_count"] == 0
     assert items[1]["is_executable"] is False
     assert items[1]["executability_reason"] == "workflow_step_partially_vacuous"
     assert (
@@ -388,10 +403,22 @@ def test_workflow_episodes_list_endpoint(monkeypatch, app_client):
         assert kwargs["limit"] == 25
         return expected_items
 
+    def _fake_count_workflow_use_episodes(**kwargs):
+        assert kwargs["workflow_id"] == "#V#alpha_workflow"
+        assert kwargs["namespace"] == "#V#user/#V#org"
+        assert kwargs["session_id"] == "session-1"
+        assert kwargs["turn_id"] == "turn-123"
+        return 3
+
     monkeypatch.setattr(
         workflows_routes,
         "list_workflow_use_episodes",
         _fake_list_workflow_use_episodes,
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "count_workflow_use_episodes",
+        _fake_count_workflow_use_episodes,
     )
 
     resp = app_client.get(
@@ -404,6 +431,8 @@ def test_workflow_episodes_list_endpoint(monkeypatch, app_client):
     assert resp.status_code == 200
     payload = resp.get_json()
     assert payload["count"] == 2
+    assert payload["total"] == 3
+    assert payload["has_more"] is True
     assert payload["items"] == expected_items
     assert payload["filters"]["workflow_id"] == "#V#alpha_workflow"
     assert payload["filters"]["namespace"] == "#V#user/#V#org"
