@@ -16,7 +16,8 @@ export default [
             // Relaxed rules for existing codebase
             "no-unused-vars": ["warn", {
                 "argsIgnorePattern": "^_",
-                "varsIgnorePattern": "^_"
+                "varsIgnorePattern": "^_",
+                "caughtErrorsIgnorePattern": "^_"
             }],
             "no-undef": "error",
             "no-constant-condition": "warn",
@@ -36,7 +37,11 @@ export default [
     },
     {
         // Test files
-        files: ["tests/**/*.js"],
+        files: [
+            "tests/**/*.js",
+            "src/**/*.test.js",
+            "src/**/test/**/*.js",
+        ],
         languageOptions: {
             globals: {
                 ...globals.node,

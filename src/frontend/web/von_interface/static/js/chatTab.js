@@ -118,7 +118,9 @@ const workflowDefinitionsState = {
     loading: false,
     error: '',
     items: [],
-    lastFetchedAt: 0
+    lastFetchedAt: 0,
+    lastPayload: null,
+    lastRequestQuery: ''
 };
 const workflowEpisodesState = {
     open: false,
@@ -354,7 +356,7 @@ function setLoadingIndicatorDetailHtml(html) {
 /**
  * Legacy function - redirects to HTML version.
  */
-function setLoadingIndicatorDetailText(text) {
+function _setLoadingIndicatorDetailText(text) {
     // For plain text, escape and wrap
     const detailEl = getLoadingIndicatorDetailEl();
     if (!detailEl) {
@@ -830,7 +832,7 @@ function renderThinkingCardBodyHTML(request) {
  * Legacy function - redirects to renderToolHistoryHTML.
  * Returns empty string for backwards compatibility with tooltip usage.
  */
-function formatToolUseHistoryTooltip(request) {
+function formatToolUseHistoryTooltip(_request) {
     // For backwards compatibility, this can still return plain text for tooltips
     // But the primary display now uses renderToolHistoryHTML
     return '';
@@ -1072,10 +1074,10 @@ function stripMarkdownForSpeech(text) {
     value = value.replace(/`([^`]+)`/g, '$1');
 
     // Replace markdown links [text](url) -> text.
-    value = value.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+    value = value.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
 
     // Remove images ![alt](url) -> alt.
-    value = value.replace(/!\[([^\]]*)\]\([^\)]+\)/g, '$1');
+    value = value.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1');
 
     // Remove headings/bullets/quotes markers.
     value = value
@@ -2431,7 +2433,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
     hydrateChatConceptCartouches(container);
 }
 
-function setVonMessageRenderMode(messageTextEl, mode, originalText, debugData) {
+function setVonMessageRenderMode(messageTextEl, mode, originalText, _debugData) {
     if (!messageTextEl) {
         return;
     }
@@ -3742,7 +3744,7 @@ function formatVoiceOptionLabel(voice) {
     return lang ? `${name} (${lang})` : name;
 }
 
-function populateTtsVoiceSelect(selectEl, selectedVoiceUri) {
+function _populateTtsVoiceSelect(selectEl, selectedVoiceUri) {
     if (!selectEl) {
         return;
     }
@@ -6579,7 +6581,7 @@ async function updateHistoryLength() {
 
                             const currentCount = transcriptTurns.length;
                             if (titleEl) {
-                                const conversationsText2 = (chats === null) ? '— conversations' : `${chats} conversations`;
+                                const conversationsText2 = (conversations === null) ? '— conversations' : `${conversations} conversations`;
                                 const totalText2 = (totalMessages === null) ? '— total' : `${totalMessages} total`;
                                 titleEl.textContent = `Conversation history — ${conversationsText2} • ${totalText2} • this ${currentCount}`;
                             }
@@ -6608,31 +6610,31 @@ async function updateHistoryLength() {
                                 const isCompleted = s?.is_completed === true;
                                 const isShared = Boolean(s?.shared_with_me || s?.shared_from_user_id || s?.invite_id);
                                 const rowClass = `history-session-row${isActive ? ' is-active' : ''}${isCompleted ? ' is-completed' : ''}${isShared ? ' is-shared' : ''}`;
-                                const idSnippet = nameRaw ? `  id ${escapeHtml(sidShort)}` : '';
+                                const idSnippet = nameRaw ? ` · id ${escapeHtml(sidShort)}` : '';
                                 const completionSnippet = isCompleted
-                                    ? `  ${escapeHtml(formatCompletedLabel(s?.completed_at))}`
+                                    ? ` · ${escapeHtml(formatCompletedLabel(s?.completed_at))}`
                                     : '';
 
                                 return [
                                     `<li class="${rowClass}" role="button" tabindex="0" data-session-id="${sessionAttr}" data-session-name="${nameAttr}">`,
                                     '<div class="history-session-content">',
-                                    `<strong class="history-session-id" title="${escapeHtml(nameTitle)}">${escapeHtml(displayName)}<\/strong>`,
-                                    `<span class="history-session-meta">${count} msgs  last ${escapeHtml(lastAtShort)}${completionSnippet}${idSnippet}${nsShort ? `  ns ${escapeHtml(nsShort)}` : ''}<\/span>`,
-                                    `<span class="history-session-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}<\/span>`,
-                                    '<\/div>',
-                                    '<\/li>'
+                                    `<strong class="history-session-id" title="${escapeHtml(nameTitle)}">${escapeHtml(displayName)}</strong>`,
+                                    `<span class="history-session-meta">${count} msgs · last ${escapeHtml(lastAtShort)}${completionSnippet}${idSnippet}${nsShort ? ` · ns ${escapeHtml(nsShort)}` : ''}</span>`,
+                                    `<span class="history-session-preview" title="${escapeHtml(preview)}">${escapeHtml(preview)}</span>`,
+                                    '</div>',
+                                    '</li>'
                                 ].join('');
                             });
 
                             const summaryLine = `Showing ${sessions.length} most recent sessions (sorted by last message time)`;
 
                             body.innerHTML = [
-                                `<p class="history-session-summary">${escapeHtml(summaryLine)}<\/p>`,
+                                `<p class="history-session-summary">${escapeHtml(summaryLine)}</p>`,
                                 '<div class="history-session-scroll">',
                                 '<ul class="history-session-list">',
                                 ...rows,
-                                '<\/ul>',
-                                '<\/div>'
+                                '</ul>',
+                                '</div>'
                             ].join('');
 
                             const switchToSession = async (sessionId) => {
@@ -8100,7 +8102,8 @@ function getWorkflowStatusElements() {
         panel: document.getElementById('workflowStatusPanel'),
         body: document.getElementById('workflowStatusBody'),
         refreshButton: document.getElementById('workflowStatusRefresh'),
-        toggleAvailableButton: document.getElementById('workflowStatusToggleAvailable')
+        toggleAvailableButton: document.getElementById('workflowStatusToggleAvailable'),
+        copyJsonButton: document.getElementById('workflowStatusCopyJson')
     };
 }
 
@@ -8260,6 +8263,9 @@ function formatWorkflowDefinitionStatus(item) {
     if (reason === 'graph_incomplete') {
         return 'partially available';
     }
+    if (reason === 'non_executable_design_artifact') {
+        return 'non-executable design artifact';
+    }
     return reason.replace(/_/g, ' ');
 }
 
@@ -8348,6 +8354,110 @@ function buildWorkflowStatusQuery({ includeStatusFilter } = {}) {
         params.set('status', Array.from(WORKFLOW_STATUS_ACTIVE).join(','));
     }
     return params;
+}
+
+function buildWorkflowMonitorExportPayload() {
+    const namespace = getSessionScopedNamespace();
+    const orgContext = getSessionScopedOrgContext();
+    const userId = getCurrentUserConceptId();
+    const definitionsPayload = (
+        workflowDefinitionsState.lastPayload && typeof workflowDefinitionsState.lastPayload === 'object'
+    ) ? workflowDefinitionsState.lastPayload : null;
+    const parityInventory = (
+        definitionsPayload && typeof definitionsPayload.parity_inventory === 'object'
+    ) ? definitionsPayload.parity_inventory : null;
+    const renderedWorkflowIds = workflowDefinitionsState.items
+        .map((item) => (typeof item?.workflow_id === 'string' ? item.workflow_id.trim() : ''))
+        .filter(Boolean);
+    const activeItems = Array.from(workflowStatusStreamState.items.values());
+
+    return {
+        schema_version: 1,
+        exported_at: new Date().toISOString(),
+        namespace_context: {
+            namespace: namespace || null,
+            user_id: userId || null,
+            org_id: orgContext?.concept_id || orgContext?.id || null
+        },
+        monitor_state: {
+            mode: workflowDefinitionsState.visible ? 'available_workflows' : 'active_instances',
+            show_available: Boolean(workflowDefinitionsState.visible),
+            loading_available: Boolean(workflowDefinitionsState.loading),
+            available_error: workflowDefinitionsState.error || null,
+            available_last_fetched_at: workflowDefinitionsState.lastFetchedAt
+                ? new Date(workflowDefinitionsState.lastFetchedAt).toISOString()
+                : null
+        },
+        definitions_snapshot: {
+            request_query: workflowDefinitionsState.lastRequestQuery || null,
+            rendered_count: renderedWorkflowIds.length,
+            rendered_workflow_ids: renderedWorkflowIds,
+            contains_salient_predicate_governance_workflow: renderedWorkflowIds.includes('#V#salient_predicate_governance_workflow'),
+            payload: definitionsPayload
+        },
+        active_instances_snapshot: {
+            count: activeItems.length,
+            items: activeItems
+        },
+        diagnostics: {
+            parity_counts: parityInventory?.counts || null,
+            parity_reason_codes: Array.isArray(parityInventory?.diagnostics?.reason_codes)
+                ? parityInventory.diagnostics.reason_codes
+                : [],
+            vontology_only_workflow_ids: Array.isArray(parityInventory?.vontology_only_workflow_ids)
+                ? parityInventory.vontology_only_workflow_ids
+                : [],
+            graph_warnings_by_workflow_id: (
+                parityInventory?.representation &&
+                typeof parityInventory.representation === 'object' &&
+                typeof parityInventory.representation.graph_warnings_by_workflow_id === 'object'
+            )
+                ? parityInventory.representation.graph_warnings_by_workflow_id
+                : {}
+        }
+    };
+}
+
+async function handleCopyWorkflowMonitorJson() {
+    const { copyJsonButton } = getWorkflowStatusElements();
+    if (!copyJsonButton) return;
+    const originalContent = copyJsonButton.textContent || 'Copy JSON';
+
+    if (!workflowDefinitionsState.loading) {
+        await refreshAvailableWorkflowDefinitions({ silent: true });
+    }
+
+    const payload = buildWorkflowMonitorExportPayload();
+    const jsonString = JSON.stringify(payload, null, 2);
+
+    const markSuccess = () => {
+        indicateClipboardResult(copyJsonButton, originalContent, true);
+    };
+    const markFailure = (err) => {
+        console.error('[workflowStatus] Failed to copy monitor JSON:', err);
+        indicateClipboardResult(copyJsonButton, originalContent, false);
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        try {
+            await navigator.clipboard.writeText(jsonString);
+            markSuccess();
+            return;
+        } catch (err) {
+            if (copyTextFallback(jsonString)) {
+                markSuccess();
+                return;
+            }
+            markFailure(err);
+            return;
+        }
+    }
+
+    if (copyTextFallback(jsonString)) {
+        markSuccess();
+    } else {
+        markFailure(new Error('Clipboard unsupported'));
+    }
 }
 
 function renderWorkflowStatusList(items) {
@@ -8613,6 +8723,7 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
 
     const params = new URLSearchParams();
     params.set('limit', '200');
+    workflowDefinitionsState.lastRequestQuery = params.toString();
 
     try {
         const resp = await fetch(
@@ -8623,11 +8734,17 @@ async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
             throw new Error(`HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        workflowDefinitionsState.lastPayload = (data && typeof data === 'object') ? data : null;
         workflowDefinitionsState.items = Array.isArray(data?.items) ? data.items : [];
         workflowDefinitionsState.lastFetchedAt = Date.now();
         workflowDefinitionsState.error = '';
     } catch (err) {
         workflowDefinitionsState.error = 'Could not load available workflows';
+        workflowDefinitionsState.lastPayload = {
+            error: 'workflow_definitions_fetch_failed',
+            detail: err instanceof Error ? err.message : String(err || 'unknown_error'),
+            request_query: workflowDefinitionsState.lastRequestQuery || null
+        };
         if (!silent) {
             console.warn('[workflowStatus] Available workflow fetch failed', err);
         }
@@ -8700,7 +8817,7 @@ function startWorkflowStatusStream() {
 }
 
 function initializeWorkflowStatusPanel() {
-    const { panel, refreshButton, toggleAvailableButton } = getWorkflowStatusElements();
+    const { panel, refreshButton, toggleAvailableButton, copyJsonButton } = getWorkflowStatusElements();
     if (!panel) return;
     const { closeButton: closeEpisodesButton } = getWorkflowEpisodesElements();
 
@@ -8721,6 +8838,16 @@ function initializeWorkflowStatusPanel() {
             }
             void refreshWorkflowStatusSnapshot();
         });
+    }
+
+    if (copyJsonButton) {
+        copyJsonButton.classList.add('workflow-status-copy-json-btn');
+        if (copyJsonButton.dataset.bound !== 'true') {
+            copyJsonButton.dataset.bound = 'true';
+            copyJsonButton.addEventListener('click', () => {
+                void handleCopyWorkflowMonitorJson();
+            });
+        }
     }
 
     if (toggleAvailableButton) {
@@ -8747,7 +8874,7 @@ function startIncomingInvitePolling() {
     }, INCOMING_INVITE_POLL_INTERVAL_MS);
 }
 
-async function handleOrgSwitchForChatTab(detail) {
+async function handleOrgSwitchForChatTab(_detail) {
     const container = getChatSessionTabsContainer();
     sessionTabsCache = [];
     lastRenderedSessionCount = 0;
@@ -9323,7 +9450,7 @@ function restorePromptEditingState(request) {
             const end = Number.isInteger(request.selectionEnd) ? request.selectionEnd : start;
             promptInput.setSelectionRange(Math.min(start, valueLength), Math.min(end, valueLength));
         }
-    } catch (err) {
+    } catch (_err) {
         // Selection range is best-effort; some environments may not support it.
     }
 
@@ -9475,8 +9602,6 @@ function ensureAbortButtonBound() {
 
 async function handleSendPrompt() {
     const promptInput = document.getElementById('promptInput');
-    const scrollableField = document.getElementById('scrollableField');
-    const sendButton = document.getElementById('sendButton');
 
     if (activeChatRequest) {
         return;
@@ -10683,7 +10808,7 @@ async function showLlmDebugPopup(turnId, options = {}) {
     // Display messages
     try {
         messagesPre.textContent = JSON.stringify(debugData.messages || [], null, 2);
-    } catch (e) {
+    } catch (_e) {
         messagesPre.textContent = 'Error formatting messages';
     }
 
@@ -10701,7 +10826,7 @@ async function showLlmDebugPopup(turnId, options = {}) {
         toolsSection.classList.remove('hidden');
         try {
             toolsPre.textContent = JSON.stringify(debugData.tool_invocations, null, 2);
-        } catch (e) {
+        } catch (_e) {
             toolsPre.textContent = 'Error formatting tool invocations';
         }
     } else {
@@ -10713,7 +10838,7 @@ async function showLlmDebugPopup(turnId, options = {}) {
         auxSection.classList.remove('hidden');
         try {
             auxPre.textContent = JSON.stringify(debugData.aux_llm_calls, null, 2);
-        } catch (e) {
+        } catch (_e) {
             auxPre.textContent = 'Error formatting auxiliary LLM calls';
         }
     } else {
@@ -10727,7 +10852,7 @@ async function showLlmDebugPopup(turnId, options = {}) {
             workflowDiscoverySection.classList.remove('hidden');
             try {
                 workflowDiscoveryPre.textContent = JSON.stringify(workflowDiscovery, null, 2);
-            } catch (e) {
+            } catch (_e) {
                 workflowDiscoveryPre.textContent = 'Error formatting workflow discovery';
             }
         } else {
@@ -10932,6 +11057,9 @@ export function __testOnly_renderWorkflowDefinitionsBody(items = []) {
     workflowDefinitionsState.error = '';
     workflowDefinitionsState.items = Array.isArray(items) ? items : [];
     renderWorkflowStatusBody();
+}
+export function __testOnly_buildWorkflowMonitorExportPayload() {
+    return buildWorkflowMonitorExportPayload();
 }
 
 // Export for testing.

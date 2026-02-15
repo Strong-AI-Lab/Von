@@ -257,6 +257,18 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
         lambda: _FakeRegistry(),
     )
     monkeypatch.setattr(
+        registry_factory,
+        "get_workflow_registry_inventory_snapshot",
+        lambda: {
+            "counts": {"registry": 2, "vontology_discovered": 3},
+            "vontology_only_workflow_ids": ["#V#salient_predicate_governance_workflow"],
+            "diagnostics": {
+                "drift_detected": True,
+                "reason_codes": ["vontology_only"],
+            },
+        },
+    )
+    monkeypatch.setattr(
         workflows_routes,
         "get_workflow_usage_aggregates_for_workflows",
         lambda workflow_ids: {
@@ -308,6 +320,8 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
 
     assert payload["count"] == 2
     assert payload["total"] == 2
+    assert payload["parity_inventory"]["counts"]["registry"] == 2
+    assert "#V#salient_predicate_governance_workflow" in payload["parity_inventory"]["vontology_only_workflow_ids"]
 
     items = payload["items"]
     assert items[0]["workflow_id"] == "#V#alpha_workflow"

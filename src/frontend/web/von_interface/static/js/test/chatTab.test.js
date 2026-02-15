@@ -1,5 +1,6 @@
 import {
     __testOnly_buildThinkingProgressPresentation,
+    __testOnly_buildWorkflowMonitorExportPayload,
     __testOnly_renderWorkflowDefinitionsBody,
     __testOnly_buildWorkflowStatusQuery,
     __testOnly_buildLlmDebugMetadata,
@@ -186,6 +187,48 @@ describe('workflow monitor concept links', () => {
         expect(eventArg.detail.createConceptTab).toBe(true);
 
         document.removeEventListener('von:selectConceptById', onSelect);
+    });
+
+    test('renders non-executable design artifact label with hyphenation', () => {
+        __testOnly_renderWorkflowDefinitionsBody([
+            {
+                workflow_id: '#V#chat_assistant_workflow',
+                description: 'Base chat assistant workflow.',
+                initial_state: 'completed',
+                source: 'built_in',
+                is_executable: false,
+                executability_reason: 'non_executable_design_artifact',
+                executability_detail: 'workflow_has_no_steps'
+            }
+        ]);
+
+        const badge = document.querySelector('.workflow-status-badge');
+        expect(badge).toBeTruthy();
+        expect(badge.textContent).toContain('non-executable design artifact');
+    });
+
+    test('exports workflow monitor payload with namespace and rendered workflow IDs', () => {
+        const { getSessionScopedNamespace } = require('../utils/sessionScopedStorage.js');
+        const { getCurrentUserConceptId } = require('../domUtils.js');
+        getSessionScopedNamespace.mockReturnValue('#V#michael_witbrock');
+        getCurrentUserConceptId.mockReturnValue('#V#michael_witbrock');
+
+        __testOnly_renderWorkflowDefinitionsBody([
+            {
+                workflow_id: '#V#chat_assistant_workflow',
+                description: 'Base chat assistant workflow.',
+                initial_state: 'completed',
+                source: 'built_in',
+                is_executable: false,
+                executability_reason: 'non_executable_design_artifact'
+            }
+        ]);
+
+        const payload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(payload.namespace_context.namespace).toBe('#V#michael_witbrock');
+        expect(payload.namespace_context.user_id).toBe('#V#michael_witbrock');
+        expect(payload.monitor_state.mode).toBe('available_workflows');
+        expect(payload.definitions_snapshot.rendered_workflow_ids).toContain('#V#chat_assistant_workflow');
     });
 });
 

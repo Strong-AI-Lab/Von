@@ -85,6 +85,7 @@ def api_list_workflow_definitions():
     try:
         from ...workflows.durable.registry_factory import (
             build_durable_workflow_registry_read_only,
+            get_workflow_registry_inventory_snapshot,
         )
         from ...services.workflow_discovery_service import (
             classify_workflow_concept_executability,
@@ -92,6 +93,9 @@ def api_list_workflow_definitions():
 
         # Read-only build avoids concept bootstrap writes on list/introspection paths.
         registry = build_durable_workflow_registry_read_only()
+        inventory_snapshot = get_workflow_registry_inventory_snapshot()
+        if not isinstance(inventory_snapshot, dict):
+            inventory_snapshot = {}
         workflow_ids = sorted(list(registry.all_workflow_ids()))
         selected_ids = workflow_ids[:limit]
         usage_aggregate_map = get_workflow_usage_aggregates_for_workflows(selected_ids)
@@ -184,6 +188,7 @@ def api_list_workflow_definitions():
                 "items": items,
                 "count": len(items),
                 "total": len(workflow_ids),
+                "parity_inventory": inventory_snapshot,
             }
         )
     except Exception as exc:
