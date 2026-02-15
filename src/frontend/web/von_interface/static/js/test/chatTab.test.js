@@ -2,6 +2,7 @@ import {
     __testOnly_buildThinkingProgressPresentation,
     __testOnly_buildWorkflowMonitorExportPayload,
     __testOnly_renderWorkflowDefinitionsBody,
+    __testOnly_setWorkflowShowDesigns,
     __testOnly_buildWorkflowStatusQuery,
     __testOnly_buildLlmDebugMetadata,
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
@@ -156,7 +157,9 @@ describe('workflow monitor concept links', () => {
             <div id="workflowStatusBody"></div>
             <button id="workflowStatusRefresh"></button>
             <button id="workflowStatusToggleAvailable"></button>
+            <input id="workflowStatusShowDesigns" type="checkbox" />
         `;
+        __testOnly_setWorkflowShowDesigns(false);
     });
 
     test('renders workflow concept links and dispatches concept selection event on click', () => {
@@ -190,6 +193,7 @@ describe('workflow monitor concept links', () => {
     });
 
     test('renders non-executable design artifact label with hyphenation', () => {
+        __testOnly_setWorkflowShowDesigns(true);
         __testOnly_renderWorkflowDefinitionsBody([
             {
                 workflow_id: '#V#chat_assistant_workflow',
@@ -213,6 +217,28 @@ describe('workflow monitor concept links', () => {
         getSessionScopedNamespace.mockReturnValue('#V#michael_witbrock');
         getCurrentUserConceptId.mockReturnValue('#V#michael_witbrock');
 
+        __testOnly_setWorkflowShowDesigns(false);
+        __testOnly_renderWorkflowDefinitionsBody([
+            {
+                workflow_id: '#V#salient_predicate_governance_workflow',
+                description: 'Salient workflow.',
+                initial_state: '#V#salience_step_identify_type',
+                source: 'vontology',
+                is_executable: false,
+                executability_reason: 'workflow_step_partially_vacuous'
+            }
+        ]);
+
+        const payload = __testOnly_buildWorkflowMonitorExportPayload();
+        expect(payload.namespace_context.namespace).toBe('#V#michael_witbrock');
+        expect(payload.namespace_context.user_id).toBe('#V#michael_witbrock');
+        expect(payload.monitor_state.mode).toBe('available_workflows');
+        expect(payload.monitor_state.show_designs).toBe(false);
+        expect(payload.definitions_snapshot.rendered_workflow_ids).toContain('#V#salient_predicate_governance_workflow');
+    });
+
+    test('hides design artefacts by default in available workflows list', () => {
+        __testOnly_setWorkflowShowDesigns(false);
         __testOnly_renderWorkflowDefinitionsBody([
             {
                 workflow_id: '#V#chat_assistant_workflow',
@@ -221,14 +247,48 @@ describe('workflow monitor concept links', () => {
                 source: 'built_in',
                 is_executable: false,
                 executability_reason: 'non_executable_design_artifact'
+            },
+            {
+                workflow_id: '#V#salient_predicate_governance_workflow',
+                description: 'Salient workflow.',
+                initial_state: '#V#salience_step_identify_type',
+                source: 'vontology',
+                is_executable: false,
+                executability_reason: 'workflow_step_partially_vacuous'
             }
         ]);
 
-        const payload = __testOnly_buildWorkflowMonitorExportPayload();
-        expect(payload.namespace_context.namespace).toBe('#V#michael_witbrock');
-        expect(payload.namespace_context.user_id).toBe('#V#michael_witbrock');
-        expect(payload.monitor_state.mode).toBe('available_workflows');
-        expect(payload.definitions_snapshot.rendered_workflow_ids).toContain('#V#chat_assistant_workflow');
+        const rows = document.querySelectorAll('.workflow-status-item');
+        expect(rows.length).toBe(1);
+        expect(document.body.textContent).toContain('salient predicate governance workflow');
+        expect(document.body.textContent).not.toContain('chat assistant workflow');
+    });
+
+    test('shows design artefacts when show-designs is enabled', () => {
+        __testOnly_setWorkflowShowDesigns(true);
+        __testOnly_renderWorkflowDefinitionsBody([
+            {
+                workflow_id: '#V#chat_assistant_workflow',
+                description: 'Base chat assistant workflow.',
+                initial_state: 'completed',
+                source: 'built_in',
+                is_executable: false,
+                executability_reason: 'non_executable_design_artifact'
+            },
+            {
+                workflow_id: '#V#salient_predicate_governance_workflow',
+                description: 'Salient workflow.',
+                initial_state: '#V#salience_step_identify_type',
+                source: 'vontology',
+                is_executable: false,
+                executability_reason: 'workflow_step_partially_vacuous'
+            }
+        ]);
+
+        const rows = document.querySelectorAll('.workflow-status-item');
+        expect(rows.length).toBe(2);
+        expect(document.body.textContent).toContain('salient predicate governance workflow');
+        expect(document.body.textContent).toContain('chat assistant workflow');
     });
 });
 

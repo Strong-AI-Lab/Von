@@ -120,7 +120,8 @@ const workflowDefinitionsState = {
     items: [],
     lastFetchedAt: 0,
     lastPayload: null,
-    lastRequestQuery: ''
+    lastRequestQuery: '',
+    showDesigns: false
 };
 const workflowEpisodesState = {
     open: false,
@@ -8103,6 +8104,7 @@ function getWorkflowStatusElements() {
         body: document.getElementById('workflowStatusBody'),
         refreshButton: document.getElementById('workflowStatusRefresh'),
         toggleAvailableButton: document.getElementById('workflowStatusToggleAvailable'),
+        showDesignsCheckbox: document.getElementById('workflowStatusShowDesigns'),
         copyJsonButton: document.getElementById('workflowStatusCopyJson')
     };
 }
@@ -8289,6 +8291,18 @@ function formatWorkflowDefinitionStatusClass(item) {
     return 'not-executable';
 }
 
+function isWorkflowDesignArtifact(item) {
+    return String(item?.executability_reason || '').trim() === 'non_executable_design_artifact';
+}
+
+function filterWorkflowDefinitionsForDisplay(items) {
+    const list = Array.isArray(items) ? items : [];
+    if (workflowDefinitionsState.showDesigns) {
+        return list.slice();
+    }
+    return list.filter((item) => !isWorkflowDesignArtifact(item));
+}
+
 function formatWorkflowExecutabilitySummary(item) {
     if (!item || item.is_executable === true) {
         return '';
@@ -8366,9 +8380,14 @@ function buildWorkflowMonitorExportPayload() {
     const parityInventory = (
         definitionsPayload && typeof definitionsPayload.parity_inventory === 'object'
     ) ? definitionsPayload.parity_inventory : null;
-    const renderedWorkflowIds = workflowDefinitionsState.items
+    const filteredItems = filterWorkflowDefinitionsForDisplay(workflowDefinitionsState.items);
+    const renderedWorkflowIds = filteredItems
         .map((item) => (typeof item?.workflow_id === 'string' ? item.workflow_id.trim() : ''))
         .filter(Boolean);
+    const hiddenDesignWorkflowIds = workflowDefinitionsState.items
+        .filter((item) => isWorkflowDesignArtifact(item))
+        .map((item) => (typeof item?.workflow_id === 'string' ? item.workflow_id.trim() : ''))
+        .filter((workflowId) => workflowId && !renderedWorkflowIds.includes(workflowId));
     const activeItems = Array.from(workflowStatusStreamState.items.values());
 
     return {
@@ -8382,6 +8401,7 @@ function buildWorkflowMonitorExportPayload() {
         monitor_state: {
             mode: workflowDefinitionsState.visible ? 'available_workflows' : 'active_instances',
             show_available: Boolean(workflowDefinitionsState.visible),
+            show_designs: Boolean(workflowDefinitionsState.showDesigns),
             loading_available: Boolean(workflowDefinitionsState.loading),
             available_error: workflowDefinitionsState.error || null,
             available_last_fetched_at: workflowDefinitionsState.lastFetchedAt
@@ -8392,6 +8412,8 @@ function buildWorkflowMonitorExportPayload() {
             request_query: workflowDefinitionsState.lastRequestQuery || null,
             rendered_count: renderedWorkflowIds.length,
             rendered_workflow_ids: renderedWorkflowIds,
+            hidden_design_count: hiddenDesignWorkflowIds.length,
+            hidden_design_workflow_ids: hiddenDesignWorkflowIds,
             contains_salient_predicate_governance_workflow: renderedWorkflowIds.includes('#V#salient_predicate_governance_workflow'),
             payload: definitionsPayload
         },
@@ -8423,19 +8445,17 @@ async function handleCopyWorkflowMonitorJson() {
     if (!copyJsonButton) return;
     const originalContent = copyJsonButton.textContent || 'Copy JSON';
 
-    if (!workflowDefinitionsState.loading) {
-        await refreshAvailableWorkflowDefinitions({ silent: true });
-    }
-
     const payload = buildWorkflowMonitorExportPayload();
     const jsonString = JSON.stringify(payload, null, 2);
 
     const markSuccess = () => {
         indicateClipboardResult(copyJsonButton, originalContent, true);
+        showToast('Workflow monitor JSON copied', 'success');
     };
     const markFailure = (err) => {
         console.error('[workflowStatus] Failed to copy monitor JSON:', err);
         indicateClipboardResult(copyJsonButton, originalContent, false);
+        showToast('Failed to copy workflow monitor JSON', 'error');
     };
 
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -8560,7 +8580,13 @@ function renderWorkflowDefinitionsList(items) {
         return;
     }
 
-    const ordered = items.slice().sort((a, b) => {
+    const filteredItems = filterWorkflowDefinitionsForDisplay(items);
+    if (!filteredItems.length) {
+        body.innerHTML = '<div class="workflow-status-empty">No available workflows (design artefacts hidden)</div>';
+        return;
+    }
+
+    const ordered = filteredItems.slice().sort((a, b) => {
         const left = String(a?.workflow_id || '');
         const right = String(b?.workflow_id || '');
         return left.localeCompare(right);
@@ -8817,11 +8843,24 @@ function startWorkflowStatusStream() {
 }
 
 function initializeWorkflowStatusPanel() {
-    const { panel, refreshButton, toggleAvailableButton, copyJsonButton } = getWorkflowStatusElements();
+    const { panel, refreshButton, toggleAvailableButton, showDesignsCheckbox, copyJsonButton } = getWorkflowStatusElements();
     if (!panel) return;
     const { closeButton: closeEpisodesButton } = getWorkflowEpisodesElements();
 
     updateWorkflowStatusActionButtons();
+
+    if (showDesignsCheckbox) {
+        showDesignsCheckbox.checked = Boolean(workflowDefinitionsState.showDesigns);
+        if (showDesignsCheckbox.dataset.bound !== 'true') {
+            showDesignsCheckbox.dataset.bound = 'true';
+            showDesignsCheckbox.addEventListener('change', () => {
+                workflowDefinitionsState.showDesigns = Boolean(showDesignsCheckbox.checked);
+                if (workflowDefinitionsState.visible) {
+                    renderWorkflowStatusBody();
+                }
+            });
+        }
+    }
 
     if (closeEpisodesButton && closeEpisodesButton.dataset.bound !== 'true') {
         closeEpisodesButton.addEventListener('click', () => {
@@ -8865,6 +8904,7 @@ function initializeWorkflowStatusPanel() {
 
     startWorkflowStatusStream();
     void refreshWorkflowStatusSnapshot({ silent: true });
+    void refreshAvailableWorkflowDefinitions({ silent: true });
 }
 
 function startIncomingInvitePolling() {
@@ -11057,6 +11097,9 @@ export function __testOnly_renderWorkflowDefinitionsBody(items = []) {
     workflowDefinitionsState.error = '';
     workflowDefinitionsState.items = Array.isArray(items) ? items : [];
     renderWorkflowStatusBody();
+}
+export function __testOnly_setWorkflowShowDesigns(enabled) {
+    workflowDefinitionsState.showDesigns = Boolean(enabled);
 }
 export function __testOnly_buildWorkflowMonitorExportPayload() {
     return buildWorkflowMonitorExportPayload();

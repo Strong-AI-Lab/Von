@@ -4645,6 +4645,20 @@ footer {
     gap: 6px;
 }
 
+.workflow-status-checkbox-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #334155;
+    user-select: none;
+}
+
+.workflow-status-checkbox-label input[type="checkbox"] {
+    width: 13px;
+    height: 13px;
+}
+
 .workflow-status-body {
     display: grid;
     gap: 10px;
