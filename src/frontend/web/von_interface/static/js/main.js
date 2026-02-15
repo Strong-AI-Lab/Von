@@ -653,7 +653,29 @@ function startHealthPolling() {
       } catch (err) { console.warn('PID copy failed', err); }
     });
   }
-  let startTimeIso = null;
+  const HEALTH_START_TIME_CACHE_KEY = 'von_server_start_time_iso';
+  const healthLoopStartedAtMs = Date.now();
+  function readCachedStartTimeIso() {
+    try {
+      const value = localStorage.getItem(HEALTH_START_TIME_CACHE_KEY);
+      if (!value) return null;
+      return Number.isNaN(Date.parse(value)) ? null : value;
+    } catch (_) {
+      return null;
+    }
+  }
+  function writeCachedStartTimeIso(value) {
+    try {
+      if (!value) {
+        localStorage.removeItem(HEALTH_START_TIME_CACHE_KEY);
+      } else {
+        localStorage.setItem(HEALTH_START_TIME_CACHE_KEY, value);
+      }
+    } catch (_) {
+      // Ignore storage errors; uptime still updates from live health polls.
+    }
+  }
+  let startTimeIso = readCachedStartTimeIso();
   let lastIdentity = { pid: null, start: null };
   let reloadTriggered = false;
   function autoReloadEnabled() {
@@ -671,11 +693,18 @@ function startHealthPolling() {
     return `${s}s`;
   }
   function updateUptimeLoop() {
-    if (startTimeIso && uptimeSpan) {
-      const started = Date.parse(startTimeIso);
-      if (!isNaN(started)) {
-        const diff = Date.now() - started;
-        uptimeSpan.textContent = formatUptime(diff);
+    if (uptimeSpan) {
+      if (startTimeIso) {
+        const started = Date.parse(startTimeIso);
+        if (!isNaN(started)) {
+          const diff = Date.now() - started;
+          uptimeSpan.textContent = formatUptime(diff);
+          uptimeSpan.title = 'Process uptime';
+        }
+      } else {
+        const estimate = Date.now() - healthLoopStartedAtMs;
+        uptimeSpan.textContent = `~${formatUptime(estimate)}`;
+        uptimeSpan.title = 'Awaiting server health response; showing local session age estimate';
       }
     }
     requestAnimationFrame(() => setTimeout(updateUptimeLoop, 1000));
@@ -1793,8 +1822,9 @@ function startHealthPolling() {
           pidSpan.textContent = '?';
         }
       }
-      if (newStart && !startTimeIso) {
+      if (newStart) {
         startTimeIso = newStart;
+        writeCachedStartTimeIso(newStart);
       }
 
       if (autoReloadEnabled() && !reloadTriggered && lastIdentity.pid !== null && lastIdentity.start !== null) {

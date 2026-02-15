@@ -358,6 +358,94 @@ async function getCurrentOrganisationInfo(settingsOverride = null) {
 
 let footerDbRetryTimerId = null;
 let footerDbLoadGeneration = 0;
+const FOOTER_DB_PROBE_STATS_KEY = 'von_footer_db_probe_stats_v1';
+const FOOTER_DB_PROBE_SAMPLE_LIMIT = 32;
+const FOOTER_DB_RETRY_MIN_MS = 1500;
+const FOOTER_DB_RETRY_MAX_MS = 20000;
+
+function readFooterDbProbeStats() {
+  const fallback = { successes: 0, failures: 0, samples_ms: [] };
+  try {
+    const raw = localStorage.getItem(FOOTER_DB_PROBE_STATS_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    const samples = Array.isArray(parsed?.samples_ms)
+      ? parsed.samples_ms.map(v => Number(v)).filter(v => Number.isFinite(v) && v >= 0)
+      : [];
+    return {
+      successes: Number.isFinite(Number(parsed?.successes)) ? Math.max(0, Number(parsed.successes)) : 0,
+      failures: Number.isFinite(Number(parsed?.failures)) ? Math.max(0, Number(parsed.failures)) : 0,
+      samples_ms: samples.slice(-FOOTER_DB_PROBE_SAMPLE_LIMIT),
+    };
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function persistFooterDbProbeStats(stats) {
+  try {
+    localStorage.setItem(FOOTER_DB_PROBE_STATS_KEY, JSON.stringify(stats));
+  } catch (_) {
+    // Non-fatal: stats persistence is best-effort only.
+  }
+}
+
+function computePercentile(values, percentile) {
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * percentile)));
+  const value = sorted[idx];
+  return Number.isFinite(value) ? Math.round(value) : null;
+}
+
+function getFooterDbProbeSummary() {
+  const stats = readFooterDbProbeStats();
+  return {
+    sampleCount: stats.samples_ms.length,
+    p50Ms: computePercentile(stats.samples_ms, 0.5),
+    p90Ms: computePercentile(stats.samples_ms, 0.9),
+    successes: stats.successes,
+    failures: stats.failures,
+  };
+}
+
+function recordFooterDbProbeSuccess(elapsedMs) {
+  const stats = readFooterDbProbeStats();
+  const nextSamples = [...stats.samples_ms, Math.round(elapsedMs)].slice(-FOOTER_DB_PROBE_SAMPLE_LIMIT);
+  persistFooterDbProbeStats({
+    successes: stats.successes + 1,
+    failures: stats.failures,
+    samples_ms: nextSamples,
+  });
+}
+
+function recordFooterDbProbeFailure() {
+  const stats = readFooterDbProbeStats();
+  persistFooterDbProbeStats({
+    successes: stats.successes,
+    failures: stats.failures + 1,
+    samples_ms: stats.samples_ms,
+  });
+}
+
+function computeFooterDbRetryDelayMs(attempt) {
+  const safeAttempt = Math.max(0, Number(attempt) || 0);
+  const summary = getFooterDbProbeSummary();
+  const adaptiveBaseMs = Number.isFinite(summary.p90Ms)
+    ? Math.min(6000, Math.max(2000, summary.p90Ms * 8))
+    : 2500;
+  const delay = Math.round(adaptiveBaseMs * Math.pow(1.6, Math.min(safeAttempt, 6)));
+  return Math.max(FOOTER_DB_RETRY_MIN_MS, Math.min(FOOTER_DB_RETRY_MAX_MS, delay));
+}
+
+function formatFooterDbRetryHint(attempt, delayMs) {
+  const summary = getFooterDbProbeSummary();
+  const waitSec = Math.max(1, Math.round(delayMs / 1000));
+  if (summary.sampleCount > 0 && Number.isFinite(summary.p50Ms) && Number.isFinite(summary.p90Ms)) {
+    return `Waiting for DB status. Retry #${attempt + 1} in ${waitSec}s. Recent db/info latency p50=${summary.p50Ms}ms p90=${summary.p90Ms}ms (n=${summary.sampleCount}).`;
+  }
+  return `Waiting for DB status. Retry #${attempt + 1} in ${waitSec}s.`;
+}
 
 function clearFooterDbRetryTimer() {
   if (footerDbRetryTimerId) {
@@ -443,6 +531,7 @@ function attachFooterDbBadge(footer, dbInfo) {
       if (!resp.ok) throw new Error('bad status ' + resp.status);
       const payload = await resp.json().catch(() => null);
       const elapsed = Math.round(performance.now() - t0);
+      recordFooterDbProbeSuccess(elapsed);
       const nextClassification = (payload && typeof payload.classification === 'string') ? payload.classification : lastClassification;
       const nextFallback = (payload && typeof payload.using_fallback === 'boolean') ? payload.using_fallback : lastUsingFallback;
       const nextPingOk = (payload && typeof payload.ping_ok === 'boolean') ? payload.ping_ok : lastPingOk;
@@ -457,9 +546,15 @@ function attachFooterDbBadge(footer, dbInfo) {
         span.classList.remove('fatal');
         span.classList.toggle('warn', elapsed > 250);
         span.classList.toggle('slow', elapsed > 600);
-        span.title = `Recent DB latency: ${elapsed} ms`;
+        const summary = getFooterDbProbeSummary();
+        if (summary.sampleCount > 0 && Number.isFinite(summary.p50Ms) && Number.isFinite(summary.p90Ms)) {
+          span.title = `Recent DB latency: ${elapsed} ms (p50 ${summary.p50Ms} ms, p90 ${summary.p90Ms} ms, n=${summary.sampleCount})`;
+        } else {
+          span.title = `Recent DB latency: ${elapsed} ms`;
+        }
       }
     } catch (e) {
+      recordFooterDbProbeFailure();
       applyBadgeState(false, lastClassification, lastUsingFallback);
       const span2 = latencySpan();
       if (span2) {
@@ -906,10 +1001,17 @@ export async function setModelInfoFooterText() {
   // permanently suppress the badge for the rest of the session.
   async function loadDbBadge(attempt = 0) {
     if (dbLoadGeneration !== footerDbLoadGeneration) return;
+    const requestStartedAt = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now();
     const dbInfo = await fetchJsonWithTimeout('/api/settings/db/info', { timeoutMs: 5000 });
+    const requestElapsedMs = Math.max(0, Math.round(((typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now()) - requestStartedAt));
     if (dbLoadGeneration !== footerDbLoadGeneration) return;
 
     if (dbInfo) {
+      recordFooterDbProbeSuccess(requestElapsedMs);
       const existingBadge = footer.querySelector('.db-conn-badge');
       if (existingBadge) {
         try { existingBadge.remove(); } catch (_) { /* ignore */ }
@@ -930,11 +1032,15 @@ export async function setModelInfoFooterText() {
         labelNode.textContent = attempt > 0 ? '🕓 Mongo: retrying...' : '🕓 Mongo: loading...';
       }
     }
+    recordFooterDbProbeFailure();
 
     const inJest = typeof process !== 'undefined' && process.env && process.env.JEST_WORKER_ID;
     if (inJest) return;
 
-    const delayMs = Math.min(10000 * Math.pow(2, attempt), 60000);
+    const delayMs = computeFooterDbRetryDelayMs(attempt);
+    if (loadingBadge) {
+      loadingBadge.title = formatFooterDbRetryHint(attempt, delayMs);
+    }
     clearFooterDbRetryTimer();
     footerDbRetryTimerId = setTimeout(() => { void loadDbBadge(attempt + 1); }, delayMs);
   }
