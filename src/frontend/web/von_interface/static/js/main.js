@@ -6,6 +6,7 @@ import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
+import { initialiseCopyJsonButtonPreCopyState, resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
 import { getSessionScopedNamespace, hasSessionOrgContext, syncNamespaceFromLocalStorage, syncOrgContextFromLocalStorage } from './utils/sessionScopedStorage.js';
 import { isVontologyBusy, loadKeyConceptsForUser, preloadVontologyData, selectVontologyNodeByIdentifier, setupVontologySearchUI } from './vontology.js';
 
@@ -20,6 +21,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   applyExpertTabGuards();
   setupTabNavigation();
   setupSettingsFrameResizing();
+  initialiseCopyJsonButtonPreCopyState();
 
   // Initialize global search UI (JVNAUTOSCI-550)
   setupVontologySearchUI();
@@ -879,6 +881,10 @@ function startHealthPolling() {
             ragModal.classList.add('open');
             ragModal.setAttribute('aria-hidden', 'false');
             ragModalBody.innerHTML = '<p>Loading…</p>';
+            const existingActions = ragModal.querySelector('.modal-actions');
+            if (existingActions && existingActions._ragCopyBtn instanceof HTMLButtonElement) {
+              resetCopyJsonButtonPreCopyState(existingActions._ragCopyBtn);
+            }
 
             if (ragRuntimeHint) {
               ragRuntimeHint.textContent = 'Runtime: loading…';

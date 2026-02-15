@@ -1,4 +1,5 @@
 import { acceptAnnotation, annotateTurn, createInstance, createType, revokeAnnotation, searchTypes } from './apiService.js';
+import { resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
 
 // Sample preset text for quick demo usage
 const SAMPLE_TEXT = `The hippocampus plays a crucial role in spatial memory consolidation. Recent work by O'Keefe and colleagues suggests place cells form a cognitive map. Disruption of NMDA receptor signaling impairs LTP and downstream memory encoding pathways.`;
@@ -699,6 +700,9 @@ export function initializeAnnotationTab(suffix = '') {
 
   function openLlmPopup() {
     if (!llmPopup) return;
+    if (llmCopyBtn) {
+      resetCopyJsonButtonPreCopyState(llmCopyBtn);
+    }
     llmPopup.classList.remove('hidden');
     llmPopup.setAttribute('aria-hidden', 'false');
     renderAuxLlmCalls();

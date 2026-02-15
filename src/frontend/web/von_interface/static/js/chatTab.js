@@ -17,6 +17,7 @@ import {
     stopSpeaking
 } from './speech.js';
 import { getPreferredLanguage, selectBestNameForContext, selectShortestNameForContext } from './utils/nameSelection.js';
+import { resetCopyJsonButtonPreCopyState } from './utils/copyJsonButtonState.js';
 import { getSessionScopedNamespace, getSessionScopedOrgContext } from './utils/sessionScopedStorage.js';
 import { applyCartoucheAppearance, cartouchifyElementText, cartouchifyVontologyTokensInElement, getCartoucheAppearanceSettings, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
 import { showToast } from './utils/toast.js';
@@ -8439,6 +8440,10 @@ async function handleCopyWorkflowDefinitionJson(workflowId, workflowName) {
 
 async function openWorkflowEpisodesPopup(workflowId, workflowName) {
     if (!workflowId) return;
+    const { copyJsonButton } = getWorkflowEpisodesElements();
+    if (copyJsonButton) {
+        resetCopyJsonButtonPreCopyState(copyJsonButton);
+    }
     workflowEpisodesState.workflowId = String(workflowId).trim();
     workflowEpisodesState.workflowName = workflowName || formatWorkflowName(workflowId);
     workflowEpisodesState.loading = true;
@@ -11012,6 +11017,7 @@ async function showLlmDebugPopup(turnId, options = {}) {
     }
 
     const popup = document.getElementById('chatLlmDebugPopup');
+    const copyBtn = document.getElementById('copyChatLlmDebugJson');
     const metaDiv = document.getElementById('chatLlmDebugMeta');
     const messagesPre = document.getElementById('chatLlmDebugMessages');
     const responsePre = document.getElementById('chatLlmDebugResponse');
@@ -11025,6 +11031,9 @@ async function showLlmDebugPopup(turnId, options = {}) {
     if (!popup || !metaDiv || !messagesPre || !responsePre || !toolsSection || !toolsPre || !auxSection || !auxPre) {
         console.error('[chatTab] LLM debug popup elements missing');
         return;
+    }
+    if (copyBtn) {
+        resetCopyJsonButtonPreCopyState(copyBtn);
     }
 
     // Display metadata

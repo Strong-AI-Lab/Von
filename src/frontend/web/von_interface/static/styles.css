@@ -2907,6 +2907,18 @@ button:hover {
     border: 1px solid #d1d5db;
 }
 
+/* JVNAUTOSCI-1150: make JSON copy controls visibly "not yet copied" until first click. */
+.btn-mini.copy-json-precopy {
+    background: #dcfce7;
+    border-color: #86efac;
+    color: #14532d;
+}
+
+.btn-mini.copy-json-precopy:hover {
+    background: #bbf7d0;
+    border-color: #4ade80;
+}
+
 .btn-mini:hover {
     background: #f1f5f9;
 }
