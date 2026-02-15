@@ -35,6 +35,15 @@ from .mcp_proxy_base import MCPServerConfig, MCPStdIOClient, MCPToolClientError
 logger = logging.getLogger(__name__)
 _LOG_TAG = "[search_proxy]"
 
+# Canonical Tavily tool aliases across MCP package versions.
+_TAVILY_TOOL_ALIASES: dict[str, tuple[str, ...]] = {
+    "tavily-search": ("tavily-search", "tavily_search"),
+    "tavily-extract": ("tavily-extract", "tavily_extract"),
+    "tavily-crawl": ("tavily-crawl", "tavily_crawl"),
+    "tavily-map": ("tavily-map", "tavily_map"),
+    "tavily-research": ("tavily-research", "tavily_research"),
+}
+
 
 def _parse_tavily_text_response(text: str) -> Dict[str, Any]:
     """Parse Tavily's text-formatted response into structured data.
@@ -144,6 +153,7 @@ class SearchMCPProxy:
     def __init__(self, config: SearchProxyConfig):
         self._config = config
         self._client = self._build_client()
+        self._available_tools_cache: Optional[set[str]] = None
 
     def _build_client(self) -> MCPStdIOClient:
         env = {"TAVILY_API_KEY": self._config.api_key}
@@ -224,6 +234,96 @@ class SearchMCPProxy:
         )
         return any(marker in lowered for marker in transient_markers)
 
+    @staticmethod
+    def _collect_exception_text(exc: BaseException) -> str:
+        """Flatten nested exception/cause/group text for diagnostics.
+
+        MCP failures are often wrapped by AnyIO/TaskGroup layers, so this
+        surfaces buried root causes such as unknown tool IDs.
+        """
+
+        seen: set[int] = set()
+        chunks: list[str] = []
+
+        def _walk(node: BaseException) -> None:
+            node_id = id(node)
+            if node_id in seen:
+                return
+            seen.add(node_id)
+
+            text = str(node).strip()
+            if text:
+                chunks.append(f"{type(node).__name__}: {text}")
+
+            cause = getattr(node, "__cause__", None)
+            if isinstance(cause, BaseException):
+                _walk(cause)
+
+            context = getattr(node, "__context__", None)
+            if isinstance(context, BaseException) and context is not cause:
+                _walk(context)
+
+            sub_exceptions = getattr(node, "exceptions", None)
+            if isinstance(sub_exceptions, (list, tuple)):
+                for sub in sub_exceptions:
+                    if isinstance(sub, BaseException):
+                        _walk(sub)
+
+        _walk(exc)
+
+        # Keep ordering but deduplicate repeats from cause/context traversal.
+        unique_chunks: list[str] = []
+        for chunk in chunks:
+            if chunk not in unique_chunks:
+                unique_chunks.append(chunk)
+        return " | ".join(unique_chunks)
+
+    async def _get_available_tool_names(self) -> set[str]:
+        """Best-effort discovery of tool names exposed by current Tavily MCP."""
+        if self._available_tools_cache is not None:
+            return self._available_tools_cache
+
+        names: set[str] = set()
+        try:
+            tools = await self._client.list_tools()
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                name = tool.get("name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+        except Exception as exc:
+            logger.warning("%s Unable to list Tavily tools for name resolution: %s", _LOG_TAG, exc)
+
+        self._available_tools_cache = names
+        return names
+
+    async def _resolve_tool_name_candidates(self, tool_name: str) -> list[str]:
+        """Return deterministic candidate tool names for current runtime."""
+        configured = _TAVILY_TOOL_ALIASES.get(tool_name, (tool_name,))
+        candidates: list[str] = []
+        for candidate in configured:
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+        # Generic swap fallback for future tool ids.
+        swapped = (
+            tool_name.replace("-", "_")
+            if "-" in tool_name
+            else tool_name.replace("_", "-")
+        )
+        if swapped not in candidates:
+            candidates.append(swapped)
+
+        available = await self._get_available_tool_names()
+        if not available:
+            return candidates
+
+        preferred = [candidate for candidate in candidates if candidate in available]
+        if preferred:
+            return preferred
+        return candidates
+
     async def _call_tool(
         self,
         tool_name: str,
@@ -252,70 +352,112 @@ class SearchMCPProxy:
         # `tavily-extract` frequently returns JSON; forcing the search parser can
         # incorrectly yield empty results (e.g., {"results": []}) and mask the
         # underlying content.
-        text_parser = _parse_tavily_text_response if tool_name == "tavily-search" else None
+        text_parser = (
+            _parse_tavily_text_response
+            if tool_name in {"tavily-search", "tavily_search"}
+            else None
+        )
         retry_max = max(0, int(self._config.max_transient_retries))
-        retry_attempt = 0
+        tool_candidates = await self._resolve_tool_name_candidates(tool_name)
+        last_error: Optional[SearchProxyError] = None
 
-        while True:
-            start_time = time.perf_counter()
-            timestamp_utc = datetime.now(timezone.utc).isoformat()
-            try:
-                return await self._client.call_tool(
-                    tool_name,
-                    arguments,
-                    text_parser=text_parser,
-                )
-            except MCPToolClientError as exc:
-                duration_ms = (time.perf_counter() - start_time) * 1000
-                error_str = str(exc)
-                error_type, suggestions = self._classify_error(error_str)
-                is_transient = self._is_transient_error(error_type, error_str)
+        for candidate_name in tool_candidates:
+            retry_attempt = 0
 
-                if is_transient and retry_attempt < retry_max:
-                    retry_attempt += 1
-                    backoff_sec = max(0.0, float(self._config.retry_backoff_sec)) * retry_attempt
-                    logger.warning(
-                        "%s %s transient failure (attempt %d/%d) after %.1fms: [%s] %s; retrying in %.2fs",
+            while True:
+                start_time = time.perf_counter()
+                timestamp_utc = datetime.now(timezone.utc).isoformat()
+                try:
+                    return await self._client.call_tool(
+                        candidate_name,
+                        arguments,
+                        text_parser=text_parser,
+                    )
+                except MCPToolClientError as exc:
+                    duration_ms = (time.perf_counter() - start_time) * 1000
+                    flattened_error = self._collect_exception_text(exc)
+                    error_text_for_classification = flattened_error or str(exc)
+                    error_type, suggestions = self._classify_error(error_text_for_classification)
+                    is_transient = self._is_transient_error(error_type, error_text_for_classification)
+                    is_unknown_tool = "unknown tool" in error_text_for_classification.lower()
+
+                    details = SearchProxyErrorDetails(
+                        error_type=error_type,
+                        message=f"Tavily {candidate_name} failed",
+                        tool_name=candidate_name,
+                        url=context_url,
+                        query=context_query,
+                        duration_ms=duration_ms,
+                        timestamp_utc=timestamp_utc,
+                        underlying_error=error_text_for_classification[:500],
+                        suggestions=suggestions,
+                        retry_attempt=retry_attempt,
+                        retry_max=retry_max,
+                    )
+
+                    if is_unknown_tool:
+                        logger.warning(
+                            "%s %s unknown-tool error after %.1fms; trying alias candidate if available: %s",
+                            _LOG_TAG,
+                            candidate_name,
+                            duration_ms,
+                            error_text_for_classification,
+                        )
+                        last_error = SearchProxyError(
+                            f"Request failed: {exc}",
+                            details=details,
+                        )
+                        break
+
+                    if is_transient and retry_attempt < retry_max:
+                        retry_attempt += 1
+                        backoff_sec = max(0.0, float(self._config.retry_backoff_sec)) * retry_attempt
+                        logger.warning(
+                            "%s %s transient failure (attempt %d/%d) after %.1fms: [%s] %s; retrying in %.2fs",
+                            _LOG_TAG,
+                            candidate_name,
+                            retry_attempt,
+                            retry_max,
+                            duration_ms,
+                            error_type,
+                            error_text_for_classification,
+                            backoff_sec,
+                        )
+                        if backoff_sec > 0:
+                            await asyncio.sleep(backoff_sec)
+                        continue
+
+                    logger.error(
+                        "%s %s failed after %.1fms: [%s] %s",
                         _LOG_TAG,
-                        tool_name,
-                        retry_attempt,
-                        retry_max,
+                        candidate_name,
                         duration_ms,
                         error_type,
-                        error_str,
-                        backoff_sec,
+                        error_text_for_classification,
                     )
-                    if backoff_sec > 0:
-                        await asyncio.sleep(backoff_sec)
-                    continue
 
-                details = SearchProxyErrorDetails(
-                    error_type=error_type,
-                    message=f"Tavily {tool_name} failed",
-                    tool_name=tool_name,
-                    url=context_url,
-                    query=context_query,
-                    duration_ms=duration_ms,
-                    timestamp_utc=timestamp_utc,
-                    underlying_error=error_str[:500],  # Truncate long errors
-                    suggestions=suggestions,
-                    retry_attempt=retry_attempt,
-                    retry_max=retry_max,
-                )
+                    raise SearchProxyError(
+                        f"Request failed: {exc}",
+                        details=details,
+                    ) from exc
 
-                logger.error(
-                    "%s %s failed after %.1fms: [%s] %s",
-                    _LOG_TAG,
-                    tool_name,
-                    duration_ms,
-                    error_type,
-                    error_str,
-                )
+            # Candidate loop continues for unknown-tool fallback only.
+            continue
 
-                raise SearchProxyError(
-                    f"Request failed: {exc}",
-                    details=details,
-                ) from exc
+        if last_error is not None:
+            raise last_error
+
+        raise SearchProxyError(
+            f"Request failed: unable to resolve callable tool for {tool_name}",
+            details=SearchProxyErrorDetails(
+                error_type="tool_resolution_error",
+                message=f"No callable Tavily tool candidate succeeded for {tool_name}",
+                tool_name=tool_name,
+                url=context_url,
+                query=context_query,
+                suggestions=["Check Tavily MCP tool availability and naming variants"],
+            ),
+        )
 
     async def search(
         self,

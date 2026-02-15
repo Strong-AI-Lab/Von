@@ -124,6 +124,79 @@ def test_search_does_not_retry_non_transient_error():
     assert details.get("retry_max") == 1
 
 
+def test_search_resolves_underscore_tool_name_from_list_tools():
+    class _UnderscoreToolClient:
+        def __init__(self):
+            self.calls = []
+            self.list_calls = 0
+
+        async def list_tools(self):
+            self.list_calls += 1
+            return [{"name": "tavily_search"}]
+
+        async def call_tool(self, tool_name, arguments, *, text_parser=None):
+            self.calls.append(tool_name)
+            if tool_name != "tavily_search":
+                raise MCPToolClientError(f"MCP error -32601: Unknown tool: {tool_name}")
+            return {
+                "results": [
+                    {"title": "ok", "url": "https://example.com", "content": "result"}
+                ]
+            }
+
+    proxy = SearchMCPProxy(SearchProxyConfig(api_key="dummy"))
+    proxy._client = _UnderscoreToolClient()  # type: ignore[attr-defined]
+
+    result = asyncio.run(proxy.search(query="hello"))
+
+    assert result.get("results")
+    assert proxy._client.calls == ["tavily_search"]  # type: ignore[attr-defined]
+    assert proxy._client.list_calls == 1  # type: ignore[attr-defined]
+
+
+def test_search_alias_fallback_uses_nested_unknown_tool_cause():
+    class _UnknownThenAliasClient:
+        def __init__(self):
+            self.calls = []
+
+        async def list_tools(self):
+            # Force alias fallback path via exception analysis.
+            return []
+
+        async def call_tool(self, tool_name, arguments, *, text_parser=None):
+            self.calls.append(tool_name)
+            if tool_name == "tavily-search":
+                nested = ExceptionGroup(
+                    "unhandled errors in a TaskGroup",
+                    [Exception("MCP error -32601: Unknown tool: tavily-search")],
+                )
+                raise MCPToolClientError(
+                    "unhandled errors in a TaskGroup (1 sub-exception)"
+                ) from nested
+            if tool_name == "tavily_search":
+                return {
+                    "results": [
+                        {
+                            "title": "Recovered",
+                            "url": "https://example.com",
+                            "content": "ok",
+                        }
+                    ]
+                }
+            raise MCPToolClientError("unexpected tool")
+
+    proxy = SearchMCPProxy(SearchProxyConfig(api_key="dummy"))
+    proxy._client = _UnknownThenAliasClient()  # type: ignore[attr-defined]
+
+    result = asyncio.run(proxy.search(query="hello"))
+
+    assert result.get("results")
+    assert proxy._client.calls == [  # type: ignore[attr-defined]
+        "tavily-search",
+        "tavily_search",
+    ]
+
+
 def test_catalogue_extract_url_works_inside_running_event_loop(monkeypatch):
     from src.backend.integrations.internal_mcp import catalogue
     from src.backend.integrations.internal_mcp import search_proxy_mcp
