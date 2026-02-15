@@ -334,6 +334,24 @@ describe('workflow monitor concept links', () => {
         expect(copyButton).toBeTruthy();
         expect(copyButton.textContent).toContain('Copy JSON');
     });
+
+    test('shows scoped vs total episode summary when totals differ', () => {
+        __testOnly_setWorkflowShowDesigns(true);
+        __testOnly_renderWorkflowDefinitionsBody([
+            {
+                workflow_id: '#V#salient_predicate_governance_workflow',
+                description: 'Salient workflow.',
+                initial_state: '#V#salience_step_identify_type',
+                source: 'vontology',
+                is_executable: false,
+                executability_reason: 'workflow_step_partially_vacuous',
+                attempts: 12,
+                episodes_count: 8
+            }
+        ]);
+
+        expect(document.body.textContent).toContain('Episodes: 8 scoped (12 total)');
+    });
 });
 
 describe('thinking liveness presentation', () => {

@@ -8874,7 +8874,15 @@ function renderWorkflowDefinitionsList(items) {
         const episodesCount = Number.isFinite(episodesCountRaw) && episodesCountRaw >= 0
             ? Math.max(0, Math.trunc(episodesCountRaw))
             : null;
-        const usageMeta = `Attempts: ${attempts} · Completions: ${completions} · Episodes: ${episodesCount === null ? '—' : episodesCount} · Completion: ${completionRate}`;
+        let episodesSummary = 'Episodes: —';
+        if (episodesCount !== null) {
+            if (attempts > episodesCount) {
+                episodesSummary = `Episodes: ${episodesCount} scoped (${attempts} total)`;
+            } else {
+                episodesSummary = `Episodes: ${episodesCount}`;
+            }
+        }
+        const usageMeta = `Attempts: ${attempts} · Completions: ${completions} · ${episodesSummary} · Completion: ${completionRate}`;
         const executionMeta = executableSummary
             ? `<div class="workflow-status-definition-meta">Status detail: ${escapeHtml(executableSummary)}</div>`
             : '';

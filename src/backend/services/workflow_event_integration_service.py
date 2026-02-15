@@ -90,8 +90,16 @@ def _build_event_idempotency_key(
 
 def _build_namespace(user_id: str | None, org_id: str | None) -> str:
     safe_user = (user_id or "anonymous").strip() or "anonymous"
-    safe_org = (org_id or "default").strip() or "default"
-    return f"{safe_user}/{safe_org}"
+    safe_org = (org_id or "").strip()
+
+    # Prefer user-only namespace when org context is unknown.
+    # Historical user/default placeholders made monitor scoping opaque and
+    # prevented reliable namespace filtering once org-scoped namespaces landed.
+    if safe_org:
+        return f"{safe_user}/{safe_org}"
+    if safe_user != "anonymous":
+        return safe_user
+    return "anonymous/default"
 
 
 def _normalise_namespace_override(namespace: str | None) -> str | None:

@@ -61,24 +61,39 @@ def _namespace_equivalents(namespace: str | None) -> list[str]:
         if candidate_clean and candidate_clean not in values:
             values.append(candidate_clean)
 
+    user_part: str | None = None
+    org_part: str | None = None
+
     if "@" in clean_namespace:
         user_raw, org_raw = clean_namespace.split("@", 1)
-        user_part = user_raw.strip()
-        org_part = org_raw.strip()
+        user_part = _safe_str(user_raw)
+        org_part = _safe_str(org_raw)
         if user_part and org_part:
             _add(f"{user_part}/{org_part}")
             if user_part.startswith("#V#") and org_part and not org_part.startswith("#V#"):
                 _add(f"{user_part}/#V#{org_part}")
+
     if "/" in clean_namespace:
         user_raw, org_raw = clean_namespace.split("/", 1)
-        user_part = user_raw.strip()
-        org_part = org_raw.strip()
+        user_part = _safe_str(user_raw) or user_part
+        org_part = _safe_str(org_raw) or org_part
         if user_part and org_part:
             _add(f"{user_part}@{org_part}")
             if user_part.startswith("#V#") and org_part.startswith("#V#"):
                 _add(f"{user_part}@{org_part[3:]}")
             if user_part.startswith("#V#") and org_part and not org_part.startswith("#V#"):
                 _add(f"{user_part}@{org_part}")
+
+    # Cross-era compatibility: some historical writes used user-only namespace
+    # or user/default placeholders before org-scoped namespaces were stable.
+    if user_part:
+        _add(user_part)
+        _add(f"{user_part}/default")
+        if user_part.startswith("#V#"):
+            _add(f"{user_part}/#V#default")
+    elif clean_namespace.startswith("#V#"):
+        _add(f"{clean_namespace}/default")
+        _add(f"{clean_namespace}/#V#default")
 
     return values
 

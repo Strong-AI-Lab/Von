@@ -211,3 +211,51 @@ def test_get_workflow_episode_counts_for_workflows_matches_namespace_equivalents
     )
     assert counts[workflow_id] == 1
     assert counts["#V#missing_workflow_id"] == 0
+
+
+def test_namespace_equivalence_includes_user_only_and_default_legacy_forms():
+    workflow_id = "#V#workflow_episode_legacy_namespace_forms"
+
+    episode_one = start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=build_workflow_episode_stable_key(
+            workflow_id=workflow_id,
+            source="chat_turn_workflow",
+            turn_id="turn-legacy-user",
+            session_id="session-legacy",
+            stage="tool_calling",
+        ),
+        namespace="#V#michael_witbrock",
+        turn_id="turn-legacy-user",
+        session_id="session-legacy",
+    )
+    episode_two = start_workflow_use_episode(
+        workflow_id=workflow_id,
+        source="chat_turn_workflow",
+        stable_key=build_workflow_episode_stable_key(
+            workflow_id=workflow_id,
+            source="chat_turn_workflow",
+            turn_id="turn-legacy-default",
+            session_id="session-legacy",
+            stage="tool_calling",
+        ),
+        namespace="#V#michael_witbrock/default",
+        turn_id="turn-legacy-default",
+        session_id="session-legacy",
+    )
+    assert episode_one is not None
+    assert episode_two is not None
+
+    episodes = list_workflow_use_episodes(
+        workflow_id=workflow_id,
+        namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+        limit=20,
+    )
+    assert len(episodes) == 2
+
+    counts = get_workflow_episode_counts_for_workflows(
+        [workflow_id],
+        namespace="#V#michael_witbrock@university_of_auckland_strong_ai_lab",
+    )
+    assert counts[workflow_id] == 2

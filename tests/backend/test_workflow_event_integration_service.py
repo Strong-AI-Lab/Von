@@ -276,6 +276,35 @@ def test_launch_event_workflow_uses_namespace_override_for_tenancy(
     assert called_args.kwargs["namespace"] == "#V#user_alice@org_nao"
 
 
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_launch_event_workflow_uses_user_only_namespace_when_org_unknown(
+    mock_get_instance_manager: MagicMock,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+    monkeypatch.setenv("VON_EVENT_TASK_CREATED_WORKFLOW_ID", "#V#task_event_workflow")
+
+    mock_manager = MagicMock()
+    mock_manager.create_instance_for_event.return_value = ("instance-user-only", True)
+    mock_get_instance_manager.return_value = mock_manager
+
+    result = launch_event_workflow(
+        event_type=EVENT_TYPE_TASK_CREATED,
+        event_id="task-namespace-user-only",
+        user_id="#V#user_alice",
+        org_id=None,
+        inputs={"task_concept_id": "#V#task_99"},
+    )
+
+    assert result["success"] is True
+    assert result["triggered"] is True
+
+    called_args = mock_manager.create_instance_for_event.call_args
+    assert called_args is not None
+    assert called_args.kwargs["namespace"] == "#V#user_alice"
+
+
 @patch("src.backend.services.workflow_event_integration_service.launch_event_workflow")
 def test_maybe_launch_vontology_mutation_workflow_emits_specific_and_catch_all(
     mock_launch_event_workflow: MagicMock,
