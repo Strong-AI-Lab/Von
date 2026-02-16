@@ -485,3 +485,56 @@ def test_presenter_mode_preserves_required_screen_json_fence_from_prompt(monkeyp
     ]
     assert json_blocks
     assert any(element["payload"]["fence"] == expected_fence for element in json_blocks)
+
+
+def test_presenter_mode_can_disable_legacy_screen_fence_insertion(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    monkeypatch.setenv("VON_DISPLAY_ELEMENTS_SCREEN_FENCE_COMPAT_ENABLE", "0")
+
+    llm = _StubLLMSequence(["<spoken>Short talk track.</spoken>"])
+    app = _make_app(monkeypatch, llm)
+
+    orchestrator_result = OrchestratorResult(
+        response_text="Tool-grounded facts only.",
+        extra_messages=[],
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = _StubOrchestrator(orchestrator_result)
+
+    prompt = (
+        "Please include this exact fenced block verbatim:\n\n"
+        "```json\n"
+        '{"sentinel":"FENCE_MUST_SURVIVE","check":"presenter_screen_code_fence_preserved"}\n'
+        "If anything fails, include exact error text/reason_code."
+    )
+
+    client = app.test_client()
+    resp = client.post(
+        "/von/generate",
+        json={"prompt": prompt, "presenter_mode": True},
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    screen_text = body["response_channels"]["screen"]
+    expected_fence = (
+        "```json\n"
+        '{"sentinel":"FENCE_MUST_SURVIVE","check":"presenter_screen_code_fence_preserved"}\n'
+        "```"
+    )
+
+    # With compat disabled, screen text is no longer mutated to append the fence.
+    assert expected_fence not in screen_text
+    assert body["llm_debug"]["display_elements_screen_fence_compat_enabled"] is False
+
+    display_elements = body["display_elements"]
+    assert "required_screen_json_fence_appended" in display_elements["reason_codes"]
+    json_blocks = [
+        element
+        for element in display_elements["elements"]
+        if element["element_type"] == "json_block"
+    ]
+    assert json_blocks
+    assert any(element["payload"]["fence"] == expected_fence for element in json_blocks)

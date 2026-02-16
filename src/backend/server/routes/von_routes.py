@@ -32,6 +32,9 @@ from ...services.settings_service import (
     get_show_tool_use_during_thinking,
     get_buttonify_model_enabled,
 )
+from ...services.feature_flags import (
+    get_display_elements_screen_fence_compat_enabled,
+)
 from ...services.chat_concept_reference_service import (
     build_context_concept_reference_metadata,
 )
@@ -4194,6 +4197,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         screen_backfill_second_pass_attempted = False
         screen_backfill_second_pass_reason = None
         required_screen_json_fence = None
+        screen_fence_compat_enabled = (
+            get_display_elements_screen_fence_compat_enabled(default=True)
+        )
 
         if presenter_mode_requested:
             has_tool_messages = bool(tool_messages)
@@ -4240,7 +4246,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     and _screen_looks_like_tool_dump(screen_text)
                 )
                 or (
-                    isinstance(required_screen_json_fence, str)
+                    screen_fence_compat_enabled
+                    and isinstance(required_screen_json_fence, str)
                     and required_screen_json_fence.strip()
                     and (
                         not isinstance(screen_text, str)
@@ -4249,6 +4256,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 )
                 or _screen_too_similar_to_spoken(screen_text, spoken_text)
             )
+
+            def _missing_required_screen_fence() -> bool:
+                return bool(
+                    screen_fence_compat_enabled
+                    and isinstance(required_screen_json_fence, str)
+                    and required_screen_json_fence.strip()
+                    and (
+                        not isinstance(screen_text, str)
+                        or required_screen_json_fence.strip() not in screen_text
+                    )
+                )
 
             def _strip_presenter_tags(text: str) -> str | None:
                 if not isinstance(text, str) or not text:
@@ -4276,11 +4294,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     )
                 if not screen_tag_present or not screen_text:
                     screen_backfill_second_pass_reason = "missing_screen"
-                elif (
-                    isinstance(required_screen_json_fence, str)
-                    and required_screen_json_fence.strip()
-                    and required_screen_json_fence.strip() not in (screen_text or "")
-                ):
+                elif _missing_required_screen_fence():
                     screen_backfill_second_pass_reason = "missing_screen_fence"
                 elif _screen_looks_like_tool_dump(screen_text or ""):
                     screen_backfill_second_pass_reason = "tool_payload_screen"
@@ -4520,10 +4534,11 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         screen_backfill_source = "tool_summary"
 
                 if screen_candidate:
-                    screen_candidate = _ensure_required_screen_json_fence(
-                        str(screen_candidate).strip(),
-                        required_screen_json_fence,
-                    )
+                    if screen_fence_compat_enabled:
+                        screen_candidate = _ensure_required_screen_json_fence(
+                            str(screen_candidate).strip(),
+                            required_screen_json_fence,
+                        )
                     base_channels = (
                         dict(presenter_channels)
                         if isinstance(presenter_channels, dict)
@@ -5222,6 +5237,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "presenter_channels": presenter_channels,
             "screen_backfill_second_pass_attempted": screen_backfill_second_pass_attempted,
             "screen_backfill_second_pass_reason": screen_backfill_second_pass_reason,
+            "display_elements_screen_fence_compat_enabled": (
+                screen_fence_compat_enabled if presenter_mode_requested else None
+            ),
             "spoken_backfill_second_pass_attempted": spoken_backfill_second_pass_attempted,
             "spoken_backfill_second_pass_reason": spoken_backfill_second_pass_reason,
             "user_prompt": user_prompt_debug,

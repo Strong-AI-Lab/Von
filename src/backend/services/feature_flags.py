@@ -41,3 +41,17 @@ def get_event_workflow_integration_enabled(*, default: bool = True) -> bool:
     """Return whether event -> workflow integration is enabled."""
 
     return _read_env_flag("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", default=default)
+
+
+def get_display_elements_screen_fence_compat_enabled(*, default: bool = True) -> bool:
+    """Return whether legacy screen-fence backfill compatibility remains enabled.
+
+    JVNAUTOSCI-1149 introduces a structured ``display_elements`` contract. This
+    flag gates the older pathway that mutates screen text to append required JSON
+    fences directly, so deployments can migrate safely.
+    """
+
+    return _read_env_flag(
+        "VON_DISPLAY_ELEMENTS_SCREEN_FENCE_COMPAT_ENABLE",
+        default=default,
+    )
