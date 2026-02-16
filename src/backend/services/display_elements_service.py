@@ -472,10 +472,109 @@ def validate_turn_display_elements(
     return len(errors) == 0, errors
 
 
+def _next_unique_element_id(base: str, used_ids: set[str]) -> str:
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used_ids.add(candidate)
+    return candidate
+
+
+def _normalise_supplied_screen_tables(
+    screen_table_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen table specs.
+
+    Accepts either:
+    - raw table payloads (`columns`/`rows` at top level), or
+    - wrapped element specs with `payload` + optional metadata.
+    """
+    if (
+        not isinstance(screen_table_elements, Sequence)
+        or isinstance(screen_table_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_table_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "columns" in raw_spec and "rows" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = (
+            _normalise_text(metadata.get("intent"))
+            or "structured_tabular_view"
+        )
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_sort": True,
+                "supports_filter": True,
+                "supports_pagination": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+
+        # Keep externally supplied payloads from invalidating the whole contract.
+        # Invalid payloads are dropped and surfaced via reason codes.
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_table_probe_{index}",
+                        "element_type": "table",
+                        "channel": "screen",
+                        "order": 16,
+                        "intent": intent,
+                        "payload": dict(payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order") if isinstance(metadata.get("order"), int) else None,
+                "intent": intent,
+                "payload": dict(payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def build_turn_display_elements(
     *,
     response_text: str | None,
     presenter_channels: Mapping[str, Any] | None,
+    screen_table_elements: Sequence[Mapping[str, Any]] | None = None,
     required_screen_json_fence: str | None = None,
     screen_backfill_second_pass_attempted: bool = False,
     screen_backfill_second_pass_reason: str | None = None,
@@ -588,14 +687,41 @@ def build_turn_display_elements(
             }
         )
 
+    supplied_screen_tables, supplied_tables_dropped = _normalise_supplied_screen_tables(
+        screen_table_elements
+    )
+    if supplied_screen_tables:
+        reason_codes.append("screen_structured_tables_supplied")
+    if supplied_tables_dropped:
+        reason_codes.append("screen_structured_tables_invalid_dropped")
+
+    table_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_tables, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_table")
+        provenance.setdefault("table_index", index)
+        table_specs.append(
+            {
+                "element_id": spec.get("element_id") or f"screen_structured_table_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "structured_tabular_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_sort": True,
+                    "supports_filter": True,
+                    "supports_pagination": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     markdown_tables = extract_markdown_tables(effective_screen)
     for index, table_payload in enumerate(markdown_tables, start=1):
-        elements.append(
+        table_specs.append(
             {
                 "element_id": f"screen_table_{index}",
-                "element_type": "table",
-                "channel": "screen",
-                "order": 15 + index,
+                "order": None,
                 "intent": "structured_tabular_view",
                 "payload": table_payload,
                 "constraints": {
@@ -612,6 +738,36 @@ def build_turn_display_elements(
         )
     if markdown_tables:
         reason_codes.append("screen_markdown_tables_detected")
+
+    used_ids: set[str] = set()
+    used_orders = {
+        int(spec["order"])
+        for spec in table_specs
+        if isinstance(spec.get("order"), int)
+    }
+    next_table_order = 16
+    for spec in table_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_table_order in used_orders:
+                next_table_order += 1
+            order = next_table_order
+            used_orders.add(order)
+            next_table_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "table",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
 
     # Emit elements in the same deterministic order signalled by `order`.
     # This keeps downstream renderers and regressions aligned on one sequence.

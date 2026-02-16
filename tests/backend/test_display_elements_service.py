@@ -170,6 +170,78 @@ def test_build_turn_display_elements_includes_table_elements_for_markdown_tables
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_table_elements() -> None:
+    supplied_table_payload = build_canonical_table_payload_from_records(
+        records=[
+            {
+                "task_id": "task_alpha",
+                "task_name": "Alpha",
+                "status": "done",
+                "source": {"source_concept_id": "#V#task_alpha"},
+            }
+        ],
+        columns=[
+            {"column_id": "task_name", "label": "Task", "source_key": "task_name"},
+            {"column_id": "status", "label": "Status", "source_key": "status"},
+        ],
+        row_id_field="task_id",
+        row_provenance_field="source",
+    )
+    contract = build_turn_display_elements(
+        response_text="Structured task output",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Structured task output",
+            "spoken": "Here is the task view.",
+        },
+        screen_table_elements=[supplied_table_payload],
+    )
+
+    table_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "table"
+    ]
+    assert len(table_elements) == 1
+    table_element = table_elements[0]
+    assert table_element["element_id"] == "screen_structured_table_1"
+    assert table_element["payload"]["rows"][0]["row_id"] == "task_alpha"
+    assert (
+        table_element["payload"]["rows"][0]["provenance"]["source_concept_id"]
+        == "#V#task_alpha"
+    )
+    assert "screen_structured_tables_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_supplied_tables() -> None:
+    contract = build_turn_display_elements(
+        response_text="Task response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Task response",
+            "spoken": None,
+        },
+        screen_table_elements=[
+            {
+                "payload": {
+                    "columns": [],
+                    "rows": [],
+                }
+            }
+        ],
+    )
+
+    table_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "table"
+    ]
+    assert table_elements == []
+    assert "screen_structured_tables_invalid_dropped" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
 def test_validate_turn_display_elements_rejects_invalid_table_shape() -> None:
     valid, errors = validate_turn_display_elements(
         {
