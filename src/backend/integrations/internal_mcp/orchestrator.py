@@ -10865,6 +10865,275 @@ class InternalMCPChatOrchestrator:
 
             return predicate_hints[:40]
 
+        def _iter_renderer_tool_result_payloads(
+            tool_messages: Sequence[Mapping[str, Any]],
+        ) -> Sequence[tuple[str, Mapping[str, Any]]]:
+            """Yield successful tool result payload mappings from tool messages.
+
+            Tool execution stores results as JSON strings via _format_tool_result.
+            Parse those payloads here so render planning can use concrete tool
+            outputs (tasks/extents) instead of only invocation inputs.
+            """
+            payloads: list[tuple[str, Mapping[str, Any]]] = []
+            for message in tool_messages:
+                if not isinstance(message, Mapping):
+                    continue
+                content = message.get("content")
+                if not isinstance(content, str) or not content.strip():
+                    continue
+                try:
+                    parsed = json.loads(content)
+                except Exception:
+                    continue
+                if not isinstance(parsed, Mapping):
+                    continue
+                status = str(parsed.get("status") or "").strip().lower()
+                if status != "ok":
+                    continue
+                tool_name_raw = parsed.get("tool")
+                payload = parsed.get("payload")
+                if not isinstance(tool_name_raw, str) or not tool_name_raw.strip():
+                    continue
+                if not isinstance(payload, Mapping):
+                    continue
+                payloads.append((tool_name_raw.strip().lower(), payload))
+            return payloads
+
+        def _extract_renderer_screen_table_record_sets(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+        ) -> list[dict[str, Any]]:
+            """Derive canonical record sets for screen tables from tool outputs."""
+
+            def _first_text(*values: Any) -> str | None:
+                for value in values:
+                    if not isinstance(value, str):
+                        continue
+                    cleaned = value.strip()
+                    if cleaned:
+                        return cleaned
+                return None
+
+            def _mapping_list(raw_value: Any, *, limit: int = 200) -> list[Mapping[str, Any]]:
+                if not isinstance(raw_value, list):
+                    return []
+                rows: list[Mapping[str, Any]] = []
+                for item in raw_value:
+                    if not isinstance(item, Mapping):
+                        continue
+                    rows.append(item)
+                    if len(rows) >= limit:
+                        break
+                return rows
+
+            def _task_record_set() -> dict[str, Any] | None:
+                task_tool_names = {"task_list", "task_search", "list_my_tasks"}
+                for tool_name, payload in _iter_renderer_tool_result_payloads(
+                    tool_messages
+                ):
+                    if tool_name not in task_tool_names:
+                        continue
+
+                    tasks = _mapping_list(payload.get("tasks") or payload.get("results"))
+                    if not tasks:
+                        continue
+
+                    records: list[dict[str, Any]] = []
+                    for index, task in enumerate(tasks, start=1):
+                        task_id = _first_text(
+                            task.get("task_concept_id"),
+                            task.get("task_id"),
+                            task.get("concept_id"),
+                            task.get("id"),
+                        )
+                        task_name = _first_text(
+                            task.get("title"),
+                            task.get("task_title"),
+                            task.get("name"),
+                        ) or task_id or f"Task {index}"
+                        status = _first_text(task.get("status")) or ""
+                        priority = _first_text(task.get("priority")) or ""
+                        due_date = _first_text(task.get("due_date")) or ""
+                        assignee = _first_text(
+                            task.get("assignee_concept_id"),
+                            task.get("assignee_id"),
+                            task.get("assignee"),
+                        ) or ""
+
+                        record: dict[str, Any] = {
+                            "task_id": task_id or f"task_{index}",
+                            "task_name": task_name,
+                            "status": status,
+                            "priority": priority,
+                            "due_date": due_date,
+                            "assignee": assignee,
+                            "source": {
+                                "source_tool": tool_name,
+                            },
+                        }
+                        if task_id:
+                            record["source"]["task_concept_id"] = task_id
+                        records.append(record)
+
+                    if not records:
+                        continue
+
+                    return {
+                        "element_id": "screen_task_table",
+                        "intent": "structured_tabular_view",
+                        "records": records,
+                        "columns": [
+                            {
+                                "column_id": "task_name",
+                                "label": "Task",
+                                "source_key": "task_name",
+                                "data_type": "text",
+                            },
+                            {
+                                "column_id": "status",
+                                "label": "Status",
+                                "source_key": "status",
+                                "data_type": "text",
+                            },
+                            {
+                                "column_id": "priority",
+                                "label": "Priority",
+                                "source_key": "priority",
+                                "data_type": "text",
+                            },
+                            {
+                                "column_id": "due_date",
+                                "label": "Due",
+                                "source_key": "due_date",
+                                "data_type": "text",
+                            },
+                        ],
+                        "row_id_field": "task_id",
+                        "row_provenance_field": "source",
+                        "default_sort_column_id": "task_name",
+                        "provenance": {
+                            "source": "tool_result_record_set",
+                            "source_tool": tool_name,
+                            "record_family": "tasks",
+                        },
+                    }
+                return None
+
+            def _predicate_extent_record_set() -> dict[str, Any] | None:
+                for tool_name, payload in _iter_renderer_tool_result_payloads(
+                    tool_messages
+                ):
+                    if tool_name != "get_predicate_extent":
+                        continue
+
+                    extent_rows = _mapping_list(payload.get("extent"))
+                    if not extent_rows:
+                        continue
+                    predicate_concept_id = _first_text(
+                        payload.get("concept_id"),
+                        payload.get("predicate_concept_id"),
+                    )
+
+                    records: list[dict[str, Any]] = []
+                    for index, item in enumerate(extent_rows, start=1):
+                        subject = _first_text(item.get("subject")) or ""
+                        predicate = _first_text(item.get("predicate")) or (
+                            predicate_concept_id or ""
+                        )
+                        object_raw = item.get("object")
+                        object_value = (
+                            object_raw.strip()
+                            if isinstance(object_raw, str)
+                            else (str(object_raw) if object_raw is not None else "")
+                        )
+                        source_value = _first_text(item.get("source")) or ""
+                        assertion_id = _first_text(
+                            item.get("assertion_id"),
+                            item.get("relation_id"),
+                            item.get("id"),
+                        ) or f"extent_{index}"
+                        if not any((subject, predicate, object_value, source_value)):
+                            continue
+
+                        assertion_meta: dict[str, Any] = {
+                            "source_tool": tool_name,
+                        }
+                        if predicate_concept_id:
+                            assertion_meta["predicate_concept_id"] = predicate_concept_id
+                        if source_value:
+                            assertion_meta["source"] = source_value
+                        created_at = item.get("created_at")
+                        updated_at = item.get("updated_at")
+                        if created_at is not None:
+                            assertion_meta["created_at"] = str(created_at)
+                        if updated_at is not None:
+                            assertion_meta["updated_at"] = str(updated_at)
+
+                        records.append(
+                            {
+                                "assertion_id": assertion_id,
+                                "subject": subject,
+                                "predicate": predicate,
+                                "object": object_value,
+                                "source": source_value,
+                                "assertion_meta": assertion_meta,
+                            }
+                        )
+
+                    if not records:
+                        continue
+
+                    return {
+                        "element_id": "screen_predicate_extent_table",
+                        "intent": "structured_tabular_view",
+                        "records": records,
+                        "columns": [
+                            {
+                                "column_id": "subject",
+                                "label": "Subject",
+                                "source_key": "subject",
+                                "data_type": "text",
+                            },
+                            {
+                                "column_id": "predicate",
+                                "label": "Predicate",
+                                "source_key": "predicate",
+                                "data_type": "text",
+                            },
+                            {
+                                "column_id": "object",
+                                "label": "Object",
+                                "source_key": "object",
+                                "data_type": "text",
+                            },
+                            {
+                                "column_id": "source",
+                                "label": "Source",
+                                "source_key": "source",
+                                "data_type": "text",
+                            },
+                        ],
+                        "row_id_field": "assertion_id",
+                        "row_provenance_field": "assertion_meta",
+                        "default_sort_column_id": "subject",
+                        "pagination_enabled": False,
+                        "provenance": {
+                            "source": "tool_result_record_set",
+                            "source_tool": tool_name,
+                            "record_family": "predicate_extent",
+                        },
+                    }
+                return None
+
+            record_sets: list[dict[str, Any]] = []
+            task_records = _task_record_set()
+            if isinstance(task_records, dict):
+                record_sets.append(task_records)
+            predicate_records = _predicate_extent_record_set()
+            if isinstance(predicate_records, dict):
+                record_sets.append(predicate_records)
+            return record_sets
+
         def _build_renderer_request_payload(
             screen_text: Any,
             *,
@@ -10944,6 +11213,7 @@ class InternalMCPChatOrchestrator:
             screen_text: Any,
             *,
             tool_invocations: Sequence[Mapping[str, Any]] = (),
+            tool_messages: Sequence[Mapping[str, Any]] = (),
         ) -> Mapping[str, Any]:
             nonlocal renderer_render_plan
             if renderer_render_plan is not None:
@@ -10964,6 +11234,14 @@ class InternalMCPChatOrchestrator:
                 "selected_renderer_types": [],
                 "selected_modalities": [],
             }
+            screen_table_record_sets = _extract_renderer_screen_table_record_sets(
+                tool_messages=tool_messages
+            )
+            if screen_table_record_sets:
+                decision["screen_table_record_sets"] = screen_table_record_sets
+                decision["screen_table_record_set_count"] = len(
+                    screen_table_record_sets
+                )
             renderer_render_plan = decision
 
             if not renderer_routing_enabled:
@@ -11097,10 +11375,12 @@ class InternalMCPChatOrchestrator:
             screen_text: Any,
             *,
             tool_invocations: Sequence[Mapping[str, Any]] = (),
+            tool_messages: Sequence[Mapping[str, Any]] = (),
         ) -> Any:
             renderer_plan = _resolve_renderer_render_plan(
                 screen_text,
                 tool_invocations=tool_invocations,
+                tool_messages=tool_messages,
             )
             renderer_mode = str(renderer_plan.get("render_mode") or "").strip().lower()
             should_route_narration = (
@@ -11357,6 +11637,7 @@ class InternalMCPChatOrchestrator:
                 "I attempted to use tools but the tool-calling workflow is not "
                 "available.  Please try again or report this issue.",
                 tool_invocations=(),
+                tool_messages=(),
             )
             result = OrchestratorResult(
                 response_text=response_text,
@@ -11483,6 +11764,11 @@ class InternalMCPChatOrchestrator:
             final_response,
             tool_invocations=(
                 tuple(invocations) if isinstance(invocations, (list, tuple)) else ()
+            ),
+            tool_messages=(
+                tuple(tool_messages)
+                if isinstance(tool_messages, (list, tuple))
+                else ()
             ),
         )
         final_response_text = _maybe_apply_critic(

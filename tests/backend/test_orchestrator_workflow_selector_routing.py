@@ -18,6 +18,7 @@ init to avoid hanging on MongoDB connections.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Mapping, Optional, Sequence, cast
 from unittest.mock import MagicMock, patch
 
@@ -582,6 +583,142 @@ def test_renderer_applicability_uses_concept_backed_request_when_available(monke
     assert renderer_entry is not None
     assert renderer_entry.get("request_payload_object_kind") == "concept"
     assert renderer_entry.get("request_payload_selected_concept_id") == "#V#task_123"
+
+
+def test_renderer_render_plan_includes_table_record_sets_from_tool_messages(monkeypatch):
+    """Render plan should carry task and predicate record sets derived from tool results."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#table_renderer",
+                        "renderer_type": "table",
+                        "modalities": ["visual"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Here is the answer on screen.",
+                "tool_messages": [
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "task_list",
+                                "status": "ok",
+                                "duration_ms": 4.2,
+                                "payload": {
+                                    "success": True,
+                                    "count": 1,
+                                    "tasks": [
+                                        {
+                                            "task_concept_id": "#V#task_alpha",
+                                            "title": "Alpha task",
+                                            "status": "pending",
+                                            "priority": "high",
+                                            "due_date": "2026-03-01T00:00:00Z",
+                                        }
+                                    ],
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "get_predicate_extent",
+                                "status": "ok",
+                                "duration_ms": 2.1,
+                                "payload": {
+                                    "success": True,
+                                    "concept_id": "#V#depends_on",
+                                    "extent": [
+                                        {
+                                            "subject": "#V#task_alpha",
+                                            "predicate": "#V#depends_on",
+                                            "object": "#V#task_beta",
+                                            "source": "structured",
+                                            "updated_at": "2026-02-16T10:00:00Z",
+                                        }
+                                    ],
+                                    "total_count": 1,
+                                    "limit": 100,
+                                    "offset": 0,
+                                    "has_more": False,
+                                },
+                            }
+                        ),
+                    },
+                ],
+                "invocations": [],
+                "iteration_count": 2,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+
+    result = orchestrator.run(
+        prompt="Show tasks and dependencies",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("screen_table_record_set_count") == 2
+    record_sets = result.render_plan.get("screen_table_record_sets")
+    assert isinstance(record_sets, list)
+    assert len(record_sets) == 2
+
+    task_record_set = next(
+        item for item in record_sets if item.get("element_id") == "screen_task_table"
+    )
+    assert task_record_set.get("row_id_field") == "task_id"
+    assert task_record_set.get("row_provenance_field") == "source"
+    task_records = task_record_set.get("records")
+    assert isinstance(task_records, list)
+    assert task_records[0]["task_id"] == "#V#task_alpha"
+    assert task_records[0]["task_name"] == "Alpha task"
+
+    predicate_record_set = next(
+        item
+        for item in record_sets
+        if item.get("element_id") == "screen_predicate_extent_table"
+    )
+    assert predicate_record_set.get("row_id_field") == "assertion_id"
+    assert predicate_record_set.get("row_provenance_field") == "assertion_meta"
+    predicate_records = predicate_record_set.get("records")
+    assert isinstance(predicate_records, list)
+    assert predicate_records[0]["subject"] == "#V#task_alpha"
+    assert predicate_records[0]["predicate"] == "#V#depends_on"
+    assert predicate_records[0]["object"] == "#V#task_beta"
 
 
 def test_renderer_applicability_missing_definitions_falls_back_screen_only(monkeypatch):
