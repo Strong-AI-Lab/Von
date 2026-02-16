@@ -918,4 +918,30 @@ describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
             request_id: 'req-123'
         });
     });
+
+    test('includes render plan summary when present', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            render_plan: {
+                enabled: true,
+                reason: 'resolved',
+                render_mode: 'spoken+screen',
+                should_narrate: true,
+                request_payload_object_kind: 'concept',
+                request_payload_selected_concept_id: '#V#task_123',
+                selected_renderer_definition_ids: ['#V#renderer_a', '#V#renderer_b']
+            }
+        });
+
+        expect(metadata.render_plan).toEqual({
+            enabled: true,
+            reason: 'resolved',
+            render_mode: 'spoken+screen',
+            should_narrate: true,
+            request_payload_object_kind: 'concept',
+            request_payload_selected_concept_id: '#V#task_123',
+            selected_renderer_count: 2
+        });
+    });
 });

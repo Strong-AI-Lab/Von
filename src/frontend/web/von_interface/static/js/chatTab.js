@@ -10963,6 +10963,22 @@ function buildLlmDebugMetadata(debugData) {
         message_count: debugData?.messages?.length || 0
     };
 
+    const renderPlan = (debugData && typeof debugData === 'object') ? debugData.render_plan : null;
+    if (renderPlan && typeof renderPlan === 'object') {
+        const selectedRendererIds = Array.isArray(renderPlan.selected_renderer_definition_ids)
+            ? renderPlan.selected_renderer_definition_ids
+            : [];
+        metadata.render_plan = {
+            enabled: renderPlan.enabled ?? null,
+            reason: renderPlan.reason ?? null,
+            render_mode: renderPlan.render_mode ?? null,
+            should_narrate: renderPlan.should_narrate ?? null,
+            request_payload_object_kind: renderPlan.request_payload_object_kind ?? null,
+            request_payload_selected_concept_id: renderPlan.request_payload_selected_concept_id ?? null,
+            selected_renderer_count: selectedRendererIds.length
+        };
+    }
+
     // JVNAUTOSCI-1070: Only include speech_planning summary (has char counts).
     // Do NOT copy full presenter_channels text - it's already at top level.
     if (debugData?.speech_planning) {
