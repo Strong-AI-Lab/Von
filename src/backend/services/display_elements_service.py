@@ -468,6 +468,99 @@ def validate_turn_display_elements(
                     value_type = cell.get("value_type")
                     if not isinstance(value_type, str) or not value_type.strip():
                         errors.append(f"{cell_label}.value_type must be a non-empty string")
+        elif element_type == "workflow_view":
+            nodes = payload.get("nodes")
+            if not isinstance(nodes, list) or not nodes:
+                errors.append(f"{label}.payload.nodes must be a non-empty list")
+                nodes = []
+
+            valid_node_ids: set[str] = set()
+            for node_index, node in enumerate(nodes):
+                node_label = f"{label}.payload.nodes[{node_index}]"
+                if not isinstance(node, Mapping):
+                    errors.append(f"{node_label} must be a mapping")
+                    continue
+                node_id = node.get("node_id")
+                if not isinstance(node_id, str) or not node_id.strip():
+                    errors.append(f"{node_label}.node_id must be a non-empty string")
+                    continue
+                valid_node_ids.add(node_id)
+
+                display_label = node.get("label")
+                if not isinstance(display_label, str) or not display_label.strip():
+                    errors.append(f"{node_label}.label must be a non-empty string")
+
+                status = node.get("status")
+                if status is not None and (
+                    not isinstance(status, str) or not status.strip()
+                ):
+                    errors.append(f"{node_label}.status must be a non-empty string when provided")
+
+                task_links = node.get("task_links")
+                if task_links is None:
+                    continue
+                if not isinstance(task_links, list):
+                    errors.append(f"{node_label}.task_links must be a list when provided")
+                    continue
+
+                for link_index, link in enumerate(task_links):
+                    link_label = f"{node_label}.task_links[{link_index}]"
+                    if not isinstance(link, Mapping):
+                        errors.append(f"{link_label} must be a mapping")
+                        continue
+                    target_id = link.get("target_id")
+                    if not isinstance(target_id, str) or not target_id.strip():
+                        errors.append(f"{link_label}.target_id must be a non-empty string")
+                    label_value = link.get("label")
+                    if label_value is not None and (
+                        not isinstance(label_value, str) or not label_value.strip()
+                    ):
+                        errors.append(
+                            f"{link_label}.label must be a non-empty string when provided"
+                        )
+                    link_type = link.get("link_type")
+                    if link_type is not None and (
+                        not isinstance(link_type, str) or not link_type.strip()
+                    ):
+                        errors.append(
+                            f"{link_label}.link_type must be a non-empty string when provided"
+                        )
+                    href = link.get("href")
+                    if href is not None and (
+                        not isinstance(href, str) or not href.strip()
+                    ):
+                        errors.append(
+                            f"{link_label}.href must be a non-empty string when provided"
+                        )
+
+            edges = payload.get("edges")
+            if edges is not None and not isinstance(edges, list):
+                errors.append(f"{label}.payload.edges must be a list when provided")
+                edges = []
+            if isinstance(edges, list):
+                for edge_index, edge in enumerate(edges):
+                    edge_label = f"{label}.payload.edges[{edge_index}]"
+                    if not isinstance(edge, Mapping):
+                        errors.append(f"{edge_label} must be a mapping")
+                        continue
+                    source_node_id = edge.get("source_node_id")
+                    target_node_id = edge.get("target_node_id")
+                    if not isinstance(source_node_id, str) or not source_node_id.strip():
+                        errors.append(
+                            f"{edge_label}.source_node_id must be a non-empty string"
+                        )
+                    elif valid_node_ids and source_node_id not in valid_node_ids:
+                        errors.append(
+                            f"{edge_label}.source_node_id must reference a declared node"
+                        )
+                    if not isinstance(target_node_id, str) or not target_node_id.strip():
+                        errors.append(
+                            f"{edge_label}.target_node_id must be a non-empty string"
+                        )
+                    elif valid_node_ids and target_node_id not in valid_node_ids:
+                        errors.append(
+                            f"{edge_label}.target_node_id must reference a declared node"
+                        )
 
     return len(errors) == 0, errors
 
@@ -570,11 +663,94 @@ def _normalise_supplied_screen_tables(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_workflows(
+    screen_workflow_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen workflow view specs."""
+    if (
+        not isinstance(screen_workflow_elements, Sequence)
+        or isinstance(screen_workflow_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_workflow_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "nodes" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = (
+            _normalise_text(metadata.get("intent"))
+            or "structured_workflow_view"
+        )
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_node_links": True,
+                "supports_task_navigation": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_workflow_probe_{index}",
+                        "element_type": "workflow_view",
+                        "channel": "screen",
+                        "order": 26,
+                        "intent": intent,
+                        "payload": dict(payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def build_turn_display_elements(
     *,
     response_text: str | None,
     presenter_channels: Mapping[str, Any] | None,
     screen_table_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
     required_screen_json_fence: str | None = None,
     screen_backfill_second_pass_attempted: bool = False,
     screen_backfill_second_pass_reason: str | None = None,
@@ -695,6 +871,14 @@ def build_turn_display_elements(
     if supplied_tables_dropped:
         reason_codes.append("screen_structured_tables_invalid_dropped")
 
+    supplied_screen_workflows, supplied_workflows_dropped = (
+        _normalise_supplied_screen_workflows(screen_workflow_elements)
+    )
+    if supplied_screen_workflows:
+        reason_codes.append("screen_structured_workflows_supplied")
+    if supplied_workflows_dropped:
+        reason_codes.append("screen_structured_workflows_invalid_dropped")
+
     table_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_tables, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -739,6 +923,27 @@ def build_turn_display_elements(
     if markdown_tables:
         reason_codes.append("screen_markdown_tables_detected")
 
+    workflow_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_workflows, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_workflow")
+        provenance.setdefault("workflow_index", index)
+        workflow_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_workflow_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "structured_workflow_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_node_links": True,
+                    "supports_task_navigation": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     used_ids: set[str] = set()
     used_orders = {
         int(spec["order"])
@@ -760,6 +965,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "table",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_workflow_order = 26
+    for spec in workflow_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_workflow_order in used_orders:
+                next_workflow_order += 1
+            order = next_workflow_order
+            used_orders.add(order)
+            next_workflow_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "workflow_view",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),

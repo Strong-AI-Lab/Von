@@ -242,6 +242,92 @@ def test_build_turn_display_elements_drops_invalid_supplied_tables() -> None:
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_workflow_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Workflow response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Workflow response",
+            "spoken": None,
+        },
+        screen_workflow_elements=[
+            {
+                "element_id": "screen_workflow_view",
+                "intent": "structured_workflow_view",
+                "payload": {
+                    "layout": "list",
+                    "nodes": [
+                        {
+                            "node_id": "inst_1",
+                            "label": "#V#salient_predicate_governance_workflow",
+                            "status": "running",
+                            "task_links": [
+                                {
+                                    "link_type": "von_task",
+                                    "target_id": "#V#task_alpha",
+                                    "label": "#V#task_alpha",
+                                },
+                                {
+                                    "link_type": "jira_issue",
+                                    "target_id": "JVNAUTOSCI-1148",
+                                    "label": "JVNAUTOSCI-1148",
+                                    "href": "https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1148",
+                                },
+                            ],
+                        }
+                    ],
+                    "edges": [],
+                },
+            }
+        ],
+    )
+
+    workflow_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "workflow_view"
+    ]
+    assert len(workflow_elements) == 1
+    workflow_element = workflow_elements[0]
+    assert workflow_element["element_id"] == "screen_workflow_view"
+    assert workflow_element["payload"]["nodes"][0]["node_id"] == "inst_1"
+    assert (
+        workflow_element["payload"]["nodes"][0]["task_links"][0]["target_id"]
+        == "#V#task_alpha"
+    )
+    assert "screen_structured_workflows_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_supplied_workflows() -> None:
+    contract = build_turn_display_elements(
+        response_text="Workflow response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Workflow response",
+            "spoken": None,
+        },
+        screen_workflow_elements=[
+            {
+                "payload": {
+                    "layout": "list",
+                    "nodes": [],
+                    "edges": [],
+                }
+            }
+        ],
+    )
+
+    workflow_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "workflow_view"
+    ]
+    assert workflow_elements == []
+    assert "screen_structured_workflows_invalid_dropped" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
 def test_validate_turn_display_elements_rejects_invalid_table_shape() -> None:
     valid, errors = validate_turn_display_elements(
         {
@@ -284,6 +370,43 @@ def test_validate_turn_display_elements_rejects_invalid_table_shape() -> None:
 
     assert valid is False
     assert any("must reference a declared column" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_invalid_workflow_links() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_workflow_view",
+                    "element_type": "workflow_view",
+                    "channel": "screen",
+                    "order": 26,
+                    "intent": "structured_workflow_view",
+                    "payload": {
+                        "nodes": [
+                            {
+                                "node_id": "workflow_1",
+                                "label": "Workflow 1",
+                                "status": "running",
+                            }
+                        ],
+                        "edges": [
+                            {
+                                "source_node_id": "workflow_1",
+                                "target_node_id": "missing_node",
+                            }
+                        ],
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any("target_node_id must reference a declared node" in message for message in errors)
 
 
 def test_build_canonical_table_payload_from_records_preserves_row_provenance() -> None:

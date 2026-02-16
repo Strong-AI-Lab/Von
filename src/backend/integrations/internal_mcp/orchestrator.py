@@ -10899,32 +10899,32 @@ class InternalMCPChatOrchestrator:
                 payloads.append((tool_name_raw.strip().lower(), payload))
             return payloads
 
+        def _first_text(*values: Any) -> str | None:
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                cleaned = value.strip()
+                if cleaned:
+                    return cleaned
+            return None
+
+        def _mapping_list(raw_value: Any, *, limit: int = 200) -> list[Mapping[str, Any]]:
+            if not isinstance(raw_value, list):
+                return []
+            rows: list[Mapping[str, Any]] = []
+            for item in raw_value:
+                if not isinstance(item, Mapping):
+                    continue
+                rows.append(item)
+                if len(rows) >= limit:
+                    break
+            return rows
+
         def _extract_renderer_screen_table_record_sets(
             *,
             tool_messages: Sequence[Mapping[str, Any]] = (),
         ) -> list[dict[str, Any]]:
             """Derive canonical record sets for screen tables from tool outputs."""
-
-            def _first_text(*values: Any) -> str | None:
-                for value in values:
-                    if not isinstance(value, str):
-                        continue
-                    cleaned = value.strip()
-                    if cleaned:
-                        return cleaned
-                return None
-
-            def _mapping_list(raw_value: Any, *, limit: int = 200) -> list[Mapping[str, Any]]:
-                if not isinstance(raw_value, list):
-                    return []
-                rows: list[Mapping[str, Any]] = []
-                for item in raw_value:
-                    if not isinstance(item, Mapping):
-                        continue
-                    rows.append(item)
-                    if len(rows) >= limit:
-                        break
-                return rows
 
             def _task_record_set() -> dict[str, Any] | None:
                 task_tool_names = {"task_list", "task_search", "list_my_tasks"}
@@ -11134,6 +11134,246 @@ class InternalMCPChatOrchestrator:
                 record_sets.append(predicate_records)
             return record_sets
 
+        def _extract_renderer_screen_workflow_elements(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+        ) -> list[dict[str, Any]]:
+            """Derive workflow view payloads from workflow tool outputs.
+
+            The renderer may only have partial workflow graph data (for example,
+            status snapshots without edge topology). We therefore emit a
+            deterministic list-style workflow payload that still includes any
+            discoverable Von task concept links and Jira issue links.
+            """
+
+            tool_payloads = list(_iter_renderer_tool_result_payloads(tool_messages))
+            if not tool_payloads:
+                return []
+
+            workflow_detail_by_instance_id: dict[str, Mapping[str, Any]] = {}
+            workflow_list_payloads: list[Mapping[str, Any]] = []
+            source_tools: list[str] = []
+            seen_source_tools: set[str] = set()
+
+            for tool_name, payload in tool_payloads:
+                if tool_name in {"workflow_list_instances", "workflow_get_instance"}:
+                    if tool_name not in seen_source_tools:
+                        seen_source_tools.add(tool_name)
+                        source_tools.append(tool_name)
+
+                if tool_name == "workflow_get_instance":
+                    instance_id = _first_text(payload.get("instance_id"))
+                    if instance_id:
+                        workflow_detail_by_instance_id[instance_id] = payload
+                    continue
+                if tool_name == "workflow_list_instances":
+                    workflow_list_payloads.append(payload)
+
+            workflow_rows: list[Mapping[str, Any]] = []
+            for payload in workflow_list_payloads:
+                workflow_rows.extend(_mapping_list(payload.get("instances"), limit=200))
+
+            if not workflow_rows and workflow_detail_by_instance_id:
+                workflow_rows = list(workflow_detail_by_instance_id.values())
+
+            if not workflow_rows:
+                return []
+
+            concept_id_pattern = re.compile(r"^#V#[A-Za-z0-9._-]+$")
+            jira_issue_pattern = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+
+            def _collect_task_links(*values: Any) -> list[dict[str, str]]:
+                links: list[dict[str, str]] = []
+                seen_targets: set[tuple[str, str]] = set()
+
+                def _add_link(link_type: str, target_id: str) -> None:
+                    target = target_id.strip()
+                    if not target:
+                        return
+                    key = (link_type, target)
+                    if key in seen_targets:
+                        return
+                    seen_targets.add(key)
+                    entry: dict[str, str] = {
+                        "link_type": link_type,
+                        "target_id": target,
+                        "label": target,
+                    }
+                    if link_type == "jira_issue":
+                        entry["href"] = (
+                            f"https://naoinstitute.atlassian.net/browse/{target}"
+                        )
+                    links.append(entry)
+
+                def _walk(value: Any, path: tuple[str, ...], depth: int) -> None:
+                    if depth > 4 or len(links) >= 12:
+                        return
+                    if isinstance(value, Mapping):
+                        for raw_key, nested in value.items():
+                            key_text = str(raw_key or "").strip().lower()
+                            if isinstance(nested, str):
+                                candidate = nested.strip()
+                                if not candidate:
+                                    continue
+                                path_tokens = " ".join(path + (key_text,))
+                                if concept_id_pattern.match(candidate) and (
+                                    "task" in path_tokens or "task" in candidate.lower()
+                                ):
+                                    _add_link("von_task", candidate)
+                                    continue
+                                if jira_issue_pattern.match(candidate):
+                                    _add_link("jira_issue", candidate)
+                                continue
+                            if isinstance(nested, (Mapping, list, tuple)):
+                                _walk(nested, path + (key_text,), depth + 1)
+                    elif isinstance(value, (list, tuple)):
+                        for nested in value:
+                            if isinstance(nested, (Mapping, list, tuple)):
+                                _walk(nested, path, depth + 1)
+                            elif isinstance(nested, str):
+                                candidate = nested.strip()
+                                if jira_issue_pattern.match(candidate):
+                                    _add_link("jira_issue", candidate)
+                                elif concept_id_pattern.match(candidate) and "task" in candidate.lower():
+                                    _add_link("von_task", candidate)
+
+                for value in values:
+                    _walk(value, tuple(), 0)
+
+                return links
+
+            nodes: list[dict[str, Any]] = []
+            seen_node_ids: set[str] = set()
+            for index, workflow_row in enumerate(workflow_rows, start=1):
+                detail = None
+                if isinstance(workflow_row, Mapping):
+                    instance_id = _first_text(workflow_row.get("instance_id"))
+                    if instance_id:
+                        detail = workflow_detail_by_instance_id.get(instance_id)
+                else:
+                    continue
+
+                instance_id = _first_text(
+                    workflow_row.get("instance_id"),
+                    detail.get("instance_id") if isinstance(detail, Mapping) else None,
+                )
+                workflow_id = _first_text(
+                    workflow_row.get("workflow_id"),
+                    detail.get("workflow_id") if isinstance(detail, Mapping) else None,
+                )
+                node_id = instance_id or workflow_id or f"workflow_node_{index}"
+                if node_id in seen_node_ids:
+                    continue
+                seen_node_ids.add(node_id)
+
+                status = (
+                    _first_text(
+                        workflow_row.get("status"),
+                        detail.get("status") if isinstance(detail, Mapping) else None,
+                    )
+                    or "unknown"
+                ).lower()
+                current_state = _first_text(
+                    workflow_row.get("current_state"),
+                    detail.get("current_state") if isinstance(detail, Mapping) else None,
+                ) or ""
+
+                progress_raw = workflow_row.get("progress")
+                if isinstance(progress_raw, Mapping):
+                    progress_map: Mapping[str, Any] = progress_raw
+                elif isinstance(detail, Mapping) and isinstance(
+                    detail.get("progress"), Mapping
+                ):
+                    progress_map = cast(Mapping[str, Any], detail.get("progress"))
+                else:
+                    progress_map = {}
+                progress_current = (
+                    progress_map.get("current")
+                    if isinstance(progress_map.get("current"), (int, float))
+                    else None
+                )
+                progress_total = (
+                    progress_map.get("total")
+                    if isinstance(progress_map.get("total"), (int, float))
+                    else None
+                )
+                progress_message = _first_text(progress_map.get("message"))
+                step_index = workflow_row.get("step_index")
+                if not isinstance(step_index, (int, float)):
+                    if isinstance(detail, Mapping) and isinstance(
+                        detail.get("step_index"), (int, float)
+                    ):
+                        step_index = detail.get("step_index")
+                    else:
+                        step_index = None
+
+                progress_bits: list[str] = []
+                if isinstance(progress_current, (int, float)) and isinstance(
+                    progress_total, (int, float)
+                ):
+                    progress_bits.append(
+                        f"Step {int(progress_current)}/{int(progress_total)}"
+                    )
+                elif isinstance(step_index, (int, float)):
+                    progress_bits.append(f"Step {int(step_index)}")
+                if progress_message:
+                    progress_bits.append(progress_message)
+                elif current_state:
+                    progress_bits.append(current_state)
+
+                task_links = _collect_task_links(
+                    workflow_row,
+                    detail if isinstance(detail, Mapping) else None,
+                    detail.get("inputs") if isinstance(detail, Mapping) else None,
+                    detail.get("outputs") if isinstance(detail, Mapping) else None,
+                    detail.get("workflow_data") if isinstance(detail, Mapping) else None,
+                )
+
+                label = workflow_id or instance_id or f"Workflow {index}"
+                node_payload: dict[str, Any] = {
+                    "node_id": node_id,
+                    "label": label,
+                    "status": status,
+                }
+                if workflow_id:
+                    node_payload["workflow_id"] = workflow_id
+                if instance_id:
+                    node_payload["instance_id"] = instance_id
+                if current_state:
+                    node_payload["state"] = current_state
+                if progress_bits:
+                    node_payload["progress_label"] = " · ".join(progress_bits)
+                if task_links:
+                    node_payload["task_links"] = task_links
+
+                nodes.append(node_payload)
+                if len(nodes) >= 50:
+                    break
+
+            if not nodes:
+                return []
+
+            return [
+                {
+                    "element_id": "screen_workflow_view",
+                    "intent": "structured_workflow_view",
+                    "payload": {
+                        "layout": "list",
+                        "nodes": nodes,
+                        "edges": [],
+                    },
+                    "constraints": {
+                        "supports_node_links": True,
+                        "supports_task_navigation": True,
+                    },
+                    "provenance": {
+                        "source": "tool_result_workflow_view",
+                        "source_tools": source_tools,
+                        "record_family": "workflow_instances",
+                    },
+                }
+            ]
+
         def _build_renderer_request_payload(
             screen_text: Any,
             *,
@@ -11241,6 +11481,14 @@ class InternalMCPChatOrchestrator:
                 decision["screen_table_record_sets"] = screen_table_record_sets
                 decision["screen_table_record_set_count"] = len(
                     screen_table_record_sets
+                )
+            screen_workflow_elements = _extract_renderer_screen_workflow_elements(
+                tool_messages=tool_messages
+            )
+            if screen_workflow_elements:
+                decision["screen_workflow_elements"] = screen_workflow_elements
+                decision["screen_workflow_element_count"] = len(
+                    screen_workflow_elements
                 )
             renderer_render_plan = decision
 

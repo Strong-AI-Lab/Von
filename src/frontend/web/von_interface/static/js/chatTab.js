@@ -1368,6 +1368,21 @@ function resolvePresenterChannels(rawPresenterChannels, displayElements) {
     });
 }
 
+function dispatchSelectConceptByIdEvent(conceptId, event = null) {
+    if (!conceptId || typeof conceptId !== 'string' || !conceptId.trim()) {
+        return;
+    }
+    document.dispatchEvent(new CustomEvent('von:selectConceptById', {
+        detail: {
+            conceptId: conceptId.trim(),
+            createConceptTab: true,
+            modifierKeys: {
+                shiftKey: !!(event && event.shiftKey)
+            }
+        }
+    }));
+}
+
 function resolveResponsePresenterState(responseData) {
     const debugData = (responseData && typeof responseData === 'object' && responseData.llm_debug && typeof responseData.llm_debug === 'object')
         ? responseData.llm_debug
@@ -1393,6 +1408,8 @@ function resolveResponsePresenterState(responseData) {
 const TABLE_NON_PAGINATED_ROW_LIMIT = 100;
 const TABLE_DEFAULT_PAGE_SIZE = 50;
 const TABLE_MAX_PAGE_SIZE = 200;
+const WORKFLOW_MAX_NODES = 100;
+const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
 
 function normaliseTableSortMetadata(value, columns) {
     if (!value || typeof value !== 'object') {
@@ -1660,6 +1677,164 @@ function resolveTableDisplayElements(debugData) {
     return tables;
 }
 
+function normaliseWorkflowTaskLink(rawLink) {
+    if (!rawLink || typeof rawLink !== 'object') {
+        return null;
+    }
+
+    const targetId = typeof rawLink.target_id === 'string'
+        ? rawLink.target_id.trim()
+        : '';
+    if (!targetId) {
+        return null;
+    }
+
+    const rawType = typeof rawLink.link_type === 'string'
+        ? rawLink.link_type.trim().toLowerCase()
+        : '';
+    let linkType = rawType;
+    if (!linkType) {
+        if (targetId.startsWith('#V#')) {
+            linkType = 'von_task';
+        } else if (JIRA_ISSUE_KEY_PATTERN.test(targetId)) {
+            linkType = 'jira_issue';
+        } else {
+            linkType = 'external';
+        }
+    }
+
+    const label = typeof rawLink.label === 'string' && rawLink.label.trim()
+        ? rawLink.label.trim()
+        : targetId;
+    const explicitHref = typeof rawLink.href === 'string' && rawLink.href.trim()
+        ? rawLink.href.trim()
+        : '';
+    const href = explicitHref || (linkType === 'jira_issue'
+        ? `https://naoinstitute.atlassian.net/browse/${targetId}`
+        : '');
+
+    return {
+        link_type: linkType,
+        target_id: targetId,
+        label,
+        href
+    };
+}
+
+function normaliseWorkflowDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'workflow_view') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const rawNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+    const nodes = rawNodes
+        .map((node, index) => {
+            if (!node || typeof node !== 'object') {
+                return null;
+            }
+            const nodeId = typeof node.node_id === 'string' && node.node_id.trim()
+                ? node.node_id.trim()
+                : `workflow_node_${index + 1}`;
+            const label = typeof node.label === 'string' && node.label.trim()
+                ? node.label.trim()
+                : (typeof node.workflow_id === 'string' && node.workflow_id.trim()
+                    ? node.workflow_id.trim()
+                    : nodeId);
+            const status = typeof node.status === 'string' && node.status.trim()
+                ? node.status.trim().toLowerCase()
+                : 'unknown';
+            const state = typeof node.state === 'string' ? node.state.trim() : '';
+            const progressLabel = typeof node.progress_label === 'string'
+                ? node.progress_label.trim()
+                : '';
+            const workflowId = typeof node.workflow_id === 'string' ? node.workflow_id.trim() : '';
+            const instanceId = typeof node.instance_id === 'string' ? node.instance_id.trim() : '';
+
+            const rawTaskLinks = Array.isArray(node.task_links) ? node.task_links : [];
+            const taskLinks = rawTaskLinks
+                .map((link) => normaliseWorkflowTaskLink(link))
+                .filter(Boolean);
+
+            return {
+                node_id: nodeId,
+                label,
+                status,
+                state,
+                progress_label: progressLabel,
+                workflow_id: workflowId,
+                instance_id: instanceId,
+                task_links: taskLinks
+            };
+        })
+        .filter(Boolean)
+        .slice(0, WORKFLOW_MAX_NODES);
+
+    if (!nodes.length) {
+        return null;
+    }
+
+    const nodeIdSet = new Set(nodes.map((node) => node.node_id));
+    const rawEdges = Array.isArray(payload.edges) ? payload.edges : [];
+    const edges = rawEdges
+        .map((edge) => {
+            if (!edge || typeof edge !== 'object') {
+                return null;
+            }
+            const sourceNodeId = typeof edge.source_node_id === 'string'
+                ? edge.source_node_id.trim()
+                : '';
+            const targetNodeId = typeof edge.target_node_id === 'string'
+                ? edge.target_node_id.trim()
+                : '';
+            if (!sourceNodeId || !targetNodeId) {
+                return null;
+            }
+            if (!nodeIdSet.has(sourceNodeId) || !nodeIdSet.has(targetNodeId)) {
+                return null;
+            }
+            return {
+                source_node_id: sourceNodeId,
+                target_node_id: targetNodeId,
+                label: typeof edge.label === 'string' ? edge.label.trim() : ''
+            };
+        })
+        .filter(Boolean);
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id : null,
+        nodes,
+        edges,
+        layout: typeof payload.layout === 'string' && payload.layout.trim()
+            ? payload.layout.trim().toLowerCase()
+            : 'list'
+    };
+}
+
+function resolveWorkflowDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const workflows = [];
+    for (const element of contract.elements) {
+        const workflowElement = normaliseWorkflowDisplayElement(element);
+        if (!workflowElement) {
+            continue;
+        }
+        workflows.push(workflowElement);
+    }
+    return workflows;
+}
+
 function renderTableDisplayElementsIntoContainer(container, debugData) {
     if (!container || typeof container.querySelectorAll !== 'function') {
         return;
@@ -1679,13 +1854,30 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     }
 
     const tableElements = resolveTableDisplayElements(debugData);
-    if (!tableElements.length) {
+    const workflowElements = resolveWorkflowDisplayElements(debugData);
+    if (!tableElements.length && !workflowElements.length) {
         return;
     }
 
     const root = document.createElement('div');
     root.className = 'chat-display-elements';
     root.style.cssText = 'margin-top: 10px; border: 1px solid #dce3ea; border-radius: 6px; background: #fff; padding: 8px;';
+    root.addEventListener('click', (event) => {
+        const target = event.target;
+        if (!target || !(target instanceof HTMLElement)) {
+            return;
+        }
+        const conceptButton = target.closest('.chat-display-elements-concept-link');
+        if (!conceptButton) {
+            return;
+        }
+        event.preventDefault();
+        const conceptId = conceptButton.dataset.conceptId;
+        if (!conceptId) {
+            return;
+        }
+        dispatchSelectConceptByIdEvent(conceptId, event);
+    });
 
     tableElements.forEach((tableElement, tableIndex) => {
         const section = document.createElement('section');
@@ -1801,6 +1993,121 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             section.appendChild(truncationNotice);
         }
 
+        root.appendChild(section);
+    });
+
+    workflowElements.forEach((workflowElement, workflowIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-workflow-section';
+        section.style.cssText = (tableElements.length > 0 || workflowIndex > 0) ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-workflow-title';
+        title.textContent = workflowElements.length > 1
+            ? `Workflow view ${workflowIndex + 1}`
+            : 'Workflow view';
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const summary = document.createElement('div');
+        summary.className = 'chat-display-elements-workflow-summary';
+        summary.textContent = `${workflowElement.nodes.length} node${workflowElement.nodes.length === 1 ? '' : 's'}`;
+        summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+        section.appendChild(summary);
+
+        const list = document.createElement('div');
+        list.className = 'chat-display-elements-workflow-list';
+        list.style.cssText = 'display: grid; gap: 8px;';
+
+        workflowElement.nodes.forEach((node) => {
+            const statusClass = String(node.status || 'unknown')
+                .toLowerCase()
+                .replace(/[^a-z0-9_-]+/g, '-');
+            const card = document.createElement('article');
+            card.className = `chat-display-elements-workflow-node status-${statusClass}`;
+            card.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; padding: 8px; background: #f8fbff;';
+
+            const header = document.createElement('div');
+            header.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px;';
+
+            const name = document.createElement('div');
+            name.className = 'chat-display-elements-workflow-node-name';
+            name.textContent = node.label;
+            name.style.cssText = 'font-size: 0.83em; font-weight: 600; color: #1f3d5a;';
+            header.appendChild(name);
+
+            const badge = document.createElement('span');
+            badge.className = `workflow-status-badge status-${statusClass}`;
+            badge.textContent = formatWorkflowStatusLabel(node.status || 'unknown');
+            header.appendChild(badge);
+            card.appendChild(header);
+
+            const details = [];
+            if (node.workflow_id) {
+                details.push(`Workflow: ${node.workflow_id}`);
+            }
+            if (node.instance_id) {
+                details.push(`Instance: ${node.instance_id}`);
+            }
+            if (node.state) {
+                details.push(`State: ${node.state}`);
+            }
+            if (node.progress_label) {
+                details.push(node.progress_label);
+            }
+
+            if (details.length) {
+                const meta = document.createElement('div');
+                meta.className = 'chat-display-elements-workflow-node-meta';
+                meta.textContent = details.join(' · ');
+                meta.style.cssText = 'margin-top: 4px; font-size: 0.78em; color: #44576a;';
+                card.appendChild(meta);
+            }
+
+            if (Array.isArray(node.task_links) && node.task_links.length) {
+                const linksWrap = document.createElement('div');
+                linksWrap.className = 'chat-display-elements-workflow-node-links';
+                linksWrap.style.cssText = 'margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px;';
+
+                node.task_links.forEach((link) => {
+                    if (!link || typeof link !== 'object') {
+                        return;
+                    }
+                    if (link.link_type === 'von_task') {
+                        const conceptId = _normalisePotentialConceptId(link.target_id);
+                        if (!conceptId) {
+                            return;
+                        }
+                        const button = document.createElement('button');
+                        button.type = 'button';
+                        button.className = 'chat-display-elements-concept-link';
+                        button.dataset.conceptId = conceptId;
+                        button.textContent = link.label || conceptId;
+                        button.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; cursor: pointer;';
+                        linksWrap.appendChild(button);
+                        return;
+                    }
+                    if (link.link_type === 'jira_issue' && link.href) {
+                        const anchor = document.createElement('a');
+                        anchor.href = link.href;
+                        anchor.target = '_blank';
+                        anchor.rel = 'noopener noreferrer';
+                        anchor.textContent = link.label || link.target_id;
+                        anchor.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; text-decoration: none;';
+                        linksWrap.appendChild(anchor);
+                        return;
+                    }
+                });
+
+                if (linksWrap.childElementCount > 0) {
+                    card.appendChild(linksWrap);
+                }
+            }
+
+            list.appendChild(card);
+        });
+
+        section.appendChild(list);
         root.appendChild(section);
     });
 
@@ -9697,15 +10004,7 @@ function bindWorkflowStatusConceptLinks() {
         if (!conceptId) {
             return;
         }
-        document.dispatchEvent(new CustomEvent('von:selectConceptById', {
-            detail: {
-                conceptId,
-                createConceptTab: true,
-                modifierKeys: {
-                    shiftKey: event.shiftKey
-                }
-            }
-        }));
+        dispatchSelectConceptByIdEvent(conceptId, event);
     });
 
     body.dataset.conceptLinkBound = 'true';
@@ -11916,15 +12215,7 @@ async function showLlmDebugPopup(turnId, options = {}) {
             if (!conceptId) {
                 return;
             }
-            document.dispatchEvent(new CustomEvent('von:selectConceptById', {
-                detail: {
-                    conceptId,
-                    createConceptTab: true,
-                    modifierKeys: {
-                        shiftKey: event.shiftKey
-                    }
-                }
-            }));
+            dispatchSelectConceptByIdEvent(conceptId, event);
         });
         metaDiv.dataset.promptLinkBound = 'true';
     }

@@ -326,6 +326,80 @@ def test_generate_drops_invalid_tables_from_render_plan_record_sets(monkeypatch)
     assert not table_elements
 
 
+def test_generate_builds_workflow_view_from_render_plan_elements(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_workflow_elements": [
+            {
+                "element_id": "screen_workflow_view",
+                "intent": "structured_workflow_view",
+                "payload": {
+                    "layout": "list",
+                    "nodes": [
+                        {
+                            "node_id": "inst_1",
+                            "label": "#V#salient_predicate_governance_workflow",
+                            "status": "running",
+                            "state": "#V#salience_step_identify_type",
+                            "task_links": [
+                                {
+                                    "link_type": "von_task",
+                                    "target_id": "#V#task_alpha",
+                                },
+                                {
+                                    "link_type": "jira_issue",
+                                    "target_id": "JVNAUTOSCI-1148",
+                                    "href": "https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1148",
+                                },
+                            ],
+                        }
+                    ],
+                    "edges": [],
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Workflow summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show workflow"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    assert display_elements.get("validation", {}).get("valid") is True
+    assert "screen_structured_workflows_supplied" in display_elements.get(
+        "reason_codes", []
+    )
+
+    workflow_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "workflow_view"
+    ]
+    assert len(workflow_elements) == 1
+    workflow_element = workflow_elements[0]
+    assert workflow_element.get("element_id") == "screen_workflow_view"
+    nodes = workflow_element.get("payload", {}).get("nodes")
+    assert isinstance(nodes, list)
+    assert nodes[0]["node_id"] == "inst_1"
+    assert nodes[0]["task_links"][0]["target_id"] == "#V#task_alpha"
+
+
 def test_task_result_includes_render_plan_when_present(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 

@@ -23,7 +23,12 @@ function advanceTimers(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildDisplayElementsContract({ screenText = null, spokenText = null, tablePayload = null } = {}) {
+function buildDisplayElementsContract({
+    screenText = null,
+    spokenText = null,
+    tablePayload = null,
+    workflowPayload = null
+} = {}) {
     const elements = [];
     if (typeof screenText === 'string') {
         elements.push({
@@ -55,6 +60,17 @@ function buildDisplayElementsContract({ screenText = null, spokenText = null, ta
             order: 16,
             intent: 'structured_tabular_view',
             payload: tablePayload,
+            provenance: { source: 'test' }
+        });
+    }
+    if (workflowPayload && typeof workflowPayload === 'object') {
+        elements.push({
+            element_id: 'screen_workflow_view',
+            element_type: 'workflow_view',
+            channel: 'screen',
+            order: 26,
+            intent: 'structured_workflow_view',
+            payload: workflowPayload,
             provenance: { source: 'test' }
         });
     }
@@ -484,6 +500,114 @@ describe('chat speech planning (presenter channels)', () => {
         expect(secondPageRows.length).toBe(1);
         expect(secondPageRows[0].querySelectorAll('td')[0].textContent).toBe('Alpha');
         expect(paginationStatus.textContent).toBe('Page 2 of 2');
+    });
+
+    test('renders workflow view display elements with Von/Jira task links', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'show workflow status';
+
+        const displayElements = buildDisplayElementsContract({
+            screenText: 'Workflow summary',
+            spokenText: 'Here is the workflow summary.',
+            workflowPayload: {
+                layout: 'list',
+                nodes: [
+                    {
+                        node_id: 'inst_1',
+                        label: '#V#salient_predicate_governance_workflow',
+                        status: 'running',
+                        state: '#V#salience_step_identify_type',
+                        progress_label: 'Step 1/3 · Processing',
+                        task_links: [
+                            {
+                                link_type: 'von_task',
+                                target_id: '#V#task_alpha',
+                                label: '#V#task_alpha'
+                            },
+                            {
+                                link_type: 'jira_issue',
+                                target_id: 'JVNAUTOSCI-1148',
+                                label: 'JVNAUTOSCI-1148'
+                            }
+                        ]
+                    }
+                ],
+                edges: []
+            }
+        });
+
+        global.fetch = jest.fn((url, options) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                let text = '';
+                try {
+                    text = JSON.parse(options?.body ?? '{}')?.text ?? '';
+                } catch (_) {
+                    text = '';
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(text) })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Workflow summary',
+                        display_elements: displayElements,
+                        llm_debug: {
+                            model: 'gpt-5.2',
+                            response: 'Workflow summary',
+                            messages: [],
+                            display_elements: displayElements
+                        }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const onSelect = jest.fn();
+        document.addEventListener('von:selectConceptById', onSelect);
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const workflowNode = document.querySelector('.chat-display-elements-workflow-node');
+        expect(workflowNode).toBeTruthy();
+        expect(workflowNode.textContent).toContain('#V#salient_predicate_governance_workflow');
+        expect(workflowNode.textContent).toContain('running');
+
+        const conceptLink = document.querySelector('.chat-display-elements-concept-link');
+        expect(conceptLink).toBeTruthy();
+        expect(conceptLink.dataset.conceptId).toBe('#V#task_alpha');
+
+        conceptLink.click();
+        expect(onSelect).toHaveBeenCalledTimes(1);
+        expect(onSelect.mock.calls[0][0].detail.conceptId).toBe('#V#task_alpha');
+
+        const jiraLink = document.querySelector('a[href*="JVNAUTOSCI-1148"]');
+        expect(jiraLink).toBeTruthy();
+        expect(jiraLink.getAttribute('href')).toContain('/browse/JVNAUTOSCI-1148');
+
+        document.removeEventListener('von:selectConceptById', onSelect);
     });
 
     test('Shift+click Speak uses screen channel (accessibility)', async () => {

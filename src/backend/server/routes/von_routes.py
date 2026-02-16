@@ -1994,6 +1994,33 @@ def _extract_screen_table_elements_from_render_plan(
     return table_elements
 
 
+def _extract_screen_workflow_elements_from_render_plan(
+    render_plan: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Extract display-contract workflow specs from renderer plan diagnostics."""
+    if not isinstance(render_plan, dict):
+        return []
+
+    workflow_elements: list[dict[str, Any]] = []
+
+    def _append_workflow_specs(raw_value: Any) -> None:
+        if isinstance(raw_value, list):
+            for item in raw_value:
+                if isinstance(item, dict):
+                    workflow_elements.append(dict(item))
+        elif isinstance(raw_value, dict):
+            workflow_elements.append(dict(raw_value))
+
+    _append_workflow_specs(render_plan.get("screen_workflow_elements"))
+    _append_workflow_specs(render_plan.get("screen_workflow_payloads"))
+
+    single_workflow = render_plan.get("screen_workflow_element")
+    if isinstance(single_workflow, dict):
+        workflow_elements.append(dict(single_workflow))
+
+    return workflow_elements
+
+
 def _ensure_required_screen_json_fence(
     screen_text: str | None,
     required_fence: str | None,
@@ -5010,12 +5037,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
         screen_table_elements = _extract_screen_table_elements_from_render_plan(
             render_plan_debug if isinstance(render_plan_debug, dict) else None
         )
+        screen_workflow_elements = _extract_screen_workflow_elements_from_render_plan(
+            render_plan_debug if isinstance(render_plan_debug, dict) else None
+        )
         display_elements_contract = build_turn_display_elements(
             response_text=response_text,
             presenter_channels=(
                 presenter_channels if isinstance(presenter_channels, dict) else None
             ),
             screen_table_elements=screen_table_elements,
+            screen_workflow_elements=screen_workflow_elements,
             required_screen_json_fence=required_screen_json_fence,
             screen_backfill_second_pass_attempted=screen_backfill_second_pass_attempted,
             screen_backfill_second_pass_reason=screen_backfill_second_pass_reason,
