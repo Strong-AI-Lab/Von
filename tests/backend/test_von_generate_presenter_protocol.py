@@ -104,6 +104,22 @@ def test_generate_extracts_presenter_blocks_and_returns_response_channels(monkey
     assert llm_debug["presenter_channels"]["spoken"] == "Hello there."
     assert llm_debug.get("spoken_backfill_second_pass_attempted") is False
     assert llm_debug.get("spoken_backfill_second_pass_reason") is None
+    display_elements = body["display_elements"]
+    assert display_elements["schema_version"] == "turn_display_elements_v1"
+    assert display_elements["validation"]["valid"] is True
+    screen_element = next(
+        element
+        for element in display_elements["elements"]
+        if element["element_id"] == "screen_text"
+    )
+    spoken_element = next(
+        element
+        for element in display_elements["elements"]
+        if element["element_id"] == "spoken_text"
+    )
+    assert screen_element["payload"]["text"] == "Here is the on-screen content."
+    assert spoken_element["payload"]["text"] == "Hello there."
+    assert llm_debug["display_elements"]["schema_version"] == "turn_display_elements_v1"
 
     assert len(llm.calls) == 1
     sent_context = llm.calls[0]["context"]
@@ -461,3 +477,11 @@ def test_presenter_mode_preserves_required_screen_json_fence_from_prompt(monkeyp
         "missing_screen",
         "missing_screen_fence",
     }
+    display_elements = body["display_elements"]
+    json_blocks = [
+        element
+        for element in display_elements["elements"]
+        if element["element_type"] == "json_block"
+    ]
+    assert json_blocks
+    assert any(element["payload"]["fence"] == expected_fence for element in json_blocks)

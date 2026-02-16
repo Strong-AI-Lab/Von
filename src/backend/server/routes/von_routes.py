@@ -36,6 +36,7 @@ from ...services.chat_concept_reference_service import (
     build_context_concept_reference_metadata,
 )
 from ...services.prompt_template_service import PromptTemplateService
+from ...services.display_elements_service import build_turn_display_elements
 from ...workflows import (
     CHAT_NARRATION_WORKFLOW_ID,
     WorkflowExecutionTrace,
@@ -1654,6 +1655,17 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
             warnings.append(
                 f"Spoken backfill attempted but spoken channel is still missing ({reason_text})."
             )
+
+    display_elements = debug_info.get("display_elements")
+    if isinstance(display_elements, dict):
+        validation = display_elements.get("validation")
+        if isinstance(validation, dict) and validation.get("valid") is False:
+            warnings.append("Display element contract validation failed.")
+            errors = validation.get("errors")
+            if isinstance(errors, list):
+                for error in errors:
+                    if isinstance(error, str) and error.strip():
+                        warnings.append(f"Display element validation error: {error.strip()}")
 
     # Remove duplicates while preserving order
     seen = set()
@@ -4181,6 +4193,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
         screen_backfill_second_pass_attempted = False
         screen_backfill_second_pass_reason = None
+        required_screen_json_fence = None
 
         if presenter_mode_requested:
             has_tool_messages = bool(tool_messages)
@@ -4875,6 +4888,18 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "[mcp_orchestrator] Tool invocations: %s", tool_invocations
             )
 
+        display_elements_contract = build_turn_display_elements(
+            response_text=response_text,
+            presenter_channels=(
+                presenter_channels if isinstance(presenter_channels, dict) else None
+            ),
+            required_screen_json_fence=required_screen_json_fence,
+            screen_backfill_second_pass_attempted=screen_backfill_second_pass_attempted,
+            screen_backfill_second_pass_reason=screen_backfill_second_pass_reason,
+            spoken_backfill_second_pass_attempted=spoken_backfill_second_pass_attempted,
+            spoken_backfill_second_pass_reason=spoken_backfill_second_pass_reason,
+        )
+
         # Build LLM debug information FIRST (before saving to history)
         # so we can persist it alongside the assistant message
         # NOTE: Only include the NEW messages for this turn to avoid exponential token growth
@@ -5245,6 +5270,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "buttonify": buttonify_meta,
             # JVNAUTOSCI-1076: Workflow discovery results for Thinking context
             "workflow_discovery": workflow_discovery_result,
+            "display_elements": display_elements_contract,
         }
         if isinstance(render_plan_debug, dict):
             llm_debug_info["render_plan"] = dict(render_plan_debug)
@@ -5308,6 +5334,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     else None
                 ),
                 "llm_debug": llm_debug_info,
+                "display_elements": display_elements_contract,
                 "rag_trace": rag_trace,
             }
         )
