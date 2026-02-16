@@ -721,6 +721,115 @@ def test_renderer_render_plan_includes_table_record_sets_from_tool_messages(monk
     assert predicate_records[0]["object"] == "#V#task_beta"
 
 
+def test_renderer_render_plan_skips_malformed_tool_messages_for_table_record_sets(
+    monkeypatch,
+):
+    """Malformed/invalid tool payloads should not produce table record sets."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#table_renderer",
+                        "renderer_type": "table",
+                        "modalities": ["visual"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Here is the answer on screen.",
+                "tool_messages": [
+                    # Malformed/truncated JSON.
+                    {
+                        "role": "tool",
+                        "content": "{\"tool\":\"task_list\",\"status\":\"ok\",\"payload\":{\"tasks\":[{\"title\":\"A\"}]",
+                    },
+                    # Explicit tool error should be ignored.
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "task_list",
+                                "status": "error",
+                                "duration_ms": 2.0,
+                                "error": "simulated failure",
+                            }
+                        ),
+                    },
+                    # Non-mapping payload should be ignored.
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "task_search",
+                                "status": "ok",
+                                "duration_ms": 3.1,
+                                "payload": ["unexpected", "payload", "shape"],
+                            }
+                        ),
+                    },
+                    # Mapping payload but invalid extent row shape should be ignored.
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "get_predicate_extent",
+                                "status": "ok",
+                                "duration_ms": 1.4,
+                                "payload": {
+                                    "success": True,
+                                    "concept_id": "#V#depends_on",
+                                    "extent": ["invalid-row-shape"],
+                                },
+                            }
+                        ),
+                    },
+                ],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+
+    result = orchestrator.run(
+        prompt="Show tasks and dependencies",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == "Here is the answer on screen."
+    assert isinstance(result.render_plan, dict)
+    assert "screen_table_record_sets" not in result.render_plan
+    assert "screen_table_record_set_count" not in result.render_plan
+
+
 def test_renderer_applicability_missing_definitions_falls_back_screen_only(monkeypatch):
     """Enabled routing with missing renderer definitions should fail closed to screen-only."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
