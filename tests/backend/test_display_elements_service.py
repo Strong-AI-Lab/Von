@@ -74,3 +74,36 @@ def test_validate_turn_display_elements_rejects_unknown_element_type() -> None:
     assert valid is False
     assert any("unsupported_kind" in message for message in errors)
 
+
+def test_build_turn_display_elements_orders_elements_deterministically() -> None:
+    required_fence = "```json\n{\"sentinel\": \"required\"}\n```"
+    contract = build_turn_display_elements(
+        response_text=(
+            "Screen content\n"
+            "```json\n"
+            "{\"existing\": true}\n"
+            "```"
+        ),
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": (
+                "Screen content\n"
+                "```json\n"
+                "{\"existing\": true}\n"
+                "```"
+            ),
+            "spoken": "Talk track",
+        },
+        required_screen_json_fence=required_fence,
+    )
+
+    element_ids = [element["element_id"] for element in contract["elements"]]
+    assert element_ids == [
+        "screen_text",
+        "screen_json_block_1",
+        "screen_json_block_2",
+        "spoken_text",
+    ]
+
+    orders = [element["order"] for element in contract["elements"]]
+    assert orders == sorted(orders)

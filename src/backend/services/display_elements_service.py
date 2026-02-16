@@ -251,6 +251,10 @@ def build_turn_display_elements(
             }
         )
 
+    # Emit elements in the same deterministic order signalled by `order`.
+    # This keeps downstream renderers and regressions aligned on one sequence.
+    elements.sort(key=lambda item: (int(item.get("order", 0)), str(item.get("element_id", ""))))
+
     reason_codes = _dedupe_preserve_order(reason_codes)
 
     contract: dict[str, Any] = {
@@ -264,4 +268,3 @@ def build_turn_display_elements(
         "errors": errors,
     }
     return contract
-
