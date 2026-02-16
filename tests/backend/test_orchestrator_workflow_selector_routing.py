@@ -402,7 +402,7 @@ def test_renderer_applicability_error_preserves_selector_narration(monkeypatch):
 def test_renderer_applicability_flag_off_preserves_default_rendering(monkeypatch):
     """With the feature flag off, routing should remain unchanged and skip tool calls."""
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
-    monkeypatch.delenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", raising=False)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "0")
     monkeypatch.delenv("VON_RENDERER_APPLICABILITY_DEFINITION_IDS", raising=False)
 
     def _invoke(_tool_name: str, _payload: Mapping[str, Any]):

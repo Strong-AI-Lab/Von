@@ -10753,11 +10753,11 @@ class InternalMCPChatOrchestrator:
 
         # Feature-flagged step toward ontology-driven render planning:
         # resolve whether narration should be part of the response rendering.
-        # Disabled by default; routing behaviour remains unchanged unless
-        # explicitly enabled with renderer definitions configured.
+        # Enabled by default; set VON_RENDERER_APPLICABILITY_ROUTING_ENABLE=0
+        # to disable and preserve legacy behaviour.
         renderer_routing_enabled = self._env_flag_enabled(
             "VON_RENDERER_APPLICABILITY_ROUTING_ENABLE",
-            default="0",
+            default="1",
         )
         renderer_definition_concept_ids = self._env_csv_values(
             "VON_RENDERER_APPLICABILITY_DEFINITION_IDS"
