@@ -216,6 +216,148 @@ def extract_markdown_tables(text: str | None) -> list[dict[str, Any]]:
     return tables
 
 
+def _normalise_table_data_type(value: object) -> str:
+    if not isinstance(value, str):
+        return "text"
+    cleaned = value.strip().lower()
+    if cleaned in {"text", "number", "boolean", "date", "mixed"}:
+        return cleaned
+    return "text"
+
+
+def _coerce_table_display_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _infer_table_value_type(value_raw: object, value_display: str, data_type: str) -> str:
+    normalised = _normalise_table_data_type(data_type)
+    if normalised != "mixed":
+        return normalised
+
+    if isinstance(value_raw, bool):
+        return "boolean"
+    if isinstance(value_raw, (int, float)) and not isinstance(value_raw, bool):
+        return "number"
+    return _infer_cell_value_type(value_display)
+
+
+def build_canonical_table_payload_from_records(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    columns: Sequence[Mapping[str, Any]],
+    row_id_field: str | None = None,
+    row_provenance_field: str | None = None,
+    default_sort_column_id: str | None = None,
+    default_sort_direction: str = "asc",
+    filters: Sequence[Mapping[str, Any]] | None = None,
+    pagination_enabled: bool = True,
+    page_size: int | None = None,
+) -> dict[str, Any]:
+    """Build one canonical table payload from configured column metadata + records.
+
+    This helper keeps task/predicate extent table construction on one shape so the
+    renderer can stay generic and avoid per-use-case branching.
+    """
+    used_column_ids: set[str] = set()
+    canonical_columns: list[dict[str, Any]] = []
+    source_keys_by_column_id: dict[str, str] = {}
+    data_type_by_column_id: dict[str, str] = {}
+
+    for index, column in enumerate(columns):
+        if not isinstance(column, Mapping):
+            continue
+        configured_column_id = _normalise_text(column.get("column_id"))
+        label = _normalise_text(column.get("label")) or configured_column_id or f"Column {index + 1}"
+        column_id = _build_column_id(configured_column_id or label, index, used_column_ids)
+        data_type = _normalise_table_data_type(column.get("data_type"))
+
+        canonical_columns.append(
+            {
+                "column_id": column_id,
+                "label": label,
+                "data_type": data_type,
+                "position": index,
+            }
+        )
+        source_key = _normalise_text(column.get("source_key")) or configured_column_id or column_id
+        source_keys_by_column_id[column_id] = source_key
+        data_type_by_column_id[column_id] = data_type
+
+    canonical_rows: list[dict[str, Any]] = []
+    for row_index, record in enumerate(records, start=1):
+        if not isinstance(record, Mapping):
+            continue
+
+        row_id_candidate = (
+            _normalise_text(record.get(row_id_field))
+            if isinstance(row_id_field, str) and row_id_field
+            else None
+        )
+        row_id = row_id_candidate or f"row_{row_index}"
+        cells: list[dict[str, Any]] = []
+        for column in canonical_columns:
+            column_id = str(column["column_id"])
+            source_key = source_keys_by_column_id.get(column_id, column_id)
+            value_raw = record.get(source_key)
+            value_display = _coerce_table_display_value(value_raw)
+            data_type = data_type_by_column_id.get(column_id, "text")
+            value_type = _infer_table_value_type(value_raw, value_display, data_type)
+            cells.append(
+                {
+                    "column_id": column_id,
+                    "value_raw": value_raw,
+                    "value_display": value_display,
+                    "value_type": value_type,
+                }
+            )
+
+        row_payload: dict[str, Any] = {"row_id": row_id, "cells": cells}
+        if isinstance(row_provenance_field, str) and row_provenance_field:
+            provenance_value = record.get(row_provenance_field)
+            if isinstance(provenance_value, Mapping):
+                row_payload["provenance"] = dict(provenance_value)
+            elif provenance_value is not None:
+                row_payload["provenance"] = {"source_ref": str(provenance_value)}
+
+        canonical_rows.append(row_payload)
+
+    resolved_sort_column = _normalise_text(default_sort_column_id)
+    declared_column_ids = {str(column["column_id"]) for column in canonical_columns}
+    if not resolved_sort_column or resolved_sort_column not in declared_column_ids:
+        resolved_sort_column = str(canonical_columns[0]["column_id"]) if canonical_columns else None
+
+    direction = "desc" if str(default_sort_direction).strip().lower() == "desc" else "asc"
+    if isinstance(page_size, int) and page_size > 0:
+        resolved_page_size = page_size
+    else:
+        resolved_page_size = min(100, max(1, len(canonical_rows)))
+
+    table_filters: list[dict[str, Any]] = []
+    if isinstance(filters, Sequence):
+        for value in filters:
+            if isinstance(value, Mapping):
+                table_filters.append(dict(value))
+
+    return {
+        "columns": canonical_columns,
+        "rows": canonical_rows,
+        "sort": {
+            "default_column_id": resolved_sort_column,
+            "direction": direction,
+        },
+        "filters": table_filters,
+        "pagination": {
+            "enabled": bool(pagination_enabled),
+            "page_size": resolved_page_size,
+            "total_rows": len(canonical_rows),
+        },
+    }
+
+
 def validate_turn_display_elements(
     contract: Mapping[str, Any] | None,
 ) -> tuple[bool, list[str]]:

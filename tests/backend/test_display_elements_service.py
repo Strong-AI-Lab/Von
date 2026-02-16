@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.backend.services.display_elements_service import (
+    build_canonical_table_payload_from_records,
     build_turn_display_elements,
     extract_markdown_tables,
     validate_turn_display_elements,
@@ -211,3 +212,134 @@ def test_validate_turn_display_elements_rejects_invalid_table_shape() -> None:
 
     assert valid is False
     assert any("must reference a declared column" in message for message in errors)
+
+
+def test_build_canonical_table_payload_from_records_preserves_row_provenance() -> None:
+    payload = build_canonical_table_payload_from_records(
+        records=[
+            {
+                "task_id": "task_alpha",
+                "task_name": "Alpha",
+                "status": "done",
+                "due_date": "2026-02-16",
+                "source": {"source_concept_id": "#V#task_alpha"},
+            },
+            {
+                "task_id": "task_beta",
+                "task_name": "Beta",
+                "status": "in_progress",
+                "due_date": "2026-03-01",
+                "source": {"source_concept_id": "#V#task_beta"},
+            },
+        ],
+        columns=[
+            {
+                "column_id": "task_name",
+                "label": "Task",
+                "source_key": "task_name",
+                "data_type": "text",
+            },
+            {
+                "column_id": "status",
+                "label": "Status",
+                "source_key": "status",
+                "data_type": "text",
+            },
+            {
+                "column_id": "due_date",
+                "label": "Due Date",
+                "source_key": "due_date",
+                "data_type": "date",
+            },
+        ],
+        row_id_field="task_id",
+        row_provenance_field="source",
+        default_sort_column_id="due_date",
+        default_sort_direction="asc",
+        pagination_enabled=True,
+        page_size=25,
+    )
+
+    assert [column["column_id"] for column in payload["columns"]] == [
+        "task_name",
+        "status",
+        "due_date",
+    ]
+    assert payload["rows"][0]["row_id"] == "task_alpha"
+    assert payload["rows"][0]["provenance"]["source_concept_id"] == "#V#task_alpha"
+    assert payload["rows"][0]["cells"][2]["value_type"] == "date"
+    assert payload["sort"]["default_column_id"] == "due_date"
+    assert payload["pagination"]["enabled"] is True
+    assert payload["pagination"]["page_size"] == 25
+
+
+def test_task_and_predicate_extent_payloads_validate_under_same_table_contract() -> None:
+    task_payload = build_canonical_table_payload_from_records(
+        records=[
+            {
+                "task_id": "task_alpha",
+                "task_name": "Alpha",
+                "status": "done",
+                "source": {"source_concept_id": "#V#task_alpha"},
+            }
+        ],
+        columns=[
+            {"column_id": "task_name", "label": "Task", "source_key": "task_name"},
+            {"column_id": "status", "label": "Status", "source_key": "status"},
+        ],
+        row_id_field="task_id",
+        row_provenance_field="source",
+        default_sort_column_id="task_name",
+    )
+
+    predicate_payload = build_canonical_table_payload_from_records(
+        records=[
+            {
+                "assertion_id": "assertion_1",
+                "subject": "#V#task_alpha",
+                "predicate": "#V#depends_on",
+                "object": "#V#task_beta",
+                "assertion_meta": {"assertion_id": "assertion_1"},
+            }
+        ],
+        columns=[
+            {"column_id": "subject", "label": "Subject", "source_key": "subject"},
+            {"column_id": "predicate", "label": "Predicate", "source_key": "predicate"},
+            {"column_id": "object", "label": "Object", "source_key": "object"},
+        ],
+        row_id_field="assertion_id",
+        row_provenance_field="assertion_meta",
+        default_sort_column_id="subject",
+        pagination_enabled=False,
+    )
+
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_table_task",
+                    "element_type": "table",
+                    "channel": "screen",
+                    "order": 15,
+                    "intent": "structured_tabular_view",
+                    "payload": task_payload,
+                    "provenance": {"source": "task_query"},
+                },
+                {
+                    "element_id": "screen_table_predicate_extent",
+                    "element_type": "table",
+                    "channel": "screen",
+                    "order": 16,
+                    "intent": "structured_tabular_view",
+                    "payload": predicate_payload,
+                    "provenance": {"source": "predicate_extent_query"},
+                },
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is True
+    assert errors == []
+    assert predicate_payload["rows"][0]["provenance"]["assertion_id"] == "assertion_1"
