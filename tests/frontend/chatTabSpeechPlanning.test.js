@@ -23,6 +23,39 @@ function advanceTimers(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function buildDisplayElementsContract({ screenText = null, spokenText = null } = {}) {
+    const elements = [];
+    if (typeof screenText === 'string') {
+        elements.push({
+            element_id: 'screen_text',
+            element_type: 'text_block',
+            channel: 'screen',
+            order: 10,
+            intent: 'primary_response',
+            payload: { text: screenText },
+            provenance: { source: 'test' }
+        });
+    }
+    if (typeof spokenText === 'string') {
+        elements.push({
+            element_id: 'spoken_text',
+            element_type: 'text_block',
+            channel: 'spoken',
+            order: 20,
+            intent: 'narration',
+            payload: { text: spokenText },
+            provenance: { source: 'test' }
+        });
+    }
+
+    return {
+        schema_version: 'turn_display_elements_v1',
+        elements,
+        reason_codes: [],
+        validation: { valid: true, errors: [] }
+    };
+}
+
 describe('chat speech planning (presenter channels)', () => {
     beforeEach(() => {
         document.body.innerHTML = `
@@ -160,6 +193,76 @@ describe('chat speech planning (presenter channels)', () => {
         expect(jsonText).toContain('speech_planning');
         expect(jsonText).toContain('tts_source');
         expect(jsonText).toContain('spoken');
+    });
+
+    test('Speak uses display element contract when presenter channels are missing', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'test prompt';
+
+        const displayElements = buildDisplayElementsContract({
+            screenText: 'SCREEN FROM CONTRACT',
+            spokenText: 'SPOKEN FROM CONTRACT'
+        });
+
+        global.fetch = jest.fn((url, options) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                let text = '';
+                try {
+                    text = JSON.parse(options?.body ?? '{}')?.text ?? '';
+                } catch (_) {
+                    text = '';
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(text) })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'fallback response',
+                        display_elements: displayElements,
+                        llm_debug: {
+                            model: 'gpt-5.2',
+                            response: 'fallback response',
+                            messages: [],
+                            display_elements: displayElements
+                        }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await sendMessage();
+
+        const speakButton = document.querySelector('.chat-tts-button');
+        expect(speakButton).toBeTruthy();
+
+        speakButton.click();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+
+        expect(global.speechSynthesis.speak).toHaveBeenCalled();
+        const utterance = global.speechSynthesis.speak.mock.calls[0][0];
+        expect(utterance.text).toBe('SPOKEN FROM CONTRACT');
     });
 
     test('Shift+click Speak uses screen channel (accessibility)', async () => {
@@ -348,6 +451,52 @@ describe('chat speech planning (presenter channels)', () => {
         expect(global.speechSynthesis.speak).toHaveBeenCalled();
         const utterance = global.speechSynthesis.speak.mock.calls[0][0];
         expect(utterance.text).toBe('SPOKEN FROM BACKFILL');
+    });
+
+    test('History Speak uses display elements returned by backfill endpoint', async () => {
+        const scrollableField = document.getElementById('scrollableField');
+        expect(scrollableField).toBeTruthy();
+
+        const displayElements = buildDisplayElementsContract({
+            screenText: 'SCREEN TEXT',
+            spokenText: 'SPOKEN FROM CONTRACT BACKFILL'
+        });
+
+        global.fetch = jest.fn((url) => {
+            if (typeof url === 'string' && url.startsWith('/von/history/backfill_spoken')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        status: 'ok',
+                        display_elements: displayElements,
+                        updated: true
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        __test_only__rehydrateHistory(scrollableField, [
+            { role: 'user', content: 'Hi', timestamp: '2026-01-02T00:00:00Z' },
+            {
+                role: 'assistant',
+                content: 'SCREEN TEXT',
+                timestamp: '2026-01-02T00:00:01Z',
+                history_location: { session_id: 'sess-1', history_index: 1 }
+            }
+        ]);
+
+        const speakButton = document.querySelector('.chat-tts-button');
+        expect(speakButton).toBeTruthy();
+
+        speakButton.click();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+
+        expect(global.fetch).toHaveBeenCalled();
+        expect(global.speechSynthesis.speak).toHaveBeenCalled();
+        const utterance = global.speechSynthesis.speak.mock.calls[0][0];
+        expect(utterance.text).toBe('SPOKEN FROM CONTRACT BACKFILL');
     });
 
     test('History Speak falls back to on-screen text when backfill fails (and cools down)', async () => {

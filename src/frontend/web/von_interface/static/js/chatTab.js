@@ -1253,13 +1253,155 @@ function normalisePresenterChannels(value) {
     };
 }
 
+function normaliseDisplayElementsContract(value) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+
+    if (value.schema_version !== 'turn_display_elements_v1') {
+        return null;
+    }
+
+    if (!Array.isArray(value.elements)) {
+        return null;
+    }
+
+    return value;
+}
+
+function extractPresenterChannelsFromDisplayElements(value) {
+    const contract = normaliseDisplayElementsContract(value);
+    if (!contract) {
+        return null;
+    }
+
+    let screen = null;
+    let spoken = null;
+
+    for (const element of contract.elements) {
+        if (!element || typeof element !== 'object') {
+            continue;
+        }
+
+        if (String(element.element_type || '').trim() !== 'text_block') {
+            continue;
+        }
+
+        const payload = element.payload;
+        const text = (payload && typeof payload === 'object' && typeof payload.text === 'string')
+            ? payload.text
+            : null;
+        if (!text || !text.trim()) {
+            continue;
+        }
+
+        const elementId = String(element.element_id || '').trim();
+        const channel = String(element.channel || '').trim().toLowerCase();
+        const intent = String(element.intent || '').trim().toLowerCase();
+
+        if (
+            !screen
+            && (
+                channel === 'screen'
+                || elementId === 'screen_text'
+                || intent === 'primary_response'
+            )
+        ) {
+            screen = text;
+            continue;
+        }
+
+        if (
+            !spoken
+            && (
+                channel === 'spoken'
+                || elementId === 'spoken_text'
+                || intent === 'narration'
+            )
+        ) {
+            spoken = text;
+        }
+    }
+
+    if (!(screen && screen.trim()) && !(spoken && spoken.trim())) {
+        return null;
+    }
+
+    return normalisePresenterChannels({
+        screen,
+        spoken,
+        format: 'display_elements_v1'
+    });
+}
+
+function resolveDisplayElementsContract(responseData, debugData = null) {
+    const topLevel = normaliseDisplayElementsContract(responseData?.display_elements);
+    if (topLevel) {
+        return topLevel;
+    }
+
+    const metadataContract = normaliseDisplayElementsContract(responseData?.metadata?.display_elements);
+    if (metadataContract) {
+        return metadataContract;
+    }
+
+    const debugContract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (debugContract) {
+        return debugContract;
+    }
+
+    return null;
+}
+
+function resolvePresenterChannels(rawPresenterChannels, displayElements) {
+    const directChannels = normalisePresenterChannels(rawPresenterChannels);
+    const contractChannels = extractPresenterChannelsFromDisplayElements(displayElements);
+
+    if (!directChannels && !contractChannels) {
+        return null;
+    }
+
+    return normalisePresenterChannels({
+        screen: directChannels?.screen || contractChannels?.screen || null,
+        spoken: directChannels?.spoken || contractChannels?.spoken || null,
+        format: directChannels?.format || contractChannels?.format || null
+    });
+}
+
+function resolveResponsePresenterState(responseData) {
+    const debugData = (responseData && typeof responseData === 'object' && responseData.llm_debug && typeof responseData.llm_debug === 'object')
+        ? responseData.llm_debug
+        : null;
+    const displayElements = resolveDisplayElementsContract(responseData, debugData);
+
+    const presenterChannelsRaw = responseData?.presenter_channels
+        || responseData?.response_channels
+        || responseData?.metadata?.presenter_channels;
+
+    const presenterChannels = resolvePresenterChannels(presenterChannelsRaw, displayElements);
+    const screenText = presenterChannels?.screen ? presenterChannels.screen : String(responseData?.response ?? '');
+    const spokenText = presenterChannels?.spoken ? presenterChannels.spoken : null;
+
+    return {
+        presenterChannels,
+        displayElements,
+        screenText,
+        spokenText
+    };
+}
+
 function enrichDebugDataWithSpeechPlanning(debugData, options = {}) {
     if (!debugData || typeof debugData !== 'object') {
         return debugData;
     }
 
-    const presenterChannels = normalisePresenterChannels(
-        options.presenterChannels || debugData.presenter_channels
+    const displayElements = resolveDisplayElementsContract(
+        { display_elements: options.displayElements },
+        debugData
+    );
+    const presenterChannels = resolvePresenterChannels(
+        options.presenterChannels || debugData.presenter_channels,
+        displayElements
     );
 
     const screenText =
@@ -1287,6 +1429,7 @@ function enrichDebugDataWithSpeechPlanning(debugData, options = {}) {
     return {
         ...debugData,
         presenter_channels: presenterChannels || debugData.presenter_channels || null,
+        display_elements: displayElements || debugData.display_elements || null,
         speech_planning: speechPlanning
     };
 }
@@ -3476,7 +3619,17 @@ function deriveLlmDebugWarnings(debugData) {
     }
 
     // Presenter channel health (screen/spoken routes)
-    const presenterChannels = normalisePresenterChannels(debugData.presenter_channels);
+    const displayElementsRaw = debugData.display_elements;
+    const displayElements = normaliseDisplayElementsContract(displayElementsRaw);
+    if (displayElementsRaw && !displayElements) {
+        warnings.push('Display element contract is present but invalid or unsupported.');
+    } else if (displayElements && displayElements.validation?.valid === false) {
+        warnings.push('Display element contract validation failed.');
+    }
+    const presenterChannels = resolvePresenterChannels(
+        debugData.presenter_channels,
+        displayElements
+    );
     if (presenterChannels) {
         const hasScreen = typeof presenterChannels.screen === 'string' && presenterChannels.screen.trim();
         const hasSpoken = typeof presenterChannels.spoken === 'string' && presenterChannels.spoken.trim();
@@ -10225,16 +10378,19 @@ async function handleSendPrompt() {
         }
 
         if (response.ok) {
+            const responsePresenterState = resolveResponsePresenterState(data);
+            const responseChannels = responsePresenterState.presenterChannels;
+            const screenText = responsePresenterState.screenText;
+            const spokenText = responsePresenterState.spokenText;
+            const displayElements = responsePresenterState.displayElements;
+
             // Store LLM debug data if available
             if (data.llm_debug) {
-                const presenterChannelsRaw = data.presenter_channels || data.response_channels || data?.metadata?.presenter_channels;
-                const responseChannels = normalisePresenterChannels(presenterChannelsRaw);
-                const screenText = responseChannels?.screen ? responseChannels.screen : String(data.response ?? '');
-                const spokenText = responseChannels?.spoken ? responseChannels.spoken : null;
                 const enriched = enrichDebugDataWithSpeechPlanning(data.llm_debug, {
                     presenterChannels: responseChannels,
                     screenText,
-                    spokenText
+                    spokenText,
+                    displayElements
                 });
                 llmDebugData.set(assistantTurnId, enriched);
                 console.log('[chatTab] Stored LLM debug data for turn:', assistantTurnId, {
@@ -10245,11 +10401,6 @@ async function handleSendPrompt() {
             }
 
             const fastpathMeta = data.fastpath || (data.llm_debug && data.llm_debug.fastpath) || null;
-
-            const presenterChannelsRaw = data.presenter_channels || data.response_channels || data?.metadata?.presenter_channels;
-            const responseChannels = normalisePresenterChannels(presenterChannelsRaw);
-            const screenText = responseChannels?.screen ? responseChannels.screen : String(data.response ?? '');
-            const spokenText = responseChannels?.spoken ? responseChannels.spoken : null;
 
             const toolProgressEnabled = data?.llm_debug?.internal_mcp?.tool_use_progress?.enabled;
             if (toolProgressEnabled === false) {
@@ -10414,7 +10565,10 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             let spokenTextForTurn = (typeof ttsText === 'string' && ttsText.trim()) ? ttsText : null;
             if (!spokenTextForTurn && turnId) {
                 const debugDataForTurn = llmDebugData.get(turnId);
-                const channels = normalisePresenterChannels(debugDataForTurn?.presenter_channels);
+                const channels = resolvePresenterChannels(
+                    debugDataForTurn?.presenter_channels,
+                    debugDataForTurn?.display_elements
+                );
                 if (channels?.spoken && channels.spoken.trim()) {
                     spokenTextForTurn = channels.spoken;
                 }
@@ -10453,17 +10607,25 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                         return null;
                     }
 
-                    const channels = normalisePresenterChannels(data?.presenter_channels);
+                    const displayElements = resolveDisplayElementsContract(data);
+                    const channels = resolvePresenterChannels(
+                        data?.presenter_channels,
+                        displayElements
+                    );
                     if (!channels?.spoken || !channels.spoken.trim()) {
                         return null;
                     }
 
                     // Cache the generated channels in-memory so subsequent clicks work.
                     const existing = llmDebugData.get(turnId);
-                    llmDebugData.set(turnId, {
+                    const merged = {
                         ...(existing && typeof existing === 'object' ? existing : {}),
                         presenter_channels: channels
-                    });
+                    };
+                    if (displayElements) {
+                        merged.display_elements = displayElements;
+                    }
+                    llmDebugData.set(turnId, merged);
 
                     // Clear any previous failure cool-down.
                     historySpokenBackfillFailures.delete(turnId);

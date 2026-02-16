@@ -813,6 +813,37 @@ describe('LLM debug warnings (presenter channel health)', () => {
         );
     });
 
+    test('uses display elements contract when presenter channels are missing', () => {
+        const warnings = __testOnly_deriveLlmDebugWarnings({
+            display_elements: {
+                schema_version: 'turn_display_elements_v1',
+                elements: [
+                    {
+                        element_id: 'screen_text',
+                        element_type: 'text_block',
+                        channel: 'screen',
+                        intent: 'primary_response',
+                        payload: { text: 'On-screen content' }
+                    },
+                    {
+                        element_id: 'spoken_text',
+                        element_type: 'text_block',
+                        channel: 'spoken',
+                        intent: 'narration',
+                        payload: { text: 'Talk track' }
+                    }
+                ]
+            }
+        });
+
+        expect(warnings).not.toContain(
+            'Presenter output missing spoken channel; text-to-speech will fall back to screen text.'
+        );
+        expect(warnings).not.toContain(
+            'Presenter output missing screen channel; display will fall back to spoken text.'
+        );
+    });
+
     test('flags failed spoken backfill attempt', () => {
         const warnings = __testOnly_deriveLlmDebugWarnings({
             presenter_channels: {
