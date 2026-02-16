@@ -83,6 +83,8 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "list_my_tasks",
     "merge_concepts",
     "qna_search",
+    "renderer_resolve_applicability",
+    "upsert_renderer_profile",
     "remove_relationship",
     "resolve_concept_by_name",
     "search_arxiv",

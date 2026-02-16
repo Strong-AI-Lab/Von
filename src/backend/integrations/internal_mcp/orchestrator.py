@@ -99,6 +99,9 @@ class OrchestratorResult:
     orchestrator_duration_ms: float | None = None
     # JVNAUTOSCI-825: Workflow routing transparency.
     workflow_routing: WorkflowRoutingInfo | None = None
+    # JVNAUTOSCI-1140: Optional renderer routing/render-mode diagnostics.
+    # Present only when renderer applicability routing is enabled and evaluated.
+    render_plan: Mapping[str, Any] | None = None
 
 
 class _ToolCallRequest(TypedDict):
@@ -10013,6 +10016,23 @@ class InternalMCPChatOrchestrator:
         return value.strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
+    def _env_csv_values(name: str, *, default: str = "") -> tuple[str, ...]:
+        raw = os.getenv(name, default)
+        if not isinstance(raw, str) or not raw.strip():
+            return ()
+        values: list[str] = []
+        seen: set[str] = set()
+        for part in raw.split(","):
+            candidate = part.strip()
+            if not candidate:
+                continue
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            values.append(candidate)
+        return tuple(values)
+
+    @staticmethod
     def _extract_discovery_candidates(
         workflow_discovery_result: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
@@ -10731,8 +10751,363 @@ class InternalMCPChatOrchestrator:
                     source="default",
                 )
 
-        def _maybe_apply_narration_routing(screen_text: Any) -> Any:
-            if selected_workflow_id != CHAT_NARRATION_WORKFLOW_ID:
+        # Feature-flagged step toward ontology-driven render planning:
+        # resolve whether narration should be part of the response rendering.
+        # Disabled by default; routing behaviour remains unchanged unless
+        # explicitly enabled with renderer definitions configured.
+        renderer_routing_enabled = self._env_flag_enabled(
+            "VON_RENDERER_APPLICABILITY_ROUTING_ENABLE",
+            default="0",
+        )
+        renderer_definition_concept_ids = self._env_csv_values(
+            "VON_RENDERER_APPLICABILITY_DEFINITION_IDS"
+        )
+        renderer_preferred_modalities = self._env_csv_values(
+            "VON_RENDERER_APPLICABILITY_PREFERRED_MODALITIES"
+        )
+        if not renderer_preferred_modalities:
+            renderer_preferred_modalities = ("narrated_audio",)
+        renderer_allow_multimodal = self._env_flag_enabled(
+            "VON_RENDERER_APPLICABILITY_ALLOW_MULTIMODAL",
+            default="1",
+        )
+        renderer_render_plan: dict[str, Any] | None = None
+
+        def _iter_renderer_invocation_payloads(
+            tool_invocations: Sequence[Mapping[str, Any]],
+        ) -> Sequence[Mapping[str, Any]]:
+            payloads: list[Mapping[str, Any]] = []
+            for invocation in tool_invocations:
+                if not isinstance(invocation, Mapping):
+                    continue
+                for field in ("effective_payload", "payload"):
+                    payload = invocation.get(field)
+                    if isinstance(payload, Mapping):
+                        payloads.append(payload)
+            return payloads
+
+        def _extract_renderer_concept_candidates(
+            tool_invocations: Sequence[Mapping[str, Any]],
+        ) -> list[str]:
+            candidate_keys = (
+                "concept_id",
+                "source_id",
+                "target_id",
+                "task_concept_id",
+            )
+            candidate_list_keys = (
+                "concept_ids",
+                "related_concept_ids",
+            )
+            blocked_ids = {
+                user_concept_id.strip()
+                if isinstance(user_concept_id, str) and user_concept_id.strip()
+                else None,
+                org_concept_id.strip()
+                if isinstance(org_concept_id, str) and org_concept_id.strip()
+                else None,
+            }
+            concept_ids: list[str] = []
+            seen_ids: set[str] = set()
+            for payload in _iter_renderer_invocation_payloads(tool_invocations):
+                for key in candidate_keys:
+                    raw_value = payload.get(key)
+                    if not isinstance(raw_value, str):
+                        continue
+                    concept_id = raw_value.strip()
+                    if not self._looks_like_concept_id(concept_id):
+                        continue
+                    if concept_id in blocked_ids:
+                        continue
+                    if concept_id in seen_ids:
+                        continue
+                    seen_ids.add(concept_id)
+                    concept_ids.append(concept_id)
+                for key in candidate_list_keys:
+                    raw_values = payload.get(key)
+                    if not isinstance(raw_values, (list, tuple)):
+                        continue
+                    for item in raw_values:
+                        if not isinstance(item, str):
+                            continue
+                        concept_id = item.strip()
+                        if not self._looks_like_concept_id(concept_id):
+                            continue
+                        if concept_id in blocked_ids:
+                            continue
+                        if concept_id in seen_ids:
+                            continue
+                        seen_ids.add(concept_id)
+                        concept_ids.append(concept_id)
+            return concept_ids
+
+        def _extract_renderer_predicate_hints(
+            tool_invocations: Sequence[Mapping[str, Any]],
+        ) -> list[str]:
+            predicate_hints: list[str] = []
+            seen_hints: set[str] = set()
+
+            def _add_hint(raw_value: Any) -> None:
+                if not isinstance(raw_value, str):
+                    return
+                text = raw_value.strip()
+                if not text or text in seen_hints:
+                    return
+                seen_hints.add(text)
+                predicate_hints.append(text)
+
+            for payload in _iter_renderer_invocation_payloads(tool_invocations):
+                _add_hint(payload.get("predicate"))
+                existing_hints = payload.get("present_predicates")
+                if isinstance(existing_hints, (list, tuple)):
+                    for item in existing_hints:
+                        _add_hint(item)
+
+            return predicate_hints[:40]
+
+        def _build_renderer_request_payload(
+            screen_text: Any,
+            *,
+            tool_invocations: Sequence[Mapping[str, Any]],
+        ) -> tuple[dict[str, Any], dict[str, Any]]:
+            screen_value = (
+                screen_text.strip() if isinstance(screen_text, str) else str(screen_text)
+            )
+            context_tags: list[str] = ["chat_turn_rendering"]
+            if presenter_mode_requested:
+                context_tags.append("presenter_mode")
+            if selected_workflow_id == CHAT_NARRATION_WORKFLOW_ID:
+                context_tags.append("workflow:narration")
+            elif selected_workflow_id == TOOL_CALLING_WORKFLOW_ID:
+                context_tags.append("workflow:tool_calling")
+            elif selected_workflow_id == CHAT_ASSISTANT_WORKFLOW_ID:
+                context_tags.append("workflow:assistant")
+
+            temporal_metadata: dict[str, Any] = {}
+            if isinstance(turn_id, str) and turn_id.strip():
+                temporal_metadata["turn_id"] = turn_id.strip()
+
+            provenance: dict[str, Any] = {
+                "source": "internal_mcp_orchestrator",
+                "selected_workflow_id": selected_workflow_id,
+                "presenter_mode_requested": bool(presenter_mode_requested),
+            }
+            if isinstance(conversation_session_id, str) and conversation_session_id.strip():
+                provenance["conversation_session_id"] = conversation_session_id.strip()
+
+            concept_candidates = _extract_renderer_concept_candidates(tool_invocations)
+            predicate_hints = _extract_renderer_predicate_hints(tool_invocations)
+
+            request_payload: dict[str, Any] = {
+                "preferred_modalities": list(renderer_preferred_modalities),
+                "context_tags": context_tags,
+                "provenance": provenance,
+            }
+            if predicate_hints:
+                request_payload["present_predicates"] = list(predicate_hints)
+
+            selected_concept_id = concept_candidates[0] if concept_candidates else None
+            if isinstance(selected_concept_id, str) and selected_concept_id:
+                request_payload["object_kind"] = "concept"
+                request_payload["concept_id"] = selected_concept_id
+            else:
+                # Preserve previous semantics: if no concept context is available,
+                # treat the render object as a transient microtheory request.
+                request_payload["object_kind"] = "transient_microtheory"
+                request_payload["transient_microtheory"] = {
+                    "context_scope": "chat_turn_rendering",
+                    "assertions": (
+                        [{"kind": "screen_text", "char_count": len(screen_value)}]
+                        if screen_value
+                        else []
+                    ),
+                    "theorems": [],
+                    "provenance": provenance,
+                    "episode_id": (
+                        conversation_session_id.strip()
+                        if isinstance(conversation_session_id, str)
+                        and conversation_session_id.strip()
+                        else None
+                    ),
+                    "temporal_metadata": temporal_metadata,
+                }
+
+            diagnostics = {
+                "concept_candidates": list(concept_candidates),
+                "selected_concept_id": selected_concept_id,
+                "predicate_hint_count": len(predicate_hints),
+                "request_object_kind": request_payload.get("object_kind"),
+            }
+            return request_payload, diagnostics
+
+        def _resolve_renderer_render_plan(
+            screen_text: Any,
+            *,
+            tool_invocations: Sequence[Mapping[str, Any]] = (),
+        ) -> Mapping[str, Any]:
+            nonlocal renderer_render_plan
+            if renderer_render_plan is not None:
+                return dict(renderer_render_plan)
+
+            decision: dict[str, Any] = {
+                "type": "renderer_applicability_routing",
+                "enabled": renderer_routing_enabled,
+                "attempted": False,
+                "success": False,
+                "reason": "not_evaluated",
+                "renderer_definition_count": len(renderer_definition_concept_ids),
+                "preferred_modalities": list(renderer_preferred_modalities),
+                "allow_multimodal": renderer_allow_multimodal,
+                "render_mode": "screen_only",
+                "should_narrate": False,
+                "selected_renderer_ids": [],
+                "selected_renderer_types": [],
+                "selected_modalities": [],
+            }
+            renderer_render_plan = decision
+
+            if not renderer_routing_enabled:
+                decision["reason"] = "feature_flag_disabled"
+                return dict(decision)
+
+            if not renderer_definition_concept_ids:
+                decision["reason"] = "renderer_definition_ids_missing"
+                aux_llm_calls.append(dict(decision))
+                return dict(decision)
+
+            request_payload, payload_diagnostics = _build_renderer_request_payload(
+                screen_text,
+                tool_invocations=tool_invocations,
+            )
+            decision["request_payload_object_kind"] = payload_diagnostics.get(
+                "request_object_kind"
+            )
+            decision["request_payload_selected_concept_id"] = payload_diagnostics.get(
+                "selected_concept_id"
+            )
+            decision["request_payload_concept_candidates"] = payload_diagnostics.get(
+                "concept_candidates",
+                [],
+            )
+            decision["request_payload_predicate_hint_count"] = payload_diagnostics.get(
+                "predicate_hint_count",
+                0,
+            )
+
+            payload: dict[str, Any] = {
+                "renderer_definition_concept_ids": list(renderer_definition_concept_ids),
+                "allow_multimodal": renderer_allow_multimodal,
+                "request_payload": request_payload,
+            }
+            if isinstance(user_namespace, str) and user_namespace.strip():
+                payload["namespace"] = user_namespace.strip()
+
+            decision["attempted"] = True
+            try:
+                invocation_result = self._gateway.invoke(
+                    "renderer_resolve_applicability",
+                    payload,
+                )
+            except Exception as exc:
+                decision["reason"] = "tool_error"
+                decision["error"] = str(exc)
+                aux_llm_calls.append(dict(decision))
+                return dict(decision)
+
+            result_payload = (
+                invocation_result.payload
+                if hasattr(invocation_result, "payload")
+                else (
+                    invocation_result if isinstance(invocation_result, Mapping) else None
+                )
+            )
+            if not isinstance(result_payload, Mapping):
+                decision["reason"] = "invalid_tool_payload"
+                aux_llm_calls.append(dict(decision))
+                return dict(decision)
+
+            success = bool(result_payload.get("success"))
+            decision["success"] = success
+            if not success:
+                decision["reason"] = "resolver_unsuccessful"
+                error_text = result_payload.get("error")
+                if isinstance(error_text, str) and error_text.strip():
+                    decision["error"] = error_text.strip()
+                aux_llm_calls.append(dict(decision))
+                return dict(decision)
+
+            selected_renderers_raw = result_payload.get("selected_renderers")
+            selected_renderers = (
+                selected_renderers_raw if isinstance(selected_renderers_raw, list) else []
+            )
+            selected_renderer_ids: list[str] = []
+            selected_renderer_types: list[str] = []
+            selected_modalities: list[str] = []
+            narration_selected = False
+            for item in selected_renderers:
+                if not isinstance(item, Mapping):
+                    continue
+                renderer_id = str(item.get("renderer_id") or "").strip()
+                if renderer_id and renderer_id not in selected_renderer_ids:
+                    selected_renderer_ids.append(renderer_id)
+
+                renderer_type_raw = str(item.get("renderer_type") or "").strip()
+                renderer_type = renderer_type_raw.lower()
+                if renderer_type and renderer_type not in selected_renderer_types:
+                    selected_renderer_types.append(renderer_type)
+                if renderer_type == "narration":
+                    narration_selected = True
+
+                modalities_raw = item.get("modalities")
+                modalities_iter: list[str] = []
+                if isinstance(modalities_raw, list):
+                    modalities_iter = [str(modality) for modality in modalities_raw]
+                elif isinstance(modalities_raw, tuple):
+                    modalities_iter = [str(modality) for modality in modalities_raw]
+                elif isinstance(modalities_raw, str):
+                    modalities_iter = [modalities_raw]
+
+                for modality in modalities_iter:
+                    normalised = modality.strip().lower()
+                    if not normalised:
+                        continue
+                    if normalised == "narrated_audio":
+                        narration_selected = True
+                    if normalised not in selected_modalities:
+                        selected_modalities.append(normalised)
+
+            diagnostics_obj = result_payload.get("diagnostics")
+            if isinstance(diagnostics_obj, Mapping):
+                selection_rationale = diagnostics_obj.get("selection_rationale")
+                if isinstance(selection_rationale, str) and selection_rationale.strip():
+                    decision["selection_rationale"] = selection_rationale.strip()
+
+            decision["reason"] = "resolved"
+            decision["should_narrate"] = narration_selected
+            decision["render_mode"] = (
+                "spoken+screen" if narration_selected else "screen_only"
+            )
+            decision["selected_renderer_ids"] = selected_renderer_ids
+            decision["selected_renderer_types"] = selected_renderer_types
+            decision["selected_modalities"] = selected_modalities
+            aux_llm_calls.append(dict(decision))
+            return dict(decision)
+
+        def _maybe_apply_narration_routing(
+            screen_text: Any,
+            *,
+            tool_invocations: Sequence[Mapping[str, Any]] = (),
+        ) -> Any:
+            renderer_plan = _resolve_renderer_render_plan(
+                screen_text,
+                tool_invocations=tool_invocations,
+            )
+            renderer_mode = str(renderer_plan.get("render_mode") or "").strip().lower()
+            should_route_narration = (
+                selected_workflow_id == CHAT_NARRATION_WORKFLOW_ID
+                or renderer_mode == "spoken+screen"
+            )
+            if not should_route_narration:
                 return screen_text
 
             try:
@@ -10807,6 +11182,13 @@ class InternalMCPChatOrchestrator:
 
             return screen_text
 
+        def _result_render_plan() -> Mapping[str, Any] | None:
+            if not renderer_routing_enabled:
+                return None
+            if not isinstance(renderer_render_plan, dict):
+                return None
+            return dict(renderer_render_plan)
+
         # ----------------------------------------------------------------
         # JVNAUTOSCI-825: Route turns to the appropriate pathway.
         #
@@ -10878,6 +11260,7 @@ class InternalMCPChatOrchestrator:
                 llm_usage=_aggregate_usage_total(),
                 orchestrator_duration_ms=_orchestrator_duration_ms(),
                 workflow_routing=routing_info,
+                render_plan=_result_render_plan(),
             )
             _persist_trace(status="completed")
             return result
@@ -10972,7 +11355,8 @@ class InternalMCPChatOrchestrator:
             )
             response_text = _maybe_apply_narration_routing(
                 "I attempted to use tools but the tool-calling workflow is not "
-                "available.  Please try again or report this issue."
+                "available.  Please try again or report this issue.",
+                tool_invocations=(),
             )
             result = OrchestratorResult(
                 response_text=response_text,
@@ -10983,6 +11367,7 @@ class InternalMCPChatOrchestrator:
                 llm_usage=_aggregate_usage_total(),
                 orchestrator_duration_ms=_orchestrator_duration_ms(),
                 workflow_routing=routing_info,
+                render_plan=_result_render_plan(),
             )
             _persist_trace(status="completed")
             return result
@@ -11094,7 +11479,12 @@ class InternalMCPChatOrchestrator:
         invocations = tc_result.data.get("invocations", [])
         iteration_count = tc_result.data.get("iteration_count", 0)
 
-        final_response_text = _maybe_apply_narration_routing(final_response)
+        final_response_text = _maybe_apply_narration_routing(
+            final_response,
+            tool_invocations=(
+                tuple(invocations) if isinstance(invocations, (list, tuple)) else ()
+            ),
+        )
         final_response_text = _maybe_apply_critic(
             final_response_text, tool_messages_for_critic=tool_messages
         )
@@ -11122,6 +11512,7 @@ class InternalMCPChatOrchestrator:
             llm_usage=_aggregate_usage_total(),
             orchestrator_duration_ms=_orchestrator_duration_ms(),
             workflow_routing=routing_info,
+            render_plan=_result_render_plan(),
         )
         _persist_trace(status="completed")
         return result

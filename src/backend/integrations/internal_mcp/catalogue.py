@@ -29,11 +29,17 @@ from typing import Any, List
 
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema, make_error_response
-from .orchestrator import InternalMCPChatOrchestrator
 from .workflow_surface_capabilities import (
     build_workflow_surface_capability_matrix,
 )
 from src.backend.services.prompt_template_service import PromptTemplateService
+
+
+def _get_internal_mcp_chat_orchestrator_cls():
+    """Lazy-import orchestrator class to avoid heavy import side effects."""
+    from .orchestrator import InternalMCPChatOrchestrator
+
+    return InternalMCPChatOrchestrator
 
 
 def _run_async_compat(async_fn):
@@ -5083,6 +5089,171 @@ def _check_placeholder_description_output_schema() -> Schema:
     )
 
 
+def _renderer_resolve_applicability(**kwargs):
+    """Resolve renderer applicability from ontology-derived metadata."""
+    from ...services.renderer_applicability_service import (
+        resolve_renderer_applicability_from_metadata,
+    )
+    from ...services.renderer_applicability_vontology_service import (
+        enrich_request_payload_from_concept,
+        load_renderer_definitions_from_concept_ids,
+    )
+
+    renderer_definitions = kwargs.get("renderer_definitions")
+    renderer_definition_concept_ids = kwargs.get("renderer_definition_concept_ids")
+    request_payload = kwargs.get("request_payload")
+
+    if not isinstance(request_payload, dict):
+        return make_error_response(
+            "missing_parameter",
+            "request_payload is required and must be a dict",
+            details={"missing": ["request_payload"]},
+            suggestions=["Provide request_payload describing the object to render"],
+        )
+    if renderer_definitions is not None and not isinstance(renderer_definitions, list):
+        return make_error_response(
+            "invalid_parameter",
+            "renderer_definitions must be a list when provided",
+            details={"parameter": "renderer_definitions"},
+            suggestions=["Provide renderer_definitions as a list of renderer metadata objects"],
+        )
+    if renderer_definition_concept_ids is not None and not isinstance(
+        renderer_definition_concept_ids, list
+    ):
+        return make_error_response(
+            "invalid_parameter",
+            "renderer_definition_concept_ids must be a list when provided",
+            details={"parameter": "renderer_definition_concept_ids"},
+            suggestions=["Provide renderer_definition_concept_ids as a list of concept IDs"],
+        )
+
+    effective_renderer_definitions = list(renderer_definitions or [])
+    loading_diagnostics = {"renderer_definition_source": "inline_payload_only"}
+    if isinstance(renderer_definition_concept_ids, list) and renderer_definition_concept_ids:
+        loaded_definitions, loading_diagnostics = load_renderer_definitions_from_concept_ids(
+            renderer_definition_concept_ids
+        )
+        effective_renderer_definitions.extend(loaded_definitions)
+
+    if not effective_renderer_definitions:
+        return make_error_response(
+            "missing_parameter",
+            "No renderer definitions were supplied. Provide renderer_definitions or renderer_definition_concept_ids with valid profile text.",
+            details={
+                "missing": [
+                    "renderer_definitions",
+                    "renderer_definition_concept_ids",
+                ]
+            },
+            suggestions=[
+                "Provide renderer_definitions as inline renderer metadata",
+                "Or provide renderer_definition_concept_ids where text relations contain renderer profile JSON",
+            ],
+        )
+
+    enriched_request_payload, request_enrichment_diagnostics = enrich_request_payload_from_concept(
+        request_payload
+    )
+
+    allow_multimodal = kwargs.get("allow_multimodal", True)
+    if not isinstance(allow_multimodal, bool):
+        allow_multimodal = bool(allow_multimodal)
+
+    try:
+        result = resolve_renderer_applicability_from_metadata(
+            renderer_definitions=effective_renderer_definitions,
+            request_payload=enriched_request_payload,
+            allow_multimodal=allow_multimodal,
+        )
+        payload = result.to_dict()
+        diagnostics = payload.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        diagnostics["renderer_definition_inputs"] = {
+            "inline_count": len(renderer_definitions or []),
+            "concept_id_count": len(renderer_definition_concept_ids or []),
+            "effective_count": len(effective_renderer_definitions),
+        }
+        diagnostics["renderer_definition_loading"] = loading_diagnostics
+        diagnostics["request_payload_enrichment"] = request_enrichment_diagnostics
+        payload["diagnostics"] = diagnostics
+        return {"success": True, **payload}
+    except ValueError as exc:
+        return make_error_response(
+            "invalid_parameter",
+            str(exc),
+            details={"exception_type": "ValueError"},
+            suggestions=["Check renderer_definitions and request_payload field shapes"],
+        )
+    except Exception as exc:
+        return make_error_response(
+            "unexpected_error",
+            f"Unexpected error while resolving renderer applicability: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
+
+
+def _upsert_renderer_profile(**kwargs):
+    """Persist renderer applicability metadata on a renderer concept."""
+    from ...services.renderer_applicability_vontology_service import (
+        upsert_renderer_profile,
+    )
+
+    renderer_concept_id = kwargs.get("renderer_concept_id")
+    renderer_profile = kwargs.get("renderer_profile")
+    predicate = kwargs.get("predicate")
+    language = kwargs.get("language", "en-NZ")
+    policy = kwargs.get("policy", "replace_others")
+    provenance = kwargs.get("provenance")
+    context = kwargs.get("context")
+    garbage_collect = kwargs.get("garbage_collect")
+
+    if not isinstance(renderer_concept_id, str) or not renderer_concept_id.strip():
+        return make_error_response(
+            "missing_parameter",
+            "renderer_concept_id is required and must be a non-empty string",
+            details={"missing": ["renderer_concept_id"]},
+            suggestions=["Provide the renderer concept ID (for example #V#timeline_renderer)"],
+        )
+    if not isinstance(renderer_profile, dict):
+        return make_error_response(
+            "missing_parameter",
+            "renderer_profile is required and must be a dict",
+            details={"missing": ["renderer_profile"]},
+            suggestions=[
+                "Provide renderer_profile with modalities and applicability metadata"
+            ],
+        )
+
+    try:
+        return upsert_renderer_profile(
+            renderer_concept_id=renderer_concept_id,
+            renderer_profile=renderer_profile,
+            predicate=predicate or "#V#has_renderer_profile_json",
+            language=language,
+            policy=policy,
+            provenance=provenance if isinstance(provenance, dict) else None,
+            context=context if isinstance(context, dict) else None,
+            garbage_collect=(True if garbage_collect is None else bool(garbage_collect)),
+        )
+    except ValueError as exc:
+        return make_error_response(
+            "invalid_parameter",
+            str(exc),
+            details={"exception_type": "ValueError"},
+            suggestions=[
+                "Ensure renderer_profile includes at least renderer_id/modalities/object kinds",
+                "Ensure renderer_concept_id references an existing concept",
+            ],
+        )
+    except Exception as exc:
+        return make_error_response(
+            "unexpected_error",
+            f"Unexpected error while upserting renderer profile: {exc}",
+            details={"exception_type": type(exc).__name__},
+        )
+
+
 # =============================================================================
 # Durable Workflow Instance Handlers (JVNAUTOSCI-1075)
 # =============================================================================
@@ -6028,6 +6199,96 @@ def _get_related_concepts_output_schema() -> Schema:
         },
         allow_unknown=True,
         description="get_related_concepts output: similar concept description chunks",
+    )
+
+
+# Renderer applicability schema helpers (JVNAUTOSCI-1140)
+def _renderer_resolve_applicability_input_schema() -> Schema:
+    return Schema(
+        required={
+            "request_payload": dict,
+        },
+        optional={
+            "renderer_definitions": list,
+            "renderer_definition_concept_ids": list,
+            "allow_multimodal": bool,
+            # Accepted for LLM consistency; resolver currently does not use it.
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "renderer_resolve_applicability input: request_payload (dict) and either "
+            "renderer_definitions (list) or renderer_definition_concept_ids (list[str]). "
+            "Optional allow_multimodal (bool, default true)."
+        ),
+    )
+
+
+def _renderer_resolve_applicability_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "interpreted_object_kind": (str, type(None)),
+            "interpreted_as_transient_microtheory": (bool, type(None)),
+            "selected_renderers": (list, type(None)),
+            "candidate_evaluations": (list, type(None)),
+            "diagnostics": (dict, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
+            "suggestions": (list, type(None)),
+            "related_concept_ids": (list, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "renderer_resolve_applicability output: deterministic renderer selection and fallback diagnostics."
+        ),
+    )
+
+
+def _upsert_renderer_profile_input_schema() -> Schema:
+    return Schema(
+        required={
+            "renderer_concept_id": str,
+            "renderer_profile": dict,
+        },
+        optional={
+            "predicate": str,
+            "language": str,
+            "policy": str,
+            "garbage_collect": (bool, type(None)),
+            "provenance": (dict, type(None)),
+            "context": (dict, type(None)),
+            # Accepted for LLM consistency.
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "upsert_renderer_profile input: renderer_concept_id (str), renderer_profile (dict), "
+            "optional predicate/language/policy/provenance/context."
+        ),
+    )
+
+
+def _upsert_renderer_profile_output_schema() -> Schema:
+    return Schema(
+        required={"success": bool},
+        optional={
+            "renderer_concept_id": (str, type(None)),
+            "predicate": (str, type(None)),
+            "language": (str, type(None)),
+            "renderer_profile": (dict, type(None)),
+            "text_relation": (dict, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
+            "suggestions": (list, type(None)),
+            "related_concept_ids": (list, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "upsert_renderer_profile output: persisted renderer profile metadata with singleton text relation diagnostics."
+        ),
     )
 
 
@@ -7832,14 +8093,15 @@ def _chat_get_prompt_context(
     behaviour_prompt_concepts = _format_fragments(behaviour_fragments)
     narration_prompt_concepts = _format_fragments(narration_fragments)
 
+    orchestrator_cls = _get_internal_mcp_chat_orchestrator_cls()
     template_service = PromptTemplateService()
     classifier_prompt_id, classifier_prompt_text = template_service.resolve_prompt_text(
-        InternalMCPChatOrchestrator._MISSING_TOOL_CLASSIFIER_PROMPTS,
-        fallback=InternalMCPChatOrchestrator._FALLBACK_MISSING_TOOL_CALL_PROMPT,
+        orchestrator_cls._MISSING_TOOL_CLASSIFIER_PROMPTS,
+        fallback=orchestrator_cls._FALLBACK_MISSING_TOOL_CALL_PROMPT,
         max_chars=max_chars_int,
     )
     retry_prompt_id, retry_prompt_text = template_service.resolve_prompt_text(
-        InternalMCPChatOrchestrator._MISSING_TOOL_RETRY_PROMPTS,
+        orchestrator_cls._MISSING_TOOL_RETRY_PROMPTS,
         fallback=None,
         max_chars=max_chars_int,
     )
@@ -7937,9 +8199,6 @@ def _chat_introspect(
     import hashlib
     import os
 
-    from src.backend.integrations.internal_mcp.orchestrator import (
-        InternalMCPChatOrchestrator,
-    )
     from src.backend.languagemodels.llm_interface import get_active_model_name
     from src.backend.services.feature_flags import (
         get_durable_workflows_enabled,
@@ -8253,6 +8512,7 @@ def _chat_introspect(
 
     try:
         # Prefer the live orchestrator (includes the real tool listing) when available.
+        orchestrator_cls = _get_internal_mcp_chat_orchestrator_cls()
         live_orchestrator = None
         try:
             from flask import current_app
@@ -8275,7 +8535,7 @@ def _chat_introspect(
                 def describe_methods(self):
                     return {}
 
-            dummy_orchestrator = InternalMCPChatOrchestrator(gateway=_StubGateway())  # type: ignore[arg-type]
+            dummy_orchestrator = orchestrator_cls(gateway=_StubGateway())  # type: ignore[arg-type]
             tool_guidance_text = dummy_orchestrator._instruction_message(
                 user_namespace=namespace,
                 auxiliary_system_prompt=auxiliary_prompt_text,
@@ -10650,6 +10910,30 @@ def build_default_catalogue() -> MethodCatalogue:
                 "Check if a description text appears to be an auto-generated placeholder "
                 "(e.g., derived from concept ID, timestamp-based, or too short). "
                 "Use this to identify concepts that need proper descriptions."
+            ),
+        ),
+        MethodDefinition(
+            name="renderer_resolve_applicability",
+            handler=_renderer_resolve_applicability,
+            input_schema=_renderer_resolve_applicability_input_schema(),
+            output_schema=_renderer_resolve_applicability_output_schema(),
+            category="read",
+            description=(
+                "Resolve candidate renderers from Vontology-defined applicability metadata. "
+                "Supports concept-backed and transient microtheory payloads, including "
+                "multimodal selection and fallback diagnostics. Renderer definitions "
+                "can be supplied inline or loaded from Vontology concept text relations."
+            ),
+        ),
+        MethodDefinition(
+            name="upsert_renderer_profile",
+            handler=_upsert_renderer_profile,
+            input_schema=_upsert_renderer_profile_input_schema(),
+            output_schema=_upsert_renderer_profile_output_schema(),
+            category="write",
+            description=(
+                "Validate and persist renderer applicability metadata on a renderer concept. "
+                "Stores canonical profile JSON as a singleton text relation."
             ),
         ),
         # =============================================================================

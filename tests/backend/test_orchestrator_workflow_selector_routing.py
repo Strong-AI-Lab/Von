@@ -52,6 +52,12 @@ class _StubGateway:
         raise AssertionError("Gateway should not be invoked in this test")
 
 
+class _InvokeResult:
+    def __init__(self, payload: Mapping[str, Any]):
+        self.payload = dict(payload)
+        self.duration_ms = 0.0
+
+
 class _CapturingLLM:
     """Test double that returns canned responses and records calls."""
 
@@ -84,6 +90,20 @@ def _build_orchestrator(
     """
     env_val = "1" if selector_enabled else "0"
     monkeypatch.setenv("VON_CHAT_WORKFLOW_SELECTOR_ENABLED", env_val)
+
+    # Keep this unit-test harness DB-independent even if the production
+    # registry factory discovers workflows from Vontology.
+    from src.backend.workflows import WorkflowRegistry, register_default_workflows
+
+    def _build_test_registry() -> WorkflowRegistry:
+        registry = WorkflowRegistry()
+        register_default_workflows(registry)
+        return registry
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.orchestrator.build_workflow_registry",
+        _build_test_registry,
+    )
 
     gateway = cast(Any, _StubGateway())
     orchestrator = InternalMCPChatOrchestrator(
@@ -237,6 +257,453 @@ def test_workflow_selector_routes_to_narration_workflow(monkeypatch):
         entry.get("type") for entry in result.aux_llm_calls if isinstance(entry, dict)
     ]
     assert "workflow_selector" in aux_types
+
+
+def test_renderer_applicability_can_enable_narration_when_flag_enabled(monkeypatch):
+    """When enabled, renderer applicability can request narration on tool-calling turns."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#narration_renderer",
+    )
+
+    renderer_invocations: list[dict[str, Any]] = []
+
+    def _invoke(tool_name: str, payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        renderer_invocations.append({"tool_name": tool_name, "payload": dict(payload)})
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#narration_renderer",
+                        "renderer_type": "narration",
+                        "modalities": ["narrated_audio"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    llm = _CapturingLLM(
+        [
+            "tool_seeking",  # workflow selector verdict
+            "Here is the answer on screen.",  # tool-calling final response
+            "<spoken>Short talk track.</spoken>",  # narration generation
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Explain this briefly",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == (
+        "<spoken>Short talk track.</spoken>\n\n"
+        "<screen>Here is the answer on screen.</screen>"
+    )
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("render_mode") == "spoken+screen"
+    assert result.render_plan.get("should_narrate") is True
+    assert len(renderer_invocations) == 1
+    assert (
+        renderer_invocations[0]["payload"]["renderer_definition_concept_ids"]
+        == ["#V#narration_renderer"]
+    )
+
+    renderer_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "renderer_applicability_routing"
+        ),
+        None,
+    )
+    assert renderer_entry is not None
+    assert renderer_entry.get("enabled") is True
+    assert renderer_entry.get("attempted") is True
+    assert renderer_entry.get("success") is True
+    assert renderer_entry.get("should_narrate") is True
+    assert renderer_entry.get("render_mode") == "spoken+screen"
+    assert "#V#narration_renderer" in renderer_entry.get("selected_renderer_ids", [])
+
+
+def test_renderer_applicability_error_preserves_selector_narration(monkeypatch):
+    """Renderer applicability failures must not block selector-driven narration."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#narration_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name == "renderer_resolve_applicability":
+            raise RuntimeError("simulated renderer tool failure")
+        raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    presenter_protocol = {
+        "role": "system",
+        "content": (
+            "PRESENTER MODE PROTOCOL:\n"
+            "- Output EXACTLY TWO tagged blocks and nothing else:\n"
+            "  <spoken>...brief talk track...</spoken>\n"
+            "  <screen>...full on-screen content...</screen>\n"
+        ),
+    }
+
+    llm = _CapturingLLM(
+        [
+            "narration",  # workflow selector verdict
+            "Here is the answer on screen.",  # main assistant screen response
+            "<spoken>Short talk track.</spoken>",  # narration generation
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="hi",
+        context=[presenter_protocol],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == (
+        "<spoken>Short talk track.</spoken>\n\n"
+        "<screen>Here is the answer on screen.</screen>"
+    )
+
+    renderer_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "renderer_applicability_routing"
+        ),
+        None,
+    )
+    assert renderer_entry is not None
+    assert renderer_entry.get("enabled") is True
+    assert renderer_entry.get("attempted") is True
+    assert renderer_entry.get("success") is False
+    assert renderer_entry.get("reason") == "tool_error"
+
+
+def test_renderer_applicability_flag_off_preserves_default_rendering(monkeypatch):
+    """With the feature flag off, routing should remain unchanged and skip tool calls."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.delenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", raising=False)
+    monkeypatch.delenv("VON_RENDERER_APPLICABILITY_DEFINITION_IDS", raising=False)
+
+    def _invoke(_tool_name: str, _payload: Mapping[str, Any]):
+        raise AssertionError("Renderer applicability tool must not be invoked when disabled")
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    llm = _CapturingLLM(
+        [
+            "tool_seeking",
+            "Here is the answer on screen.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Explain this briefly",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == "Here is the answer on screen."
+    assert result.render_plan is None
+    assert len(llm.calls) == 2
+    assert all(
+        not (isinstance(entry, dict) and entry.get("type") == "renderer_applicability_routing")
+        for entry in result.aux_llm_calls
+    )
+
+
+def test_renderer_applicability_non_narration_renderer_keeps_screen_only(monkeypatch):
+    """Successful non-narration renderer selection should keep screen-only output."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#table_renderer",
+                        "renderer_type": "table",
+                        "modalities": ["visual"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    llm = _CapturingLLM(
+        [
+            "tool_seeking",
+            "Here is the answer on screen.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Explain this briefly",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == "Here is the answer on screen."
+    assert len(llm.calls) == 2
+    renderer_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "renderer_applicability_routing"
+        ),
+        None,
+    )
+    assert renderer_entry is not None
+    assert renderer_entry.get("success") is True
+    assert renderer_entry.get("should_narrate") is False
+    assert renderer_entry.get("render_mode") == "screen_only"
+    assert renderer_entry.get("selected_renderer_types") == ["table"]
+
+
+def test_renderer_applicability_uses_concept_backed_request_when_available(monkeypatch):
+    """When tool invocations carry concept IDs, resolver request should be concept-backed."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#table_renderer",
+    )
+
+    renderer_requests: list[dict[str, Any]] = []
+
+    def _invoke(tool_name: str, payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        renderer_requests.append(dict(payload))
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#table_renderer",
+                        "renderer_type": "table",
+                        "modalities": ["visual"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Here is the answer on screen.",
+                "tool_messages": [],
+                "invocations": [
+                    {
+                        "tool": "get_task",
+                        "payload": {"concept_id": "#V#task_123"},
+                    }
+                ],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(
+        [
+            "tool_seeking",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Summarise this task",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == "Here is the answer on screen."
+    assert len(renderer_requests) == 1
+    request_payload = renderer_requests[0]["request_payload"]
+    assert request_payload["object_kind"] == "concept"
+    assert request_payload["concept_id"] == "#V#task_123"
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("request_payload_object_kind") == "concept"
+    assert result.render_plan.get("request_payload_selected_concept_id") == "#V#task_123"
+
+    renderer_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "renderer_applicability_routing"
+        ),
+        None,
+    )
+    assert renderer_entry is not None
+    assert renderer_entry.get("request_payload_object_kind") == "concept"
+    assert renderer_entry.get("request_payload_selected_concept_id") == "#V#task_123"
+
+
+def test_renderer_applicability_missing_definitions_falls_back_screen_only(monkeypatch):
+    """Enabled routing with missing renderer definitions should fail closed to screen-only."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.delenv("VON_RENDERER_APPLICABILITY_DEFINITION_IDS", raising=False)
+
+    def _invoke(_tool_name: str, _payload: Mapping[str, Any]):
+        raise AssertionError("Renderer applicability tool should not be invoked")
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    llm = _CapturingLLM(
+        [
+            "tool_seeking",
+            "Here is the answer on screen.",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Explain this briefly",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == "Here is the answer on screen."
+    renderer_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "renderer_applicability_routing"
+        ),
+        None,
+    )
+    assert renderer_entry is not None
+    assert renderer_entry.get("enabled") is True
+    assert renderer_entry.get("attempted") is False
+    assert renderer_entry.get("success") is False
+    assert renderer_entry.get("reason") == "renderer_definition_ids_missing"
+    assert renderer_entry.get("render_mode") == "screen_only"
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("render_mode") == "screen_only"
+    assert result.render_plan.get("reason") == "renderer_definition_ids_missing"
+
+
+def test_renderer_applicability_multimodal_selection_sets_spoken_plus_screen(monkeypatch):
+    """Multimodal selection should expose screen+spoken render mode deterministically."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#table_renderer,#V#narration_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#table_renderer",
+                        "renderer_type": "table",
+                        "modalities": ["visual"],
+                    },
+                    {
+                        "renderer_id": "#V#narration_renderer",
+                        "renderer_type": "narration",
+                        "modalities": ["narrated_audio", "textual"],
+                    },
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    llm = _CapturingLLM(
+        [
+            "tool_seeking",
+            "Here is the answer on screen.",
+            "<spoken>Short talk track.</spoken>",
+        ]
+    )
+
+    result = orchestrator.run(
+        prompt="Explain this briefly",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == (
+        "<spoken>Short talk track.</spoken>\n\n"
+        "<screen>Here is the answer on screen.</screen>"
+    )
+    renderer_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "renderer_applicability_routing"
+        ),
+        None,
+    )
+    assert renderer_entry is not None
+    assert renderer_entry.get("render_mode") == "spoken+screen"
+    assert renderer_entry.get("should_narrate") is True
+    assert renderer_entry.get("selected_renderer_ids") == [
+        "#V#table_renderer",
+        "#V#narration_renderer",
+    ]
+    assert renderer_entry.get("selected_modalities") == [
+        "visual",
+        "narrated_audio",
+        "textual",
+    ]
 
 
 # ---------------------------------------------------------------------------

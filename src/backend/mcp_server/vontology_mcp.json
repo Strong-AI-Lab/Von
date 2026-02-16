@@ -155,6 +155,12 @@
                     },
                     "allow_duplicate_instances": {
                         "type": "boolean"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     }
                 },
                 "required": [
@@ -162,7 +168,7 @@
                     "concepts"
                 ],
                 "additionalProperties": true,
-                "description": "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. Unknown top-level fields are ignored to accommodate orchestrator-added context (e.g., namespace)."
+                "description": "create_concepts input: parent_id (str, parent concept_id), concepts (list of {name, kind?, description?, notes?}). kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; set allow_duplicate_instances=true to opt into legacy instance suffixing. Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. Unknown top-level fields are still tolerated for orchestrator-added context."
             }
         },
         {
@@ -1136,6 +1142,38 @@
             }
         },
         {
+            "name": "renderer_resolve_applicability",
+            "description": "Resolve candidate renderers from Vontology-defined applicability metadata. Supports concept-backed and transient microtheory payloads, including multimodal selection and fallback diagnostics. Renderer definitions can be supplied inline or loaded from Vontology concept text relations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request_payload": {
+                        "type": "object"
+                    },
+                    "renderer_definitions": {
+                        "type": "array"
+                    },
+                    "renderer_definition_concept_ids": {
+                        "type": "array"
+                    },
+                    "allow_multimodal": {
+                        "type": "boolean"
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "request_payload"
+                ],
+                "additionalProperties": true,
+                "description": "renderer_resolve_applicability input: request_payload (dict) and either renderer_definitions (list) or renderer_definition_concept_ids (list[str]). Optional allow_multimodal (bool, default true)."
+            }
+        },
+        {
             "name": "resolve_concept_by_name",
             "description": "Resolve a Vontology concept deterministically from a user-provided surface form. Read-only: does not mutate concepts. Returns resolved/ambiguous/not_found with an audit trail. Supports language preferences, instance_of restriction, and optional code-string matching.",
             "inputSchema": {
@@ -1434,6 +1472,60 @@
                 ],
                 "additionalProperties": true,
                 "description": "update_text_relation input: concept_id (str), relation_id (str), new_text (str), language (str, optional)"
+            }
+        },
+        {
+            "name": "upsert_renderer_profile",
+            "description": "Validate and persist renderer applicability metadata on a renderer concept. Stores canonical profile JSON as a singleton text relation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "renderer_concept_id": {
+                        "type": "string"
+                    },
+                    "renderer_profile": {
+                        "type": "object"
+                    },
+                    "predicate": {
+                        "type": "string"
+                    },
+                    "language": {
+                        "type": "string"
+                    },
+                    "policy": {
+                        "type": "string"
+                    },
+                    "garbage_collect": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "provenance": {
+                        "type": [
+                            "object",
+                            "null"
+                        ]
+                    },
+                    "context": {
+                        "type": [
+                            "object",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "renderer_concept_id",
+                    "renderer_profile"
+                ],
+                "additionalProperties": true,
+                "description": "upsert_renderer_profile input: renderer_concept_id (str), renderer_profile (dict), optional predicate/language/policy/provenance/context."
             }
         },
         {

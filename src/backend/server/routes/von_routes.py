@@ -1150,6 +1150,8 @@ def get_task_result(task_id: str):
             serialised["llm_calls"] = list(result.llm_calls)
         if hasattr(result, "llm_usage"):
             serialised["llm_usage"] = result.llm_usage
+        if hasattr(result, "render_plan") and isinstance(result.render_plan, dict):
+            serialised["render_plan"] = dict(result.render_plan)
         return jsonify({"task_id": task_id, "result": serialised}), 200
 
     # Generic result
@@ -3842,6 +3844,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "usage": None,
             "calls": [],
         }
+        render_plan_debug: dict[str, Any] | None = None
 
         def _infer_provider(model_id: str | None) -> str | None:
             if not isinstance(model_id, str):
@@ -4096,6 +4099,9 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 auxiliary_llm_calls = list(
                     getattr(orchestrator_result, "aux_llm_calls", [])
                 )
+                raw_render_plan = getattr(orchestrator_result, "render_plan", None)
+                if isinstance(raw_render_plan, dict):
+                    render_plan_debug = dict(raw_render_plan)
 
                 invoked_tools = []
                 for inv in tool_invocations:
@@ -5240,6 +5246,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             # JVNAUTOSCI-1076: Workflow discovery results for Thinking context
             "workflow_discovery": workflow_discovery_result,
         }
+        if isinstance(render_plan_debug, dict):
+            llm_debug_info["render_plan"] = dict(render_plan_debug)
 
         # Derive warnings from debug info and add to structure
         llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)

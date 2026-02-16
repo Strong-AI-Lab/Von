@@ -111,6 +111,10 @@ from src.backend.integrations.internal_mcp.catalogue import _jira_search
 from src.backend.integrations.internal_mcp.catalogue import _jira_transition_issue
 from src.backend.integrations.internal_mcp.catalogue import _jira_update_issue
 from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
+from src.backend.integrations.internal_mcp.catalogue import (
+    _renderer_resolve_applicability,
+)
+from src.backend.integrations.internal_mcp.catalogue import _upsert_renderer_profile
 from src.backend.integrations.internal_mcp.catalogue import _workflow_bind_event
 from src.backend.integrations.internal_mcp.catalogue import _workflow_cancel_instance
 from src.backend.integrations.internal_mcp.catalogue import _workflow_create_instance
@@ -151,16 +155,10 @@ from src.backend.integrations.internal_mcp import (
     catalogue as internal_mcp_catalogue_module,
     InternalMCPGateway,
     InternalMCPTransport,
-    InternalMCPChatOrchestrator,
-    ToolCallParsingError,
     build_default_catalogue,
 )
 from src.backend.integrations.google import gmail_service
 from src.backend.services.rag_service import get_rag_service, RAGBackendUnavailable
-from src.backend.languagemodels.llm_interface import (
-    get_llm_client,
-    get_active_model_name,
-)
 
 # Create MCP server instance
 app = Server("vontology-mcp")
@@ -800,6 +798,15 @@ async def _handle_find_concepts_by_name(arguments: dict[str, Any]) -> list[TextC
 
 
 async def _handle_von_chat_run(arguments: dict[str, Any]) -> list[TextContent]:
+    from src.backend.integrations.internal_mcp.orchestrator import (
+        InternalMCPChatOrchestrator,
+        ToolCallParsingError,
+    )
+    from src.backend.languagemodels.llm_interface import (
+        get_active_model_name,
+        get_llm_client,
+    )
+
     prompt = arguments.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return [
@@ -2535,6 +2542,26 @@ async def _handle_workflow_list_definitions(
     )
 
 
+async def _handle_renderer_resolve_applicability(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _renderer_resolve_applicability,
+        arguments,
+        tool_family_label="Renderer",
+    )
+
+
+async def _handle_upsert_renderer_profile(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _upsert_renderer_profile,
+        arguments,
+        tool_family_label="Renderer",
+    )
+
+
 async def _handle_workflow_bind_event(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _workflow_bind_event,
@@ -2842,6 +2869,8 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "jira_link_issue": _handle_jira_link_issue,
     "jira_get_myself": _handle_jira_get_myself,
     "jira_get_auth_config": _handle_jira_get_auth_config,
+    "renderer_resolve_applicability": _handle_renderer_resolve_applicability,
+    "upsert_renderer_profile": _handle_upsert_renderer_profile,
     "workflow_list_definitions": _handle_workflow_list_definitions,
     "workflow_bind_event": _handle_workflow_bind_event,
     "workflow_list_event_bindings": _handle_workflow_list_event_bindings,

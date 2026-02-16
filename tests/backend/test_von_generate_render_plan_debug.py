@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+from flask import Flask
+
+
+class _DummyLLM:
+    def generate(self, *_args, **_kwargs):
+        raise AssertionError("LLM generate() should not be called in these tests")
+
+
+class _StubOrchestrator:
+    def __init__(self, result):
+        self._result = result
+
+    def configure_execution_caps(self, **_kwargs) -> None:
+        return None
+
+    def _extract_json_blob(self, _text: str):
+        return None
+
+    def run(self, **_kwargs):
+        return self._result
+
+
+class _StubTaskStatus:
+    def __init__(self, *, status: str, result=None, error: str | None = None):
+        self.status = status
+        self.result = result
+        self.error = error
+
+
+class _StubTaskRegistry:
+    def __init__(self, task_status):
+        self._task_status = task_status
+
+    def get_task_status(self, _task_id: str):
+        return self._task_status
+
+
+def _make_app(monkeypatch, orchestrator) -> Flask:
+    from src.backend.server.routes.von_routes import von_bp
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_llm_client",
+        lambda **_kwargs: _DummyLLM(),
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.get_active_model_name",
+        lambda: "test-model",
+    )
+    monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id",
+        lambda: None,
+    )
+
+    app = Flask(__name__)
+    app.secret_key = "test-secret"
+    app.config["TESTING"] = True
+    app.register_blueprint(von_bp, url_prefix="/von")
+    app.config["CONTEXT"] = []
+    app.config["INTERNAL_MCP_ORCHESTRATOR"] = orchestrator
+    app.config["INTERNAL_MCP_GATEWAY"] = object()
+    return app
+
+
+def test_generate_debug_omits_render_plan_when_not_present(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    orchestrator_result = OrchestratorResult(
+        response_text="ok",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Hello"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    debug = body.get("llm_debug")
+    assert isinstance(debug, dict)
+    assert "render_plan" not in debug
+
+
+def test_generate_debug_includes_concept_backed_render_plan(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "spoken+screen",
+        "should_narrate": True,
+        "request_payload_object_kind": "concept",
+        "request_payload_selected_concept_id": "#V#task_123",
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="ok",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Hello"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    debug = body.get("llm_debug")
+    assert isinstance(debug, dict)
+    assert debug.get("render_plan") == render_plan
+
+
+def test_generate_debug_includes_screen_only_fallback_render_plan(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "renderer_definition_ids_missing",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="ok",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Hello"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    debug = body.get("llm_debug")
+    assert isinstance(debug, dict)
+    assert debug.get("render_plan") == render_plan
+
+
+def test_task_result_includes_render_plan_when_present(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "spoken+screen",
+        "should_narrate": True,
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="ok",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    registry = _StubTaskRegistry(
+        _StubTaskStatus(status="completed", result=orchestrator_result)
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.background_task_registry",
+        registry,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.get("/von/api/task/result/task-1")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    result = body.get("result")
+    assert isinstance(result, dict)
+    assert result.get("render_plan") == render_plan
+
+
+def test_task_result_omits_render_plan_when_absent(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    orchestrator_result = OrchestratorResult(
+        response_text="ok",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+    )
+    registry = _StubTaskRegistry(
+        _StubTaskStatus(status="completed", result=orchestrator_result)
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.von_routes.background_task_registry",
+        registry,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.get("/von/api/task/result/task-2")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    result = body.get("result")
+    assert isinstance(result, dict)
+    assert "render_plan" not in result
