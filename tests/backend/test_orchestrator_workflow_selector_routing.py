@@ -847,6 +847,196 @@ def test_renderer_render_plan_includes_workflow_view_from_tool_messages(monkeypa
     assert "JVNAUTOSCI-1148" in link_targets
 
 
+def test_renderer_selection_gates_screen_element_families(monkeypatch):
+    """Selected renderer types should deterministically gate emitted screen element families."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#workflow_renderer,#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#workflow_renderer",
+                        "renderer_type": "workflow_view",
+                        "modalities": ["visual"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Workflow status summary.",
+                "tool_messages": [
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "task_list",
+                                "status": "ok",
+                                "duration_ms": 2.4,
+                                "payload": {
+                                    "tasks": [
+                                        {
+                                            "task_concept_id": "#V#task_alpha",
+                                            "title": "Alpha task",
+                                            "status": "pending",
+                                        }
+                                    ]
+                                },
+                            }
+                        ),
+                    },
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "workflow_list_instances",
+                                "status": "ok",
+                                "duration_ms": 3.1,
+                                "payload": {
+                                    "instances": [
+                                        {
+                                            "instance_id": "inst_1",
+                                            "workflow_id": "#V#salient_predicate_governance_workflow",
+                                            "status": "running",
+                                        }
+                                    ]
+                                },
+                            }
+                        ),
+                    },
+                ],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+    result = orchestrator.run(
+        prompt="Show workflow progress",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert result.render_plan.get("screen_element_targets") == {
+        "table": False,
+        "workflow_view": True,
+    }
+    assert "screen_table_record_sets" not in result.render_plan
+    assert result.render_plan.get("screen_workflow_element_count") == 1
+    assert (
+        "renderer_screen_elements:selected_renderer_types"
+        in result.render_plan.get("screen_element_reason_codes", [])
+    )
+
+
+def test_renderer_selection_fallback_when_no_types_selected(monkeypatch):
+    """Empty renderer selections should preserve legacy table/workflow extraction behaviour."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#workflow_renderer,#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Task summary.",
+                "tool_messages": [
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "task_list",
+                                "status": "ok",
+                                "duration_ms": 2.4,
+                                "payload": {
+                                    "tasks": [
+                                        {
+                                            "task_concept_id": "#V#task_alpha",
+                                            "title": "Alpha task",
+                                            "status": "pending",
+                                        }
+                                    ]
+                                },
+                            }
+                        ),
+                    }
+                ],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+    result = orchestrator.run(
+        prompt="Show tasks",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("screen_element_mapping_mode") == (
+        "fallback_no_renderer_selection"
+    )
+    assert result.render_plan.get("screen_element_targets") == {
+        "table": True,
+        "workflow_view": True,
+    }
+    assert result.render_plan.get("screen_table_record_set_count") == 1
+    assert (
+        "renderer_screen_elements:fallback_no_renderer_selection"
+        in result.render_plan.get("screen_element_reason_codes", [])
+    )
+
+
 def test_renderer_render_plan_skips_malformed_tool_messages_for_table_record_sets(
     monkeypatch,
 ):

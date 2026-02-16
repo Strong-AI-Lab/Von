@@ -1895,6 +1895,8 @@ def _extract_required_screen_json_fence(prompt_text: str | None) -> str | None:
 
 def _extract_screen_table_elements_from_render_plan(
     render_plan: dict[str, Any] | None,
+    *,
+    screen_element_targets: dict[str, bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract display-contract table specs from renderer plan diagnostics.
 
@@ -1902,6 +1904,10 @@ def _extract_screen_table_elements_from_render_plan(
     converted through the canonical table payload builder.
     """
     if not isinstance(render_plan, dict):
+        return []
+    if isinstance(screen_element_targets, dict) and not bool(
+        screen_element_targets.get("table", True)
+    ):
         return []
 
     table_elements: list[dict[str, Any]] = []
@@ -1996,9 +2002,15 @@ def _extract_screen_table_elements_from_render_plan(
 
 def _extract_screen_workflow_elements_from_render_plan(
     render_plan: dict[str, Any] | None,
+    *,
+    screen_element_targets: dict[str, bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract display-contract workflow specs from renderer plan diagnostics."""
     if not isinstance(render_plan, dict):
+        return []
+    if isinstance(screen_element_targets, dict) and not bool(
+        screen_element_targets.get("workflow_view", True)
+    ):
         return []
 
     workflow_elements: list[dict[str, Any]] = []
@@ -2019,6 +2031,46 @@ def _extract_screen_workflow_elements_from_render_plan(
         workflow_elements.append(dict(single_workflow))
 
     return workflow_elements
+
+
+def _extract_screen_element_targets_from_render_plan(
+    render_plan: dict[str, Any] | None,
+) -> dict[str, bool]:
+    """Resolve render-plan screen element targets with legacy-compatible defaults."""
+    default_targets: dict[str, bool] = {"table": True, "workflow_view": True}
+    if not isinstance(render_plan, dict):
+        return default_targets
+
+    raw_targets = render_plan.get("screen_element_targets")
+    if not isinstance(raw_targets, dict):
+        return default_targets
+
+    return {
+        "table": bool(raw_targets.get("table", True)),
+        "workflow_view": bool(raw_targets.get("workflow_view", True)),
+    }
+
+
+def _extract_screen_element_reason_codes_from_render_plan(
+    render_plan: dict[str, Any] | None,
+) -> list[str]:
+    """Return renderer mapping diagnostics for display element contract reason codes."""
+    if not isinstance(render_plan, dict):
+        return []
+
+    raw_reason_codes = render_plan.get("screen_element_reason_codes")
+    if not isinstance(raw_reason_codes, list):
+        return []
+
+    reason_codes: list[str] = []
+    for raw_reason_code in raw_reason_codes:
+        if not isinstance(raw_reason_code, str):
+            continue
+        reason_code = raw_reason_code.strip()
+        if not reason_code or reason_code in reason_codes:
+            continue
+        reason_codes.append(reason_code)
+    return reason_codes
 
 
 def _ensure_required_screen_json_fence(
@@ -5034,11 +5086,22 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "[mcp_orchestrator] Tool invocations: %s", tool_invocations
             )
 
-        screen_table_elements = _extract_screen_table_elements_from_render_plan(
+        render_plan_for_display = (
             render_plan_debug if isinstance(render_plan_debug, dict) else None
         )
+        screen_element_targets = _extract_screen_element_targets_from_render_plan(
+            render_plan_for_display
+        )
+        screen_element_reason_codes = _extract_screen_element_reason_codes_from_render_plan(
+            render_plan_for_display
+        )
+        screen_table_elements = _extract_screen_table_elements_from_render_plan(
+            render_plan_for_display,
+            screen_element_targets=screen_element_targets,
+        )
         screen_workflow_elements = _extract_screen_workflow_elements_from_render_plan(
-            render_plan_debug if isinstance(render_plan_debug, dict) else None
+            render_plan_for_display,
+            screen_element_targets=screen_element_targets,
         )
         display_elements_contract = build_turn_display_elements(
             response_text=response_text,
@@ -5047,6 +5110,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             ),
             screen_table_elements=screen_table_elements,
             screen_workflow_elements=screen_workflow_elements,
+            supplemental_reason_codes=screen_element_reason_codes,
             required_screen_json_fence=required_screen_json_fence,
             screen_backfill_second_pass_attempted=screen_backfill_second_pass_attempted,
             screen_backfill_second_pass_reason=screen_backfill_second_pass_reason,

@@ -11449,6 +11449,110 @@ class InternalMCPChatOrchestrator:
             }
             return request_payload, diagnostics
 
+        _RENDERER_SCREEN_ELEMENT_FAMILY_MAP: dict[str, tuple[str, ...]] = {
+            "table": ("table",),
+            "tabular": ("table",),
+            "workflow": ("workflow_view",),
+            "workflow_view": ("workflow_view",),
+        }
+        _LEGACY_SCREEN_ELEMENT_FAMILIES: frozenset[str] = frozenset(
+            {"table", "workflow_view"}
+        )
+
+        def _normalise_selected_renderer_types(raw_types: Sequence[Any]) -> list[str]:
+            normalised: list[str] = []
+            for raw_type in raw_types:
+                if not isinstance(raw_type, str):
+                    continue
+                renderer_type = raw_type.strip().lower()
+                if not renderer_type or renderer_type in normalised:
+                    continue
+                normalised.append(renderer_type)
+            return normalised
+
+        def _apply_screen_element_mapping(
+            decision: dict[str, Any],
+            *,
+            tool_messages: Sequence[Mapping[str, Any]],
+            resolver_attempted: bool,
+            resolver_success: bool,
+            selected_renderer_types: Sequence[str],
+        ) -> None:
+            renderer_types = _normalise_selected_renderer_types(selected_renderer_types)
+            selected_families: set[str] = set()
+            unsupported_renderer_types: list[str] = []
+            reason_codes: list[str] = []
+
+            if not resolver_attempted:
+                mapping_mode = "fallback_not_attempted"
+                selected_families.update(_LEGACY_SCREEN_ELEMENT_FAMILIES)
+                reason_codes.append("renderer_screen_elements:fallback_not_attempted")
+            elif not resolver_success:
+                mapping_mode = "fallback_resolver_unsuccessful"
+                selected_families.update(_LEGACY_SCREEN_ELEMENT_FAMILIES)
+                reason_codes.append(
+                    "renderer_screen_elements:fallback_resolver_unsuccessful"
+                )
+            elif not renderer_types:
+                mapping_mode = "fallback_no_renderer_selection"
+                selected_families.update(_LEGACY_SCREEN_ELEMENT_FAMILIES)
+                reason_codes.append(
+                    "renderer_screen_elements:fallback_no_renderer_selection"
+                )
+            else:
+                mapping_mode = "selected_renderer_types"
+                reason_codes.append("renderer_screen_elements:selected_renderer_types")
+                for renderer_type in renderer_types:
+                    mapped_families = _RENDERER_SCREEN_ELEMENT_FAMILY_MAP.get(
+                        renderer_type
+                    )
+                    if not mapped_families:
+                        unsupported_renderer_types.append(renderer_type)
+                        continue
+                    selected_families.update(mapped_families)
+                if unsupported_renderer_types:
+                    reason_codes.append(
+                        "renderer_screen_elements:unsupported_renderer_types"
+                    )
+                if not selected_families:
+                    reason_codes.append(
+                        "renderer_screen_elements:no_structured_screen_family_selected"
+                    )
+
+            include_table_elements = "table" in selected_families
+            include_workflow_elements = "workflow_view" in selected_families
+            decision["screen_element_mapping_mode"] = mapping_mode
+            decision["screen_element_reason_codes"] = list(reason_codes)
+            decision["screen_element_families"] = sorted(selected_families)
+            decision["screen_element_targets"] = {
+                "table": include_table_elements,
+                "workflow_view": include_workflow_elements,
+            }
+            if unsupported_renderer_types:
+                decision["unsupported_selected_renderer_types"] = list(
+                    unsupported_renderer_types
+                )
+
+            if include_table_elements:
+                screen_table_record_sets = _extract_renderer_screen_table_record_sets(
+                    tool_messages=tool_messages
+                )
+                if screen_table_record_sets:
+                    decision["screen_table_record_sets"] = screen_table_record_sets
+                    decision["screen_table_record_set_count"] = len(
+                        screen_table_record_sets
+                    )
+
+            if include_workflow_elements:
+                screen_workflow_elements = _extract_renderer_screen_workflow_elements(
+                    tool_messages=tool_messages
+                )
+                if screen_workflow_elements:
+                    decision["screen_workflow_elements"] = screen_workflow_elements
+                    decision["screen_workflow_element_count"] = len(
+                        screen_workflow_elements
+                    )
+
         def _resolve_renderer_render_plan(
             screen_text: Any,
             *,
@@ -11474,30 +11578,28 @@ class InternalMCPChatOrchestrator:
                 "selected_renderer_types": [],
                 "selected_modalities": [],
             }
-            screen_table_record_sets = _extract_renderer_screen_table_record_sets(
-                tool_messages=tool_messages
-            )
-            if screen_table_record_sets:
-                decision["screen_table_record_sets"] = screen_table_record_sets
-                decision["screen_table_record_set_count"] = len(
-                    screen_table_record_sets
-                )
-            screen_workflow_elements = _extract_renderer_screen_workflow_elements(
-                tool_messages=tool_messages
-            )
-            if screen_workflow_elements:
-                decision["screen_workflow_elements"] = screen_workflow_elements
-                decision["screen_workflow_element_count"] = len(
-                    screen_workflow_elements
-                )
             renderer_render_plan = decision
 
             if not renderer_routing_enabled:
                 decision["reason"] = "feature_flag_disabled"
+                _apply_screen_element_mapping(
+                    decision,
+                    tool_messages=tool_messages,
+                    resolver_attempted=False,
+                    resolver_success=False,
+                    selected_renderer_types=(),
+                )
                 return dict(decision)
 
             if not renderer_definition_concept_ids:
                 decision["reason"] = "renderer_definition_ids_missing"
+                _apply_screen_element_mapping(
+                    decision,
+                    tool_messages=tool_messages,
+                    resolver_attempted=False,
+                    resolver_success=False,
+                    selected_renderer_types=(),
+                )
                 aux_llm_calls.append(dict(decision))
                 return dict(decision)
 
@@ -11537,6 +11639,13 @@ class InternalMCPChatOrchestrator:
             except Exception as exc:
                 decision["reason"] = "tool_error"
                 decision["error"] = str(exc)
+                _apply_screen_element_mapping(
+                    decision,
+                    tool_messages=tool_messages,
+                    resolver_attempted=True,
+                    resolver_success=False,
+                    selected_renderer_types=(),
+                )
                 aux_llm_calls.append(dict(decision))
                 return dict(decision)
 
@@ -11549,6 +11658,13 @@ class InternalMCPChatOrchestrator:
             )
             if not isinstance(result_payload, Mapping):
                 decision["reason"] = "invalid_tool_payload"
+                _apply_screen_element_mapping(
+                    decision,
+                    tool_messages=tool_messages,
+                    resolver_attempted=True,
+                    resolver_success=False,
+                    selected_renderer_types=(),
+                )
                 aux_llm_calls.append(dict(decision))
                 return dict(decision)
 
@@ -11559,6 +11675,13 @@ class InternalMCPChatOrchestrator:
                 error_text = result_payload.get("error")
                 if isinstance(error_text, str) and error_text.strip():
                     decision["error"] = error_text.strip()
+                _apply_screen_element_mapping(
+                    decision,
+                    tool_messages=tool_messages,
+                    resolver_attempted=True,
+                    resolver_success=False,
+                    selected_renderer_types=(),
+                )
                 aux_llm_calls.append(dict(decision))
                 return dict(decision)
 
@@ -11616,6 +11739,13 @@ class InternalMCPChatOrchestrator:
             decision["selected_renderer_ids"] = selected_renderer_ids
             decision["selected_renderer_types"] = selected_renderer_types
             decision["selected_modalities"] = selected_modalities
+            _apply_screen_element_mapping(
+                decision,
+                tool_messages=tool_messages,
+                resolver_attempted=True,
+                resolver_success=True,
+                selected_renderer_types=selected_renderer_types,
+            )
             aux_llm_calls.append(dict(decision))
             return dict(decision)
 

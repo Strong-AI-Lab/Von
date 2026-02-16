@@ -751,6 +751,7 @@ def build_turn_display_elements(
     presenter_channels: Mapping[str, Any] | None,
     screen_table_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
+    supplemental_reason_codes: Sequence[str] | None = None,
     required_screen_json_fence: str | None = None,
     screen_backfill_second_pass_attempted: bool = False,
     screen_backfill_second_pass_reason: str | None = None,
@@ -783,6 +784,14 @@ def build_turn_display_elements(
     if spoken_backfill_second_pass_attempted:
         reason = _normalise_text(spoken_backfill_second_pass_reason) or "unspecified"
         reason_codes.append(f"spoken_backfill:{reason}")
+    if (
+        isinstance(supplemental_reason_codes, Sequence)
+        and not isinstance(supplemental_reason_codes, (str, bytes, bytearray))
+    ):
+        for raw_reason_code in supplemental_reason_codes:
+            reason = _normalise_text(raw_reason_code)
+            if reason:
+                reason_codes.append(reason)
 
     elements: list[dict[str, Any]] = []
 

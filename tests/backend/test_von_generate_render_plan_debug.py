@@ -400,6 +400,103 @@ def test_generate_builds_workflow_view_from_render_plan_elements(monkeypatch):
     assert nodes[0]["task_links"][0]["target_id"] == "#V#task_alpha"
 
 
+def test_generate_respects_renderer_screen_element_targets(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_element_targets": {
+            "table": False,
+            "workflow_view": True,
+        },
+        "screen_element_reason_codes": [
+            "renderer_screen_elements:selected_renderer_types"
+        ],
+        "screen_table_record_sets": [
+            {
+                "element_id": "screen_task_table",
+                "intent": "structured_tabular_view",
+                "records": [
+                    {
+                        "task_id": "task_alpha",
+                        "task_name": "Alpha",
+                        "status": "done",
+                    }
+                ],
+                "columns": [
+                    {
+                        "column_id": "task_name",
+                        "label": "Task",
+                        "source_key": "task_name",
+                        "data_type": "text",
+                    },
+                    {
+                        "column_id": "status",
+                        "label": "Status",
+                        "source_key": "status",
+                        "data_type": "text",
+                    },
+                ],
+                "row_id_field": "task_id",
+            }
+        ],
+        "screen_workflow_elements": [
+            {
+                "element_id": "screen_workflow_view",
+                "intent": "structured_workflow_view",
+                "payload": {
+                    "layout": "list",
+                    "nodes": [
+                        {
+                            "node_id": "inst_1",
+                            "label": "Workflow",
+                            "status": "running",
+                        }
+                    ],
+                    "edges": [],
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Workflow summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show workflow only"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    reason_codes = display_elements.get("reason_codes", [])
+    assert "renderer_screen_elements:selected_renderer_types" in reason_codes
+    assert "screen_structured_workflows_supplied" in reason_codes
+    assert "screen_structured_tables_supplied" not in reason_codes
+
+    table_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "table"
+    ]
+    assert not table_elements
+    workflow_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "workflow_view"
+    ]
+    assert len(workflow_elements) == 1
+
+
 def test_task_result_includes_render_plan_when_present(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
