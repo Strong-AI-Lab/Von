@@ -373,6 +373,119 @@ describe('chat speech planning (presenter channels)', () => {
         expect(firstRowCells[1].textContent).toBe('done');
     });
 
+    test('applies configured table sort and pagination metadata', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'show sorted task table';
+
+        const displayElements = buildDisplayElementsContract({
+            screenText: 'Sorted task summary',
+            spokenText: 'Here is the sorted task summary table.',
+            tablePayload: {
+                columns: [
+                    { column_id: 'task', label: 'Task', data_type: 'text', position: 0 },
+                    { column_id: 'priority', label: 'Priority', data_type: 'number', position: 1 }
+                ],
+                rows: [
+                    {
+                        row_id: 'row_1',
+                        cells: [
+                            { column_id: 'task', value_raw: 'Alpha', value_display: 'Alpha', value_type: 'text' },
+                            { column_id: 'priority', value_raw: 1, value_display: '1', value_type: 'number' }
+                        ]
+                    },
+                    {
+                        row_id: 'row_2',
+                        cells: [
+                            { column_id: 'task', value_raw: 'Beta', value_display: 'Beta', value_type: 'text' },
+                            { column_id: 'priority', value_raw: 2, value_display: '2', value_type: 'number' }
+                        ]
+                    },
+                    {
+                        row_id: 'row_3',
+                        cells: [
+                            { column_id: 'task', value_raw: 'Gamma', value_display: 'Gamma', value_type: 'text' },
+                            { column_id: 'priority', value_raw: 3, value_display: '3', value_type: 'number' }
+                        ]
+                    }
+                ],
+                sort: { default_column_id: 'priority', direction: 'desc' },
+                pagination: { enabled: true, page_size: 2, total_rows: 3 }
+            }
+        });
+
+        global.fetch = jest.fn((url, options) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                let text = '';
+                try {
+                    text = JSON.parse(options?.body ?? '{}')?.text ?? '';
+                } catch (_) {
+                    text = '';
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(text) })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Sorted task summary',
+                        display_elements: displayElements,
+                        llm_debug: {
+                            model: 'gpt-5.2',
+                            response: 'Sorted task summary',
+                            messages: [],
+                            display_elements: displayElements
+                        }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const renderedTable = document.querySelector('.chat-display-elements-table');
+        expect(renderedTable).toBeTruthy();
+
+        const firstPageRows = renderedTable.querySelectorAll('tbody tr');
+        expect(firstPageRows.length).toBe(2);
+        expect(firstPageRows[0].querySelectorAll('td')[0].textContent).toBe('Gamma');
+        expect(firstPageRows[1].querySelectorAll('td')[0].textContent).toBe('Beta');
+
+        const paginationStatus = document.querySelector('.chat-display-elements-page-status');
+        expect(paginationStatus).toBeTruthy();
+        expect(paginationStatus.textContent).toBe('Page 1 of 2');
+
+        const nextButton = document.querySelector('.chat-display-elements-page-next');
+        expect(nextButton).toBeTruthy();
+        nextButton.click();
+
+        const secondPageRows = renderedTable.querySelectorAll('tbody tr');
+        expect(secondPageRows.length).toBe(1);
+        expect(secondPageRows[0].querySelectorAll('td')[0].textContent).toBe('Alpha');
+        expect(paginationStatus.textContent).toBe('Page 2 of 2');
+    });
+
     test('Shift+click Speak uses screen channel (accessibility)', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         getUserContext.mockReturnValue({

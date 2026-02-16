@@ -1390,6 +1390,158 @@ function resolveResponsePresenterState(responseData) {
     };
 }
 
+const TABLE_NON_PAGINATED_ROW_LIMIT = 100;
+const TABLE_DEFAULT_PAGE_SIZE = 50;
+const TABLE_MAX_PAGE_SIZE = 200;
+
+function normaliseTableSortMetadata(value, columns) {
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const candidateColumnId = typeof value.default_column_id === 'string'
+        ? value.default_column_id.trim()
+        : '';
+    if (!candidateColumnId) {
+        return null;
+    }
+
+    const validColumnIds = new Set(columns.map((column) => column.column_id));
+    if (!validColumnIds.has(candidateColumnId)) {
+        return null;
+    }
+
+    const direction = String(value.direction || 'asc').trim().toLowerCase() === 'desc'
+        ? 'desc'
+        : 'asc';
+
+    return {
+        default_column_id: candidateColumnId,
+        direction
+    };
+}
+
+function normaliseTablePaginationMetadata(value, rowCount) {
+    const pagination = (value && typeof value === 'object') ? value : null;
+    const enabled = !!pagination?.enabled;
+
+    const rawPageSize = Number.parseInt(String(pagination?.page_size ?? ''), 10);
+    const pageSize = Number.isFinite(rawPageSize) && rawPageSize > 0
+        ? Math.min(rawPageSize, TABLE_MAX_PAGE_SIZE)
+        : TABLE_DEFAULT_PAGE_SIZE;
+
+    const rawTotalRows = Number.parseInt(String(pagination?.total_rows ?? ''), 10);
+    const totalRows = Number.isFinite(rawTotalRows) && rawTotalRows > 0
+        ? Math.max(rawTotalRows, rowCount)
+        : rowCount;
+
+    return {
+        enabled,
+        page_size: pageSize,
+        total_rows: totalRows
+    };
+}
+
+function normaliseTableCellValueDisplay(valueRaw, valueDisplay) {
+    if (typeof valueDisplay === 'string') {
+        return valueDisplay;
+    }
+    if (typeof valueRaw === 'string') {
+        return valueRaw;
+    }
+    if (typeof valueRaw === 'number' || typeof valueRaw === 'boolean') {
+        return String(valueRaw);
+    }
+    return '';
+}
+
+function parseTableCellComparableValue(cell) {
+    const valueType = String(cell?.value_type || 'text').trim().toLowerCase();
+    const candidate = cell?.value_raw ?? cell?.value_display ?? '';
+
+    if (valueType === 'number') {
+        const parsed = typeof candidate === 'number'
+            ? candidate
+            : Number.parseFloat(String(candidate).replace(/,/g, ''));
+        if (Number.isFinite(parsed)) {
+            return { kind: 'number', value: parsed };
+        }
+    } else if (valueType === 'boolean') {
+        if (typeof candidate === 'boolean') {
+            return { kind: 'boolean', value: candidate ? 1 : 0 };
+        }
+        const lowered = String(candidate).trim().toLowerCase();
+        if (lowered === 'true' || lowered === 'false') {
+            return { kind: 'boolean', value: lowered === 'true' ? 1 : 0 };
+        }
+    } else if (valueType === 'date') {
+        const timestamp = Date.parse(String(candidate));
+        if (Number.isFinite(timestamp)) {
+            return { kind: 'date', value: timestamp };
+        }
+    }
+
+    return {
+        kind: 'text',
+        value: String(cell?.value_display ?? candidate ?? '').trim()
+    };
+}
+
+function compareTableCells(leftCell, rightCell, direction) {
+    const multiplier = direction === 'desc' ? -1 : 1;
+    const left = parseTableCellComparableValue(leftCell);
+    const right = parseTableCellComparableValue(rightCell);
+
+    let compareResult = 0;
+    if (left.kind === right.kind && left.kind !== 'text') {
+        compareResult = Number(left.value) - Number(right.value);
+    } else {
+        compareResult = String(left.value).localeCompare(String(right.value), undefined, {
+            numeric: true,
+            sensitivity: 'base'
+        });
+    }
+
+    return compareResult * multiplier;
+}
+
+function sortTableRows(rows, columns, sortMetadata) {
+    if (!sortMetadata || typeof sortMetadata !== 'object') {
+        return rows;
+    }
+
+    const columnIndex = columns.findIndex((column) => column.column_id === sortMetadata.default_column_id);
+    if (columnIndex < 0) {
+        return rows;
+    }
+
+    return rows
+        .map((row, index) => ({ row, index }))
+        .sort((left, right) => {
+            const compareResult = compareTableCells(
+                left.row?.cells?.[columnIndex],
+                right.row?.cells?.[columnIndex],
+                sortMetadata.direction
+            );
+            if (compareResult !== 0) {
+                return compareResult;
+            }
+            return left.index - right.index;
+        })
+        .map(({ row }) => row);
+}
+
+function appendTableRow(tbody, row) {
+    const tr = document.createElement('tr');
+    row.cells.forEach((cell) => {
+        const td = document.createElement('td');
+        td.textContent = cell.value_display;
+        td.dataset.valueType = cell.value_type || 'text';
+        td.style.cssText = 'border-bottom: 1px solid #eef3f7; padding: 4px 6px; vertical-align: top; font-size: 0.84em; color: #223547;';
+        tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+}
+
 function normaliseTableDisplayElement(element) {
     if (!element || typeof element !== 'object') {
         return null;
@@ -1445,14 +1597,15 @@ function normaliseTableDisplayElement(element) {
                 if (!columnId || cellsByColumnId.has(columnId)) {
                     continue;
                 }
-                const valueDisplay = typeof cell.value_display === 'string'
-                    ? cell.value_display
-                    : (typeof cell.value_raw === 'string' ? cell.value_raw : '');
+                const hasRawValue = Object.prototype.hasOwnProperty.call(cell, 'value_raw');
+                const valueRaw = hasRawValue ? cell.value_raw : null;
+                const valueDisplay = normaliseTableCellValueDisplay(valueRaw, cell.value_display);
                 const valueType = typeof cell.value_type === 'string' && cell.value_type.trim()
                     ? cell.value_type.trim()
                     : 'text';
                 cellsByColumnId.set(columnId, {
                     column_id: columnId,
+                    value_raw: valueRaw,
                     value_display: valueDisplay,
                     value_type: valueType
                 });
@@ -1465,6 +1618,7 @@ function normaliseTableDisplayElement(element) {
                 }
                 return {
                     column_id: column.column_id,
+                    value_raw: null,
                     value_display: '',
                     value_type: 'text'
                 };
@@ -1477,11 +1631,15 @@ function normaliseTableDisplayElement(element) {
         })
         .filter(Boolean);
 
+    const sort = normaliseTableSortMetadata(payload.sort, columns);
+    const pagination = normaliseTablePaginationMetadata(payload.pagination, rows.length);
+
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id : null,
         columns,
         rows,
-        pagination: (payload.pagination && typeof payload.pagination === 'object') ? payload.pagination : null
+        sort,
+        pagination
     };
 }
 
@@ -1559,29 +1717,88 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         table.appendChild(thead);
 
         const tbody = document.createElement('tbody');
-        const maxRows = 100;
-        const rowsToRender = tableElement.rows.slice(0, maxRows);
-        rowsToRender.forEach((row) => {
-            const tr = document.createElement('tr');
-            row.cells.forEach((cell) => {
-                const td = document.createElement('td');
-                td.textContent = cell.value_display;
-                td.dataset.valueType = cell.value_type || 'text';
-                td.style.cssText = 'border-bottom: 1px solid #eef3f7; padding: 4px 6px; vertical-align: top; font-size: 0.84em; color: #223547;';
-                tr.appendChild(td);
+        const sortedRows = sortTableRows(tableElement.rows, tableElement.columns, tableElement.sort);
+        const pagination = tableElement.pagination || normaliseTablePaginationMetadata(null, sortedRows.length);
+        const usePagination = pagination.enabled && sortedRows.length > pagination.page_size;
+        let paginationControls = null;
+        let truncationNotice = null;
+
+        const renderRows = (rows) => {
+            tbody.innerHTML = '';
+            rows.forEach((row) => appendTableRow(tbody, row));
+        };
+
+        if (usePagination) {
+            const pageSize = Math.max(1, Number(pagination.page_size) || TABLE_DEFAULT_PAGE_SIZE);
+            const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
+            let currentPage = 1;
+
+            const controls = document.createElement('div');
+            controls.className = 'chat-display-elements-pagination';
+            controls.style.cssText = 'display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 6px; font-size: 0.78em; color: #5a6b7b;';
+
+            const prevButton = document.createElement('button');
+            prevButton.type = 'button';
+            prevButton.className = 'chat-display-elements-page-prev';
+            prevButton.textContent = 'Previous';
+            prevButton.style.cssText = 'border: 1px solid #cad5df; background: #f8fbff; border-radius: 4px; padding: 2px 8px; cursor: pointer;';
+
+            const nextButton = document.createElement('button');
+            nextButton.type = 'button';
+            nextButton.className = 'chat-display-elements-page-next';
+            nextButton.textContent = 'Next';
+            nextButton.style.cssText = 'border: 1px solid #cad5df; background: #f8fbff; border-radius: 4px; padding: 2px 8px; cursor: pointer;';
+
+            const status = document.createElement('span');
+            status.className = 'chat-display-elements-page-status';
+
+            const renderPage = (targetPage) => {
+                const boundedPage = Math.min(Math.max(targetPage, 1), totalPages);
+                currentPage = boundedPage;
+                const start = (boundedPage - 1) * pageSize;
+                const end = start + pageSize;
+                renderRows(sortedRows.slice(start, end));
+
+                status.textContent = `Page ${boundedPage} of ${totalPages}`;
+                prevButton.disabled = boundedPage <= 1;
+                nextButton.disabled = boundedPage >= totalPages;
+            };
+
+            prevButton.addEventListener('click', () => {
+                renderPage(currentPage - 1);
             });
-            tbody.appendChild(tr);
-        });
+            nextButton.addEventListener('click', () => {
+                renderPage(currentPage + 1);
+            });
+
+            controls.appendChild(prevButton);
+            controls.appendChild(status);
+            controls.appendChild(nextButton);
+            paginationControls = controls;
+            renderPage(1);
+        } else {
+            const rowsToRender = pagination.enabled
+                ? sortedRows
+                : sortedRows.slice(0, TABLE_NON_PAGINATED_ROW_LIMIT);
+            renderRows(rowsToRender);
+
+            if (!pagination.enabled && sortedRows.length > TABLE_NON_PAGINATED_ROW_LIMIT) {
+                const notice = document.createElement('div');
+                notice.className = 'chat-display-elements-table-truncation';
+                notice.textContent = `Showing first ${TABLE_NON_PAGINATED_ROW_LIMIT} of ${sortedRows.length} rows.`;
+                notice.style.cssText = 'margin-top: 6px; font-size: 0.78em; color: #5a6b7b;';
+                truncationNotice = notice;
+            }
+        }
+
         table.appendChild(tbody);
         scrollWrap.appendChild(table);
         section.appendChild(scrollWrap);
-
-        if (tableElement.rows.length > maxRows) {
-            const notice = document.createElement('div');
-            notice.className = 'chat-display-elements-table-truncation';
-            notice.textContent = `Showing first ${maxRows} of ${tableElement.rows.length} rows.`;
-            notice.style.cssText = 'margin-top: 6px; font-size: 0.78em; color: #5a6b7b;';
-            section.appendChild(notice);
+        if (paginationControls) {
+            section.appendChild(paginationControls);
+        }
+        if (truncationNotice) {
+            section.appendChild(truncationNotice);
         }
 
         root.appendChild(section);
