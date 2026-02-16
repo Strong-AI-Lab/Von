@@ -266,6 +266,66 @@ def test_generate_builds_display_tables_from_render_plan_record_sets(monkeypatch
     )
 
 
+def test_generate_drops_invalid_tables_from_render_plan_record_sets(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    # columns=[] is accepted by route-level extraction but rejected by display
+    # contract validation, so the supplied table should be dropped safely.
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_table_record_sets": [
+            {
+                "element_id": "screen_invalid_task_table",
+                "intent": "structured_tabular_view",
+                "records": [
+                    {
+                        "task_id": "task_alpha",
+                        "task_name": "Alpha",
+                        "status": "done",
+                        "source": {"source_concept_id": "#V#task_alpha"},
+                    }
+                ],
+                "columns": [],
+                "row_id_field": "task_id",
+                "row_provenance_field": "source",
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Rendered summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show tables"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    assert display_elements.get("validation", {}).get("valid") is True
+    assert "screen_structured_tables_invalid_dropped" in display_elements.get(
+        "reason_codes", []
+    )
+    assert "screen_structured_tables_supplied" not in display_elements.get(
+        "reason_codes", []
+    )
+
+    table_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "table"
+    ]
+    assert not table_elements
+
+
 def test_task_result_includes_render_plan_when_present(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
