@@ -39,7 +39,10 @@ from ...services.chat_concept_reference_service import (
     build_context_concept_reference_metadata,
 )
 from ...services.prompt_template_service import PromptTemplateService
-from ...services.display_elements_service import build_turn_display_elements
+from ...services.display_elements_service import (
+    build_canonical_table_payload_from_records,
+    build_turn_display_elements,
+)
 from ...workflows import (
     CHAT_NARRATION_WORKFLOW_ID,
     WorkflowExecutionTrace,
@@ -1888,6 +1891,107 @@ def _extract_required_screen_json_fence(prompt_text: str | None) -> str | None:
             return f"```json\n{body}\n```"
 
     return None
+
+
+def _extract_screen_table_elements_from_render_plan(
+    render_plan: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Extract display-contract table specs from renderer plan diagnostics.
+
+    Supports both prebuilt payloads and record-set definitions that are
+    converted through the canonical table payload builder.
+    """
+    if not isinstance(render_plan, dict):
+        return []
+
+    table_elements: list[dict[str, Any]] = []
+
+    def _append_table_specs(raw_value: Any) -> None:
+        if isinstance(raw_value, list):
+            for item in raw_value:
+                if isinstance(item, dict):
+                    table_elements.append(dict(item))
+        elif isinstance(raw_value, dict):
+            table_elements.append(dict(raw_value))
+
+    _append_table_specs(render_plan.get("screen_table_elements"))
+    _append_table_specs(render_plan.get("screen_table_payloads"))
+
+    record_sets_raw = render_plan.get("screen_table_record_sets")
+    record_sets: list[dict[str, Any]] = []
+    if isinstance(record_sets_raw, list):
+        for item in record_sets_raw:
+            if isinstance(item, dict):
+                record_sets.append(item)
+    elif isinstance(record_sets_raw, dict):
+        record_sets.append(record_sets_raw)
+
+    single_record_set = render_plan.get("screen_table_record_set")
+    if isinstance(single_record_set, dict):
+        record_sets.append(single_record_set)
+
+    for index, record_set in enumerate(record_sets, start=1):
+        records = record_set.get("records")
+        columns = record_set.get("columns")
+        if not isinstance(records, list) or not isinstance(columns, list):
+            continue
+
+        page_size_raw = record_set.get("page_size")
+        page_size = (
+            int(page_size_raw)
+            if isinstance(page_size_raw, int) and page_size_raw > 0
+            else None
+        )
+
+        filters = record_set.get("filters")
+        payload = build_canonical_table_payload_from_records(
+            records=records,
+            columns=columns,
+            row_id_field=(
+                str(record_set.get("row_id_field"))
+                if isinstance(record_set.get("row_id_field"), str)
+                else None
+            ),
+            row_provenance_field=(
+                str(record_set.get("row_provenance_field"))
+                if isinstance(record_set.get("row_provenance_field"), str)
+                else None
+            ),
+            default_sort_column_id=(
+                str(record_set.get("default_sort_column_id"))
+                if isinstance(record_set.get("default_sort_column_id"), str)
+                else None
+            ),
+            default_sort_direction=(
+                str(record_set.get("default_sort_direction"))
+                if isinstance(record_set.get("default_sort_direction"), str)
+                else "asc"
+            ),
+            filters=filters if isinstance(filters, list) else None,
+            pagination_enabled=bool(record_set.get("pagination_enabled", True)),
+            page_size=page_size,
+        )
+
+        spec: dict[str, Any] = {"payload": payload}
+        if isinstance(record_set.get("element_id"), str):
+            spec["element_id"] = str(record_set["element_id"])
+        if isinstance(record_set.get("order"), int):
+            spec["order"] = int(record_set["order"])
+        if isinstance(record_set.get("intent"), str):
+            spec["intent"] = str(record_set["intent"])
+        if isinstance(record_set.get("constraints"), dict):
+            spec["constraints"] = dict(record_set["constraints"])
+        provenance = record_set.get("provenance")
+        if isinstance(provenance, dict):
+            spec["provenance"] = dict(provenance)
+        else:
+            spec["provenance"] = {
+                "source": "render_plan_table_record_set",
+                "record_set_index": index,
+            }
+        table_elements.append(spec)
+
+    return table_elements
 
 
 def _ensure_required_screen_json_fence(
@@ -4903,11 +5007,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 "[mcp_orchestrator] Tool invocations: %s", tool_invocations
             )
 
+        screen_table_elements = _extract_screen_table_elements_from_render_plan(
+            render_plan_debug if isinstance(render_plan_debug, dict) else None
+        )
         display_elements_contract = build_turn_display_elements(
             response_text=response_text,
             presenter_channels=(
                 presenter_channels if isinstance(presenter_channels, dict) else None
             ),
+            screen_table_elements=screen_table_elements,
             required_screen_json_fence=required_screen_json_fence,
             screen_backfill_second_pass_attempted=screen_backfill_second_pass_attempted,
             screen_backfill_second_pass_reason=screen_backfill_second_pass_reason,

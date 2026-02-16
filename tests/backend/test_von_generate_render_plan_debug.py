@@ -142,6 +142,130 @@ def test_generate_debug_includes_screen_only_fallback_render_plan(monkeypatch):
     assert debug.get("render_plan") == render_plan
 
 
+def test_generate_builds_display_tables_from_render_plan_record_sets(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_table_record_sets": [
+            {
+                "element_id": "screen_task_table",
+                "intent": "structured_tabular_view",
+                "records": [
+                    {
+                        "task_id": "task_alpha",
+                        "task_name": "Alpha",
+                        "status": "done",
+                        "source": {"source_concept_id": "#V#task_alpha"},
+                    }
+                ],
+                "columns": [
+                    {
+                        "column_id": "task_name",
+                        "label": "Task",
+                        "source_key": "task_name",
+                        "data_type": "text",
+                    },
+                    {
+                        "column_id": "status",
+                        "label": "Status",
+                        "source_key": "status",
+                        "data_type": "text",
+                    },
+                ],
+                "row_id_field": "task_id",
+                "row_provenance_field": "source",
+                "default_sort_column_id": "task_name",
+            },
+            {
+                "element_id": "screen_predicate_extent_table",
+                "intent": "structured_tabular_view",
+                "records": [
+                    {
+                        "assertion_id": "assertion_1",
+                        "subject": "#V#task_alpha",
+                        "predicate": "#V#depends_on",
+                        "object": "#V#task_beta",
+                        "assertion_meta": {"assertion_id": "assertion_1"},
+                    }
+                ],
+                "columns": [
+                    {
+                        "column_id": "subject",
+                        "label": "Subject",
+                        "source_key": "subject",
+                        "data_type": "text",
+                    },
+                    {
+                        "column_id": "predicate",
+                        "label": "Predicate",
+                        "source_key": "predicate",
+                        "data_type": "text",
+                    },
+                    {
+                        "column_id": "object",
+                        "label": "Object",
+                        "source_key": "object",
+                        "data_type": "text",
+                    },
+                ],
+                "row_id_field": "assertion_id",
+                "row_provenance_field": "assertion_meta",
+                "default_sort_column_id": "subject",
+                "pagination_enabled": False,
+            },
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Rendered summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show tables"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    assert display_elements.get("validation", {}).get("valid") is True
+    assert "screen_structured_tables_supplied" in display_elements.get("reason_codes", [])
+
+    table_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "table"
+    ]
+    assert len(table_elements) == 2
+
+    task_table = next(
+        element for element in table_elements if element.get("element_id") == "screen_task_table"
+    )
+    assert task_table["payload"]["rows"][0]["row_id"] == "task_alpha"
+    assert (
+        task_table["payload"]["rows"][0]["provenance"]["source_concept_id"]
+        == "#V#task_alpha"
+    )
+
+    predicate_table = next(
+        element
+        for element in table_elements
+        if element.get("element_id") == "screen_predicate_extent_table"
+    )
+    assert predicate_table["payload"]["rows"][0]["row_id"] == "assertion_1"
+    assert (
+        predicate_table["payload"]["rows"][0]["provenance"]["assertion_id"]
+        == "assertion_1"
+    )
+
+
 def test_task_result_includes_render_plan_when_present(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
