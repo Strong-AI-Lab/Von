@@ -1390,6 +1390,206 @@ function resolveResponsePresenterState(responseData) {
     };
 }
 
+function normaliseTableDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'table') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const rawColumns = Array.isArray(payload.columns) ? payload.columns : [];
+    const columns = rawColumns
+        .map((column) => {
+            if (!column || typeof column !== 'object') {
+                return null;
+            }
+            const columnId = typeof column.column_id === 'string' ? column.column_id.trim() : '';
+            const label = typeof column.label === 'string' ? column.label.trim() : '';
+            if (!columnId || !label) {
+                return null;
+            }
+            return {
+                column_id: columnId,
+                label,
+                data_type: typeof column.data_type === 'string' ? column.data_type.trim() : 'text'
+            };
+        })
+        .filter(Boolean);
+
+    if (!columns.length) {
+        return null;
+    }
+
+    const rawRows = Array.isArray(payload.rows) ? payload.rows : [];
+    const rows = rawRows
+        .map((row, rowIndex) => {
+            if (!row || typeof row !== 'object') {
+                return null;
+            }
+            const rowId = typeof row.row_id === 'string' && row.row_id.trim()
+                ? row.row_id.trim()
+                : `row_${rowIndex + 1}`;
+            const rawCells = Array.isArray(row.cells) ? row.cells : [];
+            const cellsByColumnId = new Map();
+            for (const cell of rawCells) {
+                if (!cell || typeof cell !== 'object') {
+                    continue;
+                }
+                const columnId = typeof cell.column_id === 'string' ? cell.column_id.trim() : '';
+                if (!columnId || cellsByColumnId.has(columnId)) {
+                    continue;
+                }
+                const valueDisplay = typeof cell.value_display === 'string'
+                    ? cell.value_display
+                    : (typeof cell.value_raw === 'string' ? cell.value_raw : '');
+                const valueType = typeof cell.value_type === 'string' && cell.value_type.trim()
+                    ? cell.value_type.trim()
+                    : 'text';
+                cellsByColumnId.set(columnId, {
+                    column_id: columnId,
+                    value_display: valueDisplay,
+                    value_type: valueType
+                });
+            }
+
+            const orderedCells = columns.map((column) => {
+                const existing = cellsByColumnId.get(column.column_id);
+                if (existing) {
+                    return existing;
+                }
+                return {
+                    column_id: column.column_id,
+                    value_display: '',
+                    value_type: 'text'
+                };
+            });
+
+            return {
+                row_id: rowId,
+                cells: orderedCells
+            };
+        })
+        .filter(Boolean);
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id : null,
+        columns,
+        rows,
+        pagination: (payload.pagination && typeof payload.pagination === 'object') ? payload.pagination : null
+    };
+}
+
+function resolveTableDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const tables = [];
+    for (const element of contract.elements) {
+        const tableElement = normaliseTableDisplayElement(element);
+        if (!tableElement) {
+            continue;
+        }
+        tables.push(tableElement);
+    }
+    return tables;
+}
+
+function renderTableDisplayElementsIntoContainer(container, debugData) {
+    if (!container || typeof container.querySelectorAll !== 'function') {
+        return;
+    }
+
+    const existing = Array.from(container.querySelectorAll('.chat-display-elements'));
+    for (const node of existing) {
+        try {
+            node.remove();
+        } catch (_) {
+            // Ignore.
+        }
+    }
+
+    if (container?.dataset?.renderMode === 'text') {
+        return;
+    }
+
+    const tableElements = resolveTableDisplayElements(debugData);
+    if (!tableElements.length) {
+        return;
+    }
+
+    const root = document.createElement('div');
+    root.className = 'chat-display-elements';
+    root.style.cssText = 'margin-top: 10px; border: 1px solid #dce3ea; border-radius: 6px; background: #fff; padding: 8px;';
+
+    tableElements.forEach((tableElement, tableIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-table-section';
+        section.style.cssText = tableIndex > 0 ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-table-title';
+        title.textContent = tableElements.length > 1 ? `Table ${tableIndex + 1}` : 'Table';
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const scrollWrap = document.createElement('div');
+        scrollWrap.style.cssText = 'overflow-x: auto;';
+
+        const table = document.createElement('table');
+        table.className = 'chat-display-elements-table';
+        table.style.cssText = 'border-collapse: collapse; width: 100%; min-width: 320px;';
+
+        const thead = document.createElement('thead');
+        const headRow = document.createElement('tr');
+        tableElement.columns.forEach((column) => {
+            const th = document.createElement('th');
+            th.textContent = column.label;
+            th.style.cssText = 'text-align: left; border-bottom: 1px solid #dce3ea; padding: 4px 6px; font-size: 0.82em; color: #1f3d5a; background: #f5f8fb;';
+            headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        const maxRows = 100;
+        const rowsToRender = tableElement.rows.slice(0, maxRows);
+        rowsToRender.forEach((row) => {
+            const tr = document.createElement('tr');
+            row.cells.forEach((cell) => {
+                const td = document.createElement('td');
+                td.textContent = cell.value_display;
+                td.dataset.valueType = cell.value_type || 'text';
+                td.style.cssText = 'border-bottom: 1px solid #eef3f7; padding: 4px 6px; vertical-align: top; font-size: 0.84em; color: #223547;';
+                tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        scrollWrap.appendChild(table);
+        section.appendChild(scrollWrap);
+
+        if (tableElement.rows.length > maxRows) {
+            const notice = document.createElement('div');
+            notice.className = 'chat-display-elements-table-truncation';
+            notice.textContent = `Showing first ${maxRows} of ${tableElement.rows.length} rows.`;
+            notice.style.cssText = 'margin-top: 6px; font-size: 0.78em; color: #5a6b7b;';
+            section.appendChild(notice);
+        }
+
+        root.appendChild(section);
+    });
+
+    container.appendChild(root);
+}
+
 function enrichDebugDataWithSpeechPlanning(debugData, options = {}) {
     if (!debugData || typeof debugData !== 'object') {
         return debugData;
@@ -2710,6 +2910,7 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, _debugData) 
         messageTextEl.classList.remove('markdown-rendered', 'chat-markdown');
         messageTextEl.style.whiteSpace = 'pre-wrap';
         messageTextEl.textContent = raw;
+        renderTableDisplayElementsIntoContainer(messageTextEl, _debugData);
         return;
     }
 
@@ -2727,17 +2928,23 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, _debugData) 
         cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
         linkifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['a', '.vontology-cartouche', 'button'], plain: true });
         hydrateChatConceptCartouches(messageTextEl);
+        renderTableDisplayElementsIntoContainer(messageTextEl, _debugData);
         return;
     }
 
     // Keep a safe plaintext fallback while the request is in-flight.
     messageTextEl.textContent = raw;
-    void renderChatMarkdownIntoContainer(messageTextEl, raw).catch((err) => {
-        console.error('[chatTab] Server markdown render failed; falling back to plain text:', err);
-        if (messageTextEl?.dataset?.renderMode === 'rendered') {
-            messageTextEl.textContent = raw;
-        }
-    });
+    void renderChatMarkdownIntoContainer(messageTextEl, raw)
+        .then(() => {
+            renderTableDisplayElementsIntoContainer(messageTextEl, _debugData);
+        })
+        .catch((err) => {
+            console.error('[chatTab] Server markdown render failed; falling back to plain text:', err);
+            if (messageTextEl?.dataset?.renderMode === 'rendered') {
+                messageTextEl.textContent = raw;
+                renderTableDisplayElementsIntoContainer(messageTextEl, _debugData);
+            }
+        });
 }
 
 // =============================================================================
@@ -3068,6 +3275,7 @@ function renderAssistantMessageContent(container, message, debugData) {
         container.style.whiteSpace = 'pre-wrap';
         cartouchifyElementText(container, text);
         hydrateChatConceptCartouches(container);
+        renderTableDisplayElementsIntoContainer(container, debugData);
         return;
     }
 
@@ -3084,10 +3292,16 @@ function renderAssistantMessageContent(container, message, debugData) {
     // Render asynchronously so we can rely on the server-side markdown/sanitisation.
     // Keep a safe plaintext fallback in-place while the request is in-flight.
     container.textContent = text;
-    void renderChatMarkdownIntoContainer(container, text).catch((err) => {
-        console.error('[chatTab] Server markdown render failed; falling back to plain text:', err);
-        container.textContent = text;
-    });
+    renderTableDisplayElementsIntoContainer(container, debugData);
+    void renderChatMarkdownIntoContainer(container, text)
+        .then(() => {
+            renderTableDisplayElementsIntoContainer(container, debugData);
+        })
+        .catch((err) => {
+            console.error('[chatTab] Server markdown render failed; falling back to plain text:', err);
+            container.textContent = text;
+            renderTableDisplayElementsIntoContainer(container, debugData);
+        });
 }
 
 function formatKindLabel(kind) {

@@ -23,7 +23,7 @@ function advanceTimers(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildDisplayElementsContract({ screenText = null, spokenText = null } = {}) {
+function buildDisplayElementsContract({ screenText = null, spokenText = null, tablePayload = null } = {}) {
     const elements = [];
     if (typeof screenText === 'string') {
         elements.push({
@@ -44,6 +44,17 @@ function buildDisplayElementsContract({ screenText = null, spokenText = null } =
             order: 20,
             intent: 'narration',
             payload: { text: spokenText },
+            provenance: { source: 'test' }
+        });
+    }
+    if (tablePayload && typeof tablePayload === 'object') {
+        elements.push({
+            element_id: 'screen_table_1',
+            element_type: 'table',
+            channel: 'screen',
+            order: 16,
+            intent: 'structured_tabular_view',
+            payload: tablePayload,
             provenance: { source: 'test' }
         });
     }
@@ -263,6 +274,103 @@ describe('chat speech planning (presenter channels)', () => {
         expect(global.speechSynthesis.speak).toHaveBeenCalled();
         const utterance = global.speechSynthesis.speak.mock.calls[0][0];
         expect(utterance.text).toBe('SPOKEN FROM CONTRACT');
+    });
+
+    test('renders table display elements from contract payload', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'show me task table';
+
+        const displayElements = buildDisplayElementsContract({
+            screenText: 'Task summary',
+            spokenText: 'Here is the task summary table.',
+            tablePayload: {
+                columns: [
+                    { column_id: 'task', label: 'Task', data_type: 'text', position: 0 },
+                    { column_id: 'status', label: 'Status', data_type: 'text', position: 1 }
+                ],
+                rows: [
+                    {
+                        row_id: 'row_1',
+                        cells: [
+                            { column_id: 'task', value_raw: 'Alpha', value_display: 'Alpha', value_type: 'text' },
+                            { column_id: 'status', value_raw: 'done', value_display: 'done', value_type: 'text' }
+                        ]
+                    },
+                    {
+                        row_id: 'row_2',
+                        cells: [
+                            { column_id: 'task', value_raw: 'Beta', value_display: 'Beta', value_type: 'text' },
+                            { column_id: 'status', value_raw: 'in_progress', value_display: 'in_progress', value_type: 'text' }
+                        ]
+                    }
+                ],
+                pagination: { enabled: true, page_size: 50, total_rows: 2 }
+            }
+        });
+
+        global.fetch = jest.fn((url, options) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                let text = '';
+                try {
+                    text = JSON.parse(options?.body ?? '{}')?.text ?? '';
+                } catch (_) {
+                    text = '';
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(text) })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Task summary',
+                        display_elements: displayElements,
+                        llm_debug: {
+                            model: 'gpt-5.2',
+                            response: 'Task summary',
+                            messages: [],
+                            display_elements: displayElements
+                        }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const renderedTable = document.querySelector('.chat-display-elements-table');
+        expect(renderedTable).toBeTruthy();
+
+        const headers = Array.from(renderedTable.querySelectorAll('thead th')).map((cell) => cell.textContent);
+        expect(headers).toEqual(['Task', 'Status']);
+
+        const rows = renderedTable.querySelectorAll('tbody tr');
+        expect(rows.length).toBe(2);
+
+        const firstRowCells = rows[0].querySelectorAll('td');
+        expect(firstRowCells[0].textContent).toBe('Alpha');
+        expect(firstRowCells[1].textContent).toBe('done');
     });
 
     test('Shift+click Speak uses screen channel (accessibility)', async () => {
