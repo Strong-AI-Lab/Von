@@ -158,59 +158,42 @@ def extract_markdown_tables(text: str | None) -> list[dict[str, Any]]:
             continue
 
         used_column_ids: set[str] = set()
-        columns: list[dict[str, Any]] = []
+        column_configs: list[dict[str, Any]] = []
         for column_index, label in enumerate(header_cells):
             column_id = _build_column_id(label, column_index, used_column_ids)
-            columns.append(
+            column_configs.append(
                 {
                     "column_id": column_id,
                     "label": label or f"Column {column_index + 1}",
                     "data_type": "mixed",
-                    "position": column_index,
+                    "source_key": f"col_{column_index + 1}",
                 }
             )
 
-        rows: list[dict[str, Any]] = []
-        for row_index, values in enumerate(row_values, start=1):
-            cells: list[dict[str, Any]] = []
+        records: list[dict[str, Any]] = []
+        for values in row_values:
+            record: dict[str, Any] = {}
             for column_index, value in enumerate(values):
-                column_id = columns[column_index]["column_id"]
-                cleaned = value.strip()
-                cells.append(
-                    {
-                        "column_id": column_id,
-                        "value_raw": cleaned,
-                        "value_display": cleaned,
-                        "value_type": _infer_cell_value_type(cleaned),
-                    }
-                )
-            rows.append(
-                {
-                    "row_id": f"row_{row_index}",
-                    "cells": cells,
-                }
-            )
+                record[f"col_{column_index + 1}"] = value.strip()
+            records.append(record)
 
-        tables.append(
-            {
-                "columns": columns,
-                "rows": rows,
-                "sort": {
-                    "default_column_id": columns[0]["column_id"] if columns else None,
-                    "direction": "asc",
-                },
-                "filters": [],
-                "pagination": {
-                    "enabled": True,
-                    "page_size": min(100, len(rows)),
-                    "total_rows": len(rows),
-                },
-                "source_span": {
-                    "start_line": index + 1,
-                    "end_line": cursor,
-                },
-            }
+        payload = build_canonical_table_payload_from_records(
+            records=records,
+            columns=column_configs,
+            default_sort_column_id=(
+                str(column_configs[0].get("column_id"))
+                if column_configs
+                else None
+            ),
+            default_sort_direction="asc",
+            pagination_enabled=True,
+            page_size=min(100, len(records)),
         )
+        payload["source_span"] = {
+            "start_line": index + 1,
+            "end_line": cursor,
+        }
+        tables.append(payload)
         index = cursor
 
     return tables
