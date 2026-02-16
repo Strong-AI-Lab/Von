@@ -697,6 +697,7 @@ def upsert_presenter_channels_for_history_message(
     session_id: str,
     history_index: int,
     presenter_channels: Dict[str, Any],
+    display_elements: Optional[Dict[str, Any]] = None,
     generated_at: Optional[datetime] = None,
     force: bool = False,
 ) -> Dict[str, Any]:
@@ -717,6 +718,8 @@ def upsert_presenter_channels_for_history_message(
         raise ChatHistoryServiceError("history_index must be a non-negative integer")
     if not isinstance(presenter_channels, dict) or not presenter_channels:
         raise ChatHistoryServiceError("presenter_channels must be a non-empty dict")
+    if display_elements is not None and not isinstance(display_elements, dict):
+        raise ChatHistoryServiceError("display_elements must be a dict when provided")
 
     chat_history_coll = get_chat_history_collection_service()
     if chat_history_coll is None:
@@ -753,6 +756,13 @@ def upsert_presenter_channels_for_history_message(
             f"history.{history_index}.llm_debug_data.presenter_channels": presenter_channels,
             f"history.{history_index}.llm_debug_data.presenter_channels_generated_at": generated_at,
         }
+        if isinstance(display_elements, dict) and display_elements:
+            set_fields[f"history.{history_index}.llm_debug_data.display_elements"] = (
+                display_elements
+            )
+            set_fields[
+                f"history.{history_index}.llm_debug_data.display_elements_generated_at"
+            ] = generated_at
 
         result = chat_history_coll.update_one(
             {"user_id": user_id, "session_id": session_id}, {"$set": set_fields}

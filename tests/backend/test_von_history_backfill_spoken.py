@@ -181,6 +181,15 @@ def test_backfill_spoken_generates_and_persists_presenter_channels(
     assert body["presenter_channels"]["spoken"] == "Short talk track."
     assert body["presenter_channels"]["screen"] == "Here is the answer on screen."
     assert body["presenter_channels"]["format"] == "narration_fallback_v1"
+    assert body["display_elements"]["schema_version"] == "turn_display_elements_v1"
+    assert body["display_elements"]["validation"]["valid"] is True
+    spoken_element = next(
+        element
+        for element in body["display_elements"]["elements"]
+        if element["element_id"] == "spoken_text"
+    )
+    assert spoken_element["payload"]["text"] == "Short talk track."
+    assert "spoken_backfill:missing_presenter_channels" in body["display_elements"]["reason_codes"]
 
     assert len(llm.calls) == 1
     assert llm.calls[0]["prompt"] == "Generate <spoken> talk track"
@@ -198,6 +207,10 @@ def test_backfill_spoken_generates_and_persists_presenter_channels(
     assert (
         stored_history[1]["llm_debug_data"]["presenter_channels"]["spoken"]
         == "Short talk track."
+    )
+    assert (
+        stored_history[1]["llm_debug_data"]["display_elements"]["schema_version"]
+        == "turn_display_elements_v1"
     )
 
     # Verify the spoken narration was also indexed into RAG.

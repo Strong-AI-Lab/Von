@@ -5757,10 +5757,21 @@ def history_backfill_spoken():
         if not force and isinstance(existing_channels, dict):
             spoken_existing = existing_channels.get("spoken")
             if isinstance(spoken_existing, str) and spoken_existing.strip():
+                existing_display_elements = (
+                    existing_debug.get("display_elements")
+                    if isinstance(existing_debug, dict)
+                    else None
+                )
+                if not isinstance(existing_display_elements, dict):
+                    existing_display_elements = build_turn_display_elements(
+                        response_text=screen_text,
+                        presenter_channels=existing_channels,
+                    )
                 return jsonify(
                     {
                         "status": "already_present",
                         "presenter_channels": existing_channels,
+                        "display_elements": existing_display_elements,
                         "updated": False,
                     }
                 )
@@ -5913,6 +5924,17 @@ def history_backfill_spoken():
             "spoken": spoken,
             "format": "narration_fallback_v1",
         }
+        spoken_backfill_reason = (
+            "missing_spoken"
+            if isinstance(existing_channels, dict)
+            else "missing_presenter_channels"
+        )
+        display_elements_contract = build_turn_display_elements(
+            response_text=screen_text,
+            presenter_channels=presenter_channels,
+            spoken_backfill_second_pass_attempted=True,
+            spoken_backfill_second_pass_reason=spoken_backfill_reason,
+        )
 
         update_result = (
             chat_history_service.upsert_presenter_channels_for_history_message(
@@ -5920,6 +5942,7 @@ def history_backfill_spoken():
                 session_id=target_session_id,
                 history_index=history_index,
                 presenter_channels=presenter_channels,
+                display_elements=display_elements_contract,
                 generated_at=datetime.now(timezone.utc),
                 force=force,
             )
@@ -5929,6 +5952,7 @@ def history_backfill_spoken():
             {
                 "status": "ok",
                 "presenter_channels": presenter_channels,
+                "display_elements": display_elements_contract,
                 "updated": bool(update_result.get("updated")),
                 "matched": bool(update_result.get("matched")),
             }
