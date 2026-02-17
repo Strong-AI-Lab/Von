@@ -39,8 +39,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Migrate workflow mapping concepts to structured "
-            "workflow_mapping_spec objects."
+            "Migrate workflow mapping concepts to canonical "
+            "concept_data.workflow_mapping_spec objects."
         )
     )
     parser.add_argument(

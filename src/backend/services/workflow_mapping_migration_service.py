@@ -1,7 +1,7 @@
 """Migrate legacy workflow mapping concepts to structured schema specs.
 
-This service backfills ``concept_data.preserved_fields.workflow_mapping_spec``
-for mapping concepts referenced by workflow steps.
+This service backfills ``concept_data.workflow_mapping_spec`` for mapping
+concepts referenced by workflow steps.
 
 Design notes:
 - Uses workflow topology from ``build_workflow_process_graph`` so migration
@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence
 from .concept_service import update_concept
 from ..workflows.vontology_loader import (
     _extract_mapping_pair,
+    _mapping_description_text,
     _extract_structured_mapping_spec,
     _extract_tool_output_mapping,
     _fetch_concepts_by_id,
@@ -59,32 +60,23 @@ def _context_key_symbol_to_concept_id(symbol: str) -> str | None:
     return f"#V#workflow_context_key_{raw}"
 
 
-def _description_only_doc(mapping_doc: Mapping[str, Any] | None) -> Dict[str, Any] | None:
-    """Return a stripped mapping doc retaining only description fallback text.
+def _description_only_doc(
+    mapping_concept_id: str,
+    mapping_doc: Mapping[str, Any] | None,
+) -> Dict[str, Any] | None:
+    """Return a stripped mapping doc retaining only relation-backed description.
 
     This intentionally ignores any existing structured mapping spec when we need
     to recover from invalid schema objects.
     """
 
-    if not isinstance(mapping_doc, Mapping):
-        return None
-
-    concept_data = mapping_doc.get("concept_data")
-    if not isinstance(concept_data, Mapping):
-        return None
-    preserved_fields = concept_data.get("preserved_fields")
-    if not isinstance(preserved_fields, Mapping):
-        return None
-    description = preserved_fields.get("description")
+    description = _mapping_description_text(
+        mapping_concept_id,
+        dict(mapping_doc) if isinstance(mapping_doc, Mapping) else None,
+    )
     if not isinstance(description, str) or not description.strip():
         return None
-    return {
-        "concept_data": {
-            "preserved_fields": {
-                "description": description,
-            }
-        }
-    }
+    return {"description": description.strip()}
 
 
 def _parse_input_mapping(
@@ -107,7 +99,7 @@ def _parse_input_mapping(
         dict(mapping_doc) if isinstance(mapping_doc, Mapping) else None
     )
     if structured_spec:
-        fallback_doc = _description_only_doc(mapping_doc)
+        fallback_doc = _description_only_doc(mapping_concept_id, mapping_doc)
         context_key, tool_param, fallback_reason = _extract_mapping_pair(
             mapping_concept_id=mapping_concept_id,
             mapping_doc=fallback_doc,
@@ -140,7 +132,7 @@ def _parse_output_mapping(
         dict(mapping_doc) if isinstance(mapping_doc, Mapping) else None
     )
     if structured_spec:
-        fallback_doc = _description_only_doc(mapping_doc)
+        fallback_doc = _description_only_doc(mapping_concept_id, mapping_doc)
         output_field, context_key, fallback_reason = _extract_tool_output_mapping(
             mapping_concept_id=mapping_concept_id,
             mapping_doc=fallback_doc,
@@ -437,8 +429,8 @@ def migrate_workflow_mapping_specs(
             update_concept(
                 concept_id=mapping_id,
                 update_data={
-                    "concept_data.preserved_fields.workflow_mapping_spec": target_spec,
-                    "concept_data.preserved_fields.workflow_mapping_spec_migrated_at": _iso_now(),
+                    "concept_data.workflow_mapping_spec": target_spec,
+                    "concept_data.workflow_mapping_spec_migrated_at": _iso_now(),
                 },
             )
             stats["migrated"] += 1

@@ -85,18 +85,13 @@ def test_migrate_workflow_mapping_specs_recovers_from_invalid_structured_spec(mo
     mapping_doc = {
         "concept_id": mapping_id,
         "concept_data": {
-            "preserved_fields": {
-                "workflow_mapping_spec": {
-                    "schema_version": 1,
-                    "mapping_type": "context_key_to_tool_param",
-                    "workflow_step_id": "#V#step_identify",
-                    "tool_id": "wrong_tool",
-                    "context_key_concept_id": "#V#workflow_context_key_target_type_id",
-                    "tool_param_name": "concept_id",
-                },
-                "description": (
-                    "Bind context key 'target_type_id' to the 'concept_id' parameter."
-                ),
+            "workflow_mapping_spec": {
+                "schema_version": 1,
+                "mapping_type": "context_key_to_tool_param",
+                "workflow_step_id": "#V#step_identify",
+                "tool_id": "wrong_tool",
+                "context_key_concept_id": "#V#workflow_context_key_target_type_id",
+                "tool_param_name": "concept_id",
             }
         },
         "relationships": {},
@@ -117,6 +112,13 @@ def test_migrate_workflow_mapping_specs_recovers_from_invalid_structured_spec(mo
         "_fetch_concepts_by_id",
         lambda _mapping_ids: {mapping_id: mapping_doc},
     )
+    monkeypatch.setattr(
+        migration_service,
+        "_mapping_description_text",
+        lambda *_args, **_kwargs: (
+            "Bind context key 'target_type_id' to the 'concept_id' parameter."
+        ),
+    )
 
     writes: list[Dict[str, Any]] = []
 
@@ -132,9 +134,7 @@ def test_migrate_workflow_mapping_specs_recovers_from_invalid_structured_spec(mo
     assert report["stats"]["migrated"] == 1
     assert report["stats"]["updated"] == 1
     assert len(writes) == 1
-    migrated_spec = writes[0]["update_data"][
-        "concept_data.preserved_fields.workflow_mapping_spec"
-    ]
+    migrated_spec = writes[0]["update_data"]["concept_data.workflow_mapping_spec"]
     assert migrated_spec["tool_id"] == "fetch_concept"
     migrated_detail = next(item for item in report["details"] if item["status"] == "migrated")
     assert migrated_detail["parse_source"] == "legacy_recovery"
@@ -150,15 +150,13 @@ def test_migrate_workflow_mapping_specs_skips_already_structured(monkeypatch):
     mapping_doc = {
         "concept_id": mapping_id,
         "concept_data": {
-            "preserved_fields": {
-                "workflow_mapping_spec": {
-                    "schema_version": 1,
-                    "mapping_type": "context_key_to_tool_param",
-                    "workflow_step_id": "#V#step_identify",
-                    "tool_id": "fetch_concept",
-                    "context_key_concept_id": "#V#workflow_context_key_target_type_id",
-                    "tool_param_name": "concept_id",
-                }
+            "workflow_mapping_spec": {
+                "schema_version": 1,
+                "mapping_type": "context_key_to_tool_param",
+                "workflow_step_id": "#V#step_identify",
+                "tool_id": "fetch_concept",
+                "context_key_concept_id": "#V#workflow_context_key_target_type_id",
+                "tool_param_name": "concept_id",
             }
         },
         "relationships": {},

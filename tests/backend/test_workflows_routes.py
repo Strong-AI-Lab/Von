@@ -376,7 +376,7 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     )
 
 
-def test_workflow_definitions_list_includes_legacy_description_source(monkeypatch, app_client):
+def test_workflow_definitions_list_includes_relation_description_source(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
     import src.backend.workflows.durable.registry_factory as registry_factory
     import src.backend.services.workflow_discovery_service as workflow_discovery_service
@@ -449,8 +449,8 @@ def test_workflow_definitions_list_includes_legacy_description_source(monkeypatc
         workflows_routes,
         "resolve_workflow_description",
         lambda workflow_id, **kwargs: (
-            "Legacy workflow description",
-            "legacy:concept_data.preserved_fields.description",
+            "Workflow description from relation",
+            "text_relation:hasDescription",
         ),
     )
 
@@ -460,11 +460,8 @@ def test_workflow_definitions_list_includes_legacy_description_source(monkeypatc
     assert payload["count"] == 1
     item = payload["items"][0]
     assert item["workflow_id"] == "#V#legacy_workflow"
-    assert item["description"] == "Legacy workflow description"
-    assert (
-        item["description_source"]
-        == "legacy:concept_data.preserved_fields.description"
-    )
+    assert item["description"] == "Workflow description from relation"
+    assert item["description_source"] == "text_relation:hasDescription"
 
 
 def test_workflow_episodes_list_endpoint(monkeypatch, app_client):

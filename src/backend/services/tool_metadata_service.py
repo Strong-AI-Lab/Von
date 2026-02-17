@@ -452,6 +452,7 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
 
     try:
         from ..db.repositories.concepts_repository import ConceptsRepository
+        from .text_value_service import get_preferred_text_for_concept
 
         # Find all instances of #V#mcp_tool
         cursor = ConceptsRepository.find(
@@ -459,7 +460,6 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
             {
                 "concept_id": 1,
                 "attributes": 1,
-                "concept_data.preserved_fields.description": 1,
             },
         )
 
@@ -471,11 +471,21 @@ def _load_from_vontology() -> dict[str, ToolMetadata]:
 
             salience = attrs.get("user_salience", "medium")
             display_template = attrs.get("display_template")
-            description = (
-                doc.get("concept_data", {})
-                .get("preserved_fields", {})
-                .get("description")
-            )
+            description = None
+            if isinstance(doc.get("concept_id"), str):
+                best = get_preferred_text_for_concept(
+                    doc["concept_id"],
+                    predicate_precedence=(
+                        ("hasDescription", "#V#hasDescription"),
+                        ("hasContent", "#V#hasContent"),
+                    ),
+                    preferred_languages=("en-NZ", "en"),
+                    limit=10,
+                )
+                if isinstance(best, dict):
+                    text_value = best.get("text")
+                    if isinstance(text_value, str) and text_value.strip():
+                        description = text_value.strip()
             category = attrs.get("category")
 
             result[tool_name] = ToolMetadata(

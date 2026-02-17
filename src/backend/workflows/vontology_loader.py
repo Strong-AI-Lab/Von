@@ -6,7 +6,10 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..db.repositories.concepts_repository import ConceptsRepository
-from ..services.text_value_service import get_texts_for_concept
+from ..services.text_value_service import (
+    get_preferred_text_for_concept,
+    get_texts_for_concept,
+)
 from .engine import (
     WorkflowDefinition,
     WorkflowStateSpec,
@@ -122,9 +125,6 @@ WORKFLOW_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
 WORKFLOW_DESCRIPTION_SOURCE_NONE = "none"
 WORKFLOW_DESCRIPTION_SOURCE_REGISTRATION = "registration.purpose"
 WORKFLOW_DESCRIPTION_SOURCE_DEFINITION = "definition.purpose"
-WORKFLOW_DESCRIPTION_SOURCE_LEGACY = (
-    "legacy:concept_data.preserved_fields.description"
-)
 
 _WORKFLOW_MAPPING_ID_RE = re.compile(
     r"^#V#workflow_mapping_([a-z0-9_]+)_to_([a-z0-9_]+?)(?:_param(?:eter)?)?$",
@@ -198,19 +198,15 @@ def _extract_structured_mapping_spec(
     """Extract a structured mapping spec from a mapping concept document.
 
     Preferred path for deterministic runtime behaviour:
-    - read explicit schema fields from concept_data/preserved_fields
-    - fall back to legacy concept-id and description parsing only when absent
+    - read explicit schema fields from concept_data
+    - fall back to concept-id and relation-backed description parsing only
+      when structured schema is absent
     """
 
     if not isinstance(mapping_doc, dict):
         return None, None
 
     concept_data = mapping_doc.get("concept_data")
-    preserved_fields: Dict[str, Any] = {}
-    if isinstance(concept_data, dict):
-        raw_preserved = concept_data.get("preserved_fields")
-        if isinstance(raw_preserved, dict):
-            preserved_fields = raw_preserved
 
     candidate_values: List[Any] = []
     for key in _WORKFLOW_MAPPING_SPEC_CANDIDATE_KEYS:
@@ -218,7 +214,6 @@ def _extract_structured_mapping_spec(
             (
                 mapping_doc.get(key),
                 concept_data.get(key) if isinstance(concept_data, dict) else None,
-                preserved_fields.get(key),
             )
         )
 
@@ -534,19 +529,7 @@ def _extract_mapping_pair(
     if context_key and tool_param:
         return context_key, tool_param, None
 
-    concept_data = (
-        mapping_doc.get("concept_data", {}) if isinstance(mapping_doc, dict) else {}
-    )
-    preserved_fields = (
-        concept_data.get("preserved_fields", {})
-        if isinstance(concept_data, dict)
-        else {}
-    )
-    description = (
-        preserved_fields.get("description")
-        if isinstance(preserved_fields, dict)
-        else None
-    )
+    description = _mapping_description_text(mapping_concept_id, mapping_doc)
     context_key, tool_param = _mapping_pair_from_description(str(description or ""))
     if context_key and tool_param:
         return context_key, tool_param, None
@@ -582,6 +565,46 @@ def _tool_output_mapping_pair_from_description(
     if tool_output_field and context_key:
         return tool_output_field, context_key
     return None, None
+
+
+def _mapping_description_text(
+    mapping_concept_id: str,
+    mapping_doc: Dict[str, Any] | None,
+) -> str:
+    """Resolve mapping narrative text from canonical text relations."""
+
+    candidate_concept_id = (
+        mapping_doc.get("concept_id") if isinstance(mapping_doc, dict) else None
+    )
+    if not isinstance(candidate_concept_id, str) or not candidate_concept_id.strip():
+        candidate_concept_id = mapping_concept_id
+
+    if isinstance(candidate_concept_id, str) and candidate_concept_id.strip():
+        best = get_preferred_text_for_concept(
+            candidate_concept_id.strip(),
+            predicate_precedence=(
+                ("hasDescription", "#V#hasDescription"),
+                ("hasContent", "#V#hasContent"),
+            ),
+            preferred_languages=("en-NZ", "en"),
+            limit=20,
+        )
+        text_value = best.get("text") if isinstance(best, dict) else None
+        if isinstance(text_value, str) and text_value.strip():
+            return text_value.strip()
+
+    if isinstance(mapping_doc, dict):
+        for raw_value in (
+            mapping_doc.get("description"),
+            mapping_doc.get("comment"),
+            mapping_doc.get("attributes", {}).get("description")
+            if isinstance(mapping_doc.get("attributes"), dict)
+            else None,
+        ):
+            if isinstance(raw_value, str) and raw_value.strip():
+                return raw_value.strip()
+
+    return ""
 
 
 def _extract_tool_output_mapping(
@@ -621,19 +644,7 @@ def _extract_tool_output_mapping(
     if tool_output_field and context_key:
         return tool_output_field, context_key, None
 
-    concept_data = (
-        mapping_doc.get("concept_data", {}) if isinstance(mapping_doc, dict) else {}
-    )
-    preserved_fields = (
-        concept_data.get("preserved_fields", {})
-        if isinstance(concept_data, dict)
-        else {}
-    )
-    description = (
-        preserved_fields.get("description")
-        if isinstance(preserved_fields, dict)
-        else None
-    )
+    description = _mapping_description_text(mapping_concept_id, mapping_doc)
     tool_output_field, context_key = _tool_output_mapping_pair_from_description(
         str(description or "")
     )
@@ -678,13 +689,12 @@ def _normalise_non_empty_text(value: Any) -> str | None:
 
 
 def resolve_workflow_narrative_text(workflow_id: str) -> tuple[str | None, str]:
-    """Resolve workflow narrative text from canonical relations, then legacy fallback.
+    """Resolve workflow narrative text from canonical text relations.
 
     Precedence:
       1. hasDefinition
       2. hasContent
       3. hasDescription (including #V#hasDescription)
-      4. concept_data.preserved_fields.description (legacy fallback)
     """
 
     if not isinstance(workflow_id, str) or not workflow_id.strip():
@@ -707,29 +717,6 @@ def resolve_workflow_narrative_text(workflow_id: str) -> tuple[str | None, str]:
             text = _normalise_non_empty_text(item.get("text"))
             if text:
                 return text, f"text_relation:{predicate}"
-
-    concept_doc: Dict[str, Any] | None = None
-    try:
-        concept_doc = ConceptsRepository.find_one(
-            {"concept_id": workflow_id},
-            {"concept_data.preserved_fields": 1},
-        )
-    except Exception:
-        concept_doc = None
-
-    concept_data = concept_doc.get("concept_data", {}) if isinstance(concept_doc, dict) else {}
-    preserved_fields = (
-        concept_data.get("preserved_fields", {}) if isinstance(concept_data, dict) else {}
-    )
-    # TODO(JVNAUTOSCI-1171): Remove this legacy fallback once preserved_fields
-    # decommission is complete and all workflow narrative text is relation-backed.
-    legacy_description = (
-        _normalise_non_empty_text(preserved_fields.get("description"))
-        if isinstance(preserved_fields, dict)
-        else None
-    )
-    if legacy_description:
-        return legacy_description, WORKFLOW_DESCRIPTION_SOURCE_LEGACY
 
     return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
 
@@ -792,7 +779,10 @@ def _fetch_concepts_by_id(concept_ids: List[str]) -> Dict[str, Dict[str, Any]]:
             "concept_id": 1,
             "name": 1,
             "relationships": 1,
-            "concept_data.preserved_fields": 1,
+            "concept_data": 1,
+            "attributes": 1,
+            "description": 1,
+            "comment": 1,
         },
         limit=len(concept_ids),
     )

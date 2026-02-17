@@ -5,7 +5,7 @@ supports the initial concept similarity workflow. Each concept is represented
 as a hashed bag-of-words vector that is assembled from:
 
 * Canonical names (display name, language-specific names, concept_id)
-* Descriptive material (descriptions, notes, preserved content fields)
+* Descriptive material (descriptions and notes)
 * Linked text relations (`hasDescription`, `hasNote`, etc.)
 * Direct relationships (type/instance links and any other predicates)
 
@@ -89,19 +89,6 @@ def _tokens_to_embedding(tokens: Sequence[str]) -> np.ndarray:
     if norm > 0:
         vector /= norm
     return np.ascontiguousarray(vector, dtype=np.float32)
-
-
-def _extract_preserved_content(concept: Dict[str, Any]) -> List[str]:
-    preserved = concept.get("concept_data", {}).get("preserved_fields", {})
-    if not isinstance(preserved, dict):
-        return []
-    collected: List[str] = []
-    for key, value in preserved.items():
-        if not isinstance(value, str):
-            continue
-        if key.lower() in {"description", "notes", "content", "definition"}:
-            collected.extend(_normalise_tokens(value))
-    return collected
 
 
 def _resolve_related_concepts(
@@ -250,7 +237,6 @@ def _collect_concept_tokens(concept: Dict[str, Any]) -> List[str]:
     elif isinstance(user_tags, str):
         tokens.extend(_normalise_tokens(user_tags))
 
-    tokens.extend(_extract_preserved_content(concept))
     tokens.extend(_extract_relationship_tokens(concept))
     tokens.extend(_extract_text_relations(concept_id))
 

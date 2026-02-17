@@ -115,10 +115,12 @@ def _validate_unified_concept_schema(concept, index):
         if not isinstance(concept["concept_data"], dict):
             errors.append(f"Item {index}: 'concept_data' must be an object")
         elif "preserved_fields" in concept["concept_data"]:
-            if not isinstance(concept["concept_data"]["preserved_fields"], dict):
-                errors.append(
-                    f"Item {index}: 'concept_data.preserved_fields' must be an object"
+            errors.append(
+                (
+                    f"Item {index}: 'concept_data.preserved_fields' is deprecated. "
+                    "Use canonical text relations (hasDescription/hasNote/hasContent)."
                 )
+            )
 
     # Validate timestamps structure
     if "timestamps" in concept:

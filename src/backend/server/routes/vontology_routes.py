@@ -700,7 +700,7 @@ def get_node_content_route():
             }
             if isinstance(concept_stats, dict):
                 trimmed["concept_stats"] = concept_stats
-            # Preserve description only if it exists inside preserved_fields but not elsewhere
+            # Include description when already present on the resolved payload.
             if "description" in data:
                 trimmed["description"] = data["description"]
             # JVNAUTOSCI-944: Enrich raw_doc.names with text relations so cartouches display proper NL names
@@ -2544,7 +2544,6 @@ def get_node_children():
                 "names": 1,
                 "concept_id": 1,
                 "path": 1,
-                "concept_data.preserved_fields.description": 1,
                 "metadata.description": 1,
                 "_id": 0,
             },
@@ -2713,7 +2712,6 @@ def get_node_instances():
                 "names": 1,
                 "path": 1,
                 "notes": 1,
-                "concept_data.preserved_fields.description": 1,
                 "metadata.description": 1,
                 "_id": 0,
             },

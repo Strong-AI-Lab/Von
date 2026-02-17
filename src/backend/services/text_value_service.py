@@ -7,7 +7,7 @@ text_relations repositories, with simple normalization and validation.
 from __future__ import annotations
 
 import re
-from typing import Dict, Any, List, Optional, Literal, cast, Tuple
+from typing import Dict, Any, List, Optional, Literal, Sequence, cast, Tuple
 from datetime import datetime, timezone
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -375,6 +375,88 @@ def get_texts_for_concept(
         if len(results) >= limit:
             break
     return results
+
+
+def get_preferred_text_for_concept(
+    subject_concept_id: str,
+    *,
+    predicate_precedence: Optional[Sequence[str | Sequence[str]]] = None,
+    preferred_languages: Sequence[str] = ("en-NZ", "en"),
+    limit: int = 200,
+) -> Optional[Dict[str, Any]]:
+    """Return the highest-priority text relation for a concept.
+
+    Args:
+        subject_concept_id: Concept identifier to inspect.
+        predicate_precedence: Ordered predicate groups. Each group can be a
+            single predicate string or an iterable of aliases that are treated
+            as equivalent at that precedence level.
+        preferred_languages: Ordered language preference list.
+        limit: Max relation rows to inspect.
+    """
+
+    rows = get_texts_for_concept(subject_concept_id=subject_concept_id, limit=limit)
+    if not isinstance(rows, list) or not rows:
+        return None
+
+    filtered_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = row.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        filtered_rows.append(row)
+
+    if not filtered_rows:
+        return None
+
+    normalised_precedence: List[Tuple[str, ...]] = []
+    for item in predicate_precedence or []:
+        if isinstance(item, str):
+            token = item.strip()
+            if token:
+                normalised_precedence.append((token,))
+            continue
+        if isinstance(item, Sequence):
+            aliases = tuple(
+                str(alias).strip()
+                for alias in item
+                if isinstance(alias, str) and alias.strip()
+            )
+            if aliases:
+                normalised_precedence.append(aliases)
+
+    normalised_languages = [
+        lang.strip().lower()
+        for lang in preferred_languages
+        if isinstance(lang, str) and lang.strip()
+    ]
+    language_rank = {lang: idx for idx, lang in enumerate(normalised_languages)}
+    default_language_rank = len(language_rank) + 1
+
+    def _row_sort_key(row: Dict[str, Any]) -> tuple[int, str, str]:
+        row_lang = row.get("lang")
+        lang_token = row_lang.strip().lower() if isinstance(row_lang, str) else ""
+        lang_priority = language_rank.get(lang_token, default_language_rank)
+        predicate = str(row.get("predicate") or "")
+        relation_id = str(row.get("relation_id") or "")
+        return (lang_priority, predicate, relation_id)
+
+    if normalised_precedence:
+        for predicate_group in normalised_precedence:
+            candidates = [
+                row
+                for row in filtered_rows
+                if str(row.get("predicate") or "").strip() in predicate_group
+            ]
+            if not candidates:
+                continue
+            candidates.sort(key=_row_sort_key)
+            return dict(candidates[0])
+
+    filtered_rows.sort(key=_row_sort_key)
+    return dict(filtered_rows[0])
 
 
 def update_text_relation_text(

@@ -3447,29 +3447,42 @@ def break_cycles_in_import_nodes(nodes: list[dict]) -> dict:
 
 
 def get_concept_description(concept: Dict[str, Any]) -> Optional[str]:
-    """Get the description from a concept or vontology node.
-
-    Checks multiple possible locations:
-    1. concept_data.preserved_fields.description (new schema)
-    2. description (legacy top-level field)
-    3. attributes.description (vontology node)
-    """
+    """Get concept description from canonical text relations (fallback legacy fields)."""
     if not concept or not isinstance(concept, dict):
         return None
 
-    # Check new schema location first
-    preserved = concept.get("concept_data", {}).get("preserved_fields", {})
-    if "description" in preserved:
-        return preserved["description"]
+    concept_id = concept.get("concept_id")
+    if isinstance(concept_id, str) and concept_id.strip():
+        try:
+            from ..services.text_value_service import get_preferred_text_for_concept
+
+            best = get_preferred_text_for_concept(
+                concept_id,
+                predicate_precedence=(
+                    ("hasDescription", "#V#hasDescription"),
+                    ("hasContent", "#V#hasContent"),
+                ),
+                preferred_languages=("en-NZ", "en"),
+                limit=50,
+            )
+            text_value = best.get("text") if isinstance(best, dict) else None
+            if isinstance(text_value, str) and text_value.strip():
+                return text_value.strip()
+        except Exception:
+            pass
 
     # Check legacy top-level field
-    if "description" in concept:
-        return concept["description"]
+    if "description" in concept and isinstance(concept["description"], str):
+        description_value = concept["description"].strip()
+        if description_value:
+            return description_value
 
     # Check vontology node attributes
     attributes = concept.get("attributes", {})
-    if "description" in attributes:
-        return attributes["description"]
+    if "description" in attributes and isinstance(attributes["description"], str):
+        description_value = attributes["description"].strip()
+        if description_value:
+            return description_value
 
     return None
 
@@ -3495,63 +3508,57 @@ def resolve_description_text_for_import(node: Dict[str, Any]) -> Optional[str]:
 
 
 def get_concept_notes(concept: Dict[str, Any]) -> Optional[str]:
-    """Get the notes from a concept or vontology node.
-
-    Checks multiple possible locations:
-    1. concept_data.preserved_fields.notes (new schema)
-    2. notes (legacy top-level field)
-    3. attributes.notes (vontology node)
-    """
+    """Get concept notes from canonical text relations (fallback legacy fields)."""
     if not concept or not isinstance(concept, dict):
         return None
 
-    # Check new schema location first
-    preserved = concept.get("concept_data", {}).get("preserved_fields", {})
-    if "notes" in preserved:
-        return preserved["notes"]
+    concept_id = concept.get("concept_id")
+    if isinstance(concept_id, str) and concept_id.strip():
+        try:
+            from ..services.text_value_service import get_preferred_text_for_concept
+
+            best = get_preferred_text_for_concept(
+                concept_id,
+                predicate_precedence=(("hasNote", "#V#hasNote"),),
+                preferred_languages=("en-NZ", "en"),
+                limit=50,
+            )
+            text_value = best.get("text") if isinstance(best, dict) else None
+            if isinstance(text_value, str) and text_value.strip():
+                return text_value.strip()
+        except Exception:
+            pass
 
     # Check legacy top-level field
-    if "notes" in concept:
-        return concept["notes"]
+    if "notes" in concept and isinstance(concept["notes"], str):
+        notes_value = concept["notes"].strip()
+        if notes_value:
+            return notes_value
 
     # Check vontology node attributes
     attributes = concept.get("attributes", {})
-    if "notes" in attributes:
-        return attributes["notes"]
+    if "notes" in attributes and isinstance(attributes["notes"], str):
+        notes_value = attributes["notes"].strip()
+        if notes_value:
+            return notes_value
 
     return None
 
 
 def set_concept_description(concept: Dict[str, Any], description: str) -> None:
-    """Set the description on a concept or vontology node.
-
-    Uses the new schema location: concept_data.preserved_fields.description
-    """
+    """Set in-memory description convenience value (not persistent storage)."""
     if not concept or not isinstance(concept, dict):
         return
 
-    if "concept_data" not in concept:
-        concept["concept_data"] = {}
-    if "preserved_fields" not in concept["concept_data"]:
-        concept["concept_data"]["preserved_fields"] = {}
-
-    concept["concept_data"]["preserved_fields"]["description"] = description
+    concept["description"] = description
 
 
 def set_concept_notes(concept: Dict[str, Any], notes: str) -> None:
-    """Set the notes on a concept or vontology node.
-
-    Uses the new schema location: concept_data.preserved_fields.notes
-    """
+    """Set in-memory notes convenience value (not persistent storage)."""
     if not concept or not isinstance(concept, dict):
         return
 
-    if "concept_data" not in concept:
-        concept["concept_data"] = {}
-    if "preserved_fields" not in concept["concept_data"]:
-        concept["concept_data"]["preserved_fields"] = {}
-
-    concept["concept_data"]["preserved_fields"]["notes"] = notes
+    concept["notes"] = notes
 
 
 def create_vontology_concept(

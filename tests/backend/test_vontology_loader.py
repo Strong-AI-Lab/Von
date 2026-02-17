@@ -194,7 +194,7 @@ class TestFetchConceptProjection:
 
         assert "#V#example" in docs
         projection = captured["projection"]
-        assert "concept_data.preserved_fields" in projection
+        assert "concept_data" in projection
         assert "concept_data.preserved_fields.description" not in projection
 
 
@@ -231,25 +231,15 @@ class TestWorkflowDescriptionResolution:
         assert text == "Canonical V description"
         assert source == "text_relation:#V#hasDescription"
 
-    def test_resolve_narrative_falls_back_to_legacy_preserved_description(self):
+    def test_resolve_narrative_returns_none_when_canonical_text_missing(self):
         with patch(
             "src.backend.workflows.vontology_loader.get_texts_for_concept",
             return_value=[],
         ):
-            with patch(
-                "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
-                return_value={
-                    "concept_data": {
-                        "preserved_fields": {
-                            "description": "Legacy workflow description"
-                        }
-                    }
-                },
-            ):
-                text, source = resolve_workflow_narrative_text("#V#legacy_workflow")
+            text, source = resolve_workflow_narrative_text("#V#legacy_workflow")
 
-        assert text == "Legacy workflow description"
-        assert source == "legacy:concept_data.preserved_fields.description"
+        assert text is None
+        assert source == "none"
 
     def test_resolve_workflow_description_prefers_canonical_vontology_source(self):
         with patch(
@@ -700,14 +690,6 @@ class TestSemanticContextMapping:
             },
             mapping_id: {
                 "concept_id": mapping_id,
-                "concept_data": {
-                    "preserved_fields": {
-                        "description": (
-                            "Bind context key 'target_type_id' to the "
-                            "'concept_id' parameter for deterministic lookup."
-                        )
-                    }
-                },
                 "relationships": {},
             },
         }
@@ -722,10 +704,21 @@ class TestSemanticContextMapping:
 
         with _stub_fetch_concepts(docs), _stub_narrative():
             with patch(
-                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
-                return_value=(graph, []),
+                "src.backend.workflows.vontology_loader.get_preferred_text_for_concept",
+                return_value={
+                    "text": (
+                        "Bind context key 'target_type_id' to the "
+                        "'concept_id' parameter for deterministic lookup."
+                    ),
+                    "predicate": "hasDescription",
+                    "lang": "en-NZ",
+                },
             ):
-                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+                with patch(
+                    "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                    return_value=(graph, []),
+                ):
+                    defn = load_workflow_definition_from_vontology("#V#test_workflow")
 
         assert defn is not None
         action = defn.states["#V#step"].actions[0]
@@ -746,15 +739,13 @@ class TestSemanticContextMapping:
             mapping_id: {
                 "concept_id": mapping_id,
                 "concept_data": {
-                    "preserved_fields": {
-                        "workflow_mapping_spec": {
-                            "schema_version": 1,
-                            "mapping_type": "context_key_to_tool_param",
-                            "workflow_step_id": "#V#step",
-                            "tool_id": "fetch_concept",
-                            "context_key_concept_id": "#V#workflow_context_key_target_type_id",
-                            "tool_param_name": "concept_id",
-                        }
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "context_key_to_tool_param",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "fetch_concept",
+                        "context_key_concept_id": "#V#workflow_context_key_target_type_id",
+                        "tool_param_name": "concept_id",
                     }
                 },
                 "relationships": {},
@@ -798,15 +789,13 @@ class TestSemanticContextMapping:
             mapping_id: {
                 "concept_id": mapping_id,
                 "concept_data": {
-                    "preserved_fields": {
-                        "workflow_mapping_spec": {
-                            "schema_version": 1,
-                            "mapping_type": "context_key_to_tool_param",
-                            "workflow_step_id": "#V#step",
-                            "tool_id": "wrong_tool_name",
-                            "context_key_concept_id": "#V#workflow_context_key_target_type_id",
-                            "tool_param_name": "concept_id",
-                        }
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "context_key_to_tool_param",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "wrong_tool_name",
+                        "context_key_concept_id": "#V#workflow_context_key_target_type_id",
+                        "tool_param_name": "concept_id",
                     }
                 },
                 "relationships": {},
@@ -915,14 +904,6 @@ class TestToolOutputContextMappings:
             },
             mapping_id: {
                 "concept_id": mapping_id,
-                "concept_data": {
-                    "preserved_fields": {
-                        "description": (
-                            "Map tool output field 'concept_id' to context key "
-                            "'#V#workflow_context_key_validated_type_id'."
-                        )
-                    }
-                },
                 "relationships": {},
             },
         }
@@ -937,10 +918,21 @@ class TestToolOutputContextMappings:
 
         with _stub_fetch_concepts(docs), _stub_narrative():
             with patch(
-                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
-                return_value=(graph, []),
+                "src.backend.workflows.vontology_loader.get_preferred_text_for_concept",
+                return_value={
+                    "text": (
+                        "Map tool output field 'concept_id' to context key "
+                        "'#V#workflow_context_key_validated_type_id'."
+                    ),
+                    "predicate": "hasDescription",
+                    "lang": "en-NZ",
+                },
             ):
-                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+                with patch(
+                    "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                    return_value=(graph, []),
+                ):
+                    defn = load_workflow_definition_from_vontology("#V#test_workflow")
 
         assert defn is not None
         assert defn.states["#V#step"].metadata["tool_output_context_mappings"] == [
@@ -961,15 +953,13 @@ class TestToolOutputContextMappings:
             mapping_id: {
                 "concept_id": mapping_id,
                 "concept_data": {
-                    "preserved_fields": {
-                        "workflow_mapping_spec": {
-                            "schema_version": 1,
-                            "mapping_type": "tool_output_field_to_context_key",
-                            "workflow_step_id": "#V#step",
-                            "tool_id": "fetch_concept",
-                            "tool_output_field_name": "concept_id",
-                            "target_context_key_concept_id": "#V#workflow_context_key_validated_type_id",
-                        }
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "tool_output_field_to_context_key",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "fetch_concept",
+                        "tool_output_field_name": "concept_id",
+                        "target_context_key_concept_id": "#V#workflow_context_key_validated_type_id",
                     }
                 },
                 "relationships": {},
@@ -1010,16 +1000,14 @@ class TestToolOutputContextMappings:
             mapping_id: {
                 "concept_id": mapping_id,
                 "concept_data": {
-                    "preserved_fields": {
-                        "workflow_mapping_spec": {
-                            "schema_version": 1,
-                            "mapping_type": "tool_output_field_to_context_key",
-                            "workflow_step_id": "#V#step",
-                            "tool_id": "fetch_concept",
-                            "tool_output_field_name": "concept_id",
-                            "target_context_key_concept_id": "#V#workflow_context_key_validated_type_id",
-                            "unexpected_field": "not_allowed",
-                        }
+                    "workflow_mapping_spec": {
+                        "schema_version": 1,
+                        "mapping_type": "tool_output_field_to_context_key",
+                        "workflow_step_id": "#V#step",
+                        "tool_id": "fetch_concept",
+                        "tool_output_field_name": "concept_id",
+                        "target_context_key_concept_id": "#V#workflow_context_key_validated_type_id",
+                        "unexpected_field": "not_allowed",
                     }
                 },
                 "relationships": {},

@@ -4962,22 +4962,6 @@ class InternalMCPChatOrchestrator:
             if isinstance(direct_content, str):
                 _add_candidate(direct_content, predicate="direct", lang="")
 
-            preserved = (
-                concept.get("concept_data", {})
-                if isinstance(concept.get("concept_data"), Mapping)
-                else {}
-            )
-            preserved_fields = (
-                preserved.get("preserved_fields", {})
-                if isinstance(preserved.get("preserved_fields"), Mapping)
-                else {}
-            )
-            preserved_content = preserved_fields.get("content")
-            if isinstance(preserved_content, str):
-                _add_candidate(
-                    preserved_content, predicate="preserved_content", lang=""
-                )
-
         try:
             from src.backend.services.text_value_service import get_texts_for_concept
 

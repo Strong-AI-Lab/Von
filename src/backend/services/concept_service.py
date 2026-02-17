@@ -49,7 +49,6 @@ from ..vontology.utils_vontology import (
     update_vontology_node_in_db,
     get_concept_description,
     get_concept_notes,
-    set_concept_description,
     set_concept_notes,
     is_thing_id,
     THING_PRIMARY_ID,
@@ -147,15 +146,13 @@ class InvalidConceptDataError(ConceptServiceError):
 
 
 # --- Preserved Fields Write Guard ---
-_ALLOWED_PRESERVED_FIELDS = {"notes", "description"}
 
 
 def enforce_preserved_fields_write(payload: Dict[str, Any]):
     """Scan a $set payload for concept_data.preserved_fields.* writes.
 
-    If any preserved_fields keys are present that are not explicitly handled
-    (notes/description) we raise to force developers to route through proper
-    text_value / relation pathways.
+    Any preserved_fields key is rejected. Callers must route through canonical
+    text-value / relation pathways.
     """
     try:
         set_ops = payload.get("$set", {}) if isinstance(payload, dict) else {}
@@ -163,8 +160,7 @@ def enforce_preserved_fields_write(payload: Dict[str, Any]):
         for k in list(set_ops.keys()):
             if k.startswith("concept_data.preserved_fields."):
                 field = k.split("concept_data.preserved_fields.", 1)[1]
-                if field not in _ALLOWED_PRESERVED_FIELDS:
-                    suspicious.append(field)
+                suspicious.append(field)
         if suspicious:
             # Log and raise to surface deprecated direct write
             logger.error(
@@ -192,7 +188,7 @@ def gather_descriptive_material(
 
     Returns a dict with:
       - description: Prefer the type node's description; fallback to concept's own description
-      - notes: Current concept notes (already resolved to preserved_fields where applicable)
+      - notes: Current concept notes resolved via canonical relation-backed helpers
       - context_block: A small textual block you can inject into prompts. By default it includes
         only the type description to avoid duplicating notes when templates already have {concept_notes}.
         Pass include_notes_in_block=True to also include a notes line.
@@ -322,10 +318,6 @@ def create_concept(
             "linked_to": linked_concepts or [],
         },
     }
-    if description:
-        set_concept_description(concept_doc, description)
-    if notes:
-        set_concept_notes(concept_doc, notes)
 
     if concept_id:
         concept_doc["concept_id"] = concept_id
@@ -387,10 +379,26 @@ def create_concept(
                         context={"name_type": "CODE"},
                     )
 
+                if isinstance(description, str) and description.strip():
+                    upsert_text_for_concept(
+                        subject_concept_id=concept_identifier,
+                        predicate="hasDescription",
+                        text=description.strip(),
+                        lang="en-NZ",
+                    )
+
+                if isinstance(notes, str) and notes.strip():
+                    upsert_text_for_concept(
+                        subject_concept_id=concept_identifier,
+                        predicate="hasNote",
+                        text=notes.strip(),
+                        lang="en-NZ",
+                    )
+
             except Exception as name_err:
-                # Non-fatal: concept is created, just name relation failed
+                # Non-fatal: concept is created, relation write failed.
                 logger.warning(
-                    f"[create_concept] Failed to create name relations for {concept_identifier}: {name_err}"
+                    f"[create_concept] Failed to create text relations for {concept_identifier}: {name_err}"
                 )
 
         try:
@@ -3219,7 +3227,7 @@ def synthesize_and_update_concept_notes(
         if update_concept_notes(concept_id, updated_notes):
             set_concept_notes(
                 concept, updated_notes
-            )  # in-memory convenience; still uses preserved_fields structure locally
+            )  # in-memory convenience for caller context (canonical notes field)
             logger.info(
                 f"Successfully updated concept notes (relations only) for {concept_id}. Added: {synthesis_text}"
             )
