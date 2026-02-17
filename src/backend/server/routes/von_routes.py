@@ -2033,11 +2033,48 @@ def _extract_screen_workflow_elements_from_render_plan(
     return workflow_elements
 
 
+def _extract_screen_timeline_elements_from_render_plan(
+    render_plan: dict[str, Any] | None,
+    *,
+    screen_element_targets: dict[str, bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Extract display-contract timeline specs from renderer plan diagnostics."""
+    if not isinstance(render_plan, dict):
+        return []
+    if isinstance(screen_element_targets, dict) and not bool(
+        screen_element_targets.get("timeline", True)
+    ):
+        return []
+
+    timeline_elements: list[dict[str, Any]] = []
+
+    def _append_timeline_specs(raw_value: Any) -> None:
+        if isinstance(raw_value, list):
+            for item in raw_value:
+                if isinstance(item, dict):
+                    timeline_elements.append(dict(item))
+        elif isinstance(raw_value, dict):
+            timeline_elements.append(dict(raw_value))
+
+    _append_timeline_specs(render_plan.get("screen_timeline_elements"))
+    _append_timeline_specs(render_plan.get("screen_timeline_payloads"))
+
+    single_timeline = render_plan.get("screen_timeline_element")
+    if isinstance(single_timeline, dict):
+        timeline_elements.append(dict(single_timeline))
+
+    return timeline_elements
+
+
 def _extract_screen_element_targets_from_render_plan(
     render_plan: dict[str, Any] | None,
 ) -> dict[str, bool]:
     """Resolve render-plan screen element targets with legacy-compatible defaults."""
-    default_targets: dict[str, bool] = {"table": True, "workflow_view": True}
+    default_targets: dict[str, bool] = {
+        "table": True,
+        "workflow_view": True,
+        "timeline": True,
+    }
     if not isinstance(render_plan, dict):
         return default_targets
 
@@ -2048,6 +2085,7 @@ def _extract_screen_element_targets_from_render_plan(
     return {
         "table": bool(raw_targets.get("table", True)),
         "workflow_view": bool(raw_targets.get("workflow_view", True)),
+        "timeline": bool(raw_targets.get("timeline", True)),
     }
 
 
@@ -5103,6 +5141,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             render_plan_for_display,
             screen_element_targets=screen_element_targets,
         )
+        screen_timeline_elements = _extract_screen_timeline_elements_from_render_plan(
+            render_plan_for_display,
+            screen_element_targets=screen_element_targets,
+        )
         display_elements_contract = build_turn_display_elements(
             response_text=response_text,
             presenter_channels=(
@@ -5110,6 +5152,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             ),
             screen_table_elements=screen_table_elements,
             screen_workflow_elements=screen_workflow_elements,
+            screen_timeline_elements=screen_timeline_elements,
             supplemental_reason_codes=screen_element_reason_codes,
             required_screen_json_fence=required_screen_json_fence,
             screen_backfill_second_pass_attempted=screen_backfill_second_pass_attempted,

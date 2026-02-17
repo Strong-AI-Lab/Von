@@ -400,6 +400,70 @@ def test_generate_builds_workflow_view_from_render_plan_elements(monkeypatch):
     assert nodes[0]["task_links"][0]["target_id"] == "#V#task_alpha"
 
 
+def test_generate_builds_timeline_from_render_plan_elements(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_timeline_elements": [
+            {
+                "element_id": "screen_timeline_view",
+                "intent": "structured_timeline_view",
+                "payload": {
+                    "items": [
+                        {
+                            "item_id": "event_1",
+                            "label": "Task status changed",
+                            "start_at": "2026-02-17T09:10:00Z",
+                            "status": "running",
+                            "task_links": [
+                                {
+                                    "link_type": "von_task",
+                                    "target_id": "#V#task_alpha",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Timeline summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show timeline"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    assert display_elements.get("validation", {}).get("valid") is True
+    assert "screen_structured_timelines_supplied" in display_elements.get(
+        "reason_codes", []
+    )
+
+    timeline_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "timeline"
+    ]
+    assert len(timeline_elements) == 1
+    timeline_item = timeline_elements[0].get("payload", {}).get("items", [])[0]
+    assert timeline_item["item_id"] == "event_1"
+    assert timeline_item["task_links"][0]["target_id"] == "#V#task_alpha"
+
+
 def test_generate_respects_renderer_screen_element_targets(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
@@ -411,6 +475,7 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
         "screen_element_targets": {
             "table": False,
             "workflow_view": True,
+            "timeline": False,
         },
         "screen_element_reason_codes": [
             "renderer_screen_elements:selected_renderer_types"
@@ -461,6 +526,22 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
                 "provenance": {"source": "test_render_plan"},
             }
         ],
+        "screen_timeline_elements": [
+            {
+                "element_id": "screen_timeline_view",
+                "intent": "structured_timeline_view",
+                "payload": {
+                    "items": [
+                        {
+                            "item_id": "event_1",
+                            "label": "Task status changed",
+                            "start_at": "2026-02-17T09:10:00Z",
+                        }
+                    ]
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
     }
     orchestrator_result = OrchestratorResult(
         response_text="Workflow summary",
@@ -495,6 +576,12 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
         if isinstance(element, dict) and element.get("element_type") == "workflow_view"
     ]
     assert len(workflow_elements) == 1
+    timeline_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "timeline"
+    ]
+    assert not timeline_elements
 
 
 def test_task_result_includes_render_plan_when_present(monkeypatch):

@@ -10940,6 +10940,71 @@ class InternalMCPChatOrchestrator:
                     break
             return rows
 
+        _renderer_concept_id_pattern = re.compile(r"^#V#[A-Za-z0-9._-]+$")
+        _renderer_jira_issue_pattern = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+
+        def _collect_renderer_task_links(*values: Any) -> list[dict[str, str]]:
+            links: list[dict[str, str]] = []
+            seen_targets: set[tuple[str, str]] = set()
+
+            def _add_link(link_type: str, target_id: str) -> None:
+                target = target_id.strip()
+                if not target:
+                    return
+                key = (link_type, target)
+                if key in seen_targets:
+                    return
+                seen_targets.add(key)
+                entry: dict[str, str] = {
+                    "link_type": link_type,
+                    "target_id": target,
+                    "label": target,
+                }
+                if link_type == "jira_issue":
+                    entry["href"] = (
+                        f"https://naoinstitute.atlassian.net/browse/{target}"
+                    )
+                links.append(entry)
+
+            def _walk(value: Any, path: tuple[str, ...], depth: int) -> None:
+                if depth > 4 or len(links) >= 12:
+                    return
+                if isinstance(value, Mapping):
+                    for raw_key, nested in value.items():
+                        key_text = str(raw_key or "").strip().lower()
+                        if isinstance(nested, str):
+                            candidate = nested.strip()
+                            if not candidate:
+                                continue
+                            path_tokens = " ".join(path + (key_text,))
+                            if _renderer_concept_id_pattern.match(candidate) and (
+                                "task" in path_tokens or "task" in candidate.lower()
+                            ):
+                                _add_link("von_task", candidate)
+                                continue
+                            if _renderer_jira_issue_pattern.match(candidate):
+                                _add_link("jira_issue", candidate)
+                            continue
+                        if isinstance(nested, (Mapping, list, tuple)):
+                            _walk(nested, path + (key_text,), depth + 1)
+                elif isinstance(value, (list, tuple)):
+                    for nested in value:
+                        if isinstance(nested, (Mapping, list, tuple)):
+                            _walk(nested, path, depth + 1)
+                        elif isinstance(nested, str):
+                            candidate = nested.strip()
+                            if _renderer_jira_issue_pattern.match(candidate):
+                                _add_link("jira_issue", candidate)
+                            elif _renderer_concept_id_pattern.match(candidate) and (
+                                "task" in candidate.lower()
+                            ):
+                                _add_link("von_task", candidate)
+
+            for value in values:
+                _walk(value, tuple(), 0)
+
+            return links
+
         def _extract_renderer_screen_table_record_sets(
             *,
             tool_messages: Sequence[Mapping[str, Any]] = (),
@@ -11199,69 +11264,6 @@ class InternalMCPChatOrchestrator:
             if not workflow_rows:
                 return []
 
-            concept_id_pattern = re.compile(r"^#V#[A-Za-z0-9._-]+$")
-            jira_issue_pattern = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
-
-            def _collect_task_links(*values: Any) -> list[dict[str, str]]:
-                links: list[dict[str, str]] = []
-                seen_targets: set[tuple[str, str]] = set()
-
-                def _add_link(link_type: str, target_id: str) -> None:
-                    target = target_id.strip()
-                    if not target:
-                        return
-                    key = (link_type, target)
-                    if key in seen_targets:
-                        return
-                    seen_targets.add(key)
-                    entry: dict[str, str] = {
-                        "link_type": link_type,
-                        "target_id": target,
-                        "label": target,
-                    }
-                    if link_type == "jira_issue":
-                        entry["href"] = (
-                            f"https://naoinstitute.atlassian.net/browse/{target}"
-                        )
-                    links.append(entry)
-
-                def _walk(value: Any, path: tuple[str, ...], depth: int) -> None:
-                    if depth > 4 or len(links) >= 12:
-                        return
-                    if isinstance(value, Mapping):
-                        for raw_key, nested in value.items():
-                            key_text = str(raw_key or "").strip().lower()
-                            if isinstance(nested, str):
-                                candidate = nested.strip()
-                                if not candidate:
-                                    continue
-                                path_tokens = " ".join(path + (key_text,))
-                                if concept_id_pattern.match(candidate) and (
-                                    "task" in path_tokens or "task" in candidate.lower()
-                                ):
-                                    _add_link("von_task", candidate)
-                                    continue
-                                if jira_issue_pattern.match(candidate):
-                                    _add_link("jira_issue", candidate)
-                                continue
-                            if isinstance(nested, (Mapping, list, tuple)):
-                                _walk(nested, path + (key_text,), depth + 1)
-                    elif isinstance(value, (list, tuple)):
-                        for nested in value:
-                            if isinstance(nested, (Mapping, list, tuple)):
-                                _walk(nested, path, depth + 1)
-                            elif isinstance(nested, str):
-                                candidate = nested.strip()
-                                if jira_issue_pattern.match(candidate):
-                                    _add_link("jira_issue", candidate)
-                                elif concept_id_pattern.match(candidate) and "task" in candidate.lower():
-                                    _add_link("von_task", candidate)
-
-                for value in values:
-                    _walk(value, tuple(), 0)
-
-                return links
-
             nodes: list[dict[str, Any]] = []
             seen_node_ids: set[str] = set()
             for index, workflow_row in enumerate(workflow_rows, start=1):
@@ -11341,7 +11343,7 @@ class InternalMCPChatOrchestrator:
                 elif current_state:
                     progress_bits.append(current_state)
 
-                task_links = _collect_task_links(
+                task_links = _collect_renderer_task_links(
                     workflow_row,
                     detail if isinstance(detail, Mapping) else None,
                     detail.get("inputs") if isinstance(detail, Mapping) else None,
@@ -11390,6 +11392,221 @@ class InternalMCPChatOrchestrator:
                         "source": "tool_result_workflow_view",
                         "source_tools": source_tools,
                         "record_family": "workflow_instances",
+                    },
+                }
+            ]
+
+        def _extract_renderer_screen_timeline_elements(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+        ) -> list[dict[str, Any]]:
+            """Derive timeline payloads from task/workflow history style tool outputs."""
+
+            tool_payloads = list(_iter_renderer_tool_result_payloads(tool_messages))
+            if not tool_payloads:
+                return []
+
+            source_tools: list[str] = []
+            seen_source_tools: set[str] = set()
+            timeline_items: list[dict[str, Any]] = []
+            seen_item_ids: set[str] = set()
+
+            def _register_source_tool(tool_name: str) -> None:
+                if tool_name in seen_source_tools:
+                    return
+                seen_source_tools.add(tool_name)
+                source_tools.append(tool_name)
+
+            def _next_item_id(base: str) -> str:
+                candidate = base
+                suffix = 2
+                while candidate in seen_item_ids:
+                    candidate = f"{base}_{suffix}"
+                    suffix += 1
+                seen_item_ids.add(candidate)
+                return candidate
+
+            def _append_item(
+                *,
+                base_item_id: str,
+                label: str,
+                start_at: str | None = None,
+                end_at: str | None = None,
+                status: str | None = None,
+                description: str | None = None,
+                task_links: Sequence[dict[str, str]] | None = None,
+            ) -> None:
+                start_value = _first_text(start_at)
+                end_value = _first_text(end_at)
+                if not start_value and not end_value:
+                    return
+                item: dict[str, Any] = {
+                    "item_id": _next_item_id(base_item_id),
+                    "label": label,
+                }
+                if start_value:
+                    item["start_at"] = start_value
+                if end_value:
+                    item["end_at"] = end_value
+                status_value = _first_text(status)
+                if status_value:
+                    item["status"] = status_value.lower()
+                description_value = _first_text(description)
+                if description_value:
+                    item["description"] = description_value
+                if task_links:
+                    item["task_links"] = list(task_links)
+                timeline_items.append(item)
+
+            def _event_label(raw_event_type: str) -> str:
+                return re.sub(r"_+", " ", raw_event_type).strip() or "Task event"
+
+            for tool_name, payload in tool_payloads:
+                if tool_name in {"task_get_history", "task_list_worklog"}:
+                    _register_source_tool(tool_name)
+                if tool_name in {"workflow_list_instances", "workflow_get_instance"}:
+                    _register_source_tool(tool_name)
+
+                if tool_name == "task_get_history":
+                    task_concept_id = _first_text(
+                        payload.get("task_concept_id"),
+                        payload.get("task_id"),
+                    )
+                    history_rows = _mapping_list(payload.get("history"), limit=400)
+                    for index, row in enumerate(history_rows, start=1):
+                        event_type = (
+                            _first_text(row.get("event_type")) or "task_event"
+                        ).lower()
+                        base_item_id = _first_text(row.get("event_id"), row.get("id")) or (
+                            f"task_history_{index}"
+                        )
+                        timestamp = _first_text(
+                            row.get("timestamp"),
+                            row.get("created_at"),
+                            row.get("updated_at"),
+                        )
+                        details = (
+                            cast(Mapping[str, Any], row.get("details"))
+                            if isinstance(row.get("details"), Mapping)
+                            else {}
+                        )
+                        status = _first_text(
+                            row.get("status"),
+                            details.get("to_status"),
+                            details.get("status"),
+                        )
+                        description = _first_text(
+                            details.get("comment"),
+                            details.get("reason"),
+                            details.get("summary"),
+                        )
+                        task_links = _collect_renderer_task_links(
+                            {"task_concept_id": task_concept_id},
+                            row,
+                            details,
+                        )
+                        _append_item(
+                            base_item_id=base_item_id,
+                            label=_event_label(event_type),
+                            start_at=timestamp,
+                            status=status,
+                            description=description,
+                            task_links=task_links,
+                        )
+                    continue
+
+                if tool_name == "task_list_worklog":
+                    task_concept_id = _first_text(
+                        payload.get("task_concept_id"),
+                        payload.get("task_id"),
+                    )
+                    worklog_rows = _mapping_list(payload.get("worklog"), limit=200)
+                    for index, row in enumerate(worklog_rows, start=1):
+                        base_item_id = _first_text(
+                            row.get("worklog_id"),
+                            row.get("id"),
+                        ) or f"task_worklog_{index}"
+                        started_at = _first_text(
+                            row.get("started_at"),
+                            row.get("created_at"),
+                            row.get("timestamp"),
+                        )
+                        time_spent = row.get("time_spent_minutes")
+                        time_spent_label = (
+                            f"{int(time_spent)} min"
+                            if isinstance(time_spent, (int, float))
+                            else None
+                        )
+                        description = _first_text(
+                            row.get("comment"),
+                            time_spent_label,
+                        )
+                        task_links = _collect_renderer_task_links(
+                            {"task_concept_id": task_concept_id},
+                            row,
+                        )
+                        _append_item(
+                            base_item_id=base_item_id,
+                            label="Worklog entry",
+                            start_at=started_at,
+                            description=description,
+                            task_links=task_links,
+                        )
+                    continue
+
+                if tool_name == "workflow_list_instances":
+                    workflow_rows = _mapping_list(payload.get("instances"), limit=200)
+                elif tool_name == "workflow_get_instance":
+                    workflow_rows = [payload]
+                else:
+                    workflow_rows = []
+
+                for index, row in enumerate(workflow_rows, start=1):
+                    instance_id = _first_text(row.get("instance_id"))
+                    workflow_id = _first_text(row.get("workflow_id"))
+                    base_item_id = (
+                        instance_id
+                        or workflow_id
+                        or f"{tool_name}_workflow_{index}"
+                    )
+                    start_at = _first_text(
+                        row.get("created_at"),
+                        row.get("started_at"),
+                    )
+                    end_at = _first_text(
+                        row.get("completed_at"),
+                        row.get("finished_at"),
+                    )
+                    if not start_at and not end_at:
+                        start_at = _first_text(row.get("updated_at"))
+                    label = workflow_id or instance_id or "Workflow event"
+                    task_links = _collect_renderer_task_links(row)
+                    _append_item(
+                        base_item_id=base_item_id,
+                        label=label,
+                        start_at=start_at,
+                        end_at=end_at,
+                        status=_first_text(row.get("status")),
+                        description=_first_text(row.get("current_state")),
+                        task_links=task_links,
+                    )
+
+            if not timeline_items:
+                return []
+
+            return [
+                {
+                    "element_id": "screen_timeline_view",
+                    "intent": "structured_timeline_view",
+                    "payload": {"items": timeline_items[:200]},
+                    "constraints": {
+                        "supports_item_links": True,
+                        "supports_relative_time": True,
+                    },
+                    "provenance": {
+                        "source": "tool_result_timeline",
+                        "source_tools": source_tools,
+                        "record_family": "timeline_events",
                     },
                 }
             ]
@@ -11472,6 +11689,7 @@ class InternalMCPChatOrchestrator:
         _RENDERER_SCREEN_ELEMENT_FAMILY_MAP: dict[str, tuple[str, ...]] = {
             "table": ("table",),
             "tabular": ("table",),
+            "timeline": ("timeline",),
             "workflow": ("workflow_view",),
             "workflow_view": ("workflow_view",),
         }
@@ -11541,12 +11759,14 @@ class InternalMCPChatOrchestrator:
 
             include_table_elements = "table" in selected_families
             include_workflow_elements = "workflow_view" in selected_families
+            include_timeline_elements = "timeline" in selected_families
             decision["screen_element_mapping_mode"] = mapping_mode
             decision["screen_element_reason_codes"] = list(reason_codes)
             decision["screen_element_families"] = sorted(selected_families)
             decision["screen_element_targets"] = {
                 "table": include_table_elements,
                 "workflow_view": include_workflow_elements,
+                "timeline": include_timeline_elements,
             }
             if unsupported_renderer_types:
                 decision["unsupported_selected_renderer_types"] = list(
@@ -11571,6 +11791,16 @@ class InternalMCPChatOrchestrator:
                     decision["screen_workflow_elements"] = screen_workflow_elements
                     decision["screen_workflow_element_count"] = len(
                         screen_workflow_elements
+                    )
+
+            if include_timeline_elements:
+                screen_timeline_elements = _extract_renderer_screen_timeline_elements(
+                    tool_messages=tool_messages
+                )
+                if screen_timeline_elements:
+                    decision["screen_timeline_elements"] = screen_timeline_elements
+                    decision["screen_timeline_element_count"] = len(
+                        screen_timeline_elements
                     )
 
         def _resolve_renderer_render_plan(

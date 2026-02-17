@@ -328,6 +328,95 @@ def test_build_turn_display_elements_drops_invalid_supplied_workflows() -> None:
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_timeline_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Timeline response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Timeline response",
+            "spoken": None,
+        },
+        screen_timeline_elements=[
+            {
+                "element_id": "screen_timeline_view",
+                "intent": "structured_timeline_view",
+                "payload": {
+                    "items": [
+                        {
+                            "item_id": "event_1",
+                            "label": "Task created",
+                            "start_at": "2026-02-17T09:10:00Z",
+                            "status": "pending",
+                            "task_links": [
+                                {
+                                    "link_type": "von_task",
+                                    "target_id": "#V#task_alpha",
+                                    "label": "#V#task_alpha",
+                                },
+                                {
+                                    "link_type": "jira_issue",
+                                    "target_id": "JVNAUTOSCI-1138",
+                                    "label": "JVNAUTOSCI-1138",
+                                    "href": "https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1138",
+                                },
+                            ],
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    timeline_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "timeline"
+    ]
+    assert len(timeline_elements) == 1
+    timeline_element = timeline_elements[0]
+    assert timeline_element["element_id"] == "screen_timeline_view"
+    assert timeline_element["payload"]["items"][0]["item_id"] == "event_1"
+    assert (
+        timeline_element["payload"]["items"][0]["task_links"][0]["target_id"]
+        == "#V#task_alpha"
+    )
+    assert "screen_structured_timelines_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_supplied_timelines() -> None:
+    contract = build_turn_display_elements(
+        response_text="Timeline response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Timeline response",
+            "spoken": None,
+        },
+        screen_timeline_elements=[
+            {
+                "payload": {
+                    "items": [
+                        {
+                            "item_id": "event_invalid",
+                            "label": "Missing anchors",
+                            "status": "pending",
+                        }
+                    ]
+                }
+            }
+        ],
+    )
+
+    timeline_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "timeline"
+    ]
+    assert timeline_elements == []
+    assert "screen_structured_timelines_invalid_dropped" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
 def test_validate_turn_display_elements_rejects_invalid_table_shape() -> None:
     valid, errors = validate_turn_display_elements(
         {
@@ -407,6 +496,36 @@ def test_validate_turn_display_elements_rejects_invalid_workflow_links() -> None
 
     assert valid is False
     assert any("target_node_id must reference a declared node" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_timeline_without_temporal_anchor() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_timeline_view",
+                    "element_type": "timeline",
+                    "channel": "screen",
+                    "order": 36,
+                    "intent": "structured_timeline_view",
+                    "payload": {
+                        "items": [
+                            {
+                                "item_id": "event_1",
+                                "label": "Task updated",
+                            }
+                        ]
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any("must provide at least one temporal anchor" in message for message in errors)
 
 
 def test_build_canonical_table_payload_from_records_preserves_row_provenance() -> None:

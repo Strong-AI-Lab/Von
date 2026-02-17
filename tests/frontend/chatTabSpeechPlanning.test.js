@@ -27,7 +27,8 @@ function buildDisplayElementsContract({
     screenText = null,
     spokenText = null,
     tablePayload = null,
-    workflowPayload = null
+    workflowPayload = null,
+    timelinePayload = null
 } = {}) {
     const elements = [];
     if (typeof screenText === 'string') {
@@ -71,6 +72,17 @@ function buildDisplayElementsContract({
             order: 26,
             intent: 'structured_workflow_view',
             payload: workflowPayload,
+            provenance: { source: 'test' }
+        });
+    }
+    if (timelinePayload && typeof timelinePayload === 'object') {
+        elements.push({
+            element_id: 'screen_timeline_view',
+            element_type: 'timeline',
+            channel: 'screen',
+            order: 36,
+            intent: 'structured_timeline_view',
+            payload: timelinePayload,
             provenance: { source: 'test' }
         });
     }
@@ -610,6 +622,111 @@ describe('chat speech planning (presenter channels)', () => {
         document.removeEventListener('von:selectConceptById', onSelect);
     });
 
+    test('renders timeline display elements with task and Jira links', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'show task timeline';
+
+        const displayElements = buildDisplayElementsContract({
+            screenText: 'Timeline summary',
+            spokenText: 'Here is the task timeline.',
+            timelinePayload: {
+                items: [
+                    {
+                        item_id: 'event_alpha',
+                        label: 'Task status updated',
+                        start_at: '2026-02-17T09:10:00Z',
+                        status: 'running',
+                        description: 'Changed from pending to in_progress',
+                        task_links: [
+                            {
+                                link_type: 'von_task',
+                                target_id: '#V#task_alpha',
+                                label: '#V#task_alpha'
+                            },
+                            {
+                                link_type: 'jira_issue',
+                                target_id: 'JVNAUTOSCI-1138',
+                                label: 'JVNAUTOSCI-1138'
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        global.fetch = jest.fn((url, options) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                let text = '';
+                try {
+                    text = JSON.parse(options?.body ?? '{}')?.text ?? '';
+                } catch (_) {
+                    text = '';
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(text) })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Timeline summary',
+                        display_elements: displayElements,
+                        llm_debug: {
+                            model: 'gpt-5.2',
+                            response: 'Timeline summary',
+                            messages: [],
+                            display_elements: displayElements
+                        }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const onSelect = jest.fn();
+        document.addEventListener('von:selectConceptById', onSelect);
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const timelineItem = document.querySelector('.chat-display-elements-timeline-item');
+        expect(timelineItem).toBeTruthy();
+        expect(timelineItem.textContent).toContain('Task status updated');
+        expect(timelineItem.textContent).toContain('Changed from pending to in_progress');
+
+        const conceptLink = document.querySelector('.chat-display-elements-concept-link');
+        expect(conceptLink).toBeTruthy();
+        expect(conceptLink.dataset.conceptId).toBe('#V#task_alpha');
+        conceptLink.click();
+        expect(onSelect).toHaveBeenCalledTimes(1);
+        expect(onSelect.mock.calls[0][0].detail.conceptId).toBe('#V#task_alpha');
+
+        const jiraLink = document.querySelector('a[href*="JVNAUTOSCI-1138"]');
+        expect(jiraLink).toBeTruthy();
+        expect(jiraLink.getAttribute('href')).toContain('/browse/JVNAUTOSCI-1138');
+
+        document.removeEventListener('von:selectConceptById', onSelect);
+    });
+
     test('Shift+click Speak uses screen channel (accessibility)', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         getUserContext.mockReturnValue({
@@ -753,7 +870,7 @@ describe('chat speech planning (presenter channels)', () => {
         const scrollableField = document.getElementById('scrollableField');
         expect(scrollableField).toBeTruthy();
 
-        global.fetch = jest.fn((url, init) => {
+        global.fetch = jest.fn((url, _init) => {
             if (typeof url === 'string' && url.startsWith('/von/history/backfill_spoken')) {
                 return Promise.resolve({
                     ok: true,
@@ -850,7 +967,7 @@ describe('chat speech planning (presenter channels)', () => {
 
         const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => { });
         let backfillCalls = 0;
-        global.fetch = jest.fn((url, init) => {
+        global.fetch = jest.fn((url, _init) => {
             if (typeof url === 'string' && url.startsWith('/von/history/backfill_spoken')) {
                 backfillCalls += 1;
                 return Promise.resolve({

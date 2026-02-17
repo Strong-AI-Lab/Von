@@ -1409,6 +1409,7 @@ const TABLE_NON_PAGINATED_ROW_LIMIT = 100;
 const TABLE_DEFAULT_PAGE_SIZE = 50;
 const TABLE_MAX_PAGE_SIZE = 200;
 const WORKFLOW_MAX_NODES = 100;
+const TIMELINE_MAX_ITEMS = 200;
 const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
 
 function normaliseTableSortMetadata(value, columns) {
@@ -1835,6 +1836,148 @@ function resolveWorkflowDisplayElements(debugData) {
     return workflows;
 }
 
+function parseTimelineTimestamp(rawValue) {
+    if (typeof rawValue !== 'string') {
+        return null;
+    }
+    const value = rawValue.trim();
+    if (!value) {
+        return null;
+    }
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatTimelineTimestamp(rawValue) {
+    if (typeof rawValue !== 'string') {
+        return '';
+    }
+    const value = rawValue.trim();
+    if (!value) {
+        return '';
+    }
+    const parsedMillis = parseTimelineTimestamp(value);
+    if (!Number.isFinite(parsedMillis)) {
+        return value;
+    }
+    try {
+        return new Date(parsedMillis).toLocaleString(undefined, {
+            dateStyle: 'medium',
+            timeStyle: 'short'
+        });
+    } catch (_) {
+        return value;
+    }
+}
+
+function formatTimelineRangeLabel(startAt, endAt) {
+    const startLabel = formatTimelineTimestamp(startAt);
+    const endLabel = formatTimelineTimestamp(endAt);
+    if (startLabel && endLabel) {
+        return `${startLabel} -> ${endLabel}`;
+    }
+    return startLabel || endLabel;
+}
+
+function normaliseTimelineDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'timeline') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const rawItems = Array.isArray(payload.items) ? payload.items : [];
+    const items = rawItems
+        .map((item, index) => {
+            if (!item || typeof item !== 'object') {
+                return null;
+            }
+            const itemId = typeof item.item_id === 'string' && item.item_id.trim()
+                ? item.item_id.trim()
+                : `timeline_item_${index + 1}`;
+            const label = typeof item.label === 'string' && item.label.trim()
+                ? item.label.trim()
+                : (typeof item.title === 'string' && item.title.trim()
+                    ? item.title.trim()
+                    : itemId);
+            const startAt = typeof item.start_at === 'string' ? item.start_at.trim() : '';
+            const endAt = typeof item.end_at === 'string' ? item.end_at.trim() : '';
+            if (!startAt && !endAt) {
+                return null;
+            }
+            const status = typeof item.status === 'string' && item.status.trim()
+                ? item.status.trim().toLowerCase()
+                : '';
+            const description = typeof item.description === 'string' && item.description.trim()
+                ? item.description.trim()
+                : '';
+            const rawTaskLinks = Array.isArray(item.task_links) ? item.task_links : [];
+            const taskLinks = rawTaskLinks
+                .map((link) => normaliseWorkflowTaskLink(link))
+                .filter(Boolean);
+
+            return {
+                item_id: itemId,
+                label,
+                start_at: startAt,
+                end_at: endAt,
+                status,
+                description,
+                task_links: taskLinks
+            };
+        })
+        .filter(Boolean)
+        .sort((left, right) => {
+            const leftTs = parseTimelineTimestamp(left.start_at || left.end_at);
+            const rightTs = parseTimelineTimestamp(right.start_at || right.end_at);
+            const leftHasTs = Number.isFinite(leftTs);
+            const rightHasTs = Number.isFinite(rightTs);
+            if (leftHasTs && rightHasTs && leftTs !== rightTs) {
+                return leftTs - rightTs;
+            }
+            if (leftHasTs && !rightHasTs) {
+                return -1;
+            }
+            if (!leftHasTs && rightHasTs) {
+                return 1;
+            }
+            return String(left.item_id).localeCompare(String(right.item_id));
+        })
+        .slice(0, TIMELINE_MAX_ITEMS);
+
+    if (!items.length) {
+        return null;
+    }
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id : null,
+        items
+    };
+}
+
+function resolveTimelineDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const timelines = [];
+    for (const element of contract.elements) {
+        const timelineElement = normaliseTimelineDisplayElement(element);
+        if (!timelineElement) {
+            continue;
+        }
+        timelines.push(timelineElement);
+    }
+    return timelines;
+}
+
 function renderTableDisplayElementsIntoContainer(container, debugData) {
     if (!container || typeof container.querySelectorAll !== 'function') {
         return;
@@ -1855,7 +1998,8 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
     const tableElements = resolveTableDisplayElements(debugData);
     const workflowElements = resolveWorkflowDisplayElements(debugData);
-    if (!tableElements.length && !workflowElements.length) {
+    const timelineElements = resolveTimelineDisplayElements(debugData);
+    if (!tableElements.length && !workflowElements.length && !timelineElements.length) {
         return;
     }
 
@@ -2111,6 +2255,120 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         root.appendChild(section);
     });
 
+    timelineElements.forEach((timelineElement, timelineIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-timeline-section';
+        section.style.cssText = (
+            tableElements.length > 0
+            || workflowElements.length > 0
+            || timelineIndex > 0
+        ) ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-timeline-title';
+        title.textContent = timelineElements.length > 1
+            ? `Timeline ${timelineIndex + 1}`
+            : 'Timeline';
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const summary = document.createElement('div');
+        summary.className = 'chat-display-elements-timeline-summary';
+        summary.textContent = `${timelineElement.items.length} event${timelineElement.items.length === 1 ? '' : 's'}`;
+        summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+        section.appendChild(summary);
+
+        const list = document.createElement('div');
+        list.className = 'chat-display-elements-timeline-list';
+        list.style.cssText = 'display: grid; gap: 8px;';
+
+        timelineElement.items.forEach((item) => {
+            const statusClass = String(item.status || 'unknown')
+                .toLowerCase()
+                .replace(/[^a-z0-9_-]+/g, '-');
+            const card = document.createElement('article');
+            card.className = `chat-display-elements-timeline-item status-${statusClass}`;
+            card.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; padding: 8px; background: #f8fbff;';
+
+            const header = document.createElement('div');
+            header.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px;';
+
+            const name = document.createElement('div');
+            name.className = 'chat-display-elements-timeline-item-name';
+            name.textContent = item.label;
+            name.style.cssText = 'font-size: 0.83em; font-weight: 600; color: #1f3d5a;';
+            header.appendChild(name);
+
+            if (item.status) {
+                const badge = document.createElement('span');
+                badge.className = `workflow-status-badge status-${statusClass}`;
+                badge.textContent = formatWorkflowStatusLabel(item.status);
+                header.appendChild(badge);
+            }
+            card.appendChild(header);
+
+            const details = [];
+            const timeLabel = formatTimelineRangeLabel(item.start_at, item.end_at);
+            if (timeLabel) {
+                details.push(timeLabel);
+            }
+            if (item.description) {
+                details.push(item.description);
+            }
+            if (details.length) {
+                const meta = document.createElement('div');
+                meta.className = 'chat-display-elements-timeline-item-meta';
+                meta.textContent = details.join(' · ');
+                meta.style.cssText = 'margin-top: 4px; font-size: 0.78em; color: #44576a;';
+                card.appendChild(meta);
+            }
+
+            if (Array.isArray(item.task_links) && item.task_links.length) {
+                const linksWrap = document.createElement('div');
+                linksWrap.className = 'chat-display-elements-timeline-item-links';
+                linksWrap.style.cssText = 'margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px;';
+
+                item.task_links.forEach((link) => {
+                    if (!link || typeof link !== 'object') {
+                        return;
+                    }
+                    if (link.link_type === 'von_task') {
+                        const conceptId = _normalisePotentialConceptId(link.target_id);
+                        if (!conceptId) {
+                            return;
+                        }
+                        const button = document.createElement('button');
+                        button.type = 'button';
+                        button.className = 'chat-display-elements-concept-link';
+                        button.dataset.conceptId = conceptId;
+                        button.textContent = link.label || conceptId;
+                        button.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; cursor: pointer;';
+                        linksWrap.appendChild(button);
+                        return;
+                    }
+                    if (link.link_type === 'jira_issue' && link.href) {
+                        const anchor = document.createElement('a');
+                        anchor.href = link.href;
+                        anchor.target = '_blank';
+                        anchor.rel = 'noopener noreferrer';
+                        anchor.textContent = link.label || link.target_id;
+                        anchor.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; text-decoration: none;';
+                        linksWrap.appendChild(anchor);
+                    }
+                });
+
+                if (linksWrap.childElementCount > 0) {
+                    card.appendChild(linksWrap);
+                }
+            }
+
+            list.appendChild(card);
+        });
+
+        section.appendChild(list);
+        root.appendChild(section);
+    });
+
     container.appendChild(root);
 }
 
@@ -2248,7 +2506,11 @@ function toUniqueStringList(rawValue) {
     return values;
 }
 
-function extractRenderPlanSourceSummary(screenTableRecordSets, screenWorkflowElements) {
+function extractRenderPlanSourceSummary(
+    screenTableRecordSets,
+    screenWorkflowElements,
+    screenTimelineElements
+) {
     const sourceTools = [];
     const seenSourceTools = new Set();
     const recordFamilies = [];
@@ -2302,6 +2564,12 @@ function extractRenderPlanSourceSummary(screenTableRecordSets, screenWorkflowEle
         }
         addProvenance(workflowElement.provenance);
     }
+    for (const timelineElement of screenTimelineElements) {
+        if (!timelineElement || typeof timelineElement !== 'object') {
+            continue;
+        }
+        addProvenance(timelineElement.provenance);
+    }
 
     return {
         source_tools: sourceTools,
@@ -2334,10 +2602,14 @@ function buildRenderPlanMetadataSummary(renderPlan) {
     const screenWorkflowElements = Array.isArray(renderPlan.screen_workflow_elements)
         ? renderPlan.screen_workflow_elements.filter(item => item && typeof item === 'object')
         : [];
+    const screenTimelineElements = Array.isArray(renderPlan.screen_timeline_elements)
+        ? renderPlan.screen_timeline_elements.filter(item => item && typeof item === 'object')
+        : [];
 
     const sourceSummary = extractRenderPlanSourceSummary(
         screenTableRecordSets,
-        screenWorkflowElements
+        screenWorkflowElements,
+        screenTimelineElements
     );
 
     return {
@@ -2364,6 +2636,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         record_families: sourceSummary.record_families,
         screen_table_record_set_count: screenTableRecordSets.length,
         screen_workflow_element_count: screenWorkflowElements.length,
+        screen_timeline_element_count: screenTimelineElements.length,
         unsupported_selected_renderer_types: unsupportedRendererTypes,
         resolver_suggestions: resolverSuggestions
     };
@@ -2425,6 +2698,7 @@ function buildRenderPlanSummaryHtml(renderPlanSummary) {
     addList('Screen element families', renderPlanSummary.screen_element_families);
     addScalar('Screen table record sets', renderPlanSummary.screen_table_record_set_count);
     addScalar('Screen workflow elements', renderPlanSummary.screen_workflow_element_count);
+    addScalar('Screen timeline elements', renderPlanSummary.screen_timeline_element_count);
     addList('Source tools', renderPlanSummary.source_tools);
     addList('Record families', renderPlanSummary.record_families);
     addList('Unsupported renderer types', renderPlanSummary.unsupported_selected_renderer_types);

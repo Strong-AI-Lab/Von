@@ -468,6 +468,87 @@ def validate_turn_display_elements(
                     value_type = cell.get("value_type")
                     if not isinstance(value_type, str) or not value_type.strip():
                         errors.append(f"{cell_label}.value_type must be a non-empty string")
+        elif element_type == "timeline":
+            items = payload.get("items")
+            if not isinstance(items, list) or not items:
+                errors.append(f"{label}.payload.items must be a non-empty list")
+                items = []
+
+            for item_index, item in enumerate(items):
+                item_label = f"{label}.payload.items[{item_index}]"
+                if not isinstance(item, Mapping):
+                    errors.append(f"{item_label} must be a mapping")
+                    continue
+
+                item_id = item.get("item_id")
+                if not isinstance(item_id, str) or not item_id.strip():
+                    errors.append(f"{item_label}.item_id must be a non-empty string")
+
+                display_label = item.get("label")
+                if not isinstance(display_label, str) or not display_label.strip():
+                    errors.append(f"{item_label}.label must be a non-empty string")
+
+                start_at = item.get("start_at")
+                end_at = item.get("end_at")
+                has_start_at = isinstance(start_at, str) and bool(start_at.strip())
+                has_end_at = isinstance(end_at, str) and bool(end_at.strip())
+                if start_at is not None and not has_start_at:
+                    errors.append(
+                        f"{item_label}.start_at must be a non-empty string when provided"
+                    )
+                if end_at is not None and not has_end_at:
+                    errors.append(
+                        f"{item_label}.end_at must be a non-empty string when provided"
+                    )
+                if not has_start_at and not has_end_at:
+                    errors.append(
+                        f"{item_label} must provide at least one temporal anchor (start_at or end_at)"
+                    )
+
+                status = item.get("status")
+                if status is not None and (
+                    not isinstance(status, str) or not status.strip()
+                ):
+                    errors.append(
+                        f"{item_label}.status must be a non-empty string when provided"
+                    )
+
+                task_links = item.get("task_links")
+                if task_links is None:
+                    continue
+                if not isinstance(task_links, list):
+                    errors.append(f"{item_label}.task_links must be a list when provided")
+                    continue
+
+                for link_index, link in enumerate(task_links):
+                    link_label = f"{item_label}.task_links[{link_index}]"
+                    if not isinstance(link, Mapping):
+                        errors.append(f"{link_label} must be a mapping")
+                        continue
+                    target_id = link.get("target_id")
+                    if not isinstance(target_id, str) or not target_id.strip():
+                        errors.append(f"{link_label}.target_id must be a non-empty string")
+                    label_value = link.get("label")
+                    if label_value is not None and (
+                        not isinstance(label_value, str) or not label_value.strip()
+                    ):
+                        errors.append(
+                            f"{link_label}.label must be a non-empty string when provided"
+                        )
+                    link_type = link.get("link_type")
+                    if link_type is not None and (
+                        not isinstance(link_type, str) or not link_type.strip()
+                    ):
+                        errors.append(
+                            f"{link_label}.link_type must be a non-empty string when provided"
+                        )
+                    href = link.get("href")
+                    if href is not None and (
+                        not isinstance(href, str) or not href.strip()
+                    ):
+                        errors.append(
+                            f"{link_label}.href must be a non-empty string when provided"
+                        )
         elif element_type == "workflow_view":
             nodes = payload.get("nodes")
             if not isinstance(nodes, list) or not nodes:
@@ -745,12 +826,95 @@ def _normalise_supplied_screen_workflows(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_timelines(
+    screen_timeline_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen timeline specs."""
+    if (
+        not isinstance(screen_timeline_elements, Sequence)
+        or isinstance(screen_timeline_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_timeline_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "items" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = (
+            _normalise_text(metadata.get("intent"))
+            or "structured_timeline_view"
+        )
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_item_links": True,
+                "supports_relative_time": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_timeline_probe_{index}",
+                        "element_type": "timeline",
+                        "channel": "screen",
+                        "order": 36,
+                        "intent": intent,
+                        "payload": dict(payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def build_turn_display_elements(
     *,
     response_text: str | None,
     presenter_channels: Mapping[str, Any] | None,
     screen_table_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_timeline_elements: Sequence[Mapping[str, Any]] | None = None,
     supplemental_reason_codes: Sequence[str] | None = None,
     required_screen_json_fence: str | None = None,
     screen_backfill_second_pass_attempted: bool = False,
@@ -888,6 +1052,14 @@ def build_turn_display_elements(
     if supplied_workflows_dropped:
         reason_codes.append("screen_structured_workflows_invalid_dropped")
 
+    supplied_screen_timelines, supplied_timelines_dropped = (
+        _normalise_supplied_screen_timelines(screen_timeline_elements)
+    )
+    if supplied_screen_timelines:
+        reason_codes.append("screen_structured_timelines_supplied")
+    if supplied_timelines_dropped:
+        reason_codes.append("screen_structured_timelines_invalid_dropped")
+
     table_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_tables, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -953,10 +1125,31 @@ def build_turn_display_elements(
             }
         )
 
+    timeline_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_timelines, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_timeline")
+        provenance.setdefault("timeline_index", index)
+        timeline_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_timeline_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "structured_timeline_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_item_links": True,
+                    "supports_relative_time": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     used_ids: set[str] = set()
     used_orders = {
         int(spec["order"])
-        for spec in table_specs
+        for spec in [*table_specs, *workflow_specs, *timeline_specs]
         if isinstance(spec.get("order"), int)
     }
     next_table_order = 16
@@ -974,6 +1167,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "table",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_timeline_order = 36
+    for spec in timeline_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_timeline_order in used_orders:
+                next_timeline_order += 1
+            order = next_timeline_order
+            used_orders.add(order)
+            next_timeline_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "timeline",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),
