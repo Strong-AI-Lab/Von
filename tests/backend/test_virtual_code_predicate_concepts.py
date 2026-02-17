@@ -283,6 +283,102 @@ def test_relationships_route_normalises_is_a_type_ofs_alias(app_client, monkeypa
     ]
 
 
+def test_relationship_extent_route_returns_outgoing_rows(app_client, monkeypatch):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {"concept_id": "#V#focus", "relationships": {"related_to": []}},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.build_concept_relations_payload",
+        lambda *a, **k: {
+            "relations": [
+                {
+                    "relation_id": "struct::#V#focus::related_to",
+                    "source_concept_id": "#V#focus",
+                    "predicate_id": "related_to",
+                    "relation_kind": "binary",
+                    "target_values": ["#V#target"],
+                    "matched_argument_indexes": [1],
+                },
+                {
+                    "relation_id": "text::#V#focus::hasName",
+                    "source_concept_id": "#V#focus",
+                    "predicate_id": "hasName",
+                    "relation_kind": "text",
+                    "target_values": ["Example name"],
+                    "text_value": {"text": "Example name", "lang": "en-NZ"},
+                    "matched_argument_indexes": [1],
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.aggregate",
+        lambda *a, **k: [],
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/relationships/extent?concept_id=%23V%23focus"
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload.get("success") is True
+    rows = payload.get("rows") or []
+    assert any(
+        row.get("role") == "arg1"
+        and row.get("predicate_id") == "related_to"
+        and row.get("arg1_value") == "#V#focus"
+        and row.get("arg2_value") == "#V#target"
+        for row in rows
+    )
+    assert any(
+        row.get("relation_kind") == "text"
+        and row.get("predicate_id") == "hasName"
+        and row.get("arg2_value") == "Example name"
+        for row in rows
+    )
+
+
+def test_relationship_extent_route_includes_incoming_dynamic_arg2_rows(
+    app_client, monkeypatch
+):
+    _, client = app_client
+
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.find_one",
+        lambda *a, **k: {"concept_id": "#V#focus", "relationships": {}},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.build_concept_relations_payload",
+        lambda *a, **k: {"relations": []},
+    )
+    monkeypatch.setattr(
+        "src.backend.server.routes.vontology_routes.ConceptsRepository.aggregate",
+        lambda *a, **k: [
+            {
+                "concept_id": "#V#other",
+                "predicate": "#V#attended_event",
+                "targets": ["#V#focus"],
+            }
+        ],
+    )
+
+    resp = client.get(
+        "/vontology/api/vontology/relationships/extent?concept_id=%23V%23focus&role=arg2"
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload.get("success") is True
+    rows = payload.get("rows") or []
+    assert rows
+    assert rows[0]["role"] == "arg2"
+    assert rows[0]["predicate_id"] == "#V#attended_event"
+    assert rows[0]["arg1_value"] == "#V#other"
+    assert rows[0]["arg2_value"] == "#V#focus"
+
+
 def test_upsert_name_for_virtual_code_predicate_concept(app_client, monkeypatch):
     _, client = app_client
 

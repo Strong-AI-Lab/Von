@@ -175,11 +175,17 @@
 
 <!-- Relationships section (shown for both Type and Individual tabs) -->
 <div id="relationshipsSection" class="concept-list-subsection">
-  <h3 class="concept-list-title">Relationships</h3>
+  <h3 class="concept-list-title">Relation Extent</h3>
   <div id="relationshipsContent">
     <!-- Populated dynamically -->
   </div>
   <div id="relationshipsAddForm" class="mt-2 flex gap-2 ai-center flex-wrap">
+    <label for="relationshipRoleSelect" class="sr-only">Current concept role</label>
+    <select id="relationshipRoleSelect" aria-label="Current concept role"
+      title="Choose whether this concept is argument 1 or argument 2 in the assertion">
+      <option value="arg1" selected>Current concept is arg1</option>
+      <option value="arg2">Current concept is arg2</option>
+    </select>
     <label for="relationshipKindSelect" class="sr-only">Relationship kind</label>
     <select id="relationshipKindSelect" aria-label="Relationship kind" title="Select the type of relationship to add">
       <!-- Options will be populated dynamically depending on tab kind -->

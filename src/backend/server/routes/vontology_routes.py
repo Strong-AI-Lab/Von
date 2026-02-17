@@ -47,6 +47,7 @@ from ...vontology.utils_vontology import (
     is_predicate,
 )
 from ...db.repositories.concepts_repository import ConceptsRepository
+from ...db.repositories.concepts_repository import RELATIONSHIP_KINDS
 from ...services.settings_service import get_setting
 from ...services.concept_service import (
     get_concept_by_id,
@@ -56,6 +57,7 @@ from ...services.concept_service import (
     enrich_concept_with_text_relations,
 )
 from ...services.text_value_service import get_texts_for_concept
+from ...services.concept_relation_service import build_concept_relations_payload
 from ...services.concept_search_service import (
     search_concepts as search_concepts_service,
 )
@@ -92,6 +94,16 @@ Structure: {job_id: {total: int, processed: int, result: dict | None, error: str
 _TREE_BUILD_PROGRESS: dict[str, dict] = {}
 _TREE_BUILD_PROGRESS_LOCK = threading.Lock()
 
+_RELATIONSHIP_ALIAS_TO_CANONICAL = {
+    "has_subtypes": "has_subtype",
+    "is_a_type_ofs": "is_a_type_of",
+    "is_an_instance_ofs": "is_an_instance_of",
+    "has_instances": "has_instance",
+    "related_tos": "related_to",
+}
+_RELATIONSHIP_EXTENT_DEFAULT_LIMIT = 200
+_RELATIONSHIP_EXTENT_MAX_LIMIT = 500
+
 
 # NOTE: tracemalloc.start() was previously called here at the module level.
 # If memory tracing is required, initialize it at application startup (e.g., in the main entry point).
@@ -110,6 +122,159 @@ def _is_salient_split_enabled() -> bool:
         # Outside an application context; ignore config lookup
         pass
     return False
+
+
+def _normalise_relationship_value_list(raw_value: Any) -> list[str]:
+    if isinstance(raw_value, list):
+        return [
+            value.strip()
+            for value in raw_value
+            if isinstance(value, str) and value.strip()
+        ]
+    if isinstance(raw_value, str) and raw_value.strip():
+        return [raw_value.strip()]
+    return []
+
+
+def _normalise_relationship_aliases_map(raw_map: Any) -> dict[str, Any]:
+    if not isinstance(raw_map, dict):
+        return {}
+    rel_map = dict(raw_map)
+    for alias, canonical in _RELATIONSHIP_ALIAS_TO_CANONICAL.items():
+        alias_values = _normalise_relationship_value_list(rel_map.get(alias))
+        if not alias_values:
+            continue
+        canonical_values = _normalise_relationship_value_list(rel_map.get(canonical))
+        rel_map[canonical] = sorted(set(canonical_values + alias_values))
+        rel_map.pop(alias, None)
+    return rel_map
+
+
+def _canonicalise_relationship_predicate(raw_predicate: Any) -> str | None:
+    if not isinstance(raw_predicate, str):
+        return None
+    predicate = raw_predicate.strip()
+    if not predicate:
+        return None
+    return _RELATIONSHIP_ALIAS_TO_CANONICAL.get(predicate, predicate)
+
+
+def _coerce_relationship_extent_limit(raw_value: Any) -> int:
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return _RELATIONSHIP_EXTENT_DEFAULT_LIMIT
+    if parsed <= 0:
+        return _RELATIONSHIP_EXTENT_DEFAULT_LIMIT
+    return min(parsed, _RELATIONSHIP_EXTENT_MAX_LIMIT)
+
+
+def _coerce_relationship_extent_offset(raw_value: Any) -> int:
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
+
+
+def _expand_relation_payload_entry_for_extent(
+    relation: dict[str, Any],
+    focus_concept_id: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(relation, dict):
+        return []
+
+    source_concept_id = relation.get("source_concept_id")
+    if not isinstance(source_concept_id, str) or not source_concept_id.strip():
+        return []
+    source_concept_id = source_concept_id.strip()
+
+    predicate_id = _canonicalise_relationship_predicate(relation.get("predicate_id"))
+    if not predicate_id:
+        return []
+
+    relation_kind = str(relation.get("relation_kind") or "binary").strip().lower()
+    source_preview = relation.get("source_preview")
+    updated_at = None
+    if isinstance(source_preview, dict):
+        candidate = source_preview.get("last_updated")
+        if isinstance(candidate, str) and candidate.strip():
+            updated_at = candidate.strip()
+
+    rows: list[dict[str, Any]] = []
+    if relation_kind == "text":
+        text_payload = relation.get("text_value")
+        text_value = None
+        text_lang = None
+        if isinstance(text_payload, dict):
+            value = text_payload.get("text")
+            if value is not None:
+                text_value = str(value)
+            lang = text_payload.get("lang")
+            if isinstance(lang, str) and lang.strip():
+                text_lang = lang.strip()
+        if text_value is None:
+            values = relation.get("target_values")
+            if isinstance(values, list) and values:
+                text_value = str(values[0])
+        if text_value is None:
+            return []
+
+        rows.append(
+            {
+                "relation_id": str(
+                    relation.get("relation_id")
+                    or f"text::{source_concept_id}::{predicate_id}"
+                ),
+                "source": "text_relations",
+                "relation_kind": "text",
+                "role": "arg1",
+                "predicate_id": predicate_id,
+                "arg1_value": source_concept_id,
+                "arg1_is_concept": source_concept_id.startswith("#V#"),
+                "arg2_value": text_value,
+                "arg2_is_concept": False,
+                "arg2_lang": text_lang,
+                "source_concept_id": source_concept_id,
+                "target_value": text_value,
+                "updated_at": updated_at,
+                "is_asserted": True,
+            }
+        )
+        return rows
+
+    targets = _normalise_relationship_value_list(relation.get("target_values"))
+    if not targets:
+        return []
+
+    for target_index, target_value in enumerate(targets):
+        arg_index = 2 + target_index
+        if source_concept_id == focus_concept_id:
+            role = "arg1"
+        elif target_value == focus_concept_id:
+            role = "arg2"
+        else:
+            continue
+
+        rows.append(
+            {
+                "relation_id": f"{relation.get('relation_id') or 'struct'}::{target_index}",
+                "source": "structured",
+                "relation_kind": "binary",
+                "role": role,
+                "predicate_id": predicate_id,
+                "arg1_value": source_concept_id,
+                "arg1_is_concept": source_concept_id.startswith("#V#"),
+                "arg2_value": target_value,
+                "arg2_is_concept": target_value.startswith("#V#"),
+                "arg2_index": arg_index,
+                "source_concept_id": source_concept_id,
+                "target_value": target_value,
+                "updated_at": updated_at,
+                "is_asserted": True,
+            }
+        )
+    return rows
 
 
 @vontology_bp.route("/record_name_normalization", methods=["POST"])
@@ -3135,6 +3300,267 @@ def get_relationships_route():
                 {
                     "success": False,
                     "error": "Failed to retrieve relationships due to an internal server error.",
+                }
+            ),
+            500,
+        )
+
+
+@vontology_bp.route("/relationships/extent", methods=["GET"])
+def get_relationships_extent_route():
+    """
+    Return one row per relation assertion for a concept.
+
+    This endpoint is shaped for concept-tab relation extent tables where the
+    current concept can appear in either arg1 or arg2.
+    """
+    identifier = request.args.get("concept_id") or request.args.get("identifier")
+    if not identifier:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Missing 'concept_id' (or legacy 'identifier') parameter.",
+                }
+            ),
+            400,
+        )
+
+    role_filter = str(request.args.get("role") or "any").strip().lower()
+    if role_filter not in {"any", "arg1", "arg2"}:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Invalid role filter. Use one of: any, arg1, arg2.",
+                }
+            ),
+            400,
+        )
+
+    source_filter = str(request.args.get("source") or "").strip().lower()
+    if source_filter and source_filter not in {"structured", "text_relations"}:
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Invalid source filter. Use one of: structured, text_relations.",
+                }
+            ),
+            400,
+        )
+
+    requested_predicate = _canonicalise_relationship_predicate(
+        request.args.get("predicate")
+    )
+    limit = _coerce_relationship_extent_limit(request.args.get("limit"))
+    offset = _coerce_relationship_extent_offset(request.args.get("offset"))
+
+    try:
+        repo = ConceptsRepository
+
+        def _find_by_identifier(ident: str):
+            if ident.startswith("#V#"):
+                return repo.find_one({"concept_id": ident})
+            if ObjectId:
+                try:
+                    oid = ObjectId(ident)
+                    return repo.find_one({"_id": oid})
+                except Exception:
+                    pass
+            return repo.find_one({"concept_id": ident})
+
+        concept_doc = _find_by_identifier(identifier)
+        if not concept_doc:
+            try:
+                from ...vontology.code_concepts_registry import (
+                    build_virtual_concept_doc,
+                )
+
+                concept_doc = build_virtual_concept_doc(identifier)
+            except Exception:
+                concept_doc = None
+
+        if not concept_doc:
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": f"Concept '{identifier}' not found.",
+                    }
+                ),
+                404,
+            )
+
+        concept_id = concept_doc.get("concept_id")
+        if not isinstance(concept_id, str) or not concept_id.strip():
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "Resolved concept has no valid concept_id.",
+                    }
+                ),
+                400,
+            )
+        concept_id = concept_id.strip()
+
+        rows: list[dict[str, Any]] = []
+
+        base_payload = build_concept_relations_payload(
+            concept_doc,
+            include_relations_arg1=True,
+            include_relations_any_arg=True,
+            include_text_relations_arg1=True,
+            predicate_filter=[requested_predicate] if requested_predicate else None,
+            limit=_RELATIONSHIP_EXTENT_MAX_LIMIT,
+            offset=0,
+            include_concept_preview=True,
+        )
+        for relation in base_payload.get("relations", []):
+            rows.extend(
+                _expand_relation_payload_entry_for_extent(relation, concept_id)
+            )
+
+        # Supplement incoming dynamic predicates where this concept appears as arg2.
+        # build_concept_relations_payload currently covers incoming structural edges.
+        incoming_pipeline = [
+            {"$match": {"relationships": {"$type": "object"}}},
+            {
+                "$project": {
+                    "concept_id": 1,
+                    "updated_at": 1,
+                    "relationship_items": {"$objectToArray": "$relationships"},
+                }
+            },
+            {"$unwind": "$relationship_items"},
+            {
+                "$project": {
+                    "concept_id": 1,
+                    "updated_at": 1,
+                    "predicate": "$relationship_items.k",
+                    "targets": "$relationship_items.v",
+                }
+            },
+            {"$match": {"targets": concept_id}},
+        ]
+
+        for item in ConceptsRepository.aggregate(incoming_pipeline):
+            source_concept_id = item.get("concept_id")
+            if not isinstance(source_concept_id, str) or not source_concept_id.strip():
+                continue
+            source_concept_id = source_concept_id.strip()
+            if source_concept_id == concept_id:
+                continue
+
+            predicate_id = _canonicalise_relationship_predicate(item.get("predicate"))
+            if not predicate_id:
+                continue
+            if predicate_id in RELATIONSHIP_KINDS:
+                continue
+            if requested_predicate and predicate_id != requested_predicate:
+                continue
+
+            targets = _normalise_relationship_value_list(item.get("targets"))
+            if not targets:
+                continue
+
+            raw_updated_at = item.get("updated_at")
+            updated_at = None
+            isoformat_fn = getattr(raw_updated_at, "isoformat", None)
+            if callable(isoformat_fn):
+                try:
+                    updated_at = isoformat_fn()
+                except Exception:
+                    updated_at = None
+
+            for target_index, target_value in enumerate(targets):
+                if target_value != concept_id:
+                    continue
+                rows.append(
+                    {
+                        "relation_id": f"struct::{source_concept_id}::{predicate_id}::incoming::{target_index}",
+                        "source": "structured",
+                        "relation_kind": "binary",
+                        "role": "arg2",
+                        "predicate_id": predicate_id,
+                        "arg1_value": source_concept_id,
+                        "arg1_is_concept": source_concept_id.startswith("#V#"),
+                        "arg2_value": target_value,
+                        "arg2_is_concept": True,
+                        "arg2_index": target_index + 2,
+                        "source_concept_id": source_concept_id,
+                        "target_value": target_value,
+                        "updated_at": updated_at,
+                        "is_asserted": True,
+                    }
+                )
+
+        filtered_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if role_filter != "any" and row.get("role") != role_filter:
+                continue
+            if source_filter and row.get("source") != source_filter:
+                continue
+            if requested_predicate and row.get("predicate_id") != requested_predicate:
+                continue
+            filtered_rows.append(row)
+
+        deduped_rows: list[dict[str, Any]] = []
+        seen_row_keys: set[tuple[str, str, str, str, str, str, str]] = set()
+        for row in filtered_rows:
+            row_key = (
+                str(row.get("role") or ""),
+                str(row.get("source") or ""),
+                str(row.get("relation_kind") or ""),
+                str(row.get("predicate_id") or ""),
+                str(row.get("arg1_value") or ""),
+                str(row.get("arg2_value") or ""),
+                str(row.get("arg2_lang") or ""),
+            )
+            if row_key in seen_row_keys:
+                continue
+            seen_row_keys.add(row_key)
+            deduped_rows.append(row)
+
+        # Stable ordering keeps client rendering deterministic.
+        deduped_rows.sort(
+            key=lambda row: (
+                str(row.get("predicate_id") or ""),
+                str(row.get("role") or ""),
+                str(row.get("arg1_value") or ""),
+                str(row.get("arg2_value") or ""),
+                str(row.get("relation_id") or ""),
+            )
+        )
+
+        total = len(deduped_rows)
+        paged_rows = deduped_rows[offset : offset + limit]
+        return (
+            jsonify(
+                {
+                    "success": True,
+                    "concept_id": concept_id,
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                    "rows": paged_rows,
+                }
+            ),
+            200,
+        )
+    except Exception as exc:
+        current_app.logger.error(
+            "Error getting relationship extent for '%s': %s",
+            identifier,
+            exc,
+            exc_info=True,
+        )
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": "Failed to retrieve relationship extent due to an internal server error.",
                 }
             ),
             500,

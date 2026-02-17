@@ -4735,6 +4735,8 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
             kindSelect.appendChild(otherOpt);
         }
 
+        const roleSelect = document.getElementById(`relationshipRoleSelect_${suffix}`) || document.getElementById('relationshipRoleSelect');
+
         // Wire Add button
         const addBtn = document.getElementById(`relationshipAddButton_${suffix}`) || document.getElementById('relationshipAddButton');
         let targetInput = document.getElementById(`relationshipTargetInput_${suffix}`) || document.getElementById('relationshipTargetInput');
@@ -5046,6 +5048,15 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 }
 
                 if (isTextPredicate) {
+                    if (roleSelect) {
+                        const arg2Option = Array.from(roleSelect.options || []).find((opt) => opt && opt.value === 'arg2');
+                        if (arg2Option) {
+                            arg2Option.disabled = true;
+                        }
+                        if (roleSelect.value === 'arg2') {
+                            roleSelect.value = 'arg1';
+                        }
+                    }
                     // Replace simple input with inline text predicate controls
                     if (!inputContainer.querySelector('.text-predicate-form')) {
                         targetInput.style.display = 'none';
@@ -5056,6 +5067,12 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                     // Clear any existing search results since they don't apply to text predicates
                     clearResults();
                 } else {
+                    if (roleSelect) {
+                        const arg2Option = Array.from(roleSelect.options || []).find((opt) => opt && opt.value === 'arg2');
+                        if (arg2Option) {
+                            arg2Option.disabled = false;
+                        }
+                    }
                     // Show simple concept input, hide text form
                     targetInput.style.display = 'block';
                     targetInput.placeholder = '#V#target_concept_id';
@@ -5074,6 +5091,7 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
             newBtn.addEventListener('click', async () => {
                 const k = kindSelect.value;
                 const predicateValue = isOtherPredicateSelected() ? (predicateInput.value || '').trim() : k;
+                const roleValue = (roleSelect && roleSelect.value === 'arg2') ? 'arg2' : 'arg1';
                 let tgt, lang, textType;
 
                 statusEl.textContent = '';
@@ -5084,6 +5102,10 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                 }
 
                 if (isCurrentSelectionTextPredicate()) {
+                    if (roleValue === 'arg2') {
+                        statusEl.textContent = 'Text predicates currently require the current concept to be arg1';
+                        return;
+                    }
                     // Extract data from rich text form
                     const textForm = targetInput.parentNode.querySelector('.text-predicate-form');
                     if (!textForm) { statusEl.textContent = 'Text form not found'; return; }
@@ -5130,9 +5152,11 @@ async function initializeRelationshipsUI(conceptId, suffix, kind) {
                         }
                     } else {
                         // Use traditional relationships API for concept predicates
+                        const sourceId = roleValue === 'arg2' ? tgt : conceptId;
+                        const targetId = roleValue === 'arg2' ? conceptId : tgt;
                         const resp = await fetch('/vontology/api/vontology/relationships/add', {
                             method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ source_id: conceptId, kind: predicateValue, target_id: tgt })
+                            body: JSON.stringify({ source_id: sourceId, kind: predicateValue, target_id: targetId })
                         });
                         const data = await resp.json().catch(() => ({}));
                         if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
@@ -5514,437 +5538,221 @@ async function renderRelationships(conceptId, suffix, kind) {
     if (!content) return;
     content.innerHTML = '<div>Loading relationships...</div>';
     try {
-        // Fetch both concept relationships and available predicates to determine which are text predicates
-        const [relRes, elicitationRes, salientRes] = await Promise.all([
-            fetch(`/vontology/api/vontology/relationships?identifier=${encodeURIComponent(conceptId)}`),
-            fetch(`/vontology/api/vontology/predicates/elicitation?instance_id=${encodeURIComponent(conceptId)}`),
-            fetch(`/vontology/api/vontology/predicates/salient?instance_id=${encodeURIComponent(conceptId)}`)
-        ]);
-
-        if (!relRes.ok) throw new Error(`HTTP ${relRes.status}`);
-        const relData = await relRes.json();
-        const rel = relData && relData.relationships ? relData.relationships : {};
-
-        // Build a map of predicates to their text/concept type
-        const predicateTypeMap = new Map();
-
-        console.log('[renderRelationships] Building predicateTypeMap...');
-        if (elicitationRes.ok) {
-            const elicitationData = await elicitationRes.json();
-            console.log('[renderRelationships] elicitationData:', elicitationData);
-            if (elicitationData.predicates) {
-                elicitationData.predicates.forEach((pred, index) => {
-                    console.log(`[renderRelationships] elicitation predicate ${index}:`, pred);
-                    console.log('[renderRelationships] elicitation predicate:', pred.id, 'is_text:', pred.is_text_predicate);
-                    predicateTypeMap.set(pred.id, pred.is_text_predicate || false);
-                });
-            }
+        const resp = await fetch(`/vontology/api/vontology/relationships/extent?concept_id=${encodeURIComponent(conceptId)}&limit=500`);
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || !data.success) {
+            throw new Error(data.error || `HTTP ${resp.status}`);
         }
 
-        if (salientRes.ok) {
-            const salientData = await salientRes.json();
-            console.log('[renderRelationships] salientData:', salientData);
-            if (salientData.predicates) {
-                salientData.predicates.forEach((pred, index) => {
-                    console.log(`[renderRelationships] salient predicate ${index}:`, pred);
-                    console.log('[renderRelationships] salient predicate:', pred.id, 'is_text:', pred.is_text_predicate);
-                    predicateTypeMap.set(pred.id, pred.is_text_predicate || false);
-                });
-            }
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        if (!rows.length) {
+            content.innerHTML = '<i>No relationships yet.</i>';
+            return;
         }
 
-        console.log('[renderRelationships] Final predicateTypeMap:', predicateTypeMap);
-
-        const sections = [
-            { key: 'is_a_type_of', title: 'Is a type of' },
-            { key: 'has_subtype', title: 'Has subtype' },
-            { key: 'is_an_instance_of', title: 'Is an instance of' },
-            // { key: 'has_instance', title: 'Has instance' }, // handled elsewhere
-            { key: 'related_to', title: 'Related to' },
-        ];
-        const structuralKeys = new Set(sections.map(s => s.key).concat(['has_instance']));
-
-        const toPredicateConceptId = (value) => {
-            if (!value) return value;
-            if (String(value).startsWith('#V#')) return value;
-            return `#V#${value}`;
+        const toPredicateConceptId = (predicateId) => {
+            if (!predicateId || typeof predicateId !== 'string') {
+                return '';
+            }
+            if (predicateId.startsWith('#V#')) {
+                return predicateId;
+            }
+            return `#V#${predicateId}`;
         };
 
-        const wrapper = document.createElement('div');
-        wrapper.className = 'relationships-wrapper';
+        const conceptIds = new Set();
+        rows.forEach((row) => {
+            if (row.arg1_is_concept && typeof row.arg1_value === 'string' && row.arg1_value.startsWith('#V#')) {
+                conceptIds.add(row.arg1_value);
+            }
+            if (row.arg2_is_concept && typeof row.arg2_value === 'string' && row.arg2_value.startsWith('#V#')) {
+                conceptIds.add(row.arg2_value);
+            }
+            const predicateConceptId = toPredicateConceptId(row.predicate_id);
+            if (predicateConceptId) {
+                conceptIds.add(predicateConceptId);
+            }
+        });
 
-        const normaliseConceptRelItem = (raw) => {
-            if (!raw) return { id: '', name: '', kind: null, raw };
-            if (typeof raw === 'string') {
-                return { id: raw, name: raw, kind: null, raw };
-            }
-            if (typeof raw === 'object') {
-                const id = raw.id || raw.concept_id || raw.identifier || raw.target_id || '';
-                const name = raw.name || raw.display_name || raw.label || id;
-                const kind = raw.kind || null;
-                return { id, name, kind, raw };
-            }
-            const s = String(raw);
-            return { id: s, name: s, kind: null, raw };
+        const metadataMap = new Map();
+        await Promise.all(
+            Array.from(conceptIds).map(async (id) => {
+                const metadata = await getConceptMetadata(id);
+                metadataMap.set(id, metadata || { kind: 'individual', name: id });
+            })
+        );
+
+        const openConcept = (id, fallbackName) => {
+            const metadata = metadataMap.get(id) || { kind: 'individual', name: fallbackName || id };
+            const evt = new CustomEvent('open-concept-tab', {
+                detail: {
+                    conceptId: id,
+                    conceptName: metadata.name || fallbackName || id,
+                    kind: metadata.kind || 'individual',
+                    activate: true
+                }
+            });
+            document.dispatchEvent(evt);
         };
 
-        for (const s of sections) {
-            const arr = Array.isArray(rel[s.key]) ? rel[s.key] : [];
-            if (!arr.length) continue;
-            const div = document.createElement('div');
-            div.className = 'relationship-group';
-
-            // Create predicate header as a clickable cartouche
-            const h = document.createElement('h4');
-            h.style.margin = '6px 0';
-            h.style.display = 'inline-block';
-
-            const predicateChip = document.createElement('span');
-            predicateChip.className = 'concept-cartouche predicate';
-            predicateChip.textContent = s.title;
-            predicateChip.style.cursor = 'pointer';
-            predicateChip.style.fontSize = '0.875rem';
-            predicateChip.style.fontWeight = '600';
-            predicateChip.title = `Open ${s.key}`;
-
-            // Make predicate header clickable to open concept tab
-            predicateChip.addEventListener('click', () => {
-                try {
-                    const predicateId = toPredicateConceptId(s.key);
-                    const evt = new CustomEvent('open-concept-tab', {
-                        detail: { conceptId: predicateId, conceptName: s.title, kind: 'predicate', activate: true }
-                    });
-                    document.dispatchEvent(evt);
-                } catch (e) {
-                    console.warn('[dynamicTabs] Failed to open predicate tab', e);
-                }
-            });
-
-            // Right-click: copy predicate concept ID
-            predicateChip.addEventListener('contextmenu', (e) => {
-                try {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    copyConceptIdToClipboard(toPredicateConceptId(s.key));
-                } catch (err) {
-                    console.warn('[dynamicTabs] Failed to copy predicate concept ID', err);
-                }
-            });
-
-            h.appendChild(predicateChip);
-            const list = document.createElement('div'); list.className = 'relationship-list'; list.style.display = 'flex'; list.style.flexWrap = 'wrap'; list.style.gap = '6px';
-
-            // Backend now provides kind alongside name, eliminating N metadata fetches
-            // Use backend-provided metadata with fallback to cache for backward compatibility
-            for (let i = 0; i < arr.length; i++) {
-                const norm = normaliseConceptRelItem(arr[i]);
-                if (!norm.id) continue;
-                // Prefer backend-provided kind, fall back to fetching if not present (backward compatibility)
-                const metadata = norm.kind
-                    ? { kind: norm.kind, name: norm.name || norm.id }
-                    : await getConceptMetadata(norm.id);
-
-                const chip = document.createElement('span');
-                chip.className = 'relationship-chip';
-                chip.style.display = 'inline-flex';
-                chip.style.alignItems = 'center';
-                chip.style.gap = '4px';
-                chip.style.padding = '2px 8px';
-                chip.style.border = '1px solid #ddd';
-                chip.style.borderRadius = '12px';
-                chip.style.background = '#f9fafb';
-                chip.title = norm.id;
-
-                // Clickable name with cartouche styling based on kind
-                const name = document.createElement('span');
-                name.className = `concept-cartouche ${metadata.kind}`;
-                name.textContent = norm.name || norm.id;
-                name.style.cursor = 'pointer';
-                name.title = `Open ${norm.name || norm.id}`;
-
-                // Bold the most salient type for "is a type of" relationships
-                if (s.key === 'is_a_type_of' && (norm.raw && norm.raw.is_most_salient)) {
-                    name.style.fontWeight = 'bold';
-                    name.style.color = '#059669'; // Slightly different green color for emphasis
-                    name.title += ' (Most Salient Type)';
-                    chip.style.border = '2px solid #059669'; // Thicker border for salient type
-                    chip.style.background = '#ecfdf5'; // Light green background
-                }
-                name.addEventListener('click', () => {
-                    try {
-                        // Use backend's kind from metadata
-                        const evt = new CustomEvent('open-concept-tab', {
-                            detail: { conceptId: norm.id, conceptName: norm.name || norm.id, kind: metadata.kind, activate: true }
-                        });
-                        document.dispatchEvent(evt);
-                    } catch (e) {
-                        console.warn('[dynamicTabs] Failed to open related concept tab', e);
-                    }
-                });
-                name.addEventListener('contextmenu', (event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    try {
-                        copyConceptIdToClipboard(norm.id);
-                    } catch (err) {
-                        console.warn('[dynamicTabs] Failed to copy concept ID', err);
-                    }
-                });
-                const remove = document.createElement('button');
-                remove.type = 'button';
-                remove.className = 'chip-remove';
-                remove.textContent = '×';
-                remove.title = `Remove ${s.title} → ${norm.name || norm.id}`;
-                // Inline fallbacks to neutralize global button styles
-                remove.style.border = 'none';
-                remove.style.background = 'transparent';
-                remove.style.cursor = 'pointer';
-                remove.style.color = '#b91c1c';
-                remove.style.boxShadow = 'none';
-                remove.style.transform = 'none';
-                remove.addEventListener('click', async () => {
-                    try {
-                        const resp = await fetch('/vontology/api/vontology/relationships/remove', {
-                            method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ source_id: conceptId, kind: s.key, target_id: norm.id })
-                        });
-                        const d = await resp.json().catch(() => ({}));
-                        if (!resp.ok || d.error) throw new Error(d.error || `HTTP ${resp.status}`);
-                        await renderRelationships(conceptId, suffix, kind);
-                        dispatchConceptUpdated([conceptId, norm.id], { reason: 'relationship_removed', source: 'relationships_ui' });
-                    } catch (e) {
-                        console.warn('[dynamicTabs] remove relationship failed', e);
-                        alert(`Failed to remove relationship: ${e.message}`);
-                    }
-                });
-                chip.appendChild(name); chip.appendChild(remove); list.appendChild(chip);
+        const createConceptCell = (conceptIdValue, fallbackName = null) => {
+            const cell = document.createElement('td');
+            const conceptIdText = typeof conceptIdValue === 'string' ? conceptIdValue : '';
+            if (!conceptIdText || !conceptIdText.startsWith('#V#')) {
+                cell.textContent = fallbackName || conceptIdText || '';
+                return cell;
             }
-            div.appendChild(h); div.appendChild(list); wrapper.appendChild(div);
-        }
 
-        // Handle dynamic predicates - both concept relationships and text predicates
-        const dynamicConceptKeys = Object.keys(rel)
-            .filter(k => !structuralKeys.has(k) && Array.isArray(rel[k]) && rel[k].length && !predicateTypeMap.get(k));
-        console.log('[renderRelationships] dynamicConceptKeys:', dynamicConceptKeys);
+            const metadata = metadataMap.get(conceptIdText) || { kind: 'individual', name: fallbackName || conceptIdText };
+            const chip = document.createElement('span');
+            chip.className = `concept-cartouche ${metadata.kind || 'individual'}`;
+            chip.textContent = metadata.name || fallbackName || conceptIdText;
+            chip.title = conceptIdText;
+            chip.style.cursor = 'pointer';
+            chip.addEventListener('click', () => openConcept(conceptIdText, fallbackName || conceptIdText));
+            chip.addEventListener('contextmenu', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                copyConceptIdToClipboard(conceptIdText);
+            });
+            cell.appendChild(chip);
+            return cell;
+        };
 
-        // Fetch text predicates that we know are text predicates
-        const textPredicatePromises = [];
-        const textPredicateKeys = [];
-
-        for (const [predicate, isText] of predicateTypeMap.entries()) {
-            if (isText) {
-                textPredicateKeys.push(predicate);
-                textPredicatePromises.push(
-                    fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts?predicate=${encodeURIComponent(predicate)}&limit=200`)
-                        .then(res => res.ok ? res.json() : { texts: [] })
-                        .then(data => ({ predicate, texts: data.texts || [] }))
-                        .catch(() => ({ predicate, texts: [] }))
-                );
+        const createTextCell = (value, language = '') => {
+            const cell = document.createElement('td');
+            const span = document.createElement('span');
+            span.textContent = value || '';
+            span.style.fontFamily = 'monospace';
+            cell.appendChild(span);
+            if (language) {
+                const badge = document.createElement('span');
+                badge.textContent = ` ${language}`;
+                badge.style.fontSize = '0.75rem';
+                badge.style.color = '#6b7280';
+                badge.style.marginLeft = '6px';
+                cell.appendChild(badge);
             }
-        }
+            return cell;
+        };
 
-        const textPredicateResults = await Promise.all(textPredicatePromises);
+        const tableContainer = document.createElement('div');
+        tableContainer.className = 'predicate-extent-table-container';
+        const table = document.createElement('table');
+        table.className = 'predicate-extent-table';
 
-        // Debug: Log what we got from text relations API
-        console.log('[renderRelationships] textPredicateResults:', textPredicateResults);
+        const thead = document.createElement('thead');
+        const headRow = document.createElement('tr');
+        ['Role', 'Predicate', 'Arg1', 'Arg2', 'Source', 'Updated', 'Actions'].forEach((label) => {
+            const th = document.createElement('th');
+            th.textContent = label;
+            headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
 
-        // Combine all dynamic predicates (concept + text)
-        const allDynamicKeys = [...dynamicConceptKeys, ...textPredicateKeys].sort();
-        console.log('[renderRelationships] allDynamicKeys:', allDynamicKeys);
+        const tbody = document.createElement('tbody');
+        for (const row of rows) {
+            const tr = document.createElement('tr');
 
-        for (const dk of allDynamicKeys) {
-            const isTextPredicate = predicateTypeMap.get(dk) || false;
-            let arr = [];
+            const roleCell = document.createElement('td');
+            roleCell.textContent = row.role === 'arg2' ? 'arg2' : 'arg1';
+            tr.appendChild(roleCell);
 
-            if (isTextPredicate) {
-                // Get full text objects from text relations API result
-                // textPredicateResults contains the API responses which have {texts: [...], count: N} structure
-                const textResultIndex = textPredicateKeys.indexOf(dk);
-                const textResult = textPredicateResults[textResultIndex];
-                console.log(`[renderRelationships] Text result for ${dk}:`, textResult);
-                arr = textResult && textResult.texts ? textResult.texts : [];
+            const predicateConceptId = toPredicateConceptId(row.predicate_id);
+            tr.appendChild(createConceptCell(predicateConceptId, row.predicate_id || ''));
+
+            if (row.arg1_is_concept) {
+                tr.appendChild(createConceptCell(row.arg1_value, row.arg1_value));
             } else {
-                // Get concept relationships from relationships API
-                arr = rel[dk] || [];
+                tr.appendChild(createTextCell(row.arg1_value || ''));
             }
 
-            if (!arr.length) continue;
+            if (row.arg2_is_concept) {
+                tr.appendChild(createConceptCell(row.arg2_value, row.arg2_value));
+            } else {
+                tr.appendChild(createTextCell(row.arg2_value || '', row.arg2_lang || ''));
+            }
 
-            const div = document.createElement('div');
-            div.className = 'relationship-group';
-            const titleText = dk.startsWith('#V#') ? dk.replace('#V#', '').replace(/_/g, ' ') : dk;
+            const sourceCell = document.createElement('td');
+            sourceCell.textContent = row.source || 'structured';
+            sourceCell.className = `source-${row.source || 'structured'}`;
+            tr.appendChild(sourceCell);
 
-            // Create dynamic predicate header as a clickable cartouche
-            const h = document.createElement('h4');
-            h.style.margin = '6px 0';
-            h.style.display = 'inline-block';
-
-            const predicateChip = document.createElement('span');
-            predicateChip.className = 'concept-cartouche predicate';
-            predicateChip.textContent = titleText;
-            predicateChip.style.cursor = 'pointer';
-            predicateChip.style.fontSize = '0.875rem';
-            predicateChip.style.fontWeight = '600';
-            predicateChip.title = `Open ${dk}`;
-
-            // Make dynamic predicate header clickable
-            predicateChip.addEventListener('click', () => {
-                try {
-                    const predicateId = toPredicateConceptId(dk);
-                    const evt = new CustomEvent('open-concept-tab', {
-                        detail: { conceptId: predicateId, conceptName: titleText, kind: 'predicate', activate: true }
+            const updatedCell = document.createElement('td');
+            if (row.updated_at) {
+                const date = new Date(row.updated_at);
+                if (!Number.isNaN(date.getTime())) {
+                    updatedCell.textContent = date.toLocaleString('en-NZ', {
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
                     });
-                    document.dispatchEvent(evt);
-                } catch (e) {
-                    console.warn('[dynamicTabs] Failed to open predicate tab', e);
-                }
-            });
-
-            // Right-click: copy predicate concept ID
-            predicateChip.addEventListener('contextmenu', (e) => {
-                try {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    copyConceptIdToClipboard(toPredicateConceptId(dk));
-                } catch (err) {
-                    console.warn('[dynamicTabs] Failed to copy predicate concept ID', err);
-                }
-            });
-
-            h.appendChild(predicateChip);
-            const list = document.createElement('div'); list.className = 'relationship-list'; list.style.display = 'flex'; list.style.flexWrap = 'wrap'; list.style.gap = '6px';
-
-            // Backend now provides kind alongside name for concept predicates, eliminating N metadata fetches
-            // For text predicates, no metadata needed
-            for (let itemIdx = 0; itemIdx < arr.length; itemIdx++) {
-                const item = arr[itemIdx];
-                const norm = (!isTextPredicate) ? normaliseConceptRelItem(item) : null;
-                if (!isTextPredicate && (!norm || !norm.id)) continue;
-                // For concept predicates: prefer backend-provided kind, fall back to fetching if not present
-                // For text predicates: metadata is null
-                const metadata = !isTextPredicate
-                    ? (norm.kind
-                        ? { kind: norm.kind, name: norm.name || norm.id }
-                        : await getConceptMetadata(norm.id))
-                    : null;
-
-                const chip = document.createElement('span');
-                chip.className = 'relationship-chip';
-                chip.style.display = 'inline-flex'; chip.style.alignItems = 'center'; chip.style.gap = '4px'; chip.style.padding = '2px 8px';
-                chip.style.border = '1px solid #ddd'; chip.style.borderRadius = '12px'; chip.style.background = '#f9fafb';
-
-                const name = document.createElement('span');
-
-                if (isTextPredicate) {
-                    // Handle text predicate: item is a text object with text, lang, predicate, etc.
-                    console.log('[renderRelationships] Processing text predicate item:', item);
-
-                    const textValue = item.text || item;
-                    const language = item.lang || 'en';
-
-                    chip.title = `Text value: ${textValue} (${language})`;
-
-                    // Create main text span - clickable for editing
-                    name.textContent = textValue;
-                    name.style.color = '#374151';
-                    name.style.cursor = 'pointer';
-                    name.style.fontFamily = 'monospace';
-                    name.title = 'Click to edit text value';
-
-                    // Add click-to-edit functionality
-                    name.addEventListener('click', () => {
-                        createInlineTextEditor(chip, item, dk, conceptId, suffix);
-                    });
-
-                    // Add language badge similar to names display
-                    const badge = document.createElement('span');
-                    badge.textContent = language;
-                    badge.style.fontSize = '0.75rem';
-                    badge.style.color = '#6b7280';
-                    badge.style.backgroundColor = '#f3f4f6';
-                    badge.style.padding = '1px 4px';
-                    badge.style.borderRadius = '4px';
-                    badge.style.marginLeft = '4px';
-                    badge.style.fontFamily = 'monospace';
-
-                    // Add both text and badge to the chip
-                    chip.appendChild(name);
-                    chip.appendChild(badge);
+                    updatedCell.title = date.toISOString();
                 } else {
-                    // Handle concept predicate: item has id and name properties
-                    chip.title = norm.id;
-                    name.className = `concept-cartouche ${metadata.kind}`;
-                    name.textContent = norm.name || norm.id;
-                    name.style.cursor = 'pointer';
-                    name.addEventListener('click', () => {
-                        // Use backend's kind from metadata
-                        const evt = new CustomEvent('open-concept-tab', { detail: { conceptId: norm.id, conceptName: norm.name || norm.id, kind: metadata.kind, activate: true } });
-                        document.dispatchEvent(evt);
-                    });
-                    name.addEventListener('contextmenu', (event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        try {
-                            copyConceptIdToClipboard(norm.id);
-                        } catch (err) {
-                            console.warn('[dynamicTabs] Failed to copy concept ID', err);
-                        }
-                    });
+                    updatedCell.textContent = row.updated_at;
                 }
-
-                const remove = document.createElement('button');
-                remove.type = 'button'; remove.className = 'chip-remove'; remove.textContent = '×';
-                remove.title = `Remove ${titleText} → ${isTextPredicate ? (item.text || item) : (norm.name || norm.id)}`;
-                remove.style.border = 'none'; remove.style.background = 'transparent'; remove.style.cursor = 'pointer'; remove.style.color = '#b91c1c';
-                remove.addEventListener('click', async () => {
-                    try {
-                        if (isTextPredicate) {
-                            // Use text relations API for binary text predicates
-                            const textValue = item.text || item;
-                            const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}/texts`, {
-                                method: 'DELETE', headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ predicate: dk, text: textValue })
-                            });
-                            const d = await resp.json().catch(() => ({}));
-                            if (!resp.ok || d.error) throw new Error(d.error || `HTTP ${resp.status}`);
-                        } else {
-                            // Use relationships API for concept predicates
-                            const resp = await fetch('/vontology/api/vontology/relationships/remove', {
-                                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ source_id: conceptId, kind: dk, target_id: norm.id })
-                            });
-                            const d = await resp.json().catch(() => ({}));
-                            if (!resp.ok || d.error) throw new Error(d.error || `HTTP ${resp.status}`);
-                        }
-                        await renderRelationships(conceptId, suffix, kind);
-                        if (isTextPredicate) {
-                            dispatchConceptUpdated([conceptId], { reason: 'text_relation_removed', source: 'relationships_ui' });
-                        } else {
-                            dispatchConceptUpdated([conceptId, norm.id], { reason: 'relationship_removed', source: 'relationships_ui' });
-                        }
-                    } catch (e) {
-                        console.warn('[dynamicTabs] remove dynamic relationship failed', e);
-                        alert(`Failed to remove relationship: ${e.message}`);
-                    }
-                });
-
-                // For concept predicates, append name; for text predicates, name and badge are already appended
-                if (!isTextPredicate) {
-                    chip.appendChild(name);
-                }
-                chip.appendChild(remove);
-                list.appendChild(chip);
+            } else {
+                updatedCell.textContent = 'N/A';
             }
-            div.appendChild(h); div.appendChild(list); wrapper.appendChild(div);
+            tr.appendChild(updatedCell);
+
+            const actionCell = document.createElement('td');
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'chip-remove';
+            removeBtn.textContent = '×';
+            removeBtn.title = 'Remove assertion';
+            removeBtn.addEventListener('click', async () => {
+                try {
+                    if (row.relation_kind === 'text') {
+                        const deleteResp = await fetch(`/api/concepts/${encodeURIComponent(row.arg1_value)}/texts`, {
+                            method: 'DELETE',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ predicate: row.predicate_id, text: row.arg2_value })
+                        });
+                        const payload = await deleteResp.json().catch(() => ({}));
+                        if (!deleteResp.ok || payload.error) {
+                            throw new Error(payload.error || `HTTP ${deleteResp.status}`);
+                        }
+                        dispatchConceptUpdated([conceptId], { reason: 'text_relation_removed', source: 'relationships_ui' });
+                    } else {
+                        const deleteResp = await fetch('/vontology/api/vontology/relationships/remove', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                source_id: row.arg1_value,
+                                kind: row.predicate_id,
+                                target_id: row.arg2_value
+                            })
+                        });
+                        const payload = await deleteResp.json().catch(() => ({}));
+                        if (!deleteResp.ok || payload.error) {
+                            throw new Error(payload.error || `HTTP ${deleteResp.status}`);
+                        }
+                        dispatchConceptUpdated([row.arg1_value, row.arg2_value], { reason: 'relationship_removed', source: 'relationships_ui' });
+                    }
+                    await renderRelationships(conceptId, suffix, kind);
+                } catch (err) {
+                    alert(`Failed to remove relationship: ${err.message}`);
+                }
+            });
+            actionCell.appendChild(removeBtn);
+            tr.appendChild(actionCell);
+
+            tbody.appendChild(tr);
         }
 
+        table.appendChild(tbody);
+        tableContainer.appendChild(table);
         content.innerHTML = '';
-        if (wrapper.children.length === 0) content.innerHTML = '<i>No relationships yet.</i>'; else content.appendChild(wrapper);
+        content.appendChild(tableContainer);
     } catch (e) {
         content.innerHTML = `<span style="color:red">Failed to load relationships (${e.message})</span>`;
     }
 }
-
 // Helper: Add analysis and relationship buttons next to JSON button
 function attachAnalysisButtons(headerDiv, conceptId, kind) {
     try {
@@ -6343,5 +6151,6 @@ function showToast(message, type = 'info') {
 
 // Explicit exports for tests / external modules that need to force relabeling
 export { initializeRelationshipsUI, relabelAllDynamicConceptTabs, reloadConceptTab, updateTabLabelWithShortestName };
+
 
 
