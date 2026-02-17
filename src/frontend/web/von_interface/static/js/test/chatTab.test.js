@@ -685,6 +685,70 @@ describe('kanban display elements', () => {
     });
 });
 
+describe('relation graph display elements', () => {
+    beforeEach(() => {
+        const { createVontologyCartouche } = require('../utils/textDecorator.js');
+        createVontologyCartouche.mockClear();
+    });
+
+    test('renders relation graph nodes with clickable cartouches and predicate edge labels', () => {
+        const container = document.createElement('div');
+        const debugData = {
+            display_elements: {
+                schema_version: 'turn_display_elements_v1',
+                elements: [
+                    {
+                        element_id: 'screen_relation_graph_view',
+                        element_type: 'relation_graph_view',
+                        channel: 'screen',
+                        order: 43,
+                        intent: 'relation_graph_view',
+                        payload: {
+                            nodes: [
+                                {
+                                    node_id: '#V#michael_witbrock',
+                                    label: 'Michael Witbrock',
+                                    node_kind: 'individual'
+                                },
+                                {
+                                    node_id: '#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne',
+                                    label: 'Panel 4',
+                                    node_kind: 'individual'
+                                }
+                            ],
+                            edges: [
+                                {
+                                    edge_id: 'edge_1',
+                                    source: '#V#michael_witbrock',
+                                    target: '#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne',
+                                    predicate: '#V#panelist_in_event',
+                                    direction: 'directed'
+                                }
+                            ],
+                            focus_node_id: '#V#michael_witbrock'
+                        },
+                        provenance: { source: 'test' }
+                    }
+                ]
+            }
+        };
+
+        __testOnly_renderDisplayElementsIntoContainer(container, debugData);
+
+        const section = container.querySelector('.chat-display-elements-relation-graph-section');
+        expect(section).not.toBeNull();
+        expect(section.textContent).toContain('Relation graph view');
+
+        const nodes = container.querySelectorAll('.chat-display-elements-relation-graph-node');
+        expect(nodes.length).toBe(2);
+        expect(container.querySelectorAll('.chat-display-elements-relation-graph-edge-label').length).toBe(1);
+        expect(container.textContent).toContain('#V#panelist_in_event');
+
+        const { createVontologyCartouche } = require('../utils/textDecorator.js');
+        expect(createVontologyCartouche).toHaveBeenCalledTimes(2);
+    });
+});
+
 describe('chat insert prompt button behaviour', () => {
     beforeEach(() => {
         document.body.innerHTML = `
@@ -1195,6 +1259,39 @@ describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
             screen_kanban_element_count: 1,
             source_tools: ['task_list', 'workflow_list_instances'],
             record_families: ['tasks_and_workflows']
+        });
+    });
+
+    test('includes relation graph render plan provenance counts when present', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            render_plan: {
+                enabled: true,
+                attempted: true,
+                success: true,
+                reason: 'resolved',
+                selected_renderer_ids: ['#V#renderer_relation_graph'],
+                selected_renderer_types: ['relation_graph'],
+                screen_element_families: ['relation_graph_view'],
+                screen_relation_graph_elements: [
+                    {
+                        element_id: 'screen_relation_graph_view',
+                        provenance: {
+                            source_tools: ['get_predicate_extent'],
+                            record_family: 'relation_graph'
+                        }
+                    }
+                ]
+            }
+        });
+
+        expect(metadata.render_plan).toMatchObject({
+            selected_renderer_types: ['relation_graph'],
+            screen_element_families: ['relation_graph_view'],
+            screen_relation_graph_element_count: 1,
+            source_tools: ['get_predicate_extent'],
+            record_families: ['relation_graph']
         });
     });
 

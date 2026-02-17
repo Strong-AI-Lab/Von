@@ -2132,6 +2132,39 @@ def _extract_screen_timeline_elements_from_render_plan(
     return timeline_elements
 
 
+def _extract_screen_relation_graph_elements_from_render_plan(
+    render_plan: dict[str, Any] | None,
+    *,
+    screen_element_targets: dict[str, bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Extract display-contract relation graph specs from renderer plan diagnostics."""
+    if not isinstance(render_plan, dict):
+        return []
+    if isinstance(screen_element_targets, dict) and not bool(
+        screen_element_targets.get("relation_graph_view", True)
+    ):
+        return []
+
+    relation_graph_elements: list[dict[str, Any]] = []
+
+    def _append_relation_graph_specs(raw_value: Any) -> None:
+        if isinstance(raw_value, list):
+            for item in raw_value:
+                if isinstance(item, dict):
+                    relation_graph_elements.append(dict(item))
+        elif isinstance(raw_value, dict):
+            relation_graph_elements.append(dict(raw_value))
+
+    _append_relation_graph_specs(render_plan.get("screen_relation_graph_elements"))
+    _append_relation_graph_specs(render_plan.get("screen_relation_graph_payloads"))
+
+    single_relation_graph = render_plan.get("screen_relation_graph_element")
+    if isinstance(single_relation_graph, dict):
+        relation_graph_elements.append(dict(single_relation_graph))
+
+    return relation_graph_elements
+
+
 def _extract_screen_relation_truth_state_elements_from_render_plan(
     render_plan: dict[str, Any] | None,
     *,
@@ -2179,6 +2212,7 @@ def _extract_screen_element_targets_from_render_plan(
         "task_view": True,
         "kanban_view": True,
         "timeline": True,
+        "relation_graph_view": True,
         "relation_truth_state": True,
     }
     if not isinstance(render_plan, dict):
@@ -2194,6 +2228,9 @@ def _extract_screen_element_targets_from_render_plan(
         "task_view": bool(raw_targets.get("task_view", True)),
         "kanban_view": bool(raw_targets.get("kanban_view", True)),
         "timeline": bool(raw_targets.get("timeline", True)),
+        "relation_graph_view": bool(
+            raw_targets.get("relation_graph_view", True)
+        ),
         "relation_truth_state": bool(
             raw_targets.get("relation_truth_state", True)
         ),
@@ -5264,6 +5301,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             render_plan_for_display,
             screen_element_targets=screen_element_targets,
         )
+        screen_relation_graph_elements = (
+            _extract_screen_relation_graph_elements_from_render_plan(
+                render_plan_for_display,
+                screen_element_targets=screen_element_targets,
+            )
+        )
         screen_relation_truth_state_elements = (
             _extract_screen_relation_truth_state_elements_from_render_plan(
                 render_plan_for_display,
@@ -5280,6 +5323,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             screen_task_view_elements=screen_task_view_elements,
             screen_kanban_elements=screen_kanban_elements,
             screen_timeline_elements=screen_timeline_elements,
+            screen_relation_graph_elements=screen_relation_graph_elements,
             screen_relation_truth_state_elements=screen_relation_truth_state_elements,
             supplemental_reason_codes=screen_element_reason_codes,
             required_screen_json_fence=required_screen_json_fence,

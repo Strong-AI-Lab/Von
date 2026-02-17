@@ -1413,6 +1413,8 @@ const TASK_VIEW_MAX_ITEMS = 200;
 const KANBAN_MAX_COLUMNS = 30;
 const KANBAN_MAX_CARDS = 200;
 const TIMELINE_MAX_ITEMS = 200;
+const RELATION_GRAPH_MAX_NODES = 120;
+const RELATION_GRAPH_MAX_EDGES = 240;
 const RELATION_TRUTH_STATE_MAX_GROUPS = 50;
 const RELATION_TRUTH_STATE_MAX_ASSERTIONS_PER_GROUP = 200;
 const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
@@ -2258,6 +2260,147 @@ function resolveTimelineDisplayElements(debugData) {
     return timelines;
 }
 
+function normaliseRelationGraphDirection(value) {
+    const direction = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    return direction === 'undirected' ? 'undirected' : 'directed';
+}
+
+function normaliseRelationGraphNodeKind(value) {
+    const nodeKind = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (nodeKind) {
+        return nodeKind;
+    }
+    return 'unknown';
+}
+
+function normaliseRelationGraphDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'relation_graph_view') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const rawNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+    const nodeMap = new Map();
+    for (const rawNode of rawNodes) {
+        if (!rawNode || typeof rawNode !== 'object') {
+            continue;
+        }
+        const nodeId = typeof rawNode.node_id === 'string' ? rawNode.node_id.trim() : '';
+        if (!nodeId || nodeMap.has(nodeId)) {
+            continue;
+        }
+        const label = typeof rawNode.label === 'string' && rawNode.label.trim()
+            ? rawNode.label.trim()
+            : nodeId;
+        const nodeKind = normaliseRelationGraphNodeKind(rawNode.node_kind);
+        const group = typeof rawNode.group === 'string' && rawNode.group.trim()
+            ? rawNode.group.trim()
+            : '';
+        const taskLinks = Array.isArray(rawNode.task_links)
+            ? rawNode.task_links.map((link) => normaliseWorkflowTaskLink(link)).filter(Boolean)
+            : [];
+        nodeMap.set(nodeId, {
+            node_id: nodeId,
+            label,
+            node_kind: nodeKind,
+            group,
+            task_links: taskLinks
+        });
+        if (nodeMap.size >= RELATION_GRAPH_MAX_NODES) {
+            break;
+        }
+    }
+
+    if (!nodeMap.size) {
+        return null;
+    }
+
+    const rawEdges = Array.isArray(payload.edges) ? payload.edges : [];
+    const edges = [];
+    const seenEdgeKeys = new Set();
+    for (let index = 0; index < rawEdges.length; index += 1) {
+        const rawEdge = rawEdges[index];
+        if (!rawEdge || typeof rawEdge !== 'object') {
+            continue;
+        }
+        const source = typeof rawEdge.source === 'string' ? rawEdge.source.trim() : '';
+        const target = typeof rawEdge.target === 'string' ? rawEdge.target.trim() : '';
+        const predicate = typeof rawEdge.predicate === 'string' ? rawEdge.predicate.trim() : '';
+        if (!source || !target || !predicate) {
+            continue;
+        }
+        if (!nodeMap.has(source) || !nodeMap.has(target)) {
+            continue;
+        }
+        const direction = normaliseRelationGraphDirection(rawEdge.direction);
+        const edgeKey = `${source}|${target}|${predicate}|${direction}`;
+        if (seenEdgeKeys.has(edgeKey)) {
+            continue;
+        }
+        seenEdgeKeys.add(edgeKey);
+
+        const weightRaw = Number(rawEdge.weight);
+        const weight = Number.isFinite(weightRaw) ? weightRaw : null;
+        edges.push({
+            edge_id: typeof rawEdge.edge_id === 'string' && rawEdge.edge_id.trim()
+                ? rawEdge.edge_id.trim()
+                : `edge_${edges.length + 1}`,
+            source,
+            target,
+            predicate,
+            direction,
+            weight
+        });
+        if (edges.length >= RELATION_GRAPH_MAX_EDGES) {
+            break;
+        }
+    }
+
+    if (!edges.length) {
+        return null;
+    }
+
+    const layoutHint = typeof payload.layout_hint === 'string' && payload.layout_hint.trim()
+        ? payload.layout_hint.trim()
+        : '';
+    const focusNodeId = typeof payload.focus_node_id === 'string' && payload.focus_node_id.trim() && nodeMap.has(payload.focus_node_id.trim())
+        ? payload.focus_node_id.trim()
+        : '';
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
+        nodes: Array.from(nodeMap.values()),
+        edges,
+        layout_hint: layoutHint,
+        focus_node_id: focusNodeId,
+        truncated: rawNodes.length > nodeMap.size || rawEdges.length > edges.length
+    };
+}
+
+function resolveRelationGraphDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const relationGraphs = [];
+    for (const element of contract.elements) {
+        const relationGraphElement = normaliseRelationGraphDisplayElement(element);
+        if (!relationGraphElement) {
+            continue;
+        }
+        relationGraphs.push(relationGraphElement);
+    }
+    return relationGraphs;
+}
+
 function normaliseRelationTruthStateStatus(value) {
     const status = typeof value === 'string' ? value.trim().toLowerCase() : '';
     if (status === 'asserted' || status === 'missing_expected' || status === 'uncertain') {
@@ -2396,6 +2539,313 @@ function buildRelationTruthStateValueNode(rawValue) {
     return textValue;
 }
 
+function buildRelationGraphNodeElement(node) {
+    if (!node || typeof node !== 'object') {
+        return null;
+    }
+    const nodeId = typeof node.node_id === 'string' ? node.node_id.trim() : '';
+    if (!nodeId) {
+        return null;
+    }
+    const label = typeof node.label === 'string' && node.label.trim()
+        ? node.label.trim()
+        : nodeId;
+
+    const conceptId = _normalisePotentialConceptId(nodeId);
+    if (conceptId) {
+        const cartouche = createVontologyCartouche(conceptId, {
+            title: 'Open concept tab',
+            name: label,
+            kind: node.node_kind
+        });
+        cartouche.classList.add('chat-display-elements-relation-graph-node-cartouche');
+        cartouche.title = `${label} (${nodeId})`;
+        return cartouche;
+    }
+
+    const textNode = document.createElement('span');
+    textNode.className = 'chat-display-elements-relation-graph-node-text';
+    textNode.textContent = label;
+    textNode.title = nodeId;
+    return textNode;
+}
+
+function buildRelationGraphLayout(nodes, focusNodeId = '') {
+    const sortedNodes = [...nodes].sort((left, right) => {
+        const leftId = typeof left.node_id === 'string' ? left.node_id : '';
+        const rightId = typeof right.node_id === 'string' ? right.node_id : '';
+        if (focusNodeId && leftId === focusNodeId && rightId !== focusNodeId) {
+            return -1;
+        }
+        if (focusNodeId && rightId === focusNodeId && leftId !== focusNodeId) {
+            return 1;
+        }
+        return leftId.localeCompare(rightId);
+    });
+
+    const positionByNodeId = new Map();
+    let minX = 0;
+    let maxX = 0;
+    let minY = 0;
+    let maxY = 0;
+    const registerBounds = (x, y) => {
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+    };
+
+    if (sortedNodes.length === 1) {
+        const onlyNodeId = String(sortedNodes[0]?.node_id || '');
+        positionByNodeId.set(onlyNodeId, { x: 0, y: 0 });
+        registerBounds(0, 0);
+    } else {
+        const focusPresent = focusNodeId && sortedNodes.some((node) => node.node_id === focusNodeId);
+        let cursor = 0;
+        if (focusPresent) {
+            positionByNodeId.set(focusNodeId, { x: 0, y: 0 });
+            registerBounds(0, 0);
+            cursor = 1;
+        }
+        const ringSlotCount = 12;
+        const ringRadiusStep = 170;
+        for (let index = cursor; index < sortedNodes.length; index += 1) {
+            const node = sortedNodes[index];
+            const nodeId = String(node?.node_id || '');
+            if (!nodeId) {
+                continue;
+            }
+            const ringIndex = Math.floor((index - cursor) / ringSlotCount) + 1;
+            const slotIndex = (index - cursor) % ringSlotCount;
+            const angle = (Math.PI * 2 * slotIndex) / ringSlotCount - (Math.PI / 2);
+            const radius = ringRadiusStep * ringIndex;
+            const x = Math.cos(angle) * radius;
+            const y = Math.sin(angle) * radius;
+            positionByNodeId.set(nodeId, { x, y });
+            registerBounds(x, y);
+        }
+    }
+
+    const padding = 140;
+    const width = Math.max(480, Math.ceil(maxX - minX + padding * 2));
+    const height = Math.max(320, Math.ceil(maxY - minY + padding * 2));
+    const offsetX = -minX + padding;
+    const offsetY = -minY + padding;
+
+    const adjustedPositionByNodeId = new Map();
+    for (const [nodeId, pos] of positionByNodeId.entries()) {
+        adjustedPositionByNodeId.set(nodeId, {
+            x: pos.x + offsetX,
+            y: pos.y + offsetY
+        });
+    }
+
+    return {
+        width,
+        height,
+        positionByNodeId: adjustedPositionByNodeId
+    };
+}
+
+function buildRelationGraphScene(graphElement) {
+    const section = document.createElement('div');
+    section.className = 'chat-display-elements-relation-graph-scene-wrap';
+
+    const controls = document.createElement('div');
+    controls.className = 'chat-display-elements-relation-graph-controls';
+
+    const zoomOutButton = document.createElement('button');
+    zoomOutButton.type = 'button';
+    zoomOutButton.className = 'btn-mini';
+    zoomOutButton.textContent = 'Zoom -';
+
+    const resetButton = document.createElement('button');
+    resetButton.type = 'button';
+    resetButton.className = 'btn-mini';
+    resetButton.textContent = 'Reset';
+
+    const zoomInButton = document.createElement('button');
+    zoomInButton.type = 'button';
+    zoomInButton.className = 'btn-mini';
+    zoomInButton.textContent = 'Zoom +';
+
+    controls.appendChild(zoomOutButton);
+    controls.appendChild(resetButton);
+    controls.appendChild(zoomInButton);
+    section.appendChild(controls);
+
+    const viewport = document.createElement('div');
+    viewport.className = 'chat-display-elements-relation-graph-viewport';
+
+    const scene = document.createElement('div');
+    scene.className = 'chat-display-elements-relation-graph-scene';
+    scene.style.transformOrigin = '0 0';
+    viewport.appendChild(scene);
+    section.appendChild(viewport);
+
+    const layout = buildRelationGraphLayout(graphElement.nodes, graphElement.focus_node_id);
+    scene.style.width = `${layout.width}px`;
+    scene.style.height = `${layout.height}px`;
+
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'chat-display-elements-relation-graph-svg');
+    svg.setAttribute('viewBox', `0 0 ${layout.width} ${layout.height}`);
+    svg.setAttribute('width', String(layout.width));
+    svg.setAttribute('height', String(layout.height));
+
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+    marker.setAttribute('id', 'relation-graph-arrowhead');
+    marker.setAttribute('viewBox', '0 0 10 10');
+    marker.setAttribute('refX', '9');
+    marker.setAttribute('refY', '5');
+    marker.setAttribute('markerWidth', '6');
+    marker.setAttribute('markerHeight', '6');
+    marker.setAttribute('orient', 'auto-start-reverse');
+    const markerPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    markerPath.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+    markerPath.setAttribute('fill', '#64748b');
+    marker.appendChild(markerPath);
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+    scene.appendChild(svg);
+
+    const edgeGroupSizes = new Map();
+    for (const edge of graphElement.edges) {
+        const groupKey = `${edge.source}=>${edge.target}`;
+        edgeGroupSizes.set(groupKey, (edgeGroupSizes.get(groupKey) || 0) + 1);
+    }
+    const edgeGroupOffsets = new Map();
+
+    for (const edge of graphElement.edges) {
+        const sourcePos = layout.positionByNodeId.get(edge.source);
+        const targetPos = layout.positionByNodeId.get(edge.target);
+        if (!sourcePos || !targetPos) {
+            continue;
+        }
+
+        const groupKey = `${edge.source}=>${edge.target}`;
+        const groupSize = edgeGroupSizes.get(groupKey) || 1;
+        const edgeOrdinal = edgeGroupOffsets.get(groupKey) || 0;
+        edgeGroupOffsets.set(groupKey, edgeOrdinal + 1);
+
+        const offsetIndex = edgeOrdinal - ((groupSize - 1) / 2);
+        const curveOffset = offsetIndex * 16;
+
+        const edgePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        edgePath.setAttribute('class', 'chat-display-elements-relation-graph-edge');
+
+        const dx = targetPos.x - sourcePos.x;
+        const dy = targetPos.y - sourcePos.y;
+        const distance = Math.hypot(dx, dy) || 1;
+        const nx = -dy / distance;
+        const ny = dx / distance;
+        const cx = ((sourcePos.x + targetPos.x) / 2) + (nx * curveOffset);
+        const cy = ((sourcePos.y + targetPos.y) / 2) + (ny * curveOffset);
+        edgePath.setAttribute('d', `M ${sourcePos.x} ${sourcePos.y} Q ${cx} ${cy} ${targetPos.x} ${targetPos.y}`);
+        if (edge.direction !== 'undirected') {
+            edgePath.setAttribute('marker-end', 'url(#relation-graph-arrowhead)');
+        }
+        svg.appendChild(edgePath);
+
+        const mx = (0.25 * sourcePos.x) + (0.5 * cx) + (0.25 * targetPos.x);
+        const my = (0.25 * sourcePos.y) + (0.5 * cy) + (0.25 * targetPos.y);
+        const label = document.createElement('span');
+        label.className = 'chat-display-elements-relation-graph-edge-label';
+        label.textContent = edge.predicate;
+        label.style.left = `${mx}px`;
+        label.style.top = `${my}px`;
+        scene.appendChild(label);
+    }
+
+    for (const node of graphElement.nodes) {
+        const nodePos = layout.positionByNodeId.get(node.node_id);
+        if (!nodePos) {
+            continue;
+        }
+        const nodeElement = buildRelationGraphNodeElement(node);
+        if (!nodeElement) {
+            continue;
+        }
+        nodeElement.classList.add('chat-display-elements-relation-graph-node');
+        if (graphElement.focus_node_id && node.node_id === graphElement.focus_node_id) {
+            nodeElement.classList.add('focus');
+        }
+        nodeElement.style.left = `${nodePos.x}px`;
+        nodeElement.style.top = `${nodePos.y}px`;
+        scene.appendChild(nodeElement);
+    }
+
+    const zoomState = {
+        scale: 1,
+        tx: 0,
+        ty: 0,
+        dragging: false,
+        startX: 0,
+        startY: 0
+    };
+
+    const applyTransform = () => {
+        scene.style.transform = `translate(${zoomState.tx}px, ${zoomState.ty}px) scale(${zoomState.scale})`;
+    };
+
+    const updateScale = (nextScale) => {
+        zoomState.scale = Math.min(2.4, Math.max(0.45, nextScale));
+        applyTransform();
+    };
+
+    zoomOutButton.addEventListener('click', () => updateScale(zoomState.scale - 0.12));
+    zoomInButton.addEventListener('click', () => updateScale(zoomState.scale + 0.12));
+    resetButton.addEventListener('click', () => {
+        zoomState.scale = 1;
+        zoomState.tx = 0;
+        zoomState.ty = 0;
+        applyTransform();
+    });
+
+    viewport.addEventListener('wheel', (event) => {
+        event.preventDefault();
+        const delta = event.deltaY < 0 ? 0.12 : -0.12;
+        updateScale(zoomState.scale + delta);
+    });
+
+    viewport.addEventListener('mousedown', (event) => {
+        if (event.button !== 0) {
+            return;
+        }
+        const target = event.target;
+        if (target instanceof HTMLElement && target.closest('.chat-display-elements-relation-graph-node')) {
+            return;
+        }
+        zoomState.dragging = true;
+        zoomState.startX = event.clientX - zoomState.tx;
+        zoomState.startY = event.clientY - zoomState.ty;
+        viewport.classList.add('is-dragging');
+    });
+
+    viewport.addEventListener('mousemove', (event) => {
+        if (!zoomState.dragging) {
+            return;
+        }
+        zoomState.tx = event.clientX - zoomState.startX;
+        zoomState.ty = event.clientY - zoomState.startY;
+        applyTransform();
+    });
+
+    const stopDragging = () => {
+        if (!zoomState.dragging) {
+            return;
+        }
+        zoomState.dragging = false;
+        viewport.classList.remove('is-dragging');
+    };
+    viewport.addEventListener('mouseup', stopDragging);
+    viewport.addEventListener('mouseleave', stopDragging);
+
+    applyTransform();
+    return section;
+}
+
 function renderTableDisplayElementsIntoContainer(container, debugData) {
     if (!container || typeof container.querySelectorAll !== 'function') {
         return;
@@ -2419,6 +2869,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     const taskViewElements = resolveTaskViewDisplayElements(debugData);
     const kanbanElements = resolveKanbanDisplayElements(debugData);
     const timelineElements = resolveTimelineDisplayElements(debugData);
+    const relationGraphElements = resolveRelationGraphDisplayElements(debugData);
     const relationTruthStateElements = resolveRelationTruthStateDisplayElements(debugData);
     if (
         !tableElements.length
@@ -2426,6 +2877,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         && !taskViewElements.length
         && !kanbanElements.length
         && !timelineElements.length
+        && !relationGraphElements.length
         && !relationTruthStateElements.length
     ) {
         return;
@@ -2962,6 +3414,39 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         root.appendChild(section);
     });
 
+    relationGraphElements.forEach((relationGraphElement, relationGraphIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-relation-graph-section';
+        section.style.cssText = (
+            tableElements.length > 0
+            || workflowElements.length > 0
+            || taskViewElements.length > 0
+            || kanbanElements.length > 0
+            || timelineElements.length > 0
+            || relationGraphIndex > 0
+        ) ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-relation-graph-title';
+        title.textContent = relationGraphElements.length > 1
+            ? `Relation graph view ${relationGraphIndex + 1}`
+            : 'Relation graph view';
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const summary = document.createElement('div');
+        summary.className = 'chat-display-elements-relation-graph-summary';
+        summary.textContent = `${relationGraphElement.nodes.length} node${relationGraphElement.nodes.length === 1 ? '' : 's'}, ${relationGraphElement.edges.length} edge${relationGraphElement.edges.length === 1 ? '' : 's'}`;
+        if (relationGraphElement.truncated) {
+            summary.textContent += ' (truncated)';
+        }
+        summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+        section.appendChild(summary);
+
+        section.appendChild(buildRelationGraphScene(relationGraphElement));
+        root.appendChild(section);
+    });
+
     relationTruthStateElements.forEach((relationElement, relationIndex) => {
         const section = document.createElement('section');
         section.className = 'chat-display-elements-relation-truth-state-section';
@@ -2971,6 +3456,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || taskViewElements.length > 0
             || kanbanElements.length > 0
             || timelineElements.length > 0
+            || relationGraphElements.length > 0
             || relationIndex > 0
         ) ? 'margin-top: 10px;' : '';
 
@@ -3211,7 +3697,8 @@ function extractRenderPlanSourceSummary(
     screenWorkflowElements,
     screenTaskViewElements,
     screenKanbanElements,
-    screenTimelineElements
+    screenTimelineElements,
+    screenRelationGraphElements
 ) {
     const sourceTools = [];
     const seenSourceTools = new Set();
@@ -3284,6 +3771,12 @@ function extractRenderPlanSourceSummary(
         }
         addProvenance(timelineElement.provenance);
     }
+    for (const relationGraphElement of screenRelationGraphElements) {
+        if (!relationGraphElement || typeof relationGraphElement !== 'object') {
+            continue;
+        }
+        addProvenance(relationGraphElement.provenance);
+    }
 
     return {
         source_tools: sourceTools,
@@ -3325,13 +3818,17 @@ function buildRenderPlanMetadataSummary(renderPlan) {
     const screenTimelineElements = Array.isArray(renderPlan.screen_timeline_elements)
         ? renderPlan.screen_timeline_elements.filter(item => item && typeof item === 'object')
         : [];
+    const screenRelationGraphElements = Array.isArray(renderPlan.screen_relation_graph_elements)
+        ? renderPlan.screen_relation_graph_elements.filter(item => item && typeof item === 'object')
+        : [];
 
     const sourceSummary = extractRenderPlanSourceSummary(
         screenTableRecordSets,
         screenWorkflowElements,
         screenTaskViewElements,
         screenKanbanElements,
-        screenTimelineElements
+        screenTimelineElements,
+        screenRelationGraphElements
     );
 
     return {
@@ -3361,6 +3858,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screen_task_view_element_count: screenTaskViewElements.length,
         screen_kanban_element_count: screenKanbanElements.length,
         screen_timeline_element_count: screenTimelineElements.length,
+        screen_relation_graph_element_count: screenRelationGraphElements.length,
         unsupported_selected_renderer_types: unsupportedRendererTypes,
         resolver_suggestions: resolverSuggestions
     };
@@ -3425,6 +3923,7 @@ function buildRenderPlanSummaryHtml(renderPlanSummary) {
     addScalar('Screen task views', renderPlanSummary.screen_task_view_element_count);
     addScalar('Screen kanban elements', renderPlanSummary.screen_kanban_element_count);
     addScalar('Screen timeline elements', renderPlanSummary.screen_timeline_element_count);
+    addScalar('Screen relation graph elements', renderPlanSummary.screen_relation_graph_element_count);
     addList('Source tools', renderPlanSummary.source_tools);
     addList('Record families', renderPlanSummary.record_families);
     addList('Unsupported renderer types', renderPlanSummary.unsupported_selected_renderer_types);

@@ -18,6 +18,7 @@ ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
         "text_block",
         "json_block",
         "kanban_view",
+        "relation_graph_view",
         "table",
         "relation_truth_state",
         "timeline",
@@ -28,6 +29,9 @@ ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
 RELATION_TRUTH_STATE_GROUP_STATUSES = frozenset(
     {"asserted", "missing_expected", "uncertain"}
 )
+RELATION_GRAPH_ALLOWED_DIRECTIONS = frozenset({"directed", "undirected"})
+RELATION_GRAPH_MAX_NODES = 200
+RELATION_GRAPH_MAX_EDGES = 400
 
 _JSON_FENCE_PATTERN = re.compile(
     r"```json\s*\n(?P<body>[\s\S]*?)\n```",
@@ -581,6 +585,135 @@ def validate_turn_display_elements(
                         errors.append(
                             f"{assertion_label}.is_asserted must be a boolean"
                         )
+        elif element_type == "relation_graph_view":
+            nodes = payload.get("nodes")
+            if not isinstance(nodes, list) or not nodes:
+                errors.append(f"{label}.payload.nodes must be a non-empty list")
+                nodes = []
+            if isinstance(nodes, list) and len(nodes) > RELATION_GRAPH_MAX_NODES:
+                errors.append(
+                    f"{label}.payload.nodes exceeds max size {RELATION_GRAPH_MAX_NODES}"
+                )
+
+            valid_node_ids: set[str] = set()
+            for node_index, node in enumerate(nodes):
+                node_label = f"{label}.payload.nodes[{node_index}]"
+                if not isinstance(node, Mapping):
+                    errors.append(f"{node_label} must be a mapping")
+                    continue
+
+                node_id = node.get("node_id")
+                if not isinstance(node_id, str) or not node_id.strip():
+                    errors.append(f"{node_label}.node_id must be a non-empty string")
+                    continue
+                if node_id in valid_node_ids:
+                    errors.append(f"{node_label}.node_id must be unique")
+                    continue
+                valid_node_ids.add(node_id)
+
+                display_label = node.get("label")
+                if not isinstance(display_label, str) or not display_label.strip():
+                    errors.append(f"{node_label}.label must be a non-empty string")
+
+                node_kind = node.get("node_kind")
+                if not isinstance(node_kind, str) or not node_kind.strip():
+                    errors.append(f"{node_label}.node_kind must be a non-empty string")
+
+                group = node.get("group")
+                if group is not None and (
+                    not isinstance(group, str) or not group.strip()
+                ):
+                    errors.append(
+                        f"{node_label}.group must be a non-empty string when provided"
+                    )
+
+                _validate_task_links(
+                    links=node.get("task_links"),
+                    label=f"{node_label}.task_links",
+                    errors=errors,
+                )
+
+            edges = payload.get("edges")
+            if not isinstance(edges, list):
+                errors.append(f"{label}.payload.edges must be a list")
+                edges = []
+            if isinstance(edges, list) and len(edges) > RELATION_GRAPH_MAX_EDGES:
+                errors.append(
+                    f"{label}.payload.edges exceeds max size {RELATION_GRAPH_MAX_EDGES}"
+                )
+
+            seen_edge_ids: set[str] = set()
+            for edge_index, edge in enumerate(edges):
+                edge_label = f"{label}.payload.edges[{edge_index}]"
+                if not isinstance(edge, Mapping):
+                    errors.append(f"{edge_label} must be a mapping")
+                    continue
+
+                edge_id = edge.get("edge_id")
+                if not isinstance(edge_id, str) or not edge_id.strip():
+                    errors.append(f"{edge_label}.edge_id must be a non-empty string")
+                elif edge_id in seen_edge_ids:
+                    errors.append(f"{edge_label}.edge_id must be unique")
+                else:
+                    seen_edge_ids.add(edge_id)
+
+                source_node_id = edge.get("source")
+                if not isinstance(source_node_id, str) or not source_node_id.strip():
+                    errors.append(f"{edge_label}.source must be a non-empty string")
+                elif valid_node_ids and source_node_id not in valid_node_ids:
+                    errors.append(
+                        f"{edge_label}.source must reference a declared node"
+                    )
+
+                target_node_id = edge.get("target")
+                if not isinstance(target_node_id, str) or not target_node_id.strip():
+                    errors.append(f"{edge_label}.target must be a non-empty string")
+                elif valid_node_ids and target_node_id not in valid_node_ids:
+                    errors.append(
+                        f"{edge_label}.target must reference a declared node"
+                    )
+
+                predicate = edge.get("predicate")
+                if not isinstance(predicate, str) or not predicate.strip():
+                    errors.append(f"{edge_label}.predicate must be a non-empty string")
+
+                direction = edge.get("direction")
+                if direction is not None:
+                    if not isinstance(direction, str) or direction.strip() not in (
+                        RELATION_GRAPH_ALLOWED_DIRECTIONS
+                    ):
+                        errors.append(
+                            f"{edge_label}.direction must be one of {sorted(RELATION_GRAPH_ALLOWED_DIRECTIONS)} when provided"
+                        )
+
+                weight = edge.get("weight")
+                if weight is not None and isinstance(weight, bool):
+                    errors.append(
+                        f"{edge_label}.weight must be numeric when provided"
+                    )
+                elif weight is not None and not isinstance(weight, (int, float)):
+                    errors.append(
+                        f"{edge_label}.weight must be numeric when provided"
+                    )
+
+            layout_hint = payload.get("layout_hint")
+            if layout_hint is not None and (
+                not isinstance(layout_hint, str) or not layout_hint.strip()
+            ):
+                errors.append(
+                    f"{label}.payload.layout_hint must be a non-empty string when provided"
+                )
+
+            focus_node_id = payload.get("focus_node_id")
+            if focus_node_id is not None:
+                if not isinstance(focus_node_id, str) or not focus_node_id.strip():
+                    errors.append(
+                        f"{label}.payload.focus_node_id must be a non-empty string when provided"
+                    )
+                elif valid_node_ids and focus_node_id not in valid_node_ids:
+                    errors.append(
+                        f"{label}.payload.focus_node_id must reference a declared node"
+                    )
         elif element_type == "timeline":
             items = payload.get("items")
             if not isinstance(items, list) or not items:
@@ -1263,6 +1396,85 @@ def _normalise_supplied_screen_kanban_views(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_relation_graph_views(
+    screen_relation_graph_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen relation graph specs."""
+    if (
+        not isinstance(screen_relation_graph_elements, Sequence)
+        or isinstance(screen_relation_graph_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_relation_graph_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "nodes" in raw_spec and "edges" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = _normalise_text(metadata.get("intent")) or "relation_graph_view"
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_pan_zoom": True,
+                "supports_clickthrough": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_relation_graph_view_probe_{index}",
+                        "element_type": "relation_graph_view",
+                        "channel": "screen",
+                        "order": 43,
+                        "intent": intent,
+                        "payload": dict(payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def _normalise_supplied_screen_relation_truth_states(
     screen_relation_truth_state_elements: Sequence[Mapping[str, Any]] | None,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -1354,6 +1566,7 @@ def build_turn_display_elements(
     screen_task_view_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_kanban_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_timeline_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_relation_graph_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_relation_truth_state_elements: Sequence[Mapping[str, Any]] | None = None,
     supplemental_reason_codes: Sequence[str] | None = None,
     required_screen_json_fence: str | None = None,
@@ -1516,6 +1729,16 @@ def build_turn_display_elements(
     if supplied_timelines_dropped:
         reason_codes.append("screen_structured_timelines_invalid_dropped")
 
+    supplied_screen_relation_graph_views, supplied_relation_graph_views_dropped = (
+        _normalise_supplied_screen_relation_graph_views(
+            screen_relation_graph_elements
+        )
+    )
+    if supplied_screen_relation_graph_views:
+        reason_codes.append("screen_structured_relation_graph_views_supplied")
+    if supplied_relation_graph_views_dropped:
+        reason_codes.append("screen_structured_relation_graph_views_invalid_dropped")
+
     supplied_screen_relation_truth_states, supplied_relation_truth_states_dropped = (
         _normalise_supplied_screen_relation_truth_states(
             screen_relation_truth_state_elements
@@ -1654,6 +1877,27 @@ def build_turn_display_elements(
             }
         )
 
+    relation_graph_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_relation_graph_views, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_relation_graph_view")
+        provenance.setdefault("relation_graph_index", index)
+        relation_graph_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_relation_graph_view_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "relation_graph_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_pan_zoom": True,
+                    "supports_clickthrough": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     relation_truth_state_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_relation_truth_states, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -1684,6 +1928,7 @@ def build_turn_display_elements(
             *task_view_specs,
             *kanban_specs,
             *timeline_specs,
+            *relation_graph_specs,
             *relation_truth_state_specs,
         ]
         if isinstance(spec.get("order"), int)
@@ -1799,6 +2044,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "kanban_view",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_relation_graph_order = 43
+    for spec in relation_graph_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_relation_graph_order in used_orders:
+                next_relation_graph_order += 1
+            order = next_relation_graph_order
+            used_orders.add(order)
+            next_relation_graph_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "relation_graph_view",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),

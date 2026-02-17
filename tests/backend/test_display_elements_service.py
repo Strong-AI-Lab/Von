@@ -587,6 +587,106 @@ def test_build_turn_display_elements_drops_invalid_supplied_timelines() -> None:
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_relation_graph_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Relation graph response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Relation graph response",
+            "spoken": None,
+        },
+        screen_relation_graph_elements=[
+            {
+                "element_id": "screen_relation_graph_view",
+                "intent": "relation_graph_view",
+                "payload": {
+                    "nodes": [
+                        {
+                            "node_id": "#V#michael_witbrock",
+                            "label": "Michael Witbrock",
+                            "node_kind": "individual",
+                        },
+                        {
+                            "node_id": "#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne",
+                            "label": "Panel 4",
+                            "node_kind": "individual",
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": "edge_1",
+                            "source": "#V#michael_witbrock",
+                            "target": "#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne",
+                            "predicate": "#V#panelist_in_event",
+                            "direction": "directed",
+                        }
+                    ],
+                    "focus_node_id": "#V#michael_witbrock",
+                },
+            }
+        ],
+    )
+
+    relation_graph_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "relation_graph_view"
+    ]
+    assert len(relation_graph_elements) == 1
+    relation_graph_element = relation_graph_elements[0]
+    assert relation_graph_element["element_id"] == "screen_relation_graph_view"
+    assert relation_graph_element["payload"]["nodes"][0]["node_id"] == "#V#michael_witbrock"
+    assert relation_graph_element["payload"]["edges"][0]["predicate"] == "#V#panelist_in_event"
+    assert (
+        "screen_structured_relation_graph_views_supplied" in contract["reason_codes"]
+    )
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_relation_graph_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Relation graph response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Relation graph response",
+            "spoken": None,
+        },
+        screen_relation_graph_elements=[
+            {
+                "payload": {
+                    "nodes": [
+                        {
+                            "node_id": "#V#michael_witbrock",
+                            "label": "Michael Witbrock",
+                            "node_kind": "individual",
+                        }
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": "edge_1",
+                            "source": "#V#michael_witbrock",
+                            "target": "#V#missing_node",
+                            "predicate": "#V#panelist_in_event",
+                        }
+                    ],
+                }
+            }
+        ],
+    )
+
+    relation_graph_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "relation_graph_view"
+    ]
+    assert relation_graph_elements == []
+    assert (
+        "screen_structured_relation_graph_views_invalid_dropped"
+        in contract["reason_codes"]
+    )
+    assert contract["validation"]["valid"] is True
+
+
 def test_build_turn_display_elements_includes_supplied_relation_truth_state_elements() -> None:
     contract = build_turn_display_elements(
         response_text="Truth state summary",
@@ -864,6 +964,49 @@ def test_validate_turn_display_elements_rejects_kanban_card_without_column() -> 
 
     assert valid is False
     assert any("column_id must reference a declared column" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_invalid_relation_graph_shape() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_relation_graph_view",
+                    "element_type": "relation_graph_view",
+                    "channel": "screen",
+                    "order": 43,
+                    "intent": "relation_graph_view",
+                    "payload": {
+                        "nodes": [
+                            {
+                                "node_id": "#V#michael_witbrock",
+                                "label": "Michael Witbrock",
+                                "node_kind": "individual",
+                            }
+                        ],
+                        "edges": [
+                            {
+                                "edge_id": "edge_1",
+                                "source": "#V#michael_witbrock",
+                                "target": "#V#missing_node",
+                                "predicate": "#V#panelist_in_event",
+                                "direction": "sideways",
+                            }
+                        ],
+                        "focus_node_id": "#V#missing_node",
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any("target must reference a declared node" in message for message in errors)
+    assert any("direction must be one of" in message for message in errors)
+    assert any("focus_node_id must reference a declared node" in message for message in errors)
 
 
 def test_validate_turn_display_elements_rejects_invalid_relation_truth_state_shape() -> None:

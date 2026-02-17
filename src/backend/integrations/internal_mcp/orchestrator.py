@@ -11863,6 +11863,445 @@ class InternalMCPChatOrchestrator:
                 }
             ]
 
+        def _extract_renderer_screen_relation_graph_elements(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+            focus_concept_id: Any = None,
+        ) -> list[dict[str, Any]]:
+            """Derive relation graph payloads from concept/relation tool outputs."""
+
+            tool_payloads = list(_iter_renderer_tool_result_payloads(tool_messages))
+            if not tool_payloads:
+                return []
+
+            max_nodes = 120
+            max_edges = 240
+
+            source_tools: list[str] = []
+            seen_source_tools: set[str] = set()
+
+            nodes_by_id: dict[str, dict[str, Any]] = {}
+            text_node_id_by_value: dict[str, str] = {}
+            edges: list[dict[str, Any]] = []
+            seen_edge_keys: set[tuple[str, str, str, str]] = set()
+            node_cap_hit = False
+            edge_cap_hit = False
+
+            def _register_source_tool(tool_name: str) -> None:
+                if tool_name in seen_source_tools:
+                    return
+                seen_source_tools.add(tool_name)
+                source_tools.append(tool_name)
+
+            def _is_concept_node_id(value: str) -> bool:
+                return bool(_renderer_concept_id_pattern.match(value))
+
+            def _coerce_text(value: Any) -> str | None:
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    return cleaned or None
+                if value is None:
+                    return None
+                cleaned = str(value).strip()
+                return cleaned or None
+
+            def _text_node_id(value: str) -> str:
+                existing = text_node_id_by_value.get(value)
+                if existing:
+                    return existing
+                slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+                slug = slug[:40] or "value"
+                candidate = f"text:{slug}"
+                suffix = 2
+                while candidate in nodes_by_id:
+                    candidate = f"text:{slug}_{suffix}"
+                    suffix += 1
+                text_node_id_by_value[value] = candidate
+                return candidate
+
+            def _merge_task_links(
+                node_entry: dict[str, Any], task_links: Sequence[dict[str, str]]
+            ) -> None:
+                if not task_links:
+                    return
+                existing_links = node_entry.get("task_links")
+                if not isinstance(existing_links, list):
+                    node_entry["task_links"] = list(task_links)
+                    return
+                seen_targets: set[tuple[str, str]] = set()
+                for link in existing_links:
+                    if not isinstance(link, Mapping):
+                        continue
+                    seen_targets.add(
+                        (str(link.get("link_type") or ""), str(link.get("target_id") or ""))
+                    )
+                for link in task_links:
+                    key = (
+                        str(link.get("link_type") or ""),
+                        str(link.get("target_id") or ""),
+                    )
+                    if key in seen_targets:
+                        continue
+                    seen_targets.add(key)
+                    existing_links.append(dict(link))
+
+            def _ensure_node(
+                raw_value: Any,
+                *,
+                label: Any = None,
+                node_kind: Any = None,
+                group: Any = None,
+                task_link_values: Sequence[Any] = (),
+            ) -> str | None:
+                nonlocal node_cap_hit
+
+                value_text = _coerce_text(raw_value)
+                if not value_text:
+                    return None
+
+                if _is_concept_node_id(value_text):
+                    node_id = value_text
+                else:
+                    node_id = _text_node_id(value_text)
+
+                if node_id in nodes_by_id:
+                    task_links = _collect_renderer_task_links(*task_link_values)
+                    if task_links:
+                        _merge_task_links(nodes_by_id[node_id], task_links)
+                    return node_id
+
+                if len(nodes_by_id) >= max_nodes:
+                    node_cap_hit = True
+                    return None
+
+                label_text = _coerce_text(label) or value_text
+                if len(label_text) > 120:
+                    label_text = f"{label_text[:117]}..."
+
+                kind_text = _coerce_text(node_kind)
+                if not kind_text:
+                    kind_text = "concept" if _is_concept_node_id(value_text) else "text"
+                kind_text = kind_text.lower()
+
+                node_entry: dict[str, Any] = {
+                    "node_id": node_id,
+                    "label": label_text,
+                    "node_kind": kind_text,
+                }
+                group_text = _coerce_text(group)
+                if group_text:
+                    node_entry["group"] = group_text
+
+                task_links = _collect_renderer_task_links(*task_link_values)
+                if task_links:
+                    node_entry["task_links"] = task_links
+
+                nodes_by_id[node_id] = node_entry
+                return node_id
+
+            def _add_edge(
+                source_id: str | None,
+                target_id: str | None,
+                predicate: Any,
+                *,
+                direction: Any = "directed",
+                weight: Any = None,
+            ) -> None:
+                nonlocal edge_cap_hit
+
+                if not source_id or not target_id:
+                    return
+                predicate_text = _coerce_text(predicate)
+                if not predicate_text:
+                    return
+
+                direction_text = (_coerce_text(direction) or "directed").lower()
+                if direction_text not in {"directed", "undirected"}:
+                    direction_text = "directed"
+
+                edge_key = (source_id, target_id, predicate_text, direction_text)
+                if edge_key in seen_edge_keys:
+                    return
+
+                if len(edges) >= max_edges:
+                    edge_cap_hit = True
+                    return
+
+                edge_entry: dict[str, Any] = {
+                    "edge_id": f"edge_{len(edges) + 1}",
+                    "source": source_id,
+                    "target": target_id,
+                    "predicate": predicate_text,
+                    "direction": direction_text,
+                }
+                if isinstance(weight, (int, float)) and not isinstance(weight, bool):
+                    edge_entry["weight"] = float(weight)
+
+                seen_edge_keys.add(edge_key)
+                edges.append(edge_entry)
+
+            focus_node_text = _coerce_text(focus_concept_id)
+            focus_node_id = _ensure_node(
+                focus_node_text,
+                node_kind="concept",
+                group="focus",
+            )
+
+            for tool_name, tool_payload in tool_payloads:
+                has_graph_data = False
+
+                direct_nodes = _mapping_list(tool_payload.get("nodes"), limit=max_nodes * 3)
+                direct_edges = _mapping_list(tool_payload.get("edges"), limit=max_edges * 3)
+                if direct_nodes and direct_edges:
+                    _register_source_tool(tool_name)
+                    has_graph_data = True
+
+                    for node in direct_nodes:
+                        node_id = _first_text(
+                            node.get("node_id"),
+                            node.get("concept_id"),
+                            node.get("id"),
+                            node.get("label"),
+                        )
+                        _ensure_node(
+                            node_id,
+                            label=_first_text(node.get("label"), node.get("name"), node_id),
+                            node_kind=_first_text(node.get("node_kind"), node.get("kind")),
+                            group=_first_text(node.get("group")),
+                            task_link_values=(node,),
+                        )
+
+                    for edge in direct_edges:
+                        source_id = _ensure_node(
+                            _first_text(
+                                edge.get("source"),
+                                edge.get("source_node_id"),
+                                edge.get("from"),
+                            ),
+                            task_link_values=(edge,),
+                        )
+                        target_id = _ensure_node(
+                            _first_text(
+                                edge.get("target"),
+                                edge.get("target_node_id"),
+                                edge.get("to"),
+                            ),
+                            task_link_values=(edge,),
+                        )
+                        _add_edge(
+                            source_id,
+                            target_id,
+                            _first_text(edge.get("predicate"), edge.get("label")),
+                            direction=_first_text(edge.get("direction")),
+                            weight=edge.get("weight"),
+                        )
+
+                if tool_name == "get_predicate_extent":
+                    extent_rows = _mapping_list(tool_payload.get("extent"), limit=max_edges * 3)
+                    if extent_rows:
+                        _register_source_tool(tool_name)
+                        has_graph_data = True
+
+                    predicate_fallback = _first_text(
+                        tool_payload.get("predicate_concept_id"),
+                        tool_payload.get("concept_id"),
+                    )
+                    for row in extent_rows:
+                        subject = _coerce_text(
+                            _first_text(row.get("subject"), row.get("arg1"))
+                        )
+                        object_value = _coerce_text(row.get("object"))
+                        if not object_value:
+                            object_value = _coerce_text(row.get("arg2"))
+                        predicate = _first_text(row.get("predicate"), predicate_fallback)
+                        source_id = _ensure_node(
+                            subject,
+                            task_link_values=(row, tool_payload),
+                        )
+                        target_id = _ensure_node(
+                            object_value,
+                            task_link_values=(row, tool_payload),
+                        )
+                        _add_edge(source_id, target_id, predicate, direction="directed")
+
+                concept_id = _first_text(tool_payload.get("concept_id"), tool_payload.get("id"))
+                relationships = (
+                    cast(Mapping[str, Any], tool_payload.get("relationships"))
+                    if isinstance(tool_payload.get("relationships"), Mapping)
+                    else {}
+                )
+                if concept_id and relationships:
+                    _register_source_tool(tool_name)
+                    has_graph_data = True
+                    source_id = _ensure_node(
+                        concept_id,
+                        node_kind="concept",
+                        group=(
+                            "focus"
+                            if focus_node_text and concept_id == focus_node_text
+                            else None
+                        ),
+                        task_link_values=(tool_payload,),
+                    )
+                    for predicate_name, raw_targets in relationships.items():
+                        predicate = _coerce_text(predicate_name)
+                        if not predicate:
+                            continue
+                        if isinstance(raw_targets, (list, tuple)):
+                            target_values = list(raw_targets)
+                        else:
+                            target_values = [raw_targets]
+                        for raw_target in target_values:
+                            if isinstance(raw_target, Mapping):
+                                target_value = _first_text(
+                                    raw_target.get("target"),
+                                    raw_target.get("arg2"),
+                                    raw_target.get("concept_id"),
+                                    raw_target.get("id"),
+                                    raw_target.get("value"),
+                                )
+                                target_label = _first_text(
+                                    raw_target.get("label"),
+                                    raw_target.get("name"),
+                                )
+                            else:
+                                target_value = _coerce_text(raw_target)
+                                target_label = None
+                            target_id = _ensure_node(
+                                target_value,
+                                label=target_label,
+                                task_link_values=(raw_target, tool_payload),
+                            )
+                            _add_edge(source_id, target_id, predicate, direction="directed")
+
+                relation_list_keys = (
+                    "relations",
+                    "assertions",
+                    "rows",
+                    "results",
+                )
+                for relation_key in relation_list_keys:
+                    relation_rows = _mapping_list(
+                        tool_payload.get(relation_key),
+                        limit=max_edges * 3,
+                    )
+                    if not relation_rows:
+                        continue
+                    extracted_any = False
+                    for row in relation_rows:
+                        predicate = _first_text(
+                            row.get("predicate"),
+                            row.get("predicate_id"),
+                            row.get("relation"),
+                        )
+                        source_value = _first_text(
+                            row.get("arg1"),
+                            row.get("subject"),
+                            row.get("source"),
+                            row.get("from"),
+                        )
+                        target_value = _coerce_text(row.get("object"))
+                        if not target_value:
+                            target_value = _first_text(
+                                row.get("arg2"),
+                                row.get("target"),
+                                row.get("to"),
+                            )
+                        if not (predicate and source_value and target_value):
+                            continue
+                        extracted_any = True
+                        source_id = _ensure_node(
+                            source_value,
+                            task_link_values=(row, tool_payload),
+                        )
+                        target_id = _ensure_node(
+                            target_value,
+                            task_link_values=(row, tool_payload),
+                        )
+                        _add_edge(
+                            source_id,
+                            target_id,
+                            predicate,
+                            direction=_first_text(row.get("direction")),
+                            weight=row.get("weight"),
+                        )
+                    if extracted_any:
+                        _register_source_tool(tool_name)
+                        has_graph_data = True
+                        break
+
+                if has_graph_data and (node_cap_hit or edge_cap_hit):
+                    break
+
+            if not nodes_by_id or not edges:
+                return []
+
+            if focus_node_text and _is_concept_node_id(focus_node_text):
+                resolved_focus_node_id = focus_node_text
+            else:
+                resolved_focus_node_id = focus_node_id
+            if resolved_focus_node_id and resolved_focus_node_id not in nodes_by_id:
+                resolved_focus_node_id = None
+
+            ordered_nodes = sorted(
+                nodes_by_id.values(),
+                key=lambda node: (
+                    0
+                    if resolved_focus_node_id
+                    and str(node.get("node_id") or "") == resolved_focus_node_id
+                    else 1,
+                    str(node.get("node_id") or ""),
+                ),
+            )
+            ordered_edges = sorted(
+                edges,
+                key=lambda edge: (
+                    str(edge.get("source") or ""),
+                    str(edge.get("target") or ""),
+                    str(edge.get("predicate") or ""),
+                    str(edge.get("direction") or ""),
+                ),
+            )
+            for index, edge in enumerate(ordered_edges, start=1):
+                edge["edge_id"] = f"edge_{index}"
+
+            payload: dict[str, Any] = {
+                "nodes": ordered_nodes,
+                "edges": ordered_edges,
+                "layout_hint": (
+                    "radial_focus"
+                    if resolved_focus_node_id
+                    else "force_layers"
+                ),
+            }
+            if resolved_focus_node_id:
+                payload["focus_node_id"] = resolved_focus_node_id
+
+            provenance: dict[str, Any] = {
+                "source": "tool_result_relation_graph",
+                "source_tools": source_tools,
+                "record_family": "relation_graph",
+                "node_count": len(ordered_nodes),
+                "edge_count": len(ordered_edges),
+            }
+            if node_cap_hit or edge_cap_hit:
+                provenance["truncated"] = True
+                provenance["node_cap"] = max_nodes
+                provenance["edge_cap"] = max_edges
+
+            return [
+                {
+                    "element_id": "screen_relation_graph_view",
+                    "intent": "relation_graph_view",
+                    "payload": payload,
+                    "constraints": {
+                        "supports_pan_zoom": True,
+                        "supports_clickthrough": True,
+                    },
+                    "provenance": provenance,
+                }
+            ]
+
         def _build_renderer_request_payload(
             screen_text: Any,
             *,
@@ -11943,6 +12382,9 @@ class InternalMCPChatOrchestrator:
             "tabular": ("table",),
             "kanban": ("kanban_view",),
             "kanban_view": ("kanban_view",),
+            "graph": ("relation_graph_view",),
+            "relation_graph": ("relation_graph_view",),
+            "relation_graph_view": ("relation_graph_view",),
             "task": ("task_view",),
             "task_view": ("task_view",),
             "timeline": ("timeline",),
@@ -12018,6 +12460,7 @@ class InternalMCPChatOrchestrator:
             include_task_view_elements = "task_view" in selected_families
             include_kanban_elements = "kanban_view" in selected_families
             include_timeline_elements = "timeline" in selected_families
+            include_relation_graph_elements = "relation_graph_view" in selected_families
             decision["screen_element_mapping_mode"] = mapping_mode
             decision["screen_element_reason_codes"] = list(reason_codes)
             decision["screen_element_families"] = sorted(selected_families)
@@ -12027,6 +12470,7 @@ class InternalMCPChatOrchestrator:
                 "task_view": include_task_view_elements,
                 "kanban_view": include_kanban_elements,
                 "timeline": include_timeline_elements,
+                "relation_graph_view": include_relation_graph_elements,
             }
             if unsupported_renderer_types:
                 decision["unsupported_selected_renderer_types"] = list(
@@ -12081,6 +12525,23 @@ class InternalMCPChatOrchestrator:
                     decision["screen_timeline_elements"] = screen_timeline_elements
                     decision["screen_timeline_element_count"] = len(
                         screen_timeline_elements
+                    )
+
+            if include_relation_graph_elements:
+                screen_relation_graph_elements = (
+                    _extract_renderer_screen_relation_graph_elements(
+                        tool_messages=tool_messages,
+                        focus_concept_id=decision.get(
+                            "request_payload_selected_concept_id"
+                        ),
+                    )
+                )
+                if screen_relation_graph_elements:
+                    decision["screen_relation_graph_elements"] = (
+                        screen_relation_graph_elements
+                    )
+                    decision["screen_relation_graph_element_count"] = len(
+                        screen_relation_graph_elements
                     )
 
         def _resolve_renderer_render_plan(

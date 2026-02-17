@@ -600,6 +600,79 @@ def test_generate_builds_kanban_from_render_plan_elements(monkeypatch):
     assert cards[0]["task_links"][0]["target_id"] == "JVNAUTOSCI-1181"
 
 
+def test_generate_builds_relation_graph_from_render_plan_elements(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_relation_graph_elements": [
+            {
+                "element_id": "screen_relation_graph_view",
+                "intent": "relation_graph_view",
+                "payload": {
+                    "nodes": [
+                        {
+                            "node_id": "#V#michael_witbrock",
+                            "label": "Michael Witbrock",
+                            "node_kind": "individual",
+                        },
+                        {
+                            "node_id": "#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne",
+                            "label": "Panel 4",
+                            "node_kind": "individual",
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": "edge_1",
+                            "source": "#V#michael_witbrock",
+                            "target": "#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne",
+                            "predicate": "#V#panelist_in_event",
+                            "direction": "directed",
+                        }
+                    ],
+                    "focus_node_id": "#V#michael_witbrock",
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Relation graph summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show relation graph"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    assert display_elements.get("validation", {}).get("valid") is True
+    assert "screen_structured_relation_graph_views_supplied" in display_elements.get(
+        "reason_codes", []
+    )
+
+    relation_graph_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict)
+        and element.get("element_type") == "relation_graph_view"
+    ]
+    assert len(relation_graph_elements) == 1
+    payload = relation_graph_elements[0].get("payload", {})
+    assert payload.get("focus_node_id") == "#V#michael_witbrock"
+    assert payload.get("edges", [])[0]["predicate"] == "#V#panelist_in_event"
+
+
 def test_generate_builds_relation_truth_state_from_render_plan_elements(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
@@ -697,6 +770,7 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
             "task_view": False,
             "kanban_view": False,
             "timeline": False,
+            "relation_graph_view": False,
         },
         "screen_element_reason_codes": [
             "renderer_screen_elements:selected_renderer_types"
@@ -798,6 +872,35 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
                 "provenance": {"source": "test_render_plan"},
             }
         ],
+        "screen_relation_graph_elements": [
+            {
+                "element_id": "screen_relation_graph_view",
+                "intent": "relation_graph_view",
+                "payload": {
+                    "nodes": [
+                        {
+                            "node_id": "#V#michael_witbrock",
+                            "label": "Michael Witbrock",
+                            "node_kind": "individual",
+                        },
+                        {
+                            "node_id": "#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne",
+                            "label": "Panel 4",
+                            "node_kind": "individual",
+                        },
+                    ],
+                    "edges": [
+                        {
+                            "edge_id": "edge_1",
+                            "source": "#V#michael_witbrock",
+                            "target": "#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne",
+                            "predicate": "#V#panelist_in_event",
+                        }
+                    ],
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
     }
     orchestrator_result = OrchestratorResult(
         response_text="Workflow summary",
@@ -850,6 +953,13 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
         if isinstance(element, dict) and element.get("element_type") == "kanban_view"
     ]
     assert not kanban_elements
+    relation_graph_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict)
+        and element.get("element_type") == "relation_graph_view"
+    ]
+    assert not relation_graph_elements
 
 
 def test_task_result_includes_render_plan_when_present(monkeypatch):
