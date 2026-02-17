@@ -2228,6 +2228,278 @@ function buildPromptConceptLinksHtml(groups) {
     return html;
 }
 
+function toUniqueStringList(rawValue) {
+    if (!Array.isArray(rawValue)) {
+        return [];
+    }
+    const seen = new Set();
+    const values = [];
+    for (const item of rawValue) {
+        if (typeof item !== 'string') {
+            continue;
+        }
+        const cleaned = item.trim();
+        if (!cleaned || seen.has(cleaned)) {
+            continue;
+        }
+        seen.add(cleaned);
+        values.push(cleaned);
+    }
+    return values;
+}
+
+function extractRenderPlanSourceSummary(screenTableRecordSets, screenWorkflowElements) {
+    const sourceTools = [];
+    const seenSourceTools = new Set();
+    const recordFamilies = [];
+    const seenRecordFamilies = new Set();
+
+    const addSourceTool = (value) => {
+        if (typeof value !== 'string') {
+            return;
+        }
+        const cleaned = value.trim();
+        if (!cleaned || seenSourceTools.has(cleaned)) {
+            return;
+        }
+        seenSourceTools.add(cleaned);
+        sourceTools.push(cleaned);
+    };
+
+    const addRecordFamily = (value) => {
+        if (typeof value !== 'string') {
+            return;
+        }
+        const cleaned = value.trim();
+        if (!cleaned || seenRecordFamilies.has(cleaned)) {
+            return;
+        }
+        seenRecordFamilies.add(cleaned);
+        recordFamilies.push(cleaned);
+    };
+
+    const addProvenance = (rawValue) => {
+        if (!rawValue || typeof rawValue !== 'object') {
+            return;
+        }
+        addSourceTool(rawValue.source_tool);
+        const sourceToolsList = toUniqueStringList(rawValue.source_tools);
+        for (const sourceTool of sourceToolsList) {
+            addSourceTool(sourceTool);
+        }
+        addRecordFamily(rawValue.record_family);
+    };
+
+    for (const recordSet of screenTableRecordSets) {
+        if (!recordSet || typeof recordSet !== 'object') {
+            continue;
+        }
+        addProvenance(recordSet.provenance);
+    }
+    for (const workflowElement of screenWorkflowElements) {
+        if (!workflowElement || typeof workflowElement !== 'object') {
+            continue;
+        }
+        addProvenance(workflowElement.provenance);
+    }
+
+    return {
+        source_tools: sourceTools,
+        record_families: recordFamilies
+    };
+}
+
+function buildRenderPlanMetadataSummary(renderPlan) {
+    if (!renderPlan || typeof renderPlan !== 'object') {
+        return null;
+    }
+
+    // Preserve compatibility with older debug payloads that only stored
+    // selected_renderer_definition_ids.
+    const selectedRendererIds = toUniqueStringList(
+        Array.isArray(renderPlan.selected_renderer_ids)
+            ? renderPlan.selected_renderer_ids
+            : renderPlan.selected_renderer_definition_ids
+    );
+    const selectedRendererTypes = toUniqueStringList(renderPlan.selected_renderer_types);
+    const selectedModalities = toUniqueStringList(renderPlan.selected_modalities);
+    const screenElementReasonCodes = toUniqueStringList(renderPlan.screen_element_reason_codes);
+    const screenElementFamilies = toUniqueStringList(renderPlan.screen_element_families);
+    const unsupportedRendererTypes = toUniqueStringList(renderPlan.unsupported_selected_renderer_types);
+    const resolverSuggestions = toUniqueStringList(renderPlan.resolver_suggestions);
+
+    const screenTableRecordSets = Array.isArray(renderPlan.screen_table_record_sets)
+        ? renderPlan.screen_table_record_sets.filter(item => item && typeof item === 'object')
+        : [];
+    const screenWorkflowElements = Array.isArray(renderPlan.screen_workflow_elements)
+        ? renderPlan.screen_workflow_elements.filter(item => item && typeof item === 'object')
+        : [];
+
+    const sourceSummary = extractRenderPlanSourceSummary(
+        screenTableRecordSets,
+        screenWorkflowElements
+    );
+
+    return {
+        enabled: renderPlan.enabled ?? null,
+        attempted: renderPlan.attempted ?? null,
+        success: renderPlan.success ?? null,
+        reason: renderPlan.reason ?? null,
+        selection_rationale: renderPlan.selection_rationale ?? null,
+        error: renderPlan.error ?? null,
+        resolver_error_code: renderPlan.resolver_error_code ?? null,
+        render_mode: renderPlan.render_mode ?? null,
+        should_narrate: renderPlan.should_narrate ?? null,
+        renderer_definition_source: renderPlan.renderer_definition_source ?? null,
+        request_payload_object_kind: renderPlan.request_payload_object_kind ?? null,
+        request_payload_selected_concept_id: renderPlan.request_payload_selected_concept_id ?? null,
+        selected_renderer_ids: selectedRendererIds,
+        selected_renderer_types: selectedRendererTypes,
+        selected_modalities: selectedModalities,
+        selected_renderer_count: selectedRendererIds.length,
+        screen_element_mapping_mode: renderPlan.screen_element_mapping_mode ?? null,
+        screen_element_reason_codes: screenElementReasonCodes,
+        screen_element_families: screenElementFamilies,
+        source_tools: sourceSummary.source_tools,
+        record_families: sourceSummary.record_families,
+        screen_table_record_set_count: screenTableRecordSets.length,
+        screen_workflow_element_count: screenWorkflowElements.length,
+        unsupported_selected_renderer_types: unsupportedRendererTypes,
+        resolver_suggestions: resolverSuggestions
+    };
+}
+
+function buildRenderPlanSummaryHtml(renderPlanSummary) {
+    if (!renderPlanSummary || typeof renderPlanSummary !== 'object') {
+        return '';
+    }
+
+    const summaryRows = [];
+    const addScalar = (label, value) => {
+        if (value === null || value === undefined) {
+            return;
+        }
+        if (typeof value === 'string') {
+            const cleaned = value.trim();
+            if (!cleaned) {
+                return;
+            }
+            summaryRows.push({ label, value: cleaned });
+            return;
+        }
+        if (typeof value === 'boolean') {
+            summaryRows.push({ label, value: value ? 'yes' : 'no' });
+            return;
+        }
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            summaryRows.push({ label, value: String(value) });
+        }
+    };
+
+    const addList = (label, value) => {
+        const cleanedValues = toUniqueStringList(value);
+        if (cleanedValues.length === 0) {
+            return;
+        }
+        summaryRows.push({ label, value: cleanedValues.join(', ') });
+    };
+
+    addScalar('Routing enabled', renderPlanSummary.enabled);
+    addScalar('Resolver attempted', renderPlanSummary.attempted);
+    addScalar('Resolver success', renderPlanSummary.success);
+    addScalar('Reason', renderPlanSummary.reason);
+    addScalar('Selection rationale', renderPlanSummary.selection_rationale);
+    addScalar('Resolver error code', renderPlanSummary.resolver_error_code);
+    addScalar('Resolver error', renderPlanSummary.error);
+    addScalar('Render mode', renderPlanSummary.render_mode);
+    addScalar('Should narrate', renderPlanSummary.should_narrate);
+    addScalar('Renderer definition source', renderPlanSummary.renderer_definition_source);
+    addScalar('Request object kind', renderPlanSummary.request_payload_object_kind);
+    addScalar('Selected concept', renderPlanSummary.request_payload_selected_concept_id);
+    addScalar('Selected renderer count', renderPlanSummary.selected_renderer_count);
+    addList('Selected renderer IDs', renderPlanSummary.selected_renderer_ids);
+    addList('Selected renderer types', renderPlanSummary.selected_renderer_types);
+    addList('Selected modalities', renderPlanSummary.selected_modalities);
+    addScalar('Screen mapping mode', renderPlanSummary.screen_element_mapping_mode);
+    addList('Screen mapping reason codes', renderPlanSummary.screen_element_reason_codes);
+    addList('Screen element families', renderPlanSummary.screen_element_families);
+    addScalar('Screen table record sets', renderPlanSummary.screen_table_record_set_count);
+    addScalar('Screen workflow elements', renderPlanSummary.screen_workflow_element_count);
+    addList('Source tools', renderPlanSummary.source_tools);
+    addList('Record families', renderPlanSummary.record_families);
+    addList('Unsupported renderer types', renderPlanSummary.unsupported_selected_renderer_types);
+    addList('Resolver suggestions', renderPlanSummary.resolver_suggestions);
+
+    if (summaryRows.length === 0) {
+        return '';
+    }
+
+    let html = '<div class="llm-debug-metadata-section">';
+    html += '<strong>Render plan</strong>';
+    html += '<ul class="llm-debug-summary-list">';
+    for (const row of summaryRows) {
+        html += '<li class="llm-debug-summary-item">';
+        html += `<span class="llm-debug-summary-label">${escapeHtml(row.label)}:</span> `;
+        html += `<span class="llm-debug-summary-value">${escapeHtml(row.value)}</span>`;
+        html += '</li>';
+    }
+    html += '</ul>';
+    html += '</div>';
+    return html;
+}
+
+function buildTurnDiagnosticsSummaryHtml(turnDiagnosticsSummary) {
+    if (!turnDiagnosticsSummary || typeof turnDiagnosticsSummary !== 'object') {
+        return '';
+    }
+
+    const rows = [];
+    const addScalar = (label, value) => {
+        if (value === null || value === undefined) {
+            return;
+        }
+        if (typeof value === 'string') {
+            const cleaned = value.trim();
+            if (!cleaned) {
+                return;
+            }
+            rows.push({ label, value: cleaned });
+            return;
+        }
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            rows.push({ label, value: String(value) });
+        }
+    };
+    const addList = (label, value) => {
+        const cleanedValues = toUniqueStringList(value);
+        if (cleanedValues.length === 0) {
+            return;
+        }
+        rows.push({ label, value: cleanedValues.join(', ') });
+    };
+
+    addScalar('Event count', turnDiagnosticsSummary.event_count);
+    addList('Categories', turnDiagnosticsSummary.categories);
+    addScalar('Latest event type', turnDiagnosticsSummary.latest_event_type);
+
+    if (rows.length === 0) {
+        return '';
+    }
+
+    let html = '<div class="llm-debug-metadata-section">';
+    html += '<strong>Turn diagnostics</strong>';
+    html += '<ul class="llm-debug-summary-list">';
+    for (const row of rows) {
+        html += '<li class="llm-debug-summary-item">';
+        html += `<span class="llm-debug-summary-label">${escapeHtml(row.label)}:</span> `;
+        html += `<span class="llm-debug-summary-value">${escapeHtml(row.value)}</span>`;
+        html += '</li>';
+    }
+    html += '</ul>';
+    html += '</div>';
+    return html;
+}
+
 function extractBoldQuotedInstruction(text) {
     const value = String(text ?? '').trim();
     if (!value) return null;
@@ -2515,10 +2787,70 @@ async function uploadSingleFileToVon(file) {
 
     if (!response.ok || !data || data.success !== true) {
         const detail = data?.message || data?.error || `HTTP ${response.status}`;
-        throw new Error(`Upload failed: ${detail}`);
+        const uploadError = new Error(`Upload failed: ${detail}`);
+        uploadError.uploadDiagnostics = {
+            endpoint: '/von/api/files/upload',
+            status_code: response.status,
+            response_ok: response.ok,
+            response_body: (data && typeof data === 'object') ? data : null
+        };
+        throw uploadError;
     }
 
     return data;
+}
+
+function buildUploadFailureDiagnosticPayload(file, error, context = {}) {
+    const fileName = String(file?.name || '').trim();
+    const contentType = String(file?.type || '').trim();
+    const lastModifiedMs = Number.isFinite(file?.lastModified) ? Number(file.lastModified) : null;
+    const uploadDiagnostics = (error && typeof error === 'object' && error.uploadDiagnostics && typeof error.uploadDiagnostics === 'object')
+        ? error.uploadDiagnostics
+        : null;
+
+    let stackPreview = null;
+    if (typeof error?.stack === 'string' && error.stack.trim()) {
+        stackPreview = error.stack
+            .split('\n')
+            .slice(0, 6)
+            .map(line => line.trim())
+            .join('\n');
+    }
+
+    return {
+        type: 'file_upload_failure',
+        generated_at_utc: new Date().toISOString(),
+        file: {
+            name: fileName || null,
+            size_bytes: Number.isFinite(file?.size) ? Number(file.size) : null,
+            content_type: contentType || null,
+            last_modified_utc: lastModifiedMs ? new Date(lastModifiedMs).toISOString() : null
+        },
+        upload_context: {
+            index: Number.isFinite(context.index) ? Number(context.index) : null,
+            total: Number.isFinite(context.total) ? Number(context.total) : null,
+            active_chat_session_id: activeChatSessionId || null
+        },
+        error: {
+            message: String(error?.message || error || 'Upload failed'),
+            name: String(error?.name || 'Error'),
+            stack_preview: stackPreview
+        },
+        upload_request: uploadDiagnostics
+    };
+}
+
+function buildTurnDiagnosticDebugPayload(errorMessage, diagnosticPayload) {
+    const diagnosticsEvent = (diagnosticPayload && typeof diagnosticPayload === 'object') ? diagnosticPayload : null;
+    return {
+        model: 'diagnostic',
+        error: errorMessage,
+        turn_diagnostics: {
+            event_count: diagnosticsEvent ? 1 : 0,
+            categories: diagnosticsEvent ? [String(diagnosticsEvent.type || 'unknown')] : [],
+            events: diagnosticsEvent ? [diagnosticsEvent] : []
+        }
+    };
 }
 
 async function uploadFilesToVon(files) {
@@ -2572,7 +2904,27 @@ async function uploadFilesToVon(files) {
             }
         } catch (error) {
             console.error('[chatTab] file upload error', error);
-            appendMessage('Error', `File upload failed: ${String(error?.message || error)}`);
+            const errorMessage = `File upload failed: ${String(error?.message || error)}`;
+            const diagnosticsPayload = buildUploadFailureDiagnosticPayload(file, error, {
+                index,
+                total
+            });
+            const errorTurnId = `e-upload-${Date.now()}-${index}`;
+            llmDebugData.set(
+                errorTurnId,
+                buildTurnDiagnosticDebugPayload(errorMessage, diagnosticsPayload)
+            );
+            appendMessage(
+                'Error',
+                errorMessage,
+                errorTurnId,
+                true,
+                false,
+                null,
+                null,
+                null,
+                { diagnosticsPayload }
+            );
             failureCount += 1;
             setUploadStatus(`Upload failed: ${file.name}`, 'error');
         }
@@ -7489,6 +7841,44 @@ function copyTextFallback(text) {
     return successful;
 }
 
+async function copyTextToClipboard(text) {
+    const value = String(text ?? '');
+    if (!value) {
+        return false;
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        try {
+            await navigator.clipboard.writeText(value);
+            return true;
+        } catch (_) {
+            return copyTextFallback(value);
+        }
+    }
+
+    return copyTextFallback(value);
+}
+
+async function copyJsonPayloadToClipboard(payload, button = null, fallbackLabel = 'Copy JSON') {
+    if (!payload || typeof payload !== 'object') {
+        return false;
+    }
+    let jsonString = '';
+    try {
+        jsonString = JSON.stringify(payload, null, 2);
+    } catch (_) {
+        return false;
+    }
+
+    const copied = await copyTextToClipboard(jsonString);
+    if (button) {
+        const original = button.dataset.originalText || button.textContent || fallbackLabel;
+        button.dataset.originalText = original;
+        indicateClipboardResult(button, original, copied);
+    }
+    return copied;
+}
+
 // Delete exchange (top-level so event handlers can access it)
 function deleteExchange(turnId, isUserMessage) {
     const scrollableField = document.getElementById('scrollableField');
@@ -10946,17 +11336,7 @@ async function copyActiveThinkingDiagnostics(button = null) {
     }
 
     const text = JSON.stringify(payload, null, 2);
-    let copied = false;
-    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-        try {
-            await navigator.clipboard.writeText(text);
-            copied = true;
-        } catch (_) {
-            copied = copyTextFallback(text);
-        }
-    } else {
-        copied = copyTextFallback(text);
-    }
+    const copied = await copyTextToClipboard(text);
 
     if (button) {
         const original = button.dataset.originalText || button.textContent || 'Copy diagnostics';
@@ -11260,12 +11640,16 @@ function formatChatTimestamp(isoString) {
     }
 }
 
-function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null, fastpathMeta = null, ttsText = null) {
+function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null, fastpathMeta = null, ttsText = null, messageOptions = null) {
     const scrollableField = document.getElementById('scrollableField');
     if (!scrollableField) {
         console.error('[chatTab] appendMessage: scrollableField not found!');
         return;
     }
+
+    const options = (messageOptions && typeof messageOptions === 'object')
+        ? messageOptions
+        : {};
 
     try {
         const displayTimestamp = formatChatTimestamp(timestampStr);
@@ -11746,6 +12130,22 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 }
             }
 
+            if (sender === 'Error' && options.diagnosticsPayload && typeof options.diagnosticsPayload === 'object') {
+                const copyDiagnosticsButton = document.createElement('button');
+                copyDiagnosticsButton.className = 'btn-mini chat-error-copy-diagnostics-btn';
+                copyDiagnosticsButton.type = 'button';
+                copyDiagnosticsButton.textContent = 'Copy diagnostics';
+                copyDiagnosticsButton.title = 'Copy structured diagnostics as JSON';
+                copyDiagnosticsButton.addEventListener('click', () => {
+                    void copyJsonPayloadToClipboard(
+                        options.diagnosticsPayload,
+                        copyDiagnosticsButton,
+                        'Copy diagnostics'
+                    );
+                });
+                messageHeader.appendChild(copyDiagnosticsButton);
+            }
+
             // Add delete button for user messages
             if (turnId) {
                 const deleteButton = document.createElement('button');
@@ -11828,16 +12228,12 @@ function initializeLlmDebugPopup() {
     });
 
     // Copy JSON button handler
-    copyBtn.addEventListener('click', () => {
+    copyBtn.addEventListener('click', async () => {
         const currentDebugData = popup.dataset.currentDebugData;
         if (currentDebugData) {
-            navigator.clipboard.writeText(currentDebugData)
-                .then(() => {
-                    const originalText = copyBtn.textContent;
-                    copyBtn.textContent = 'Copied!';
-                    setTimeout(() => { copyBtn.textContent = originalText; }, 1500);
-                })
-                .catch(err => console.error('[chatTab] Failed to copy:', err));
+            const originalText = copyBtn.textContent || 'Copy JSON';
+            const copied = await copyTextToClipboard(currentDebugData);
+            indicateClipboardResult(copyBtn, originalText, copied);
         }
     });
 
@@ -11856,18 +12252,26 @@ function buildLlmDebugMetadata(debugData) {
     };
 
     const renderPlan = (debugData && typeof debugData === 'object') ? debugData.render_plan : null;
-    if (renderPlan && typeof renderPlan === 'object') {
-        const selectedRendererIds = Array.isArray(renderPlan.selected_renderer_definition_ids)
-            ? renderPlan.selected_renderer_definition_ids
+    const renderPlanMetadata = buildRenderPlanMetadataSummary(renderPlan);
+    if (renderPlanMetadata) {
+        metadata.render_plan = renderPlanMetadata;
+    }
+
+    const turnDiagnostics = (debugData && typeof debugData === 'object') ? debugData.turn_diagnostics : null;
+    if (turnDiagnostics && typeof turnDiagnostics === 'object') {
+        const events = Array.isArray(turnDiagnostics.events)
+            ? turnDiagnostics.events.filter(event => event && typeof event === 'object')
             : [];
-        metadata.render_plan = {
-            enabled: renderPlan.enabled ?? null,
-            reason: renderPlan.reason ?? null,
-            render_mode: renderPlan.render_mode ?? null,
-            should_narrate: renderPlan.should_narrate ?? null,
-            request_payload_object_kind: renderPlan.request_payload_object_kind ?? null,
-            request_payload_selected_concept_id: renderPlan.request_payload_selected_concept_id ?? null,
-            selected_renderer_count: selectedRendererIds.length
+        const categories = toUniqueStringList(
+            events.map(event => {
+                const value = event.type ?? event.category;
+                return (typeof value === 'string') ? value : '';
+            })
+        );
+        metadata.turn_diagnostics = {
+            event_count: events.length,
+            categories,
+            latest_event_type: categories.length ? categories[categories.length - 1] : null
         };
     }
 
@@ -12146,6 +12550,8 @@ async function showLlmDebugPopup(turnId, options = {}) {
     let metadataHtml = '';
     const promptGroups = extractPromptConceptGroups(debugData);
     metadataHtml += buildPromptConceptLinksHtml(promptGroups);
+    metadataHtml += buildRenderPlanSummaryHtml(metadata.render_plan);
+    metadataHtml += buildTurnDiagnosticsSummaryHtml(metadata.turn_diagnostics);
     if (workflowExecutionTrace) {
         const executionId = String(workflowExecutionTrace.execution_id).trim();
         const href = `/api/workflows/executions/${encodeURIComponent(executionId)}`;
@@ -12184,12 +12590,12 @@ async function showLlmDebugPopup(turnId, options = {}) {
     }
 
     metadataHtml += '<div class="llm-debug-metadata-section"><strong>Metadata</strong><pre>';
-    metadataHtml += JSON.stringify(metadata, null, 2);
+    metadataHtml += escapeHtml(JSON.stringify(metadata, null, 2));
     metadataHtml += '</pre></div>';
 
     const warnings = deriveLlmDebugWarnings(debugData).filter(w => !String(w).startsWith('Backend error:'));
     if (warnings.length > 0) {
-        const warningItems = warnings.map(warning => `<li>${warning}</li>`).join('');
+        const warningItems = warnings.map(warning => `<li>${escapeHtml(warning)}</li>`).join('');
         metadataHtml = `
             <div class="llm-debug-warning-box">
                 <div class="llm-debug-warning-box-title">Warnings</div>

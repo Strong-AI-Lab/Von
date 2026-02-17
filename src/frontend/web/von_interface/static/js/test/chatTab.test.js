@@ -950,29 +950,124 @@ describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
         });
     });
 
-    test('includes render plan summary when present', () => {
+    test('includes render plan provenance summary when present', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            render_plan: {
+                enabled: true,
+                attempted: true,
+                success: true,
+                reason: 'resolved',
+                render_mode: 'spoken+screen',
+                should_narrate: true,
+                selection_rationale: 'Selected table and workflow views for task-focused output.',
+                request_payload_object_kind: 'concept',
+                request_payload_selected_concept_id: '#V#task_123',
+                selected_renderer_ids: ['#V#renderer_a', '#V#renderer_b'],
+                selected_renderer_types: ['table', 'workflow'],
+                selected_modalities: ['screen', 'narrated_audio'],
+                screen_element_mapping_mode: 'selected_renderer_types',
+                screen_element_reason_codes: ['renderer_screen_elements:selected_renderer_types'],
+                screen_element_families: ['table', 'workflow'],
+                screen_table_record_sets: [
+                    {
+                        element_id: 'screen_task_table',
+                        provenance: {
+                            source_tool: 'task_list',
+                            record_family: 'tasks'
+                        }
+                    }
+                ],
+                screen_workflow_elements: [
+                    {
+                        element_id: 'screen_workflow_view',
+                        provenance: {
+                            source_tools: ['workflow_list_instances', 'workflow_get_instance'],
+                            record_family: 'workflow_instances'
+                        }
+                    }
+                ]
+            }
+        });
+
+        expect(metadata.render_plan).toMatchObject({
+            enabled: true,
+            attempted: true,
+            success: true,
+            reason: 'resolved',
+            selection_rationale: 'Selected table and workflow views for task-focused output.',
+            render_mode: 'spoken+screen',
+            should_narrate: true,
+            request_payload_object_kind: 'concept',
+            request_payload_selected_concept_id: '#V#task_123',
+            selected_renderer_count: 2,
+            selected_renderer_ids: ['#V#renderer_a', '#V#renderer_b'],
+            selected_renderer_types: ['table', 'workflow'],
+            selected_modalities: ['screen', 'narrated_audio'],
+            screen_element_mapping_mode: 'selected_renderer_types',
+            screen_element_reason_codes: ['renderer_screen_elements:selected_renderer_types'],
+            screen_element_families: ['table', 'workflow'],
+            source_tools: ['task_list', 'workflow_list_instances', 'workflow_get_instance'],
+            record_families: ['tasks', 'workflow_instances'],
+            screen_table_record_set_count: 1,
+            screen_workflow_element_count: 1
+        });
+    });
+
+    test('falls back to legacy selected_renderer_definition_ids for historical payloads', () => {
         const metadata = __testOnly_buildLlmDebugMetadata({
             model: 'gpt-test',
             messages: [],
             render_plan: {
                 enabled: true,
                 reason: 'resolved',
-                render_mode: 'spoken+screen',
-                should_narrate: true,
-                request_payload_object_kind: 'concept',
-                request_payload_selected_concept_id: '#V#task_123',
-                selected_renderer_definition_ids: ['#V#renderer_a', '#V#renderer_b']
+                selected_renderer_definition_ids: ['#V#legacy_renderer']
             }
         });
 
-        expect(metadata.render_plan).toEqual({
-            enabled: true,
-            reason: 'resolved',
-            render_mode: 'spoken+screen',
-            should_narrate: true,
-            request_payload_object_kind: 'concept',
-            request_payload_selected_concept_id: '#V#task_123',
-            selected_renderer_count: 2
+        expect(metadata.render_plan.selected_renderer_ids).toEqual(['#V#legacy_renderer']);
+        expect(metadata.render_plan.selected_renderer_count).toBe(1);
+    });
+
+    test('surfaces fallback diagnostics when resolver fails', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            render_plan: {
+                enabled: true,
+                attempted: true,
+                success: false,
+                reason: 'resolver_unsuccessful',
+                resolver_error_code: 'no_renderer_match',
+                resolver_suggestions: ['Add a renderer for transient microtheory objects.']
+            }
+        });
+
+        expect(metadata.render_plan).toMatchObject({
+            attempted: true,
+            success: false,
+            reason: 'resolver_unsuccessful',
+            resolver_error_code: 'no_renderer_match',
+            resolver_suggestions: ['Add a renderer for transient microtheory objects.']
+        });
+    });
+
+    test('summarises turn diagnostics events for non-LLM failures', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'diagnostic',
+            messages: [],
+            turn_diagnostics: {
+                events: [
+                    { type: 'file_upload_failure', detail: 'background upload task failed' }
+                ]
+            }
+        });
+
+        expect(metadata.turn_diagnostics).toEqual({
+            event_count: 1,
+            categories: ['file_upload_failure'],
+            latest_event_type: 'file_upload_failure'
         });
     });
 });

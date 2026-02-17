@@ -1001,6 +1001,29 @@ body {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
+.llm-debug-metadata-section {
+    margin-top: 8px;
+}
+
+.llm-debug-summary-list {
+    margin: 6px 0 0 0;
+    padding-left: 18px;
+}
+
+.llm-debug-summary-item {
+    margin: 2px 0;
+    line-height: 1.35;
+}
+
+.llm-debug-summary-label {
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.llm-debug-summary-value {
+    color: #111827;
+}
+
 .llm-popup-footer {
     padding: 6px 10px;
     border-top: 1px solid #e5e7eb;
@@ -1422,6 +1445,22 @@ body {
 .llm-debug-button:hover {
     background: #0056b3;
     border-color: #004085;
+}
+
+.chat-error-copy-diagnostics-btn {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    background: #fef2f2;
+    color: #b91c1c;
+    border: 1px solid #fecaca;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.chat-error-copy-diagnostics-btn:hover {
+    background: #fee2e2;
+    border-color: #fca5a5;
 }
 
 /* Copy agent message (markdown) button in chat messages */
