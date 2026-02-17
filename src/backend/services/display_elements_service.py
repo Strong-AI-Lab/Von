@@ -18,10 +18,14 @@ ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
         "text_block",
         "json_block",
         "table",
+        "relation_truth_state",
         "timeline",
         "task_view",
         "workflow_view",
     }
+)
+RELATION_TRUTH_STATE_GROUP_STATUSES = frozenset(
+    {"asserted", "missing_expected", "uncertain"}
 )
 
 _JSON_FENCE_PATTERN = re.compile(
@@ -510,6 +514,72 @@ def validate_turn_display_elements(
                     value_type = cell.get("value_type")
                     if not isinstance(value_type, str) or not value_type.strip():
                         errors.append(f"{cell_label}.value_type must be a non-empty string")
+        elif element_type == "relation_truth_state":
+            title = payload.get("title")
+            if not isinstance(title, str) or not title.strip():
+                errors.append(
+                    f"{label}.payload.title must be a non-empty string"
+                )
+
+            groups = payload.get("groups")
+            if not isinstance(groups, list) or not groups:
+                errors.append(f"{label}.payload.groups must be a non-empty list")
+                groups = []
+
+            for group_index, group in enumerate(groups):
+                group_label = f"{label}.payload.groups[{group_index}]"
+                if not isinstance(group, Mapping):
+                    errors.append(f"{group_label} must be a mapping")
+                    continue
+
+                group_name = group.get("label")
+                if not isinstance(group_name, str) or not group_name.strip():
+                    errors.append(f"{group_label}.label must be a non-empty string")
+
+                group_status = group.get("status")
+                if (
+                    not isinstance(group_status, str)
+                    or group_status.strip() not in RELATION_TRUTH_STATE_GROUP_STATUSES
+                ):
+                    errors.append(
+                        f"{group_label}.status must be one of {sorted(RELATION_TRUTH_STATE_GROUP_STATUSES)}"
+                    )
+
+                assertions = group.get("assertions")
+                if not isinstance(assertions, list) or not assertions:
+                    errors.append(
+                        f"{group_label}.assertions must be a non-empty list"
+                    )
+                    assertions = []
+
+                for assertion_index, assertion in enumerate(assertions):
+                    assertion_label = (
+                        f"{group_label}.assertions[{assertion_index}]"
+                    )
+                    if not isinstance(assertion, Mapping):
+                        errors.append(f"{assertion_label} must be a mapping")
+                        continue
+
+                    assertion_id = assertion.get("assertion_id")
+                    if assertion_id is not None and (
+                        not isinstance(assertion_id, str) or not assertion_id.strip()
+                    ):
+                        errors.append(
+                            f"{assertion_label}.assertion_id must be a non-empty string when provided"
+                        )
+
+                    for relation_key in ("arg1", "predicate", "arg2"):
+                        value = assertion.get(relation_key)
+                        if not isinstance(value, str) or not value.strip():
+                            errors.append(
+                                f"{assertion_label}.{relation_key} must be a non-empty string"
+                            )
+
+                    is_asserted = assertion.get("is_asserted")
+                    if not isinstance(is_asserted, bool):
+                        errors.append(
+                            f"{assertion_label}.is_asserted must be a boolean"
+                        )
         elif element_type == "timeline":
             items = payload.get("items")
             if not isinstance(items, list) or not items:
@@ -1027,6 +1097,88 @@ def _normalise_supplied_screen_task_views(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_relation_truth_states(
+    screen_relation_truth_state_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied relation truth-state display specs."""
+    if (
+        not isinstance(screen_relation_truth_state_elements, Sequence)
+        or isinstance(screen_relation_truth_state_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_relation_truth_state_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "groups" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = (
+            _normalise_text(metadata.get("intent"))
+            or "truth_state_relation_view"
+        )
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_compact_cartouches": True,
+                "supports_assertion_variants": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_relation_truth_state_probe_{index}",
+                        "element_type": "relation_truth_state",
+                        "channel": "screen",
+                        "order": 41,
+                        "intent": intent,
+                        "payload": dict(payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def build_turn_display_elements(
     *,
     response_text: str | None,
@@ -1035,6 +1187,7 @@ def build_turn_display_elements(
     screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_task_view_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_timeline_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_relation_truth_state_elements: Sequence[Mapping[str, Any]] | None = None,
     supplemental_reason_codes: Sequence[str] | None = None,
     required_screen_json_fence: str | None = None,
     screen_backfill_second_pass_attempted: bool = False,
@@ -1188,6 +1341,16 @@ def build_turn_display_elements(
     if supplied_timelines_dropped:
         reason_codes.append("screen_structured_timelines_invalid_dropped")
 
+    supplied_screen_relation_truth_states, supplied_relation_truth_states_dropped = (
+        _normalise_supplied_screen_relation_truth_states(
+            screen_relation_truth_state_elements
+        )
+    )
+    if supplied_screen_relation_truth_states:
+        reason_codes.append("screen_structured_relation_truth_states_supplied")
+    if supplied_relation_truth_states_dropped:
+        reason_codes.append("screen_structured_relation_truth_states_invalid_dropped")
+
     table_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_tables, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -1295,10 +1458,37 @@ def build_turn_display_elements(
             }
         )
 
+    relation_truth_state_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_relation_truth_states, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_relation_truth_state")
+        provenance.setdefault("relation_truth_state_index", index)
+        relation_truth_state_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_relation_truth_state_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "truth_state_relation_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_compact_cartouches": True,
+                    "supports_assertion_variants": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     used_ids: set[str] = set()
     used_orders = {
         int(spec["order"])
-        for spec in [*table_specs, *workflow_specs, *task_view_specs, *timeline_specs]
+        for spec in [
+            *table_specs,
+            *workflow_specs,
+            *task_view_specs,
+            *timeline_specs,
+            *relation_truth_state_specs,
+        ]
         if isinstance(spec.get("order"), int)
     }
     next_table_order = 16
@@ -1388,6 +1578,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "task_view",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_relation_truth_state_order = 41
+    for spec in relation_truth_state_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_relation_truth_state_order in used_orders:
+                next_relation_truth_state_order += 1
+            order = next_relation_truth_state_order
+            used_orders.add(order)
+            next_relation_truth_state_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "relation_truth_state",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),

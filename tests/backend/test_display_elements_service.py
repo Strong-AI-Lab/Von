@@ -499,6 +499,111 @@ def test_build_turn_display_elements_drops_invalid_supplied_timelines() -> None:
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_relation_truth_state_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Truth state summary",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Truth state summary",
+            "spoken": None,
+        },
+        screen_relation_truth_state_elements=[
+            {
+                "element_id": "screen_relation_truth_state",
+                "intent": "truth_state_relation_view",
+                "payload": {
+                    "title": "Current truth state",
+                    "groups": [
+                        {
+                            "label": "Conference-level",
+                            "status": "asserted",
+                            "assertions": [
+                                {
+                                    "assertion_id": "a1",
+                                    "arg1": "#V#michael_witbrock",
+                                    "predicate": "#V#attended_event",
+                                    "arg2": "#V#international_ai_cooperation_and_governance_forum_2025_melbourne",
+                                    "is_asserted": True,
+                                }
+                            ],
+                        },
+                        {
+                            "label": "Missing (should exist)",
+                            "status": "missing_expected",
+                            "assertions": [
+                                {
+                                    "assertion_id": "a2",
+                                    "arg1": "#V#michael_witbrock",
+                                    "predicate": "#V#panelist_in_event",
+                                    "arg2": "#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne",
+                                    "is_asserted": False,
+                                }
+                            ],
+                        },
+                    ],
+                },
+            }
+        ],
+    )
+
+    relation_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "relation_truth_state"
+    ]
+    assert len(relation_elements) == 1
+    relation_element = relation_elements[0]
+    assert relation_element["element_id"] == "screen_relation_truth_state"
+    assert relation_element["payload"]["groups"][0]["status"] == "asserted"
+    assert relation_element["payload"]["groups"][1]["assertions"][0]["is_asserted"] is False
+    assert "screen_structured_relation_truth_states_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_relation_truth_state_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Truth state summary",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Truth state summary",
+            "spoken": None,
+        },
+        screen_relation_truth_state_elements=[
+            {
+                "payload": {
+                    "title": "Current truth state",
+                    "groups": [
+                        {
+                            "label": "Bad status group",
+                            "status": "unknown",
+                            "assertions": [
+                                {
+                                    "arg1": "#V#a",
+                                    "predicate": "#V#p",
+                                    "arg2": "#V#b",
+                                    "is_asserted": "yes",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        ],
+    )
+
+    relation_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "relation_truth_state"
+    ]
+    assert relation_elements == []
+    assert (
+        "screen_structured_relation_truth_states_invalid_dropped"
+        in contract["reason_codes"]
+    )
+    assert contract["validation"]["valid"] is True
+
+
 def test_validate_turn_display_elements_rejects_invalid_table_shape() -> None:
     valid, errors = validate_turn_display_elements(
         {
@@ -637,6 +742,45 @@ def test_validate_turn_display_elements_rejects_task_view_without_task_id() -> N
 
     assert valid is False
     assert any("must provide a non-empty task identifier" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_invalid_relation_truth_state_shape() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_relation_truth_state",
+                    "element_type": "relation_truth_state",
+                    "channel": "screen",
+                    "order": 41,
+                    "intent": "truth_state_relation_view",
+                    "payload": {
+                        "title": "Current truth state",
+                        "groups": [
+                            {
+                                "label": "Missing",
+                                "status": "missing_expected",
+                                "assertions": [
+                                    {
+                                        "arg1": "#V#michael_witbrock",
+                                        "predicate": "#V#panelist_in_event",
+                                        "arg2": "#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne",
+                                        "is_asserted": "false",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any("is_asserted must be a boolean" in message for message in errors)
 
 
 def test_build_canonical_table_payload_from_records_preserves_row_provenance() -> None:

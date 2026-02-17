@@ -527,6 +527,89 @@ def test_generate_builds_task_view_from_render_plan_elements(monkeypatch):
     assert task_entry["task_links"][0]["target_id"] == "JVNAUTOSCI-1174"
 
 
+def test_generate_builds_relation_truth_state_from_render_plan_elements(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_relation_truth_state_elements": [
+            {
+                "element_id": "screen_relation_truth_state",
+                "intent": "truth_state_relation_view",
+                "payload": {
+                    "title": "Current truth state",
+                    "groups": [
+                        {
+                            "label": "Conference-level",
+                            "status": "asserted",
+                            "assertions": [
+                                {
+                                    "assertion_id": "a1",
+                                    "arg1": "#V#michael_witbrock",
+                                    "predicate": "#V#attended_event",
+                                    "arg2": "#V#international_ai_cooperation_and_governance_forum_2025_melbourne",
+                                    "is_asserted": True,
+                                }
+                            ],
+                        },
+                        {
+                            "label": "Missing (should exist)",
+                            "status": "missing_expected",
+                            "assertions": [
+                                {
+                                    "assertion_id": "a2",
+                                    "arg1": "#V#michael_witbrock",
+                                    "predicate": "#V#panelist_in_event",
+                                    "arg2": "#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne",
+                                    "is_asserted": False,
+                                }
+                            ],
+                        },
+                    ],
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Truth state summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show relation truth state"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    assert display_elements.get("validation", {}).get("valid") is True
+    assert "screen_structured_relation_truth_states_supplied" in display_elements.get(
+        "reason_codes", []
+    )
+
+    relation_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict)
+        and element.get("element_type") == "relation_truth_state"
+    ]
+    assert len(relation_elements) == 1
+    relation_payload = relation_elements[0].get("payload", {})
+    assert relation_payload.get("title") == "Current truth state"
+    groups = relation_payload.get("groups")
+    assert isinstance(groups, list)
+    assert groups[0]["status"] == "asserted"
+    assert groups[1]["assertions"][0]["is_asserted"] is False
+
+
 def test_generate_respects_renderer_screen_element_targets(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 

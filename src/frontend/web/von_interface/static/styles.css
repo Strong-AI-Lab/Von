@@ -4869,6 +4869,129 @@ footer {
     color: #991b1b;
 }
 
+.chat-display-elements-relation-truth-state-groups {
+    display: grid;
+    gap: 8px;
+}
+
+.chat-display-elements-relation-truth-state-group {
+    border: 1px solid #dce3ea;
+    border-radius: 6px;
+    padding: 8px;
+    background: #f8fbff;
+}
+
+.chat-display-elements-relation-truth-state-group.status-asserted {
+    border-left: 4px solid #22c55e;
+}
+
+.chat-display-elements-relation-truth-state-group.status-missing_expected {
+    border-left: 4px solid #ef4444;
+}
+
+.chat-display-elements-relation-truth-state-group.status-uncertain {
+    border-left: 4px solid #f59e0b;
+}
+
+.chat-display-elements-relation-truth-state-group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.chat-display-elements-relation-truth-state-status {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.chat-display-elements-relation-truth-state-status.status-asserted {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.chat-display-elements-relation-truth-state-status.status-missing_expected {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.chat-display-elements-relation-truth-state-status.status-uncertain {
+    background: #ffedd5;
+    color: #9a3412;
+}
+
+.chat-display-elements-relation-truth-state-group-label {
+    font-size: 0.84em;
+    font-weight: 600;
+    color: #1f3d5a;
+}
+
+.chat-display-elements-relation-truth-state-assertions {
+    display: grid;
+    gap: 6px;
+}
+
+.chat-display-elements-relation-truth-state-assertion {
+    border: 1px solid #dce3ea;
+    border-radius: 6px;
+    background: #ffffff;
+    padding: 6px 8px;
+}
+
+.chat-display-elements-relation-truth-state-assertion.not-asserted {
+    background: #fff7f7;
+    border-color: #fecaca;
+}
+
+.chat-display-elements-relation-truth-state-line {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.chat-display-elements-relation-truth-state-cartouche {
+    font-size: 12px;
+    padding: 1px 7px;
+    min-height: 22px;
+}
+
+.chat-display-elements-relation-truth-state-text-value {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    padding: 1px 8px;
+    border-radius: 999px;
+    border: 1px solid #dbe2ea;
+    background: #f8fafc;
+    color: #1f2937;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.chat-display-elements-relation-truth-state-connector {
+    color: #475569;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+
+.chat-display-elements-relation-truth-state-assertion.not-asserted .chat-display-elements-relation-truth-state-connector {
+    color: #b91c1c;
+    opacity: 0.9;
+}
+
+.chat-display-elements-relation-truth-state-hint {
+    margin-top: 4px;
+    font-size: 0.74em;
+    color: #b91c1c;
+}
+
 .workflow-status-meta {
     margin-top: 4px;
     color: #475569;

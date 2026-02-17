@@ -11,6 +11,7 @@ import {
     __testOnly_convertReplyOptionsListsToButtons,
     __testOnly_deriveLlmDebugWarnings,
     __testOnly_hydrateChatConceptCartouches,
+    __testOnly_renderDisplayElementsIntoContainer,
     __testOnly_resetChatConceptMetaCaches,
     formatChatTimestamp,
     sendMessage
@@ -38,6 +39,17 @@ jest.mock('../utils/textDecorator.js', () => ({
     applyCartoucheAppearance: jest.fn(),
     cartouchifyElementText: jest.fn(),
     cartouchifyVontologyTokensInElement: jest.fn(),
+    createVontologyCartouche: jest.fn((conceptId) => {
+        const idRaw = String(conceptId ?? '').trim();
+        const fullId = idRaw.startsWith('#V#') ? idRaw : `#V#${idRaw}`;
+        const button = globalThis.document.createElement('button');
+        button.type = 'button';
+        button.className = 'vontology-cartouche';
+        button.dataset.fullConceptId = fullId;
+        button.dataset.conceptId = fullId.startsWith('#V#') ? fullId.slice(3) : fullId;
+        button.textContent = fullId;
+        return button;
+    }),
     getCartoucheAppearanceSettings: jest.fn(() => ({
         useShortestName: false,
         showName: true,
@@ -532,6 +544,76 @@ describe('chat cartouche hydration retries', () => {
         await flushMicrotasks();
 
         expect(nameEl.textContent).toBe('Literary Work');
+    });
+});
+
+describe('relation truth-state display elements', () => {
+    beforeEach(() => {
+        const { createVontologyCartouche } = require('../utils/textDecorator.js');
+        createVontologyCartouche.mockClear();
+    });
+
+    test('renders grouped asserted and missing relation rows using compact cartouches', () => {
+        const container = document.createElement('div');
+        const debugData = {
+            display_elements: {
+                schema_version: 'turn_display_elements_v1',
+                elements: [
+                    {
+                        element_id: 'screen_relation_truth_state',
+                        element_type: 'relation_truth_state',
+                        channel: 'screen',
+                        order: 41,
+                        intent: 'truth_state_relation_view',
+                        payload: {
+                            title: 'Current truth state',
+                            groups: [
+                                {
+                                    label: 'Conference-level',
+                                    status: 'asserted',
+                                    assertions: [
+                                        {
+                                            assertion_id: 'a1',
+                                            arg1: '#V#michael_witbrock',
+                                            predicate: '#V#attended_event',
+                                            arg2: '#V#international_ai_cooperation_and_governance_forum_2025_melbourne',
+                                            is_asserted: true
+                                        }
+                                    ]
+                                },
+                                {
+                                    label: 'Missing (should exist)',
+                                    status: 'missing_expected',
+                                    assertions: [
+                                        {
+                                            assertion_id: 'a2',
+                                            arg1: '#V#michael_witbrock',
+                                            predicate: '#V#panelist_in_event',
+                                            arg2: '#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne',
+                                            is_asserted: false
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        provenance: { source: 'test' }
+                    }
+                ]
+            }
+        };
+
+        __testOnly_renderDisplayElementsIntoContainer(container, debugData);
+
+        const section = container.querySelector('.chat-display-elements-relation-truth-state-section');
+        expect(section).not.toBeNull();
+
+        const rows = container.querySelectorAll('.chat-display-elements-relation-truth-state-assertion');
+        expect(rows.length).toBe(2);
+        expect(container.querySelectorAll('.chat-display-elements-relation-truth-state-assertion.not-asserted').length).toBe(1);
+        expect(container.textContent).toContain('not currently asserted');
+
+        const { createVontologyCartouche } = require('../utils/textDecorator.js');
+        expect(createVontologyCartouche).toHaveBeenCalledTimes(6);
     });
 });
 

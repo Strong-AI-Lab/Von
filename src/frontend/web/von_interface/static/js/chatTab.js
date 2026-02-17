@@ -26,7 +26,7 @@ import {
     selectConversationHistorySessions
 } from './utils/conversationHistoryPreferences.js';
 import { getSessionScopedNamespace, getSessionScopedOrgContext } from './utils/sessionScopedStorage.js';
-import { applyCartoucheAppearance, cartouchifyElementText, cartouchifyVontologyTokensInElement, getCartoucheAppearanceSettings, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
+import { applyCartoucheAppearance, cartouchifyElementText, cartouchifyVontologyTokensInElement, createVontologyCartouche, getCartoucheAppearanceSettings, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
 import { showToast } from './utils/toast.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
@@ -1411,6 +1411,8 @@ const TABLE_MAX_PAGE_SIZE = 200;
 const WORKFLOW_MAX_NODES = 100;
 const TASK_VIEW_MAX_ITEMS = 200;
 const TIMELINE_MAX_ITEMS = 200;
+const RELATION_TRUTH_STATE_MAX_GROUPS = 50;
+const RELATION_TRUTH_STATE_MAX_ASSERTIONS_PER_GROUP = 200;
 const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
 
 function normaliseTableSortMetadata(value, columns) {
@@ -2069,6 +2071,144 @@ function resolveTimelineDisplayElements(debugData) {
     return timelines;
 }
 
+function normaliseRelationTruthStateStatus(value) {
+    const status = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (status === 'asserted' || status === 'missing_expected' || status === 'uncertain') {
+        return status;
+    }
+    return 'uncertain';
+}
+
+function normaliseRelationTruthStateAssertion(rawAssertion, assertionIndex, groupStatus) {
+    if (!rawAssertion || typeof rawAssertion !== 'object') {
+        return null;
+    }
+
+    const arg1 = typeof rawAssertion.arg1 === 'string' ? rawAssertion.arg1.trim() : '';
+    const predicate = typeof rawAssertion.predicate === 'string' ? rawAssertion.predicate.trim() : '';
+    const arg2 = typeof rawAssertion.arg2 === 'string' ? rawAssertion.arg2.trim() : '';
+    if (!arg1 || !predicate || !arg2) {
+        return null;
+    }
+
+    const assertionId = typeof rawAssertion.assertion_id === 'string' && rawAssertion.assertion_id.trim()
+        ? rawAssertion.assertion_id.trim()
+        : `assertion_${assertionIndex + 1}`;
+
+    const isAsserted = typeof rawAssertion.is_asserted === 'boolean'
+        ? rawAssertion.is_asserted
+        : groupStatus === 'asserted';
+
+    return {
+        assertion_id: assertionId,
+        arg1,
+        predicate,
+        arg2,
+        is_asserted: isAsserted
+    };
+}
+
+function normaliseRelationTruthStateDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'relation_truth_state') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const title = typeof payload.title === 'string' && payload.title.trim()
+        ? payload.title.trim()
+        : 'Current truth state';
+    const rawGroups = Array.isArray(payload.groups) ? payload.groups : [];
+
+    const groups = rawGroups
+        .map((rawGroup, groupIndex) => {
+            if (!rawGroup || typeof rawGroup !== 'object') {
+                return null;
+            }
+            const status = normaliseRelationTruthStateStatus(rawGroup.status);
+            const fallbackLabel = status === 'asserted'
+                ? 'Asserted'
+                : status === 'missing_expected'
+                    ? 'Missing (should exist)'
+                    : 'Uncertain';
+            const label = typeof rawGroup.label === 'string' && rawGroup.label.trim()
+                ? rawGroup.label.trim()
+                : fallbackLabel;
+            const assertionsRaw = Array.isArray(rawGroup.assertions) ? rawGroup.assertions : [];
+            const assertions = assertionsRaw
+                .map((assertion, assertionIndex) => (
+                    normaliseRelationTruthStateAssertion(assertion, assertionIndex, status)
+                ))
+                .filter(Boolean)
+                .slice(0, RELATION_TRUTH_STATE_MAX_ASSERTIONS_PER_GROUP);
+            if (!assertions.length) {
+                return null;
+            }
+            return {
+                label,
+                status,
+                assertions
+            };
+        })
+        .filter(Boolean)
+        .slice(0, RELATION_TRUTH_STATE_MAX_GROUPS);
+
+    if (!groups.length) {
+        return null;
+    }
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
+        title,
+        groups
+    };
+}
+
+function resolveRelationTruthStateDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const relationTruthStateElements = [];
+    for (const element of contract.elements) {
+        const relationTruthStateElement = normaliseRelationTruthStateDisplayElement(element);
+        if (!relationTruthStateElement) {
+            continue;
+        }
+        relationTruthStateElements.push(relationTruthStateElement);
+    }
+    return relationTruthStateElements;
+}
+
+function buildRelationTruthStateValueNode(rawValue) {
+    const value = typeof rawValue === 'string' ? rawValue.trim() : '';
+    if (!value) {
+        return null;
+    }
+
+    const conceptId = _normalisePotentialConceptId(value);
+    if (conceptId) {
+        const cartouche = createVontologyCartouche(conceptId, {
+            title: 'Open concept tab'
+        });
+        cartouche.classList.add('chat-display-elements-relation-truth-state-cartouche');
+        return cartouche;
+    }
+
+    const textValue = document.createElement('span');
+    textValue.className = 'chat-display-elements-relation-truth-state-text-value';
+    textValue.textContent = value;
+    textValue.title = value;
+    return textValue;
+}
+
 function renderTableDisplayElementsIntoContainer(container, debugData) {
     if (!container || typeof container.querySelectorAll !== 'function') {
         return;
@@ -2091,7 +2231,14 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     const workflowElements = resolveWorkflowDisplayElements(debugData);
     const taskViewElements = resolveTaskViewDisplayElements(debugData);
     const timelineElements = resolveTimelineDisplayElements(debugData);
-    if (!tableElements.length && !workflowElements.length && !taskViewElements.length && !timelineElements.length) {
+    const relationTruthStateElements = resolveRelationTruthStateDisplayElements(debugData);
+    if (
+        !tableElements.length
+        && !workflowElements.length
+        && !taskViewElements.length
+        && !timelineElements.length
+        && !relationTruthStateElements.length
+    ) {
         return;
     }
 
@@ -2584,7 +2731,113 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         root.appendChild(section);
     });
 
+    relationTruthStateElements.forEach((relationElement, relationIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-relation-truth-state-section';
+        section.style.cssText = (
+            tableElements.length > 0
+            || workflowElements.length > 0
+            || taskViewElements.length > 0
+            || timelineElements.length > 0
+            || relationIndex > 0
+        ) ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-relation-truth-state-title';
+        title.textContent = relationTruthStateElements.length > 1
+            ? `${relationElement.title} ${relationIndex + 1}`
+            : relationElement.title;
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const totalAssertions = relationElement.groups.reduce(
+            (count, group) => count + group.assertions.length,
+            0
+        );
+        const summary = document.createElement('div');
+        summary.className = 'chat-display-elements-relation-truth-state-summary';
+        summary.textContent = `${totalAssertions} relation${totalAssertions === 1 ? '' : 's'}`;
+        summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+        section.appendChild(summary);
+
+        const groupsWrap = document.createElement('div');
+        groupsWrap.className = 'chat-display-elements-relation-truth-state-groups';
+
+        relationElement.groups.forEach((group) => {
+            const groupCard = document.createElement('article');
+            groupCard.className = `chat-display-elements-relation-truth-state-group status-${group.status}`;
+
+            const groupHeader = document.createElement('div');
+            groupHeader.className = 'chat-display-elements-relation-truth-state-group-header';
+
+            const statusBadge = document.createElement('span');
+            statusBadge.className = `chat-display-elements-relation-truth-state-status status-${group.status}`;
+            statusBadge.textContent = group.status === 'asserted'
+                ? 'Asserted'
+                : group.status === 'missing_expected'
+                    ? 'Missing'
+                    : 'Uncertain';
+            groupHeader.appendChild(statusBadge);
+
+            const groupLabel = document.createElement('span');
+            groupLabel.className = 'chat-display-elements-relation-truth-state-group-label';
+            groupLabel.textContent = group.label;
+            groupHeader.appendChild(groupLabel);
+
+            groupCard.appendChild(groupHeader);
+
+            const assertionList = document.createElement('div');
+            assertionList.className = 'chat-display-elements-relation-truth-state-assertions';
+
+            group.assertions.forEach((assertion) => {
+                const assertionRow = document.createElement('div');
+                assertionRow.className = `chat-display-elements-relation-truth-state-assertion ${assertion.is_asserted ? 'asserted' : 'not-asserted'}`;
+
+                const relationLine = document.createElement('div');
+                relationLine.className = 'chat-display-elements-relation-truth-state-line';
+
+                const arg1Node = buildRelationTruthStateValueNode(assertion.arg1);
+                const predicateNode = buildRelationTruthStateValueNode(assertion.predicate);
+                const arg2Node = buildRelationTruthStateValueNode(assertion.arg2);
+                if (!arg1Node || !predicateNode || !arg2Node) {
+                    return;
+                }
+
+                const connectorLeft = document.createElement('span');
+                connectorLeft.className = 'chat-display-elements-relation-truth-state-connector connector-left';
+                connectorLeft.textContent = '--';
+
+                const connectorRight = document.createElement('span');
+                connectorRight.className = 'chat-display-elements-relation-truth-state-connector connector-right';
+                connectorRight.textContent = '-->';
+
+                relationLine.appendChild(arg1Node);
+                relationLine.appendChild(connectorLeft);
+                relationLine.appendChild(predicateNode);
+                relationLine.appendChild(connectorRight);
+                relationLine.appendChild(arg2Node);
+                assertionRow.appendChild(relationLine);
+
+                if (!assertion.is_asserted) {
+                    const missingHint = document.createElement('div');
+                    missingHint.className = 'chat-display-elements-relation-truth-state-hint';
+                    missingHint.textContent = 'not currently asserted';
+                    assertionRow.appendChild(missingHint);
+                }
+
+                assertionList.appendChild(assertionRow);
+            });
+
+            groupCard.appendChild(assertionList);
+            groupsWrap.appendChild(groupCard);
+        });
+
+        section.appendChild(groupsWrap);
+        root.appendChild(section);
+    });
+
     container.appendChild(root);
+    hydrateChatConceptCartouches(root);
 }
 
 function enrichDebugDataWithSpeechPlanning(debugData, options = {}) {
@@ -13386,6 +13639,9 @@ export function __testOnly_setWorkflowShowDesigns(enabled) {
 }
 export function __testOnly_buildWorkflowMonitorExportPayload() {
     return buildWorkflowMonitorExportPayload();
+}
+export function __testOnly_renderDisplayElementsIntoContainer(container, debugData) {
+    renderTableDisplayElementsIntoContainer(container, debugData);
 }
 
 // Export for testing.
