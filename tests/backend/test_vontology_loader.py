@@ -34,6 +34,8 @@ from src.backend.workflows.vontology_loader import (
     _normalise_invoked_action_target,
     _first_relationship_target,
     _all_relationship_targets,
+    resolve_workflow_description,
+    resolve_workflow_narrative_text,
 )
 
 
@@ -194,6 +196,75 @@ class TestFetchConceptProjection:
         projection = captured["projection"]
         assert "concept_data.preserved_fields" in projection
         assert "concept_data.preserved_fields.description" not in projection
+
+
+class TestWorkflowDescriptionResolution:
+    def test_resolve_narrative_prefers_has_definition_precedence(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {"predicate": "hasContent", "text": "Content text"},
+                {"predicate": "hasDefinition", "text": "Definition text"},
+                {"predicate": "hasDescription", "text": "Description text"},
+            ],
+        ):
+            with patch(
+                "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+                side_effect=AssertionError(
+                    "legacy fallback should not run when canonical text exists"
+                ),
+            ):
+                text, source = resolve_workflow_narrative_text("#V#demo_workflow")
+
+        assert text == "Definition text"
+        assert source == "text_relation:hasDefinition"
+
+    def test_resolve_narrative_supports_v_prefixed_has_description(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[
+                {"predicate": "#V#hasDescription", "text": "Canonical V description"}
+            ],
+        ):
+            text, source = resolve_workflow_narrative_text("#V#demo_workflow")
+
+        assert text == "Canonical V description"
+        assert source == "text_relation:#V#hasDescription"
+
+    def test_resolve_narrative_falls_back_to_legacy_preserved_description(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.get_texts_for_concept",
+            return_value=[],
+        ):
+            with patch(
+                "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+                return_value={
+                    "concept_data": {
+                        "preserved_fields": {
+                            "description": "Legacy workflow description"
+                        }
+                    }
+                },
+            ):
+                text, source = resolve_workflow_narrative_text("#V#legacy_workflow")
+
+        assert text == "Legacy workflow description"
+        assert source == "legacy:concept_data.preserved_fields.description"
+
+    def test_resolve_workflow_description_prefers_canonical_vontology_source(self):
+        with patch(
+            "src.backend.workflows.vontology_loader.resolve_workflow_narrative_text",
+            return_value=("Narrative from relation", "text_relation:hasContent"),
+        ):
+            description, source = resolve_workflow_description(
+                "#V#workflow",
+                workflow_source="vontology",
+                registration_purpose="Cached purpose",
+                definition_purpose="Definition purpose",
+            )
+
+        assert description == "Narrative from relation"
+        assert source == "text_relation:hasContent"
 
 
 class TestWorkflowGraphPredicateCompatibility:

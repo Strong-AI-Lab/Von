@@ -5277,6 +5277,7 @@ def _workflow_list_definitions(**kwargs):
         build_durable_workflow_registry_read_only,
         get_workflow_registry_inventory_snapshot,
     )
+    from ...workflows.vontology_loader import resolve_workflow_description
     from ...workflows.workflow_baseline_telemetry import (
         get_workflow_baseline_telemetry_snapshot,
     )
@@ -5292,14 +5293,21 @@ def _workflow_list_definitions(**kwargs):
         # Enriched descriptions
         definitions = []
         for wid in ids[:limit]:
-            defn = registry.get(wid)
-            description = (
-                defn.purpose if defn is not None and isinstance(defn.purpose, str) else ""
+            registration = registry.get_registration(wid)
+            defn = registration.definition if registration is not None else registry.get(wid)
+            description, description_source = resolve_workflow_description(
+                wid,
+                workflow_source=(registration.source if registration is not None else None),
+                registration_purpose=(
+                    registration.purpose if registration is not None else None
+                ),
+                definition_purpose=(getattr(defn, "purpose", "") if defn else None),
             )
             definitions.append(
                 {
                     "workflow_id": wid,
                     "description": description,
+                    "description_source": description_source,
                     "initial_state": defn.initial_state if defn else "",
                 }
             )

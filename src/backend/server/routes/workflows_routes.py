@@ -30,7 +30,8 @@ from ...workflows.durable.workflow_instance_submission_service import (
 )
 from ...workflows.vontology_loader import (
     build_workflow_process_graph,
-    best_effort_workflow_narrative_text,
+    resolve_workflow_description,
+    resolve_workflow_narrative_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ workflows_bp = Blueprint("workflows", __name__)
 @workflows_bp.get("/api/workflows/definitions/<path:workflow_id>")
 def api_get_workflow_definition(workflow_id: str):
     definition, warnings = build_workflow_process_graph(workflow_id)
-    raw = best_effort_workflow_narrative_text(workflow_id)
+    raw, raw_source = resolve_workflow_narrative_text(workflow_id)
 
     if not definition:
         # Backward compatibility: if a workflow only has narrative text, return it.
@@ -52,6 +53,7 @@ def api_get_workflow_definition(workflow_id: str):
                     "workflow_id": workflow_id,
                     "definition": {"representation": "narrative_only"},
                     "raw": raw,
+                    "raw_source": raw_source,
                     "warnings": warnings,
                 }
             )
@@ -68,6 +70,7 @@ def api_get_workflow_definition(workflow_id: str):
             "workflow_id": workflow_id,
             "definition": definition,
             "raw": raw,
+            "raw_source": raw_source,
             "warnings": warnings,
         }
     )
@@ -120,20 +123,22 @@ def api_list_workflow_definitions():
                 else registry.get(workflow_id)
             )
 
-            description = ""
+            registration_purpose = (
+                registration.purpose if registration is not None else None
+            )
+            definition_purpose = (
+                getattr(definition, "purpose", "") if definition is not None else None
+            )
+            description, description_source = resolve_workflow_description(
+                workflow_id,
+                workflow_source=(registration.source if registration is not None else None),
+                registration_purpose=registration_purpose,
+                definition_purpose=definition_purpose,
+            )
             source = "unknown"
             if registration is not None:
-                if (
-                    isinstance(registration.purpose, str)
-                    and registration.purpose.strip()
-                ):
-                    description = registration.purpose.strip()
                 if isinstance(registration.source, str) and registration.source.strip():
                     source = registration.source.strip()
-            if not description and definition is not None:
-                purpose = getattr(definition, "purpose", "")
-                if isinstance(purpose, str) and purpose.strip():
-                    description = purpose.strip()
 
             initial_state = ""
             if definition is not None:
@@ -168,6 +173,7 @@ def api_list_workflow_definitions():
                 {
                     "workflow_id": workflow_id,
                     "description": description,
+                    "description_source": description_source,
                     "initial_state": initial_state,
                     "source": source,
                     "attempts": (

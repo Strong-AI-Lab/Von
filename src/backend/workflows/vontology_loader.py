@@ -112,6 +112,20 @@ WORKFLOW_DISCOVERY_BASE_TYPE_IDS: Tuple[str, ...] = (
 
 WORKFLOW_STEP_VACUITY_REASON_CODE = "workflow_step_vacuous"
 
+# Canonical narrative precedence for workflow introspection surfaces.
+# Keep ordering stable so monitor output is deterministic across code paths.
+WORKFLOW_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE: Tuple[Tuple[str, ...], ...] = (
+    ("hasDefinition", "#V#hasDefinition"),
+    ("hasContent", "#V#hasContent"),
+    ("hasDescription", "#V#hasDescription"),
+)
+WORKFLOW_DESCRIPTION_SOURCE_NONE = "none"
+WORKFLOW_DESCRIPTION_SOURCE_REGISTRATION = "registration.purpose"
+WORKFLOW_DESCRIPTION_SOURCE_DEFINITION = "definition.purpose"
+WORKFLOW_DESCRIPTION_SOURCE_LEGACY = (
+    "legacy:concept_data.preserved_fields.description"
+)
+
 _WORKFLOW_MAPPING_ID_RE = re.compile(
     r"^#V#workflow_mapping_([a-z0-9_]+)_to_([a-z0-9_]+?)(?:_param(?:eter)?)?$",
     re.IGNORECASE,
@@ -656,37 +670,116 @@ def _normalise_invoked_action_target(raw_target: str) -> str | None:
     return target
 
 
+def _normalise_non_empty_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def resolve_workflow_narrative_text(workflow_id: str) -> tuple[str | None, str]:
+    """Resolve workflow narrative text from canonical relations, then legacy fallback.
+
+    Precedence:
+      1. hasDefinition
+      2. hasContent
+      3. hasDescription (including #V#hasDescription)
+      4. concept_data.preserved_fields.description (legacy fallback)
+    """
+
+    if not isinstance(workflow_id, str) or not workflow_id.strip():
+        return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
+
+    texts: list[dict[str, Any]] = []
+    try:
+        raw_texts = get_texts_for_concept(workflow_id)
+    except Exception:
+        raw_texts = []
+
+    if isinstance(raw_texts, list):
+        texts = [item for item in raw_texts if isinstance(item, dict)]
+
+    for predicate_aliases in WORKFLOW_DESCRIPTION_TEXT_PREDICATE_PRECEDENCE:
+        for item in texts:
+            predicate = str(item.get("predicate") or "").strip()
+            if predicate not in predicate_aliases:
+                continue
+            text = _normalise_non_empty_text(item.get("text"))
+            if text:
+                return text, f"text_relation:{predicate}"
+
+    concept_doc: Dict[str, Any] | None = None
+    try:
+        concept_doc = ConceptsRepository.find_one(
+            {"concept_id": workflow_id},
+            {"concept_data.preserved_fields": 1},
+        )
+    except Exception:
+        concept_doc = None
+
+    concept_data = concept_doc.get("concept_data", {}) if isinstance(concept_doc, dict) else {}
+    preserved_fields = (
+        concept_data.get("preserved_fields", {}) if isinstance(concept_data, dict) else {}
+    )
+    # TODO(JVNAUTOSCI-1171): Remove this legacy fallback once preserved_fields
+    # decommission is complete and all workflow narrative text is relation-backed.
+    legacy_description = (
+        _normalise_non_empty_text(preserved_fields.get("description"))
+        if isinstance(preserved_fields, dict)
+        else None
+    )
+    if legacy_description:
+        return legacy_description, WORKFLOW_DESCRIPTION_SOURCE_LEGACY
+
+    return None, WORKFLOW_DESCRIPTION_SOURCE_NONE
+
+
+def resolve_workflow_description(
+    workflow_id: str,
+    *,
+    workflow_source: str | None = None,
+    registration_purpose: Any = None,
+    definition_purpose: Any = None,
+) -> tuple[str, str]:
+    """Resolve monitor/introspection description text with explicit source telemetry.
+
+    For Vontology-sourced registrations, prefer the canonical Vontology resolver
+    so source telemetry reflects where description text actually came from.
+    """
+
+    registration_text = _normalise_non_empty_text(registration_purpose)
+    definition_text = _normalise_non_empty_text(definition_purpose)
+    source_token = str(workflow_source or "").strip().lower()
+
+    if source_token == "vontology":
+        narrative_text, narrative_source = resolve_workflow_narrative_text(workflow_id)
+        if narrative_text:
+            return narrative_text, narrative_source
+        if registration_text:
+            return registration_text, WORKFLOW_DESCRIPTION_SOURCE_REGISTRATION
+        if definition_text:
+            return definition_text, WORKFLOW_DESCRIPTION_SOURCE_DEFINITION
+        return "", narrative_source
+
+    if registration_text:
+        return registration_text, WORKFLOW_DESCRIPTION_SOURCE_REGISTRATION
+    if definition_text:
+        return definition_text, WORKFLOW_DESCRIPTION_SOURCE_DEFINITION
+
+    narrative_text, narrative_source = resolve_workflow_narrative_text(workflow_id)
+    if narrative_text:
+        return narrative_text, narrative_source
+    return "", narrative_source
+
+
 def best_effort_workflow_narrative_text(workflow_id: str) -> Optional[str]:
     """Fetch a stored workflow definition *narrative* text from Vontology.
 
     Workflows should be represented structurally via explicit relationships
     (steps + control flow). This text is optional and is not machine-parsed.
     """
-
-    if not isinstance(workflow_id, str) or not workflow_id.strip():
-        return None
-
-    try:
-        texts = get_texts_for_concept(workflow_id)
-    except Exception:
-        return None
-
-    if not isinstance(texts, list):
-        return None
-
-    preferred_predicates = ("hasDefinition", "hasContent", "hasDescription")
-
-    for predicate in preferred_predicates:
-        for item in texts:
-            if not isinstance(item, dict):
-                continue
-            if item.get("predicate") != predicate:
-                continue
-            text = item.get("text")
-            if isinstance(text, str) and text.strip():
-                return text.strip()
-
-    return None
+    narrative_text, _ = resolve_workflow_narrative_text(workflow_id)
+    return narrative_text
 
 
 def _fetch_concepts_by_id(concept_ids: List[str]) -> Dict[str, Dict[str, Any]]:

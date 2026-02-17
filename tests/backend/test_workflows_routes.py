@@ -173,7 +173,11 @@ def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_cli
 
     monkeypatch.setattr(workflows_routes.ConceptsRepository, "find_one", _fake_find_one)
     monkeypatch.setattr(workflows_routes.ConceptsRepository, "find", _fake_find)
-    monkeypatch.setattr(workflows_routes, "get_texts_for_concept", lambda cid: [])
+    monkeypatch.setattr(
+        workflows_routes,
+        "resolve_workflow_narrative_text",
+        lambda workflow_id: (None, "none"),
+    )
 
     resp = app_client.get("/api/workflows/definitions/%23V%23demo_workflow")
     assert resp.status_code == 200
@@ -198,6 +202,8 @@ def test_workflow_definition_endpoint_uses_best_effort_text(monkeypatch, app_cli
     assert any(
         edge["predicate"] == "onFalseNextStep" for edge in data["definition"]["edges"]
     )
+    assert data["raw"] is None
+    assert data["raw_source"] == "none"
 
 
 def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_client):
@@ -339,6 +345,7 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     items = payload["items"]
     assert items[0]["workflow_id"] == "#V#alpha_workflow"
     assert items[0]["description"] == "Alpha explicit purpose"
+    assert items[0]["description_source"] == "registration.purpose"
     assert items[0]["initial_state"] == "alpha_start"
     assert items[0]["source"] == "built_in"
     assert items[0]["attempts"] == 8
@@ -353,6 +360,7 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert items[1]["workflow_id"] == "#V#beta_workflow"
     # Falls back to definition.purpose when registration purpose is empty.
     assert items[1]["description"] == "Beta fallback purpose"
+    assert items[1]["description_source"] == "definition.purpose"
     assert items[1]["initial_state"] == "beta_start"
     assert items[1]["source"] == "vontology"
     assert items[1]["attempts"] == 2
@@ -365,6 +373,97 @@ def test_workflow_definitions_list_endpoint_reads_registry(monkeypatch, app_clie
     assert (
         items[1]["executability_detail"]
         == "workflow_step_contract_issue:count=2,total=3,first_step=#V#alpha_step"
+    )
+
+
+def test_workflow_definitions_list_includes_legacy_description_source(monkeypatch, app_client):
+    import src.backend.server.routes.workflows_routes as workflows_routes
+    import src.backend.workflows.durable.registry_factory as registry_factory
+    import src.backend.services.workflow_discovery_service as workflow_discovery_service
+
+    class _FakeDefinition:
+        def __init__(self, initial_state: str, purpose: str):
+            self.initial_state = initial_state
+            self.purpose = purpose
+
+    class _FakeRegistration:
+        def __init__(self, definition, purpose: str, source: str):
+            self.definition = definition
+            self.purpose = purpose
+            self.source = source
+
+    class _FakeRegistry:
+        def __init__(self):
+            self._ids = ["#V#legacy_workflow"]
+            self._definitions = {
+                "#V#legacy_workflow": _FakeDefinition(
+                    initial_state="legacy_start",
+                    purpose="",
+                )
+            }
+            self._registrations = {
+                "#V#legacy_workflow": _FakeRegistration(
+                    definition=self._definitions["#V#legacy_workflow"],
+                    purpose="",
+                    source="vontology",
+                )
+            }
+
+        def all_workflow_ids(self):
+            return list(self._ids)
+
+        def get(self, workflow_id):
+            return self._definitions.get(workflow_id)
+
+        def get_registration(self, workflow_id):
+            return self._registrations.get(workflow_id)
+
+    monkeypatch.setattr(
+        registry_factory,
+        "build_durable_workflow_registry_read_only",
+        lambda: _FakeRegistry(),
+    )
+    monkeypatch.setattr(
+        registry_factory,
+        "get_workflow_registry_inventory_snapshot",
+        lambda: {},
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_usage_aggregates_for_workflows",
+        lambda workflow_ids: {},
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "get_workflow_episode_counts_for_workflows",
+        lambda workflow_ids, namespace=None, session_id=None, turn_id=None: {
+            "#V#legacy_workflow": 0,
+        },
+    )
+    monkeypatch.setattr(
+        workflow_discovery_service,
+        "classify_workflow_concept_executability",
+        lambda workflow_id: (False, "non_executable_design_artifact", None),
+    )
+    monkeypatch.setattr(
+        workflows_routes,
+        "resolve_workflow_description",
+        lambda workflow_id, **kwargs: (
+            "Legacy workflow description",
+            "legacy:concept_data.preserved_fields.description",
+        ),
+    )
+
+    resp = app_client.get("/api/workflows/definitions?limit=10")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["count"] == 1
+    item = payload["items"][0]
+    assert item["workflow_id"] == "#V#legacy_workflow"
+    assert item["description"] == "Legacy workflow description"
+    assert (
+        item["description_source"]
+        == "legacy:concept_data.preserved_fields.description"
     )
 
 
