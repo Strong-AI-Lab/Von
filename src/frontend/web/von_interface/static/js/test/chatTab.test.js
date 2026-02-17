@@ -685,6 +685,71 @@ describe('kanban display elements', () => {
     });
 });
 
+describe('calendar display elements', () => {
+    test('renders calendar day cards with date labels and task links', () => {
+        const container = document.createElement('div');
+        const debugData = {
+            display_elements: {
+                schema_version: 'turn_display_elements_v1',
+                elements: [
+                    {
+                        element_id: 'screen_calendar_view',
+                        element_type: 'calendar_view',
+                        channel: 'screen',
+                        order: 38,
+                        intent: 'structured_calendar_view',
+                        payload: {
+                            default_granularity: 'month',
+                            focus_date: '2026-02-17',
+                            items: [
+                                {
+                                    item_id: '#V#task_alpha',
+                                    title: 'Alpha task',
+                                    start_at: '2026-02-17',
+                                    all_day: true,
+                                    status: 'pending',
+                                    task_links: [
+                                        {
+                                            link_type: 'von_task',
+                                            target_id: '#V#task_alpha',
+                                            label: '#V#task_alpha'
+                                        },
+                                        {
+                                            link_type: 'jira_issue',
+                                            target_id: 'JVNAUTOSCI-1177',
+                                            label: 'JVNAUTOSCI-1177',
+                                            href: 'https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1177'
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        provenance: { source: 'test' }
+                    }
+                ]
+            }
+        };
+
+        __testOnly_renderDisplayElementsIntoContainer(container, debugData);
+
+        const section = container.querySelector('.chat-display-elements-calendar-section');
+        expect(section).not.toBeNull();
+        expect(section.textContent).toContain('Calendar view');
+        expect(section.textContent).toContain('Alpha task');
+
+        const dayCards = container.querySelectorAll('.chat-display-elements-calendar-day');
+        expect(dayCards.length).toBe(1);
+        expect(dayCards[0].textContent).toContain('2026');
+
+        const conceptButton = section.querySelector('.chat-display-elements-concept-link');
+        expect(conceptButton).not.toBeNull();
+        expect(conceptButton.dataset.conceptId).toBe('#V#task_alpha');
+
+        const jiraLink = section.querySelector('a[href="https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1177"]');
+        expect(jiraLink).not.toBeNull();
+    });
+});
+
 describe('relation graph display elements', () => {
     beforeEach(() => {
         const { createVontologyCartouche } = require('../utils/textDecorator.js');
@@ -1259,6 +1324,39 @@ describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
             screen_kanban_element_count: 1,
             source_tools: ['task_list', 'workflow_list_instances'],
             record_families: ['tasks_and_workflows']
+        });
+    });
+
+    test('includes calendar render plan provenance counts when present', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            render_plan: {
+                enabled: true,
+                attempted: true,
+                success: true,
+                reason: 'resolved',
+                selected_renderer_ids: ['#V#renderer_calendar'],
+                selected_renderer_types: ['calendar'],
+                screen_element_families: ['calendar_view'],
+                screen_calendar_elements: [
+                    {
+                        element_id: 'screen_calendar_view',
+                        provenance: {
+                            source_tools: ['task_list', 'workflow_list_instances'],
+                            record_family: 'calendar_items'
+                        }
+                    }
+                ]
+            }
+        });
+
+        expect(metadata.render_plan).toMatchObject({
+            selected_renderer_types: ['calendar'],
+            screen_element_families: ['calendar_view'],
+            screen_calendar_element_count: 1,
+            source_tools: ['task_list', 'workflow_list_instances'],
+            record_families: ['calendar_items']
         });
     });
 

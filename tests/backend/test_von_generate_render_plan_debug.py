@@ -464,6 +464,74 @@ def test_generate_builds_timeline_from_render_plan_elements(monkeypatch):
     assert timeline_item["task_links"][0]["target_id"] == "#V#task_alpha"
 
 
+def test_generate_builds_calendar_from_render_plan_elements(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_calendar_elements": [
+            {
+                "element_id": "screen_calendar_view",
+                "intent": "structured_calendar_view",
+                "payload": {
+                    "default_granularity": "month",
+                    "focus_date": "2026-02-17",
+                    "items": [
+                        {
+                            "item_id": "#V#task_alpha",
+                            "title": "Alpha task",
+                            "start_at": "2026-02-17",
+                            "all_day": True,
+                            "status": "pending",
+                            "task_links": [
+                                {
+                                    "link_type": "von_task",
+                                    "target_id": "#V#task_alpha",
+                                }
+                            ],
+                        }
+                    ],
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Calendar summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show calendar"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    assert display_elements.get("validation", {}).get("valid") is True
+    assert "screen_structured_calendar_views_supplied" in display_elements.get(
+        "reason_codes", []
+    )
+
+    calendar_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "calendar_view"
+    ]
+    assert len(calendar_elements) == 1
+    calendar_item = calendar_elements[0].get("payload", {}).get("items", [])[0]
+    assert calendar_item["item_id"] == "#V#task_alpha"
+    assert calendar_item["title"] == "Alpha task"
+    assert calendar_item["all_day"] is True
+
+
 def test_generate_builds_task_view_from_render_plan_elements(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
@@ -768,6 +836,7 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
             "table": False,
             "workflow_view": True,
             "task_view": False,
+            "calendar_view": False,
             "kanban_view": False,
             "timeline": False,
             "relation_graph_view": False,
@@ -847,6 +916,23 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
                             "item_id": "event_1",
                             "label": "Task status changed",
                             "start_at": "2026-02-17T09:10:00Z",
+                        }
+                    ]
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+        "screen_calendar_elements": [
+            {
+                "element_id": "screen_calendar_view",
+                "intent": "structured_calendar_view",
+                "payload": {
+                    "items": [
+                        {
+                            "item_id": "#V#task_alpha",
+                            "title": "Alpha task",
+                            "start_at": "2026-02-17",
+                            "all_day": True,
                         }
                     ]
                 },
@@ -947,6 +1033,13 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
         if isinstance(element, dict) and element.get("element_type") == "timeline"
     ]
     assert not timeline_elements
+    calendar_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict)
+        and element.get("element_type") == "calendar_view"
+    ]
+    assert not calendar_elements
     kanban_elements = [
         element
         for element in display_elements.get("elements", [])

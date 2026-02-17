@@ -587,6 +587,89 @@ def test_build_turn_display_elements_drops_invalid_supplied_timelines() -> None:
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_calendar_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Calendar response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Calendar response",
+            "spoken": None,
+        },
+        screen_calendar_elements=[
+            {
+                "element_id": "screen_calendar_view",
+                "intent": "structured_calendar_view",
+                "payload": {
+                    "default_granularity": "month",
+                    "focus_date": "2026-02-17",
+                    "items": [
+                        {
+                            "item_id": "#V#task_alpha",
+                            "title": "Alpha task",
+                            "start_at": "2026-02-17",
+                            "all_day": True,
+                            "status": "pending",
+                            "task_links": [
+                                {
+                                    "link_type": "von_task",
+                                    "target_id": "#V#task_alpha",
+                                    "label": "#V#task_alpha",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    calendar_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "calendar_view"
+    ]
+    assert len(calendar_elements) == 1
+    calendar_element = calendar_elements[0]
+    assert calendar_element["element_id"] == "screen_calendar_view"
+    assert calendar_element["payload"]["items"][0]["item_id"] == "#V#task_alpha"
+    assert calendar_element["payload"]["items"][0]["all_day"] is True
+    assert "screen_structured_calendar_views_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_supplied_calendar_views() -> None:
+    contract = build_turn_display_elements(
+        response_text="Calendar response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Calendar response",
+            "spoken": None,
+        },
+        screen_calendar_elements=[
+            {
+                "payload": {
+                    "items": [
+                        {
+                            "item_id": "bad_item",
+                            "start_at": "2026-02-17",
+                            "all_day": "yes",
+                        }
+                    ]
+                }
+            }
+        ],
+    )
+
+    calendar_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "calendar_view"
+    ]
+    assert calendar_elements == []
+    assert "screen_structured_calendar_views_invalid_dropped" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
 def test_build_turn_display_elements_includes_supplied_relation_graph_elements() -> None:
     contract = build_turn_display_elements(
         response_text="Relation graph response",
@@ -901,6 +984,40 @@ def test_validate_turn_display_elements_rejects_timeline_without_temporal_anchor
 
     assert valid is False
     assert any("must provide at least one temporal anchor" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_calendar_item_without_title() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_calendar_view",
+                    "element_type": "calendar_view",
+                    "channel": "screen",
+                    "order": 38,
+                    "intent": "structured_calendar_view",
+                    "payload": {
+                        "items": [
+                            {
+                                "item_id": "event_1",
+                                "start_at": "2026-02-17",
+                                "all_day": "yes",
+                            }
+                        ],
+                        "default_granularity": "hourly",
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any(".title must be a non-empty string" in message for message in errors)
+    assert any(".all_day must be a boolean" in message for message in errors)
+    assert any("default_granularity must be one of" in message for message in errors)
 
 
 def test_validate_turn_display_elements_rejects_task_view_without_task_id() -> None:

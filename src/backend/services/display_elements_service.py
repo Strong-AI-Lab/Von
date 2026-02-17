@@ -15,6 +15,7 @@ DISPLAY_ELEMENT_SCHEMA_VERSION = "turn_display_elements_v1"
 # renderer integration can evolve without ad hoc shape drift.
 ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
     {
+        "calendar_view",
         "text_block",
         "json_block",
         "kanban_view",
@@ -32,6 +33,7 @@ RELATION_TRUTH_STATE_GROUP_STATUSES = frozenset(
 RELATION_GRAPH_ALLOWED_DIRECTIONS = frozenset({"directed", "undirected"})
 RELATION_GRAPH_MAX_NODES = 200
 RELATION_GRAPH_MAX_EDGES = 400
+CALENDAR_ALLOWED_GRANULARITIES = frozenset({"month", "week", "day"})
 
 _JSON_FENCE_PATTERN = re.compile(
     r"```json\s*\n(?P<body>[\s\S]*?)\n```",
@@ -763,6 +765,90 @@ def validate_turn_display_elements(
                     label=f"{item_label}.task_links",
                     errors=errors,
                 )
+        elif element_type == "calendar_view":
+            items = payload.get("items")
+            if not isinstance(items, list) or not items:
+                errors.append(f"{label}.payload.items must be a non-empty list")
+                items = []
+
+            for item_index, item in enumerate(items):
+                item_label = f"{label}.payload.items[{item_index}]"
+                if not isinstance(item, Mapping):
+                    errors.append(f"{item_label} must be a mapping")
+                    continue
+
+                item_id = item.get("item_id")
+                if not isinstance(item_id, str) or not item_id.strip():
+                    errors.append(f"{item_label}.item_id must be a non-empty string")
+
+                title = item.get("title")
+                label_value = item.get("label")
+                has_title = (
+                    (isinstance(title, str) and bool(title.strip()))
+                    or (
+                        isinstance(label_value, str)
+                        and bool(label_value.strip())
+                    )
+                )
+                if not has_title:
+                    errors.append(
+                        f"{item_label}.title must be a non-empty string"
+                    )
+
+                start_at = item.get("start_at")
+                end_at = item.get("end_at")
+                has_start_at = isinstance(start_at, str) and bool(start_at.strip())
+                has_end_at = isinstance(end_at, str) and bool(end_at.strip())
+                if start_at is not None and not has_start_at:
+                    errors.append(
+                        f"{item_label}.start_at must be a non-empty string when provided"
+                    )
+                if end_at is not None and not has_end_at:
+                    errors.append(
+                        f"{item_label}.end_at must be a non-empty string when provided"
+                    )
+                if not has_start_at and not has_end_at:
+                    errors.append(
+                        f"{item_label} must provide at least one temporal anchor (start_at or end_at)"
+                    )
+
+                all_day = item.get("all_day")
+                if all_day is not None and not isinstance(all_day, bool):
+                    errors.append(
+                        f"{item_label}.all_day must be a boolean when provided"
+                    )
+
+                for field_name in ("status", "timezone", "description"):
+                    field_value = item.get(field_name)
+                    if field_value is None:
+                        continue
+                    if not isinstance(field_value, str) or not field_value.strip():
+                        errors.append(
+                            f"{item_label}.{field_name} must be a non-empty string when provided"
+                        )
+
+                _validate_task_links(
+                    links=item.get("task_links"),
+                    label=f"{item_label}.task_links",
+                    errors=errors,
+                )
+
+            default_granularity = payload.get("default_granularity")
+            if default_granularity is not None and (
+                not isinstance(default_granularity, str)
+                or default_granularity.strip() not in CALENDAR_ALLOWED_GRANULARITIES
+            ):
+                errors.append(
+                    f"{label}.payload.default_granularity must be one of {sorted(CALENDAR_ALLOWED_GRANULARITIES)} when provided"
+                )
+
+            focus_date = payload.get("focus_date")
+            if focus_date is not None and (
+                not isinstance(focus_date, str) or not focus_date.strip()
+            ):
+                errors.append(
+                    f"{label}.payload.focus_date must be a non-empty string when provided"
+                )
         elif element_type == "task_view":
             tasks = payload.get("tasks")
             if not isinstance(tasks, list) or not tasks:
@@ -1235,6 +1321,88 @@ def _normalise_supplied_screen_timelines(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_calendar_views(
+    screen_calendar_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen calendar view specs."""
+    if (
+        not isinstance(screen_calendar_elements, Sequence)
+        or isinstance(screen_calendar_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_calendar_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "items" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = (
+            _normalise_text(metadata.get("intent"))
+            or "structured_calendar_view"
+        )
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_task_links": True,
+                "supports_granularity_switch": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_calendar_view_probe_{index}",
+                        "element_type": "calendar_view",
+                        "channel": "screen",
+                        "order": 38,
+                        "intent": intent,
+                        "payload": dict(payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def _normalise_supplied_screen_task_views(
     screen_task_view_elements: Sequence[Mapping[str, Any]] | None,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -1564,6 +1732,7 @@ def build_turn_display_elements(
     screen_table_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_task_view_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_calendar_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_kanban_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_timeline_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_relation_graph_elements: Sequence[Mapping[str, Any]] | None = None,
@@ -1713,6 +1882,14 @@ def build_turn_display_elements(
     if supplied_task_views_dropped:
         reason_codes.append("screen_structured_task_views_invalid_dropped")
 
+    supplied_screen_calendar_views, supplied_calendar_views_dropped = (
+        _normalise_supplied_screen_calendar_views(screen_calendar_elements)
+    )
+    if supplied_screen_calendar_views:
+        reason_codes.append("screen_structured_calendar_views_supplied")
+    if supplied_calendar_views_dropped:
+        reason_codes.append("screen_structured_calendar_views_invalid_dropped")
+
     supplied_screen_kanban_views, supplied_kanban_views_dropped = (
         _normalise_supplied_screen_kanban_views(screen_kanban_elements)
     )
@@ -1835,6 +2012,27 @@ def build_turn_display_elements(
             }
         )
 
+    calendar_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_calendar_views, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_calendar_view")
+        provenance.setdefault("calendar_index", index)
+        calendar_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_calendar_view_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "structured_calendar_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_task_links": True,
+                    "supports_granularity_switch": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     kanban_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_kanban_views, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -1926,6 +2124,7 @@ def build_turn_display_elements(
             *table_specs,
             *workflow_specs,
             *task_view_specs,
+            *calendar_specs,
             *kanban_specs,
             *timeline_specs,
             *relation_graph_specs,
@@ -1972,6 +2171,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "timeline",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_calendar_order = 38
+    for spec in calendar_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_calendar_order in used_orders:
+                next_calendar_order += 1
+            order = next_calendar_order
+            used_orders.add(order)
+            next_calendar_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "calendar_view",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),

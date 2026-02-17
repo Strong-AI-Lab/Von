@@ -11039,9 +11039,33 @@ class InternalMCPChatOrchestrator:
                     priority = _first_text(task.get("priority"))
                     if priority:
                         task_entry["priority"] = priority
-                    due_date = _first_text(task.get("due_date"), task.get("due_at"))
+                    start_at = _first_text(
+                        task.get("start_at"),
+                        task.get("starts_at"),
+                        task.get("start_date"),
+                        task.get("scheduled_start_at"),
+                    )
+                    end_at = _first_text(
+                        task.get("end_at"),
+                        task.get("ends_at"),
+                        task.get("due_date"),
+                        task.get("due_at"),
+                        task.get("target_date"),
+                        task.get("milestone_date"),
+                    )
+                    due_date = _first_text(
+                        task.get("due_date"),
+                        task.get("due_at"),
+                        task.get("target_date"),
+                        task.get("milestone_date"),
+                        end_at,
+                    )
                     if due_date:
                         task_entry["due_date"] = due_date
+                    if start_at:
+                        task_entry["start_at"] = start_at
+                    if end_at:
+                        task_entry["end_at"] = end_at
                     assignee = _first_text(
                         task.get("assignee_concept_id"),
                         task.get("assignee_id"),
@@ -11049,6 +11073,16 @@ class InternalMCPChatOrchestrator:
                     )
                     if assignee:
                         task_entry["assignee"] = assignee
+                    timezone = _first_text(
+                        task.get("timezone"),
+                        task.get("time_zone"),
+                        task.get("tz"),
+                    )
+                    if timezone:
+                        task_entry["timezone"] = timezone
+                    all_day = task.get("all_day")
+                    if isinstance(all_day, bool):
+                        task_entry["all_day"] = all_day
                     description = _first_text(
                         task.get("description"),
                         task.get("summary"),
@@ -11863,6 +11897,218 @@ class InternalMCPChatOrchestrator:
                 }
             ]
 
+        def _extract_renderer_screen_calendar_elements(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+        ) -> list[dict[str, Any]]:
+            """Derive calendar payloads from task/workflow timeline style outputs."""
+
+            max_items = 240
+            source_tools: list[str] = []
+            seen_source_tools: set[str] = set()
+            calendar_items: list[dict[str, Any]] = []
+            seen_item_ids: set[str] = set()
+
+            def _register_source_tool(tool_name: str) -> None:
+                if tool_name in seen_source_tools:
+                    return
+                seen_source_tools.add(tool_name)
+                source_tools.append(tool_name)
+
+            def _next_item_id(base: str) -> str:
+                candidate = base
+                suffix = 2
+                while candidate in seen_item_ids:
+                    candidate = f"{base}_{suffix}"
+                    suffix += 1
+                seen_item_ids.add(candidate)
+                return candidate
+
+            def _is_date_only(raw_value: Any) -> bool:
+                return bool(
+                    isinstance(raw_value, str)
+                    and re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_value.strip())
+                )
+
+            def _extract_focus_date(raw_value: Any) -> str | None:
+                if not isinstance(raw_value, str):
+                    return None
+                value = raw_value.strip()
+                if not value:
+                    return None
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    return value
+                if re.match(r"^\d{4}-\d{2}-\d{2}[Tt\s]", value):
+                    return value[:10]
+                return None
+
+            def _append_item(
+                *,
+                base_item_id: str,
+                title: str,
+                start_at: Any = None,
+                end_at: Any = None,
+                all_day: Any = None,
+                status: Any = None,
+                timezone: Any = None,
+                description: Any = None,
+                task_links: Sequence[dict[str, str]] | None = None,
+            ) -> None:
+                if len(calendar_items) >= max_items:
+                    return
+
+                start_value = _first_text(start_at)
+                end_value = _first_text(end_at)
+                if not start_value and not end_value:
+                    return
+
+                item: dict[str, Any] = {
+                    "item_id": _next_item_id(base_item_id),
+                    "title": title,
+                }
+                if start_value:
+                    item["start_at"] = start_value
+                if end_value:
+                    item["end_at"] = end_value
+
+                if isinstance(all_day, bool):
+                    all_day_value = all_day
+                else:
+                    all_day_value = _is_date_only(start_value) and (
+                        not end_value or _is_date_only(end_value)
+                    )
+                item["all_day"] = bool(all_day_value)
+
+                status_value = _first_text(status)
+                if status_value:
+                    item["status"] = status_value.lower()
+
+                timezone_value = _first_text(timezone)
+                if timezone_value:
+                    item["timezone"] = timezone_value
+
+                description_value = _first_text(description)
+                if description_value:
+                    item["description"] = description_value
+
+                if task_links:
+                    item["task_links"] = list(task_links)
+
+                calendar_items.append(item)
+
+            timeline_elements = _extract_renderer_screen_timeline_elements(
+                tool_messages=tool_messages
+            )
+            if timeline_elements:
+                timeline_element = timeline_elements[0]
+                timeline_payload = timeline_element.get("payload")
+                if isinstance(timeline_payload, Mapping):
+                    for timeline_item in _mapping_list(
+                        timeline_payload.get("items"),
+                        limit=max_items,
+                    ):
+                        item_id = _first_text(
+                            timeline_item.get("item_id"),
+                            timeline_item.get("id"),
+                        ) or f"timeline_item_{len(calendar_items) + 1}"
+                        title = _first_text(
+                            timeline_item.get("label"),
+                            timeline_item.get("title"),
+                        ) or item_id
+                        _append_item(
+                            base_item_id=item_id,
+                            title=title,
+                            start_at=timeline_item.get("start_at"),
+                            end_at=timeline_item.get("end_at"),
+                            status=timeline_item.get("status"),
+                            description=timeline_item.get("description"),
+                            task_links=_collect_renderer_task_links(timeline_item),
+                        )
+
+                timeline_provenance_raw = timeline_element.get("provenance")
+                timeline_provenance: Mapping[str, Any] = (
+                    cast(Mapping[str, Any], timeline_provenance_raw)
+                    if isinstance(timeline_provenance_raw, Mapping)
+                    else {}
+                )
+                raw_timeline_source_tools = timeline_provenance.get("source_tools")
+                if isinstance(raw_timeline_source_tools, Sequence) and not isinstance(
+                    raw_timeline_source_tools,
+                    (str, bytes, bytearray),
+                ):
+                    for raw_tool_name in raw_timeline_source_tools:
+                        candidate = _first_text(raw_tool_name)
+                        if candidate:
+                            _register_source_tool(candidate)
+
+            task_entries, task_source_tools = _extract_renderer_task_entries(
+                tool_messages=tool_messages,
+                limit=max_items,
+            )
+            for tool_name in task_source_tools:
+                _register_source_tool(tool_name)
+
+            for index, task_entry in enumerate(task_entries, start=1):
+                task_id = _first_text(task_entry.get("task_id")) or f"task_{index}"
+                title = _first_text(task_entry.get("title")) or task_id
+                start_at = _first_text(
+                    task_entry.get("start_at"),
+                    task_entry.get("due_date"),
+                    task_entry.get("end_at"),
+                )
+                end_at = _first_text(
+                    task_entry.get("end_at"),
+                    task_entry.get("due_date"),
+                )
+                _append_item(
+                    base_item_id=task_id,
+                    title=title,
+                    start_at=start_at,
+                    end_at=end_at,
+                    all_day=task_entry.get("all_day"),
+                    status=task_entry.get("status"),
+                    timezone=task_entry.get("timezone"),
+                    description=task_entry.get("description"),
+                    task_links=_collect_renderer_task_links(task_entry),
+                )
+                if len(calendar_items) >= max_items:
+                    break
+
+            if not calendar_items:
+                return []
+
+            focus_date: str | None = None
+            for item in calendar_items:
+                focus_date = _extract_focus_date(item.get("start_at")) or _extract_focus_date(
+                    item.get("end_at")
+                )
+                if focus_date:
+                    break
+
+            payload: dict[str, Any] = {
+                "items": calendar_items[:max_items],
+                "default_granularity": "month",
+            }
+            if focus_date:
+                payload["focus_date"] = focus_date
+
+            return [
+                {
+                    "element_id": "screen_calendar_view",
+                    "intent": "structured_calendar_view",
+                    "payload": payload,
+                    "constraints": {
+                        "supports_task_links": True,
+                        "supports_granularity_switch": True,
+                    },
+                    "provenance": {
+                        "source": "tool_result_calendar_view",
+                        "source_tools": source_tools,
+                        "record_family": "calendar_items",
+                    },
+                }
+            ]
+
         def _extract_renderer_screen_relation_graph_elements(
             *,
             tool_messages: Sequence[Mapping[str, Any]] = (),
@@ -12380,6 +12626,8 @@ class InternalMCPChatOrchestrator:
         _RENDERER_SCREEN_ELEMENT_FAMILY_MAP: dict[str, tuple[str, ...]] = {
             "table": ("table",),
             "tabular": ("table",),
+            "calendar": ("calendar_view",),
+            "calendar_view": ("calendar_view",),
             "kanban": ("kanban_view",),
             "kanban_view": ("kanban_view",),
             "graph": ("relation_graph_view",),
@@ -12458,6 +12706,7 @@ class InternalMCPChatOrchestrator:
             include_table_elements = "table" in selected_families
             include_workflow_elements = "workflow_view" in selected_families
             include_task_view_elements = "task_view" in selected_families
+            include_calendar_elements = "calendar_view" in selected_families
             include_kanban_elements = "kanban_view" in selected_families
             include_timeline_elements = "timeline" in selected_families
             include_relation_graph_elements = "relation_graph_view" in selected_families
@@ -12468,6 +12717,7 @@ class InternalMCPChatOrchestrator:
                 "table": include_table_elements,
                 "workflow_view": include_workflow_elements,
                 "task_view": include_task_view_elements,
+                "calendar_view": include_calendar_elements,
                 "kanban_view": include_kanban_elements,
                 "timeline": include_timeline_elements,
                 "relation_graph_view": include_relation_graph_elements,
@@ -12505,6 +12755,18 @@ class InternalMCPChatOrchestrator:
                     decision["screen_task_view_elements"] = screen_task_view_elements
                     decision["screen_task_view_element_count"] = len(
                         screen_task_view_elements
+                    )
+
+            if include_calendar_elements:
+                screen_calendar_elements = (
+                    _extract_renderer_screen_calendar_elements(
+                        tool_messages=tool_messages
+                    )
+                )
+                if screen_calendar_elements:
+                    decision["screen_calendar_elements"] = screen_calendar_elements
+                    decision["screen_calendar_element_count"] = len(
+                        screen_calendar_elements
                     )
 
             if include_kanban_elements:

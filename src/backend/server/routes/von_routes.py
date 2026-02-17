@@ -2066,6 +2066,39 @@ def _extract_screen_task_view_elements_from_render_plan(
     return task_view_elements
 
 
+def _extract_screen_calendar_elements_from_render_plan(
+    render_plan: dict[str, Any] | None,
+    *,
+    screen_element_targets: dict[str, bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Extract display-contract calendar specs from renderer plan diagnostics."""
+    if not isinstance(render_plan, dict):
+        return []
+    if isinstance(screen_element_targets, dict) and not bool(
+        screen_element_targets.get("calendar_view", True)
+    ):
+        return []
+
+    calendar_elements: list[dict[str, Any]] = []
+
+    def _append_calendar_specs(raw_value: Any) -> None:
+        if isinstance(raw_value, list):
+            for item in raw_value:
+                if isinstance(item, dict):
+                    calendar_elements.append(dict(item))
+        elif isinstance(raw_value, dict):
+            calendar_elements.append(dict(raw_value))
+
+    _append_calendar_specs(render_plan.get("screen_calendar_elements"))
+    _append_calendar_specs(render_plan.get("screen_calendar_payloads"))
+
+    single_calendar = render_plan.get("screen_calendar_element")
+    if isinstance(single_calendar, dict):
+        calendar_elements.append(dict(single_calendar))
+
+    return calendar_elements
+
+
 def _extract_screen_kanban_elements_from_render_plan(
     render_plan: dict[str, Any] | None,
     *,
@@ -2210,6 +2243,7 @@ def _extract_screen_element_targets_from_render_plan(
         "table": True,
         "workflow_view": True,
         "task_view": True,
+        "calendar_view": True,
         "kanban_view": True,
         "timeline": True,
         "relation_graph_view": True,
@@ -2226,6 +2260,7 @@ def _extract_screen_element_targets_from_render_plan(
         "table": bool(raw_targets.get("table", True)),
         "workflow_view": bool(raw_targets.get("workflow_view", True)),
         "task_view": bool(raw_targets.get("task_view", True)),
+        "calendar_view": bool(raw_targets.get("calendar_view", True)),
         "kanban_view": bool(raw_targets.get("kanban_view", True)),
         "timeline": bool(raw_targets.get("timeline", True)),
         "relation_graph_view": bool(
@@ -5293,6 +5328,10 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             render_plan_for_display,
             screen_element_targets=screen_element_targets,
         )
+        screen_calendar_elements = _extract_screen_calendar_elements_from_render_plan(
+            render_plan_for_display,
+            screen_element_targets=screen_element_targets,
+        )
         screen_kanban_elements = _extract_screen_kanban_elements_from_render_plan(
             render_plan_for_display,
             screen_element_targets=screen_element_targets,
@@ -5321,6 +5360,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             screen_table_elements=screen_table_elements,
             screen_workflow_elements=screen_workflow_elements,
             screen_task_view_elements=screen_task_view_elements,
+            screen_calendar_elements=screen_calendar_elements,
             screen_kanban_elements=screen_kanban_elements,
             screen_timeline_elements=screen_timeline_elements,
             screen_relation_graph_elements=screen_relation_graph_elements,

@@ -1413,6 +1413,7 @@ const TASK_VIEW_MAX_ITEMS = 200;
 const KANBAN_MAX_COLUMNS = 30;
 const KANBAN_MAX_CARDS = 200;
 const TIMELINE_MAX_ITEMS = 200;
+const CALENDAR_MAX_ITEMS = 240;
 const RELATION_GRAPH_MAX_NODES = 120;
 const RELATION_GRAPH_MAX_EDGES = 240;
 const RELATION_TRUTH_STATE_MAX_GROUPS = 50;
@@ -2260,6 +2261,184 @@ function resolveTimelineDisplayElements(debugData) {
     return timelines;
 }
 
+function normaliseCalendarGranularity(value) {
+    const granularity = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    if (granularity === 'week' || granularity === 'day') {
+        return granularity;
+    }
+    return 'month';
+}
+
+function deriveCalendarDateKey(startAt, endAt) {
+    const candidates = [startAt, endAt];
+    for (const candidate of candidates) {
+        if (typeof candidate !== 'string') {
+            continue;
+        }
+        const value = candidate.trim();
+        if (!value) {
+            continue;
+        }
+        if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+            return value;
+        }
+        if (/^\d{4}-\d{2}-\d{2}[Tt\s]/.test(value)) {
+            return value.slice(0, 10);
+        }
+        const parsed = parseTimelineTimestamp(value);
+        if (Number.isFinite(parsed)) {
+            try {
+                return new Date(parsed).toISOString().slice(0, 10);
+            } catch (_) {
+                continue;
+            }
+        }
+    }
+    return '';
+}
+
+function formatCalendarDateLabel(dateKey) {
+    if (typeof dateKey !== 'string' || !dateKey.trim()) {
+        return 'Date unspecified';
+    }
+    const value = dateKey.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        return value;
+    }
+    const parsed = Date.parse(`${value}T00:00:00Z`);
+    if (!Number.isFinite(parsed)) {
+        return value;
+    }
+    try {
+        return new Date(parsed).toLocaleDateString(undefined, {
+            weekday: 'short',
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric'
+        });
+    } catch (_) {
+        return value;
+    }
+}
+
+function normaliseCalendarDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'calendar_view') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const rawItems = Array.isArray(payload.items) ? payload.items : [];
+    const items = rawItems
+        .map((item, index) => {
+            if (!item || typeof item !== 'object') {
+                return null;
+            }
+            const itemId = typeof item.item_id === 'string' && item.item_id.trim()
+                ? item.item_id.trim()
+                : `calendar_item_${index + 1}`;
+            const title = typeof item.title === 'string' && item.title.trim()
+                ? item.title.trim()
+                : (typeof item.label === 'string' && item.label.trim()
+                    ? item.label.trim()
+                    : itemId);
+            const startAt = typeof item.start_at === 'string' ? item.start_at.trim() : '';
+            const endAt = typeof item.end_at === 'string' ? item.end_at.trim() : '';
+            if (!startAt && !endAt) {
+                return null;
+            }
+            const status = typeof item.status === 'string' && item.status.trim()
+                ? item.status.trim().toLowerCase()
+                : '';
+            const timezone = typeof item.timezone === 'string' && item.timezone.trim()
+                ? item.timezone.trim()
+                : '';
+            const description = typeof item.description === 'string' && item.description.trim()
+                ? item.description.trim()
+                : '';
+            const rawTaskLinks = Array.isArray(item.task_links) ? item.task_links : [];
+            const taskLinks = rawTaskLinks
+                .map((link) => normaliseWorkflowTaskLink(link))
+                .filter(Boolean);
+            const dateKey = deriveCalendarDateKey(startAt, endAt);
+            const allDay = typeof item.all_day === 'boolean'
+                ? item.all_day
+                : (
+                    /^\d{4}-\d{2}-\d{2}$/.test(startAt)
+                    && (!endAt || /^\d{4}-\d{2}-\d{2}$/.test(endAt))
+                );
+
+            return {
+                item_id: itemId,
+                title,
+                start_at: startAt,
+                end_at: endAt,
+                all_day: allDay,
+                status,
+                timezone,
+                description,
+                date_key: dateKey,
+                task_links: taskLinks
+            };
+        })
+        .filter(Boolean)
+        .sort((left, right) => {
+            const leftTs = parseTimelineTimestamp(left.start_at || left.end_at);
+            const rightTs = parseTimelineTimestamp(right.start_at || right.end_at);
+            const leftHasTs = Number.isFinite(leftTs);
+            const rightHasTs = Number.isFinite(rightTs);
+            if (leftHasTs && rightHasTs && leftTs !== rightTs) {
+                return leftTs - rightTs;
+            }
+            if (leftHasTs && !rightHasTs) {
+                return -1;
+            }
+            if (!leftHasTs && rightHasTs) {
+                return 1;
+            }
+            return String(left.item_id).localeCompare(String(right.item_id));
+        })
+        .slice(0, CALENDAR_MAX_ITEMS);
+
+    if (!items.length) {
+        return null;
+    }
+
+    const focusDateRaw = typeof payload.focus_date === 'string' ? payload.focus_date.trim() : '';
+    const focusDate = deriveCalendarDateKey(focusDateRaw, '');
+    const derivedFocusDate = focusDate || items.find((item) => item.date_key)?.date_key || '';
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
+        default_granularity: normaliseCalendarGranularity(payload.default_granularity),
+        focus_date: derivedFocusDate,
+        items
+    };
+}
+
+function resolveCalendarDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const calendarViews = [];
+    for (const element of contract.elements) {
+        const calendarElement = normaliseCalendarDisplayElement(element);
+        if (!calendarElement) {
+            continue;
+        }
+        calendarViews.push(calendarElement);
+    }
+    return calendarViews;
+}
+
 function normaliseRelationGraphDirection(value) {
     const direction = typeof value === 'string' ? value.trim().toLowerCase() : '';
     return direction === 'undirected' ? 'undirected' : 'directed';
@@ -2869,6 +3048,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     const taskViewElements = resolveTaskViewDisplayElements(debugData);
     const kanbanElements = resolveKanbanDisplayElements(debugData);
     const timelineElements = resolveTimelineDisplayElements(debugData);
+    const calendarElements = resolveCalendarDisplayElements(debugData);
     const relationGraphElements = resolveRelationGraphDisplayElements(debugData);
     const relationTruthStateElements = resolveRelationTruthStateDisplayElements(debugData);
     if (
@@ -2877,6 +3057,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         && !taskViewElements.length
         && !kanbanElements.length
         && !timelineElements.length
+        && !calendarElements.length
         && !relationGraphElements.length
         && !relationTruthStateElements.length
     ) {
@@ -3414,6 +3595,138 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         root.appendChild(section);
     });
 
+    calendarElements.forEach((calendarElement, calendarIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-calendar-section';
+        section.style.cssText = (
+            tableElements.length > 0
+            || workflowElements.length > 0
+            || taskViewElements.length > 0
+            || kanbanElements.length > 0
+            || timelineElements.length > 0
+            || calendarIndex > 0
+        ) ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-calendar-title';
+        title.textContent = calendarElements.length > 1
+            ? `Calendar view ${calendarIndex + 1}`
+            : 'Calendar view';
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const summary = document.createElement('div');
+        summary.className = 'chat-display-elements-calendar-summary';
+        summary.textContent = `${calendarElement.items.length} item${calendarElement.items.length === 1 ? '' : 's'} - ${calendarElement.default_granularity}`;
+        summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+        section.appendChild(summary);
+
+        const grid = document.createElement('div');
+        grid.className = 'chat-display-elements-calendar-grid';
+        grid.style.cssText = 'display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));';
+
+        const itemsByDate = new Map();
+        for (const item of calendarElement.items) {
+            const dateKey = typeof item.date_key === 'string' && item.date_key.trim()
+                ? item.date_key.trim()
+                : 'unspecified';
+            if (!itemsByDate.has(dateKey)) {
+                itemsByDate.set(dateKey, []);
+            }
+            itemsByDate.get(dateKey).push(item);
+        }
+
+        const orderedDateKeys = Array.from(itemsByDate.keys()).sort((left, right) => {
+            if (left === 'unspecified' && right !== 'unspecified') {
+                return 1;
+            }
+            if (left !== 'unspecified' && right === 'unspecified') {
+                return -1;
+            }
+            return String(left).localeCompare(String(right));
+        });
+
+        orderedDateKeys.forEach((dateKey) => {
+            const dayCard = document.createElement('article');
+            dayCard.className = 'chat-display-elements-calendar-day';
+            dayCard.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; padding: 8px; background: #f8fbff;';
+
+            const dayHeader = document.createElement('div');
+            dayHeader.className = 'chat-display-elements-calendar-day-label';
+            dayHeader.textContent = dateKey === 'unspecified'
+                ? 'Date unspecified'
+                : formatCalendarDateLabel(dateKey);
+            dayHeader.style.cssText = 'font-size: 0.81em; font-weight: 600; color: #1f3d5a; margin-bottom: 6px;';
+            dayCard.appendChild(dayHeader);
+
+            const dayList = document.createElement('div');
+            dayList.className = 'chat-display-elements-calendar-day-list';
+            dayList.style.cssText = 'display: grid; gap: 6px;';
+
+            const dayItems = itemsByDate.get(dateKey) || [];
+            dayItems.forEach((item) => {
+                const statusClass = String(item.status || 'unknown')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9_-]+/g, '-');
+                const itemCard = document.createElement('article');
+                itemCard.className = `chat-display-elements-calendar-item status-${statusClass}`;
+                itemCard.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; background: #fff; padding: 7px;';
+
+                const itemHeader = document.createElement('div');
+                itemHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px;';
+
+                const itemTitle = document.createElement('div');
+                itemTitle.className = 'chat-display-elements-calendar-item-title';
+                itemTitle.textContent = item.title;
+                itemTitle.style.cssText = 'font-size: 0.81em; font-weight: 600; color: #1f3d5a;';
+                itemHeader.appendChild(itemTitle);
+
+                if (item.status) {
+                    const statusBadge = document.createElement('span');
+                    statusBadge.className = `workflow-status-badge status-${statusClass}`;
+                    statusBadge.textContent = formatWorkflowStatusLabel(item.status);
+                    itemHeader.appendChild(statusBadge);
+                }
+                itemCard.appendChild(itemHeader);
+
+                const details = [];
+                const timeLabel = item.all_day
+                    ? 'All day'
+                    : formatTimelineRangeLabel(item.start_at, item.end_at);
+                if (timeLabel) {
+                    details.push(timeLabel);
+                }
+                if (item.timezone) {
+                    details.push(item.timezone);
+                }
+                if (item.description) {
+                    details.push(item.description);
+                }
+                if (details.length) {
+                    const meta = document.createElement('div');
+                    meta.className = 'chat-display-elements-calendar-item-meta';
+                    meta.textContent = details.join(' · ');
+                    meta.style.cssText = 'margin-top: 4px; font-size: 0.78em; color: #44576a;';
+                    itemCard.appendChild(meta);
+                }
+
+                appendTaskLinksToCard(
+                    itemCard,
+                    item.task_links,
+                    'chat-display-elements-calendar-item-links'
+                );
+
+                dayList.appendChild(itemCard);
+            });
+
+            dayCard.appendChild(dayList);
+            grid.appendChild(dayCard);
+        });
+
+        section.appendChild(grid);
+        root.appendChild(section);
+    });
+
     relationGraphElements.forEach((relationGraphElement, relationGraphIndex) => {
         const section = document.createElement('section');
         section.className = 'chat-display-elements-relation-graph-section';
@@ -3423,6 +3736,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || taskViewElements.length > 0
             || kanbanElements.length > 0
             || timelineElements.length > 0
+            || calendarElements.length > 0
             || relationGraphIndex > 0
         ) ? 'margin-top: 10px;' : '';
 
@@ -3457,6 +3771,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || kanbanElements.length > 0
             || timelineElements.length > 0
             || relationGraphElements.length > 0
+            || calendarElements.length > 0
             || relationIndex > 0
         ) ? 'margin-top: 10px;' : '';
 
@@ -3698,6 +4013,7 @@ function extractRenderPlanSourceSummary(
     screenTaskViewElements,
     screenKanbanElements,
     screenTimelineElements,
+    screenCalendarElements,
     screenRelationGraphElements
 ) {
     const sourceTools = [];
@@ -3771,6 +4087,12 @@ function extractRenderPlanSourceSummary(
         }
         addProvenance(timelineElement.provenance);
     }
+    for (const calendarElement of screenCalendarElements) {
+        if (!calendarElement || typeof calendarElement !== 'object') {
+            continue;
+        }
+        addProvenance(calendarElement.provenance);
+    }
     for (const relationGraphElement of screenRelationGraphElements) {
         if (!relationGraphElement || typeof relationGraphElement !== 'object') {
             continue;
@@ -3818,6 +4140,9 @@ function buildRenderPlanMetadataSummary(renderPlan) {
     const screenTimelineElements = Array.isArray(renderPlan.screen_timeline_elements)
         ? renderPlan.screen_timeline_elements.filter(item => item && typeof item === 'object')
         : [];
+    const screenCalendarElements = Array.isArray(renderPlan.screen_calendar_elements)
+        ? renderPlan.screen_calendar_elements.filter(item => item && typeof item === 'object')
+        : [];
     const screenRelationGraphElements = Array.isArray(renderPlan.screen_relation_graph_elements)
         ? renderPlan.screen_relation_graph_elements.filter(item => item && typeof item === 'object')
         : [];
@@ -3828,6 +4153,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screenTaskViewElements,
         screenKanbanElements,
         screenTimelineElements,
+        screenCalendarElements,
         screenRelationGraphElements
     );
 
@@ -3858,6 +4184,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screen_task_view_element_count: screenTaskViewElements.length,
         screen_kanban_element_count: screenKanbanElements.length,
         screen_timeline_element_count: screenTimelineElements.length,
+        screen_calendar_element_count: screenCalendarElements.length,
         screen_relation_graph_element_count: screenRelationGraphElements.length,
         unsupported_selected_renderer_types: unsupportedRendererTypes,
         resolver_suggestions: resolverSuggestions
@@ -3923,6 +4250,7 @@ function buildRenderPlanSummaryHtml(renderPlanSummary) {
     addScalar('Screen task views', renderPlanSummary.screen_task_view_element_count);
     addScalar('Screen kanban elements', renderPlanSummary.screen_kanban_element_count);
     addScalar('Screen timeline elements', renderPlanSummary.screen_timeline_element_count);
+    addScalar('Screen calendar elements', renderPlanSummary.screen_calendar_element_count);
     addScalar('Screen relation graph elements', renderPlanSummary.screen_relation_graph_element_count);
     addList('Source tools', renderPlanSummary.source_tools);
     addList('Record families', renderPlanSummary.record_families);
