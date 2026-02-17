@@ -126,8 +126,18 @@ Do not "hack around" MCP failures with ad-hoc scripts or direct REST calls. Fix 
 - Tasks can have Subtasks (use `issueTypeName="Subtask"` + `parent="JVNAUTOSCI-XXX"`).
 - Tasks can set an Epic as `parent` via edit tooling (`{"parent": {"key": "JVNAUTOSCI-123"}}`).
 - If an issue is created without an assignee, fix it via the Jira edit tool rather than duplicating.
+- **Deduplicate before create**: when a user asks to create a Jira task, first search for an existing issue with the same intended effect. Prefer updating/expanding the existing issue (and linking/commenting for traceability) instead of creating a new one. Create a new issue only if no suitable existing issue exists, or if the user explicitly asks for a separate task.
 - For full Jira Tasks (not sub-tasks), always identify the appropriate epic and attach them to it. In the very unlikely event that a suitable epic isn't available, plan what that epic would look like, and offer to create it.
 - Add appropriate inter-task links (e.g. blocks/depends-on/relates) when the available MCP tooling supports it.
+- **Link hygiene is mandatory**:
+	- When creating a new Jira task, scan for existing related tasks first and add links (`relates to` / `blocks` / `is blocked by`) immediately.
+	- Before starting implementation on an existing task, check whether relevant related tasks exist and add missing links before coding.
+- **Completion linked-issue scan is mandatory for every task**:
+	- Run a linked-issue review before merge while full code context is still available (validate linked issue statuses, add/update comments, and apply justified transitions).
+	- Before marking a task Done, review all linked issues and identify any linked items still in `Backlog` / `To Do`.
+	- Add a concise status comment on each relevant linked item describing what changed, what remains, and whether it is now unblocked, superseded, or complete.
+	- Apply transitions when justified by the completion outcome (for example `To Do` -> `Done` for fully satisfied scope, or `To Do` -> `SUPERSEDED` when absorbed by another task).
+- If a screenshot is provided to describe an issue or support issue creation, attach it to the Jira issue whenever possible using available MCP tooling rather than leaving it only in chat context.
 - When setting Jira `Components`, use `docs/engineering/jira_components_taxonomy.md` as the default source of truth unless the user requests otherwise.
 - Jira site URL: https://naoinstitute.atlassian.net/
 - If a cloudId is required, fetch it from https://naoinstitute.atlassian.net/_edge/tenant_info and include that URL when requesting it.

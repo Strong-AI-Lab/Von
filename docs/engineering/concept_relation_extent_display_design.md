@@ -1,0 +1,218 @@
+# Concept Relation Extent Display Redesign (Design Only)
+
+## Goal
+Redesign the concept-tab `Relationships` section so it behaves more like predicate extent displays:
+
+1. Show all relation assertions where the current concept appears in either argument position (arg1 or arg2).
+2. Make relation assertion symmetric, so the user can assert with the current concept fixed as arg1 or as arg2.
+
+This document is design-only and does not include implementation.
+
+## Current State and Gap
+- Current UI (`dynamicTabs.js`, `concept_tab.html`) renders grouped chips by predicate and mostly follows outgoing relations.
+- Current read route (`GET /vontology/api/vontology/relationships`) returns a convenience map keyed by predicate, but does not provide a canonical row-wise extent view with explicit argument position for the focal concept.
+- Current add form always treats current concept as source (`source_id`) and only accepts a target field.
+
+## Proposed UX
+
+### Section Rename and Layout
+- Rename section heading from `Relationships` to `Relation Extent`.
+- Replace chip-only grouped display with a table-first extent display aligned to predicate extent visual language.
+- Keep lightweight predicate grouping as an optional secondary view (collapsed by default).
+
+### Extent Table
+Use a table with one row per assertion:
+
+| Column | Purpose |
+| --- | --- |
+| Role | Whether current concept is `arg1` or `arg2` in this assertion |
+| Predicate | Predicate cartouche, clickable |
+| Arg1 | Concept/text shown for arg1 |
+| Arg2 | Concept/text shown for arg2 (or first object value for n-ary fallback) |
+| Source | `structured` or `text_relations` |
+| Updated | Timestamp, when available |
+| Actions | Remove assertion (existing semantics) |
+
+Notes:
+- Reuse cartouche affordances from predicate extent display (type/individual/predicate colouring, click to open, right-click to copy concept_id).
+- Keep sorting and filtering parity with predicate extent (`source`, predicate filter, role filter, sort by updated/predicate/role).
+
+### Assert Relation Composer
+Below the table, add a single inline composer:
+
+- `Role` control (required): `Current concept is arg1` | `Current concept is arg2`.
+- `Predicate` selector/search:
+  - include structural + salient + searchable “Other…” predicates.
+  - preserve text-predicate detection behaviour from existing form.
+- `Counterparty` input:
+  - concept search input for concept predicates.
+  - text/lang/type inline form for binary text predicates.
+- Primary action: `Add assertion`.
+
+Composer behaviour:
+- If role is arg1, add relation as `(current_concept, predicate, counterparty)`.
+- If role is arg2, add relation as `(counterparty, predicate, current_concept)` for concept predicates.
+- For text predicates, role is forced to arg1 (or arg2 option disabled with explanation), because current text APIs are subject/text-value oriented.
+
+## API/Data Contract Design
+
+### Read Path
+Add a row-wise extent endpoint for concepts:
+
+- `GET /vontology/api/vontology/relationships/extent?concept_id=<id>&limit=<n>&offset=<n>&source=<optional>&predicate=<optional>&role=<optional>`
+
+Response shape (conceptual):
+- `success: bool`
+- `concept_id: str`
+- `total: int`
+- `rows: [ ... ]`
+
+Each row:
+- `relation_id`
+- `relation_kind` (`structured` | `text`)
+- `predicate_id`
+- `arg1` (concept id or text payload)
+- `arg2` (concept id or text payload)
+- `matched_argument_indexes` (include `1` and/or `2`)
+- `source`
+- `timestamp`
+
+Implementation note:
+- Build via existing shared service `build_concept_relations_payload(...)` with:
+  - `include_relations_arg1=true`
+  - `include_relations_any_arg=true`
+  - `include_text_relations_arg1=true`
+- Then transform to UI rows (normalised arg1/arg2 fields + role derivation).
+
+### Write Path
+Reuse existing routes for this phase:
+- Concept predicates: `POST /vontology/api/vontology/relationships/add`
+- Text predicates: `POST /api/concepts/<concept_id>/texts`
+
+Directional logic in UI:
+- Role `arg1`: existing behaviour.
+- Role `arg2`: submit with swapped subject/target for concept predicates.
+
+## Styling and Reuse Plan
+- Reuse predicate extent classes where feasible:
+  - container/table/filter/status patterns from `.predicate-extent-*`
+- Extract shared table helper in follow-up implementation (to avoid duplicating predicate extent/table behaviour).
+- Preserve current cartouche classes (`.concept-cartouche.*`) and search dropdown style (`.vontology-search-results`).
+
+## Accessibility and Interaction
+- Keyboard support:
+  - tab through filters/composer.
+  - Enter submits composer.
+  - Arrow key navigation in search dropdowns.
+- Clear status messages for add/remove success and validation errors.
+- Explicit labels for role selection and predicate/counterparty inputs.
+
+## Non-Goals (This Task)
+- No ontology semantics changes for structural predicate meaning.
+- No new inference rules.
+- No migration of all existing relationship chips to cards/charts.
+
+## Acceptance Criteria
+1. The concept tab shows a relation extent table with rows where current concept appears as arg1 or arg2.
+2. Each row shows predicate and both argument columns, with role indication.
+3. User can add a concept-predicate relation with current concept fixed as arg1 or arg2.
+4. User can remove rows from the table with existing permission/error behaviour preserved.
+5. Filter/sort behaviour matches predicate extent interaction quality.
+6. Existing predicate extent display remains unchanged.
+
+## Suggested Wireframe
+```text
+Relation Extent
+[Role: Any v] [Predicate: any] [Source: any] [Apply] [Reset]
+
+| Role | Predicate | Arg1                  | Arg2                  | Source      | Updated           | Actions |
+| arg1 | related_to| #V#current_concept    | #V#target_concept     | structured  | 17 Feb 2026 13:04 |   x     |
+| arg2 | depends_on| #V#other_concept      | #V#current_concept    | structured  | 17 Feb 2026 12:02 |   x     |
+| arg1 | hasName   | #V#current_concept    | "Example label" (en)  | text_rel... | 16 Feb 2026 09:40 |   x     |
+
+Add assertion:
+[Current concept is: arg1 v] [Predicate v / search] [Counterparty concept/text input] [Add assertion]
+```
+
+## Chat Display Element Extension (Under `JVNAUTOSCI-865`)
+
+### Goal
+Add a dedicated display element for chat rendering of relation truth-state groups, with:
+- clickable concept cartouches in minimal form, and
+- explicit visual variants for asserted vs not-asserted relations.
+
+### Proposed Display Element Type
+- `element_type`: `relation_truth_state`
+- `intent`: `truth_state_relation_view`
+- `channel`: `screen`
+
+This keeps relation-state rendering semantically distinct from generic tables and avoids broad behavioural changes to all existing table renderers.
+
+### Payload Sketch
+```json
+{
+  "title": "Current Truth State",
+  "groups": [
+    {
+      "label": "Conference-level",
+      "status": "asserted",
+      "assertions": [
+        {
+          "assertion_id": "a1",
+          "arg1": "#V#michael_witbrock",
+          "predicate": "#V#attended_event",
+          "arg2": "#V#international_ai_cooperation_and_governance_forum_2025_melbourne",
+          "is_asserted": true
+        }
+      ]
+    },
+    {
+      "label": "Missing (should exist)",
+      "status": "missing_expected",
+      "assertions": [
+        {
+          "assertion_id": "a2",
+          "arg1": "#V#michael_witbrock",
+          "predicate": "#V#panelist_in_event",
+          "arg2": "#V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne",
+          "is_asserted": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Rendering Behaviour
+- Group header:
+  - `asserted` -> green/check styling
+  - `missing_expected` -> red/cross styling
+  - optionally `uncertain` -> amber/warning styling
+- Assertion row format (minimal):
+  - `[arg1 cartouche] -- [predicate cartouche] --> [arg2 cartouche]`
+- Cartouches:
+  - clickable to open concept tabs
+  - right-click copies concept id
+  - compact presentation (name-first with id tooltip)
+
+### Display-Elements Contract Changes
+- Add `relation_truth_state` to `ALLOWED_DISPLAY_ELEMENT_TYPES` in `display_elements_service.py`.
+- Add payload validator for:
+  - `title: string`
+  - `groups: list`
+  - `group.status` in allow-list (`asserted`, `missing_expected`, `uncertain`)
+  - each assertion requiring `arg1`, `predicate`, `arg2`, `is_asserted`
+- Add chat renderer in `chatTab.js` alongside current `table/timeline/task_view/workflow_view` handlers.
+
+### Variant Rules (Asserted vs Not Asserted)
+- Asserted relation (`is_asserted=true`):
+  - normal stroke arrow and neutral/positive text tone.
+- Not asserted relation (`is_asserted=false`):
+  - dashed arrow or muted line, plus red/amber accent depending on group status.
+  - optional suffix label: `not currently asserted`.
+
+### Acceptance Criteria (Chat Element)
+1. Chat can render `relation_truth_state` elements without falling back to raw JSON.
+2. Each assertion renders three clickable cartouches (arg1, predicate, arg2).
+3. Asserted and not-asserted variants are visually distinct and accessible.
+4. Existing display element types continue to validate and render unchanged.
