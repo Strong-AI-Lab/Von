@@ -73,4 +73,38 @@ describe('LLM debug popup workflow execution hook', () => {
         const auxSection = document.getElementById('chatLlmDebugAuxSection');
         expect(auxSection.classList.contains('hidden')).toBe(false);
     });
+
+    test('prefers turn_execution_diagnostics for popup copy payload', () => {
+        const { setLlmDebugDataForTurn, showLlmDebugPopup } = require(chatTabModulePath);
+
+        const turnId = 'assistant-456';
+        setLlmDebugDataForTurn(turnId, {
+            model: 'gpt-5.2-test',
+            messages: [],
+            response: 'ok',
+            workflow_discovery: { matches: [{ concept_id: '#V#demo' }] },
+            turn_execution_diagnostics: {
+                generated_at_utc: '2026-02-18T00:00:00Z',
+                request_id: 'req-456',
+                elapsed_ms: 1234,
+                prompt_preview: 'hello',
+                latest_progress: { status: 'completed' },
+                progress_events: [],
+                phase_history: [],
+                tool_history: []
+            }
+        });
+
+        showLlmDebugPopup(turnId);
+
+        const popup = document.getElementById('chatLlmDebugPopup');
+        const jsonText = popup.dataset.currentDebugData || '';
+        const payload = JSON.parse(jsonText);
+
+        expect(payload.request_id).toBe('req-456');
+        expect(payload.prompt_preview).toBe('hello');
+        expect(payload.workflow_discovery).toEqual({ matches: [{ concept_id: '#V#demo' }] });
+        expect(payload.model).toBeUndefined();
+        expect(payload.messages).toBeUndefined();
+    });
 });

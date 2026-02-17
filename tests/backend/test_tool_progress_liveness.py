@@ -165,3 +165,82 @@ def test_progress_event_contains_required_telemetry_fields(monkeypatch) -> None:
     assert serialised["stage"] == "llm_call"
     assert "activity_idle_ms" in serialised
     assert isinstance(serialised["activity_idle_ms"], int)
+
+
+def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch) -> None:
+    clock = _set_clock(monkeypatch, start=5000.0)
+
+    von_routes._set_tool_progress(
+        "scope-e",
+        "req-e",
+        {
+            "status": "phase_transition",
+            "phase": "workflow_discovery",
+            "phase_label": "Searching for workflows",
+            "request_id": "req-e",
+        },
+    )
+    clock["now"] += 0.2
+    von_routes._set_tool_progress(
+        "scope-e",
+        "req-e",
+        {
+            "status": "phase_transition",
+            "phase": "tool_execute",
+            "phase_label": "Executing tools",
+            "request_id": "req-e",
+        },
+    )
+    clock["now"] += 0.2
+    von_routes._set_tool_progress(
+        "scope-e",
+        "req-e",
+        {
+            "status": "tool_call_start",
+            "phase": "tool_execute",
+            "tool": "search_knowledge_base",
+            "batch_size": 2,
+            "request_id": "req-e",
+        },
+    )
+    clock["now"] += 0.2
+    von_routes._set_tool_progress(
+        "scope-e",
+        "req-e",
+        {
+            "status": "tool_invoked",
+            "phase": "tool_execute",
+            "tool": "search_knowledge_base",
+            "batch_size": 2,
+            "result_summary": "ok",
+            "request_id": "req-e",
+        },
+    )
+
+    snapshot = von_routes._snapshot_tool_progress_for_request("scope-e", "req-e")
+    assert snapshot is not None
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-e",
+        prompt_text="Summarise indexed notes",
+        tool_progress_state=snapshot,
+    )
+
+    assert diagnostics["request_id"] == "req-e"
+    assert diagnostics["prompt_preview"] == "Summarise indexed notes"
+    assert diagnostics["latest_progress"] is not None
+    assert diagnostics["progress_events"], "expected reconstructed progress events"
+
+    phase_history = diagnostics["phase_history"]
+    assert [entry["phase"] for entry in phase_history] == [
+        "workflow_discovery",
+        "tool_execute",
+    ]
+
+    tool_history = diagnostics["tool_history"]
+    assert len(tool_history) == 1
+    tool_entry = tool_history[0]
+    assert tool_entry["tool"] == "search_knowledge_base"
+    assert tool_entry["batchSize"] == 2
+    assert tool_entry["resultSummary"] == "ok"
+    assert tool_entry["success"] is True

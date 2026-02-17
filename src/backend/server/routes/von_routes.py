@@ -68,6 +68,8 @@ _TOOL_PROGRESS_LOCK = threading.Lock()
 _TOOL_PROGRESS: dict[tuple[str, str], dict[str, Any]] = {}
 _TOOL_PROGRESS_TERMINAL_STATUSES = {"completed", "error", "cancelled"}
 _TOOL_PROGRESS_DIAGNOSTIC_EVENT_LIMIT = 80
+_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT = 40
+_TURN_EXECUTION_DIAGNOSTICS_PROMPT_PREVIEW_LIMIT = 1000
 
 
 def _env_int(name: str, default: int, *, min_value: int) -> int:
@@ -275,7 +277,9 @@ def _serialise_tool_progress_state(
 
     events = payload.get("diagnostic_events")
     if isinstance(events, list):
-        payload["diagnostic_events"] = list(events[-20:])
+        payload["diagnostic_events"] = list(
+            events[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+        )
 
     return payload
 
@@ -310,6 +314,201 @@ def _build_tool_progress_compact_summary(state: dict[str, Any] | None) -> dict[s
         },
         "waiting_threshold_sec": state.get("waiting_threshold_sec"),
         "stall_threshold_sec": state.get("stall_threshold_sec"),
+    }
+
+
+def _iso_utc_to_epoch_ms(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000.0)
+
+
+def _normalise_progress_events_from_diagnostic_events(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    progress_events: list[dict[str, Any]] = []
+    for entry in events:
+        stage = _progress_str(entry.get("stage")) or _progress_str(entry.get("phase"))
+        subtask = _progress_str(entry.get("subtask")) or _progress_str(
+            entry.get("tool")
+        ) or _progress_str(entry.get("workflow_task"))
+
+        sequence_no_raw = _progress_number(entry.get("sequence_no"))
+        sequence_no = int(sequence_no_raw) if sequence_no_raw is not None else None
+
+        idle_raw = _progress_number(entry.get("idle_ms"))
+        if idle_raw is None:
+            idle_raw = _progress_number(entry.get("activity_idle_ms"))
+        idle_ms = int(idle_raw) if idle_raw is not None else None
+
+        progress_events.append(
+            {
+                "at_utc": _progress_str(entry.get("at_utc")),
+                "status": _progress_str(entry.get("status")),
+                "stage": stage,
+                "sequence_no": sequence_no,
+                "liveness_state": _progress_str(entry.get("liveness_state")),
+                "idle_ms": idle_ms,
+                "subtask": subtask,
+            }
+        )
+    return progress_events
+
+
+def _derive_phase_history_from_diagnostic_events(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    phase_history: list[dict[str, Any]] = []
+    last_phase: str | None = None
+
+    for entry in events:
+        status = (_progress_str(entry.get("status")) or "").lower()
+        if status != "phase_transition":
+            continue
+
+        phase = _progress_str(entry.get("phase")) or _progress_str(entry.get("stage"))
+        if not phase:
+            continue
+        if last_phase == phase:
+            continue
+
+        phase_history.append(
+            {
+                "phase": phase,
+                "phaseLabel": _progress_str(entry.get("phase_label"))
+                or _progress_str(entry.get("stage_label")),
+                "timestamp": _iso_utc_to_epoch_ms(entry.get("at_utc")),
+            }
+        )
+        last_phase = phase
+
+    return phase_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+
+
+def _derive_tool_history_from_diagnostic_events(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    tool_history: list[dict[str, Any]] = []
+
+    for entry in events:
+        tool = _progress_str(entry.get("tool")) or ""
+        workflow_task = _progress_str(entry.get("workflow_task")) or ""
+        if not tool and not workflow_task:
+            continue
+
+        phase = _progress_str(entry.get("phase")) or _progress_str(entry.get("stage")) or ""
+        result_summary = _progress_str(entry.get("result_summary")) or ""
+        status = (_progress_str(entry.get("status")) or "").lower()
+
+        batch_size_raw = _progress_number(entry.get("batch_size"))
+        batch_size: int | float | None
+        if batch_size_raw is None:
+            batch_size = None
+        elif float(batch_size_raw).is_integer():
+            batch_size = int(batch_size_raw)
+        else:
+            batch_size = float(batch_size_raw)
+
+        last = tool_history[-1] if tool_history else None
+        if (
+            isinstance(last, dict)
+            and last.get("tool") == tool
+            and last.get("workflowTask") == workflow_task
+            and last.get("batchSize") == batch_size
+        ):
+            if result_summary:
+                last["resultSummary"] = result_summary
+            if status == "tool_invoked":
+                last["success"] = True
+            elif status in {"tool_failed", "tool_blocked", "error"}:
+                last["success"] = False
+            continue
+
+        success: bool | None = None
+        if status == "tool_invoked":
+            success = True
+        elif status in {"tool_failed", "tool_blocked", "error"}:
+            success = False
+
+        tool_history.append(
+            {
+                "tool": tool,
+                "workflowTask": workflow_task,
+                "batchSize": batch_size,
+                "phase": phase,
+                "resultSummary": result_summary,
+                "success": success,
+            }
+        )
+
+    return tool_history[-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+
+
+def _build_turn_execution_diagnostics(
+    *,
+    request_id: str | None,
+    prompt_text: str | None,
+    elapsed_ms: float | int | None = None,
+    tool_progress_state: dict[str, Any] | None = None,
+    workflow_discovery: dict[str, Any] | None = None,
+    generated_at_utc: str | None = None,
+) -> dict[str, Any]:
+    prompt_preview = (
+        prompt_text[:_TURN_EXECUTION_DIAGNOSTICS_PROMPT_PREVIEW_LIMIT]
+        if isinstance(prompt_text, str)
+        else None
+    )
+
+    latest_progress = dict(tool_progress_state) if isinstance(tool_progress_state, dict) else None
+
+    diagnostic_events: list[dict[str, Any]] = []
+    if isinstance(latest_progress, dict):
+        raw_events = latest_progress.get("diagnostic_events")
+        if isinstance(raw_events, list):
+            diagnostic_events = [
+                cast(dict[str, Any], entry)
+                for entry in raw_events
+                if isinstance(entry, dict)
+            ][-_TURN_EXECUTION_DIAGNOSTICS_EVENT_LIMIT :]
+
+    effective_elapsed = _progress_number(elapsed_ms)
+    if effective_elapsed is None and isinstance(latest_progress, dict):
+        effective_elapsed = _progress_number(latest_progress.get("elapsed_ms"))
+    elapsed_ms_value = int(max(0.0, effective_elapsed)) if effective_elapsed is not None else None
+
+    workflow_payload = workflow_discovery
+    if workflow_payload is None and isinstance(latest_progress, dict):
+        progress_workflow = latest_progress.get("workflow_discovery")
+        if isinstance(progress_workflow, dict):
+            workflow_payload = dict(progress_workflow)
+
+    effective_request_id = _progress_str(request_id)
+    if effective_request_id is None and isinstance(latest_progress, dict):
+        effective_request_id = _progress_str(latest_progress.get("request_id"))
+
+    return {
+        "generated_at_utc": _progress_str(generated_at_utc) or _now_utc_iso(),
+        "request_id": effective_request_id,
+        "elapsed_ms": elapsed_ms_value,
+        "prompt_preview": prompt_preview,
+        "latest_progress": latest_progress,
+        "progress_events": _normalise_progress_events_from_diagnostic_events(
+            diagnostic_events
+        ),
+        "phase_history": _derive_phase_history_from_diagnostic_events(diagnostic_events),
+        "tool_history": _derive_tool_history_from_diagnostic_events(diagnostic_events),
+        "workflow_discovery": workflow_payload,
     }
 
 
@@ -995,6 +1194,7 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             "tools_started": max(0, tools_started),
             "tools_completed": max(0, tools_completed),
         }
+        liveness = _derive_progress_liveness(merged, now_epoch=now_epoch)
 
         existing_events = merged.get("diagnostic_events")
         if not isinstance(existing_events, list):
@@ -1005,11 +1205,19 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             "status": status,
             "event_kind": event_kind,
             "stage": stage,
+            "phase": _progress_str(merged.get("phase")) or stage,
+            "phase_label": _progress_str(merged.get("phase_label")),
+            "stage_label": _progress_str(merged.get("stage_label")),
             "subtask": subtask,
             "tool": _progress_str(merged.get("tool")),
             "workflow_task": _progress_str(merged.get("workflow_task")),
+            "batch_size": _progress_number(merged.get("batch_size")),
+            "result_summary": _progress_str(merged.get("result_summary")),
             "idle_ms": idle_ms,
             "elapsed_ms": elapsed_ms,
+            "liveness_state": liveness.get("liveness_state"),
+            "liveness_reason": liveness.get("liveness_reason"),
+            "stall_detected": liveness.get("stall_detected"),
         }
         if _progress_str(merged.get("error")):
             event_entry["error"] = str(merged.get("error"))
@@ -1030,7 +1238,7 @@ def _set_tool_progress(scope_key: str, request_id: str, update: dict[str, Any]) 
             "counters": dict(merged["counters"]),
         }
 
-        merged.update(_derive_progress_liveness(merged, now_epoch=now_epoch))
+        merged.update(liveness)
         merged["updated_at"] = now_utc
         merged["updated_at_epoch"] = now_epoch
         _TOOL_PROGRESS[key] = merged
@@ -1041,6 +1249,20 @@ def _get_tool_progress(scope_key: str, request_id: str) -> dict[str, Any] | None
     with _TOOL_PROGRESS_LOCK:
         value = _TOOL_PROGRESS.get((scope_key, request_id))
         return dict(value) if isinstance(value, dict) else None
+
+
+def _snapshot_tool_progress_for_request(
+    scope_key: str | None, request_id: str | None
+) -> dict[str, Any] | None:
+    scope = _progress_str(scope_key)
+    req = _progress_str(request_id)
+    if not scope or not req:
+        return None
+
+    raw_state = _get_tool_progress(scope, req)
+    if not isinstance(raw_state, dict):
+        return None
+    return _serialise_tool_progress_state(raw_state)
 
 
 def _clear_tool_progress(scope_key: str, request_id: str) -> None:
@@ -2749,6 +2971,8 @@ def _maybe_handle_prompt_introspection_fastpath(
     interaction_timestamp_utc: str,
     model_name: str,
     request_start_perf: float,
+    request_id: str | None = None,
+    progress_scope_key: str | None = None,
 ):
     gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
     import json as _json
@@ -2883,6 +3107,15 @@ def _maybe_handle_prompt_introspection_fastpath(
     context_stats = _calculate_context_stats(context)
     current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
     tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
+    tool_progress_snapshot = _snapshot_tool_progress_for_request(
+        progress_scope_key, request_id
+    )
+    turn_execution_diagnostics = _build_turn_execution_diagnostics(
+        request_id=request_id,
+        prompt_text=prompt_text,
+        elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
+        tool_progress_state=tool_progress_snapshot,
+    )
 
     llm_debug_info = {
         "interaction_timestamp_utc": interaction_timestamp_utc,
@@ -2911,6 +3144,7 @@ def _maybe_handle_prompt_introspection_fastpath(
             "used_tool": used_tool,
             "enabled": True,
         },
+        "turn_execution_diagnostics": turn_execution_diagnostics,
     }
     llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
 
@@ -2938,6 +3172,8 @@ def _maybe_handle_tool_inventory_fastpath(
     model_name: str,
     request_start_perf: float,
     user_prompt_debug: dict,
+    request_id: str | None = None,
+    progress_scope_key: str | None = None,
 ):
     gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
 
@@ -2961,6 +3197,15 @@ def _maybe_handle_tool_inventory_fastpath(
     context_stats = _calculate_context_stats(context)
     current_context_stats = _calculate_context_stats(
         current_app.config.get("CONTEXT", [])
+    )
+    tool_progress_snapshot = _snapshot_tool_progress_for_request(
+        progress_scope_key, request_id
+    )
+    turn_execution_diagnostics = _build_turn_execution_diagnostics(
+        request_id=request_id,
+        prompt_text=prompt_text,
+        elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
+        tool_progress_state=tool_progress_snapshot,
     )
 
     llm_debug_info = {
@@ -3001,6 +3246,7 @@ def _maybe_handle_tool_inventory_fastpath(
             "used_tool": used_tool,
             "enabled": True,
         },
+        "turn_execution_diagnostics": turn_execution_diagnostics,
     }
 
     llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
@@ -3056,6 +3302,8 @@ def _maybe_handle_rag_status_fastpath(
     model_name: str,
     request_start_perf: float,
     user_prompt_debug: dict,
+    request_id: str | None = None,
+    progress_scope_key: str | None = None,
 ):
     gateway = current_app.config.get("INTERNAL_MCP_GATEWAY")
     import json as _json
@@ -3140,6 +3388,15 @@ def _maybe_handle_rag_status_fastpath(
     context_stats = _calculate_context_stats(context)
     current_context_stats = _calculate_context_stats(current_app.config["CONTEXT"])
     tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
+    tool_progress_snapshot = _snapshot_tool_progress_for_request(
+        progress_scope_key, request_id
+    )
+    turn_execution_diagnostics = _build_turn_execution_diagnostics(
+        request_id=request_id,
+        prompt_text=prompt_text,
+        elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
+        tool_progress_state=tool_progress_snapshot,
+    )
 
     llm_debug_info = {
         "interaction_timestamp_utc": interaction_timestamp_utc,
@@ -3167,6 +3424,7 @@ def _maybe_handle_rag_status_fastpath(
             "used_tool": used_tool,
             "enabled": True,
         },
+        "turn_execution_diagnostics": turn_execution_diagnostics,
     }
     llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
 
@@ -3573,6 +3831,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     interaction_timestamp_utc=interaction_timestamp_utc,
                     model_name=model_name or "unknown",
                     request_start_perf=request_start_perf,
+                    request_id=request_id,
+                    progress_scope_key=progress_scope_key,
                 )
 
             if _is_rag_status_question(prompt_text):
@@ -3586,6 +3846,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     model_name=model_name or "unknown",
                     request_start_perf=request_start_perf,
                     user_prompt_debug=user_prompt_debug,
+                    request_id=request_id,
+                    progress_scope_key=progress_scope_key,
                 )
 
         if deterministic_introspection_enabled and _is_tool_introspection_question(
@@ -3601,6 +3863,8 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 model_name=model_name or "unknown",
                 request_start_perf=request_start_perf,
                 user_prompt_debug=user_prompt_debug,
+                request_id=request_id,
+                progress_scope_key=progress_scope_key,
             )
 
         # Try to get user name from concept if user_id provided
@@ -4080,6 +4344,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 current_app.config["CONTEXT"]
             )
             tool_stats = _calculate_tool_stats(tool_messages) if tool_messages else None
+            tool_progress_snapshot = _snapshot_tool_progress_for_request(
+                progress_scope_key, request_id
+            )
+            turn_execution_diagnostics = _build_turn_execution_diagnostics(
+                request_id=request_id,
+                prompt_text=prompt_text,
+                elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
+                tool_progress_state=tool_progress_snapshot,
+            )
 
             llm_debug_info = {
                 "interaction_timestamp_utc": interaction_timestamp_utc,
@@ -4110,6 +4383,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     "used_tool": bool(tool_messages),
                     "enabled": True,
                 },
+                "turn_execution_diagnostics": turn_execution_diagnostics,
             }
             llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
 
@@ -4246,6 +4520,15 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     tool_stats = (
                         _calculate_tool_stats(tool_messages) if tool_messages else None
                     )
+                    tool_progress_snapshot = _snapshot_tool_progress_for_request(
+                        progress_scope_key, request_id
+                    )
+                    turn_execution_diagnostics = _build_turn_execution_diagnostics(
+                        request_id=request_id,
+                        prompt_text=prompt_text,
+                        elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
+                        tool_progress_state=tool_progress_snapshot,
+                    )
 
                     llm_debug_info = {
                         "interaction_timestamp_utc": interaction_timestamp_utc,
@@ -4272,6 +4555,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         "tool_stats": tool_stats,
                         "tool_invocations": tool_invocations,
                         "aux_llm_calls": [],
+                        "turn_execution_diagnostics": turn_execution_diagnostics,
                     }
 
                     rag_trace["tools_invoked"] = [
@@ -5706,13 +5990,16 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 },
             )
 
-        tool_progress_snapshot = None
-        if show_tool_use_progress:
-            raw_tool_progress_snapshot = _get_tool_progress(progress_scope_key, request_id)
-            if isinstance(raw_tool_progress_snapshot, dict):
-                tool_progress_snapshot = _serialise_tool_progress_state(
-                    raw_tool_progress_snapshot
-                )
+        tool_progress_snapshot = _snapshot_tool_progress_for_request(
+            progress_scope_key, request_id
+        )
+        turn_execution_diagnostics = _build_turn_execution_diagnostics(
+            request_id=request_id,
+            prompt_text=prompt_text,
+            elapsed_ms=(time.perf_counter() - request_start_perf) * 1000.0,
+            tool_progress_state=tool_progress_snapshot,
+            workflow_discovery=workflow_discovery_result,
+        )
 
         workflow_use_episodes = [
             entry
@@ -5787,6 +6074,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             # JVNAUTOSCI-1076: Workflow discovery results for Thinking context
             "workflow_discovery": workflow_discovery_result,
             "display_elements": display_elements_contract,
+            "turn_execution_diagnostics": turn_execution_diagnostics,
         }
         if isinstance(render_plan_debug, dict):
             llm_debug_info["render_plan"] = dict(render_plan_debug)
@@ -5888,6 +6176,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             except Exception:
                 pass
 
+        error_tool_progress_snapshot = _snapshot_tool_progress_for_request(
+            progress_scope_key if "progress_scope_key" in locals() else None,
+            request_id if "request_id" in locals() else None,
+        )
+        error_workflow_discovery = (
+            workflow_discovery_result
+            if (
+                "workflow_discovery_result" in locals()
+                and isinstance(workflow_discovery_result, dict)
+            )
+            else None
+        )
+        error_elapsed_ms = (
+            (time.perf_counter() - request_start_perf) * 1000.0
+            if "request_start_perf" in locals()
+            else None
+        )
+
         error_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
             "request_id": request_id,
@@ -5900,6 +6206,13 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 user_prompt_debug if "user_prompt_debug" in locals() else None
             ),
             "tool_invocations": [],
+            "turn_execution_diagnostics": _build_turn_execution_diagnostics(
+                request_id=request_id if "request_id" in locals() else None,
+                prompt_text=prompt_text if "prompt_text" in locals() else None,
+                elapsed_ms=error_elapsed_ms,
+                tool_progress_state=error_tool_progress_snapshot,
+                workflow_discovery=error_workflow_discovery,
+            ),
         }
         error_debug_info["warnings"] = _derive_llm_debug_warnings(error_debug_info)
         body = {

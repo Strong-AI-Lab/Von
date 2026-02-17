@@ -125,6 +125,14 @@ def test_prompt_introspection_fastpath_returns_prompt_text(app):
     assert "Please be terse." in data.get("response", "")
     llm_debug = data.get("llm_debug") or {}
     assert llm_debug.get("tool_invocations"), "expected tool invocations to be recorded"
+    diagnostics = llm_debug.get("turn_execution_diagnostics") or {}
+    assert diagnostics.get("request_id")
+    assert diagnostics.get("prompt_preview", "").startswith(
+        "Can you tell me what my user prompt is for chat?"
+    )
+    assert isinstance(diagnostics.get("progress_events"), list)
+    assert isinstance(diagnostics.get("phase_history"), list)
+    assert isinstance(diagnostics.get("tool_history"), list)
 
     meta = llm_debug.get("prompt_introspection_fastpath") or {}
     assert meta.get("enabled") is True

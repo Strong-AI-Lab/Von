@@ -14610,6 +14610,32 @@ function initializeLlmDebugPopup() {
     });
 }
 
+function buildLlmDebugCopyPayload(debugData, metadata, workflowExecutionTrace) {
+    if (!debugData || typeof debugData !== 'object') {
+        return null;
+    }
+
+    const turnExecutionDiagnostics = (
+        debugData.turn_execution_diagnostics
+        && typeof debugData.turn_execution_diagnostics === 'object'
+    )
+        ? { ...debugData.turn_execution_diagnostics }
+        : null;
+
+    if (turnExecutionDiagnostics) {
+        if (!turnExecutionDiagnostics.workflow_discovery && debugData.workflow_discovery) {
+            turnExecutionDiagnostics.workflow_discovery = debugData.workflow_discovery;
+        }
+        return turnExecutionDiagnostics;
+    }
+
+    return {
+        ...debugData,
+        metadata,
+        workflow_execution_trace: workflowExecutionTrace || undefined
+    };
+}
+
 function buildLlmDebugMetadata(debugData) {
     const metadata = {
         model: debugData?.model || 'Unknown',
@@ -15046,13 +15072,13 @@ async function showLlmDebugPopup(turnId, options = {}) {
         }
     }
 
-    // Store full data for copy function, including computed metadata
-    const enhancedDebugData = {
-        ...debugData,
-        metadata: metadata,  // Add computed metadata to the structure
-        workflow_execution_trace: workflowExecutionTrace || undefined
-    };
-    popup.dataset.currentDebugData = JSON.stringify(enhancedDebugData, null, 2);
+    // Prefer turn_execution_diagnostics for parity with active-turn Copy diagnostics.
+    const copyPayload = buildLlmDebugCopyPayload(
+        debugData,
+        metadata,
+        workflowExecutionTrace,
+    );
+    popup.dataset.currentDebugData = JSON.stringify(copyPayload, null, 2);
 
     // Show popup - update aria-hidden BEFORE showing to avoid accessibility warning
     popup.setAttribute('aria-hidden', 'false');

@@ -82,3 +82,11 @@ def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_
     assert internal_mcp["gateway_present"] is False
     assert internal_mcp["gateway_enabled"] is False
     assert internal_mcp["orchestrator_present"] is False
+
+    diagnostics = llm_debug.get("turn_execution_diagnostics")
+    assert isinstance(diagnostics, dict)
+    assert diagnostics.get("request_id") == body.get("request_id")
+    assert diagnostics.get("prompt_preview") == "Hello"
+    assert isinstance(diagnostics.get("progress_events"), list)
+    assert isinstance(diagnostics.get("phase_history"), list)
+    assert isinstance(diagnostics.get("tool_history"), list)
