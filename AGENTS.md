@@ -32,6 +32,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - `docs/software_engineering.md`: conventions, debugging, and lessons learned.
 - `docs/engineering/security_considerations.md`: required security context.
 - `docs/engineering/atlassian_mcp_recovery_runbook.md`: canonical Atlassian MCP recovery and credential reset procedure.
+- `docs/engineering/jira_components_taxonomy.md`: canonical candidate Jira Components taxonomy for Von issues.
 
 ## Workflow and Quality
 - Preserve raw user-authored text when it is rendered/transformed; store originals in dataset/raw attributes where applicable.
@@ -127,6 +128,7 @@ Do not "hack around" MCP failures with ad-hoc scripts or direct REST calls. Fix 
 - If an issue is created without an assignee, fix it via the Jira edit tool rather than duplicating.
 - For full Jira Tasks (not sub-tasks), always identify the appropriate epic and attach them to it. In the very unlikely event that a suitable epic isn't available, plan what that epic would look like, and offer to create it.
 - Add appropriate inter-task links (e.g. blocks/depends-on/relates) when the available MCP tooling supports it.
+- When setting Jira `Components`, use `docs/engineering/jira_components_taxonomy.md` as the default source of truth unless the user requests otherwise.
 - Jira site URL: https://naoinstitute.atlassian.net/
 - If a cloudId is required, fetch it from https://naoinstitute.atlassian.net/_edge/tenant_info and include that URL when requesting it.
 
