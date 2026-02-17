@@ -7,6 +7,7 @@ JIRA_TOOL_NAMES = {
     "jira_get_issue",
     "jira_get_transitions",
     "jira_add_comment",
+    "jira_add_attachment",
     "jira_transition",
     "jira_create_issue",
     "jira_update_issue",

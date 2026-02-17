@@ -71,6 +71,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "gmail_list_messages",
     "gmail_modify_labels",
     "jira_add_comment",
+    "jira_add_attachment",
     "jira_create_issue",
     "jira_get_auth_config",
     "jira_get_issue",

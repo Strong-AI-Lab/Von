@@ -763,6 +763,47 @@
             }
         },
         {
+            "name": "jira_add_attachment",
+            "description": "Upload an attachment to a Jira issue using base64 content. Validates MIME type, file size, and filename safety before upload.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "issue_key": {
+                        "type": "string"
+                    },
+                    "filename": {
+                        "type": "string"
+                    },
+                    "content_base64": {
+                        "type": "string"
+                    },
+                    "mime_type": {
+                        "type": "string"
+                    },
+                    "comment": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "issue_key",
+                    "filename",
+                    "content_base64",
+                    "mime_type"
+                ],
+                "additionalProperties": true,
+                "description": "jira_add_attachment input: issue_key, filename, content_base64, mime_type (all required). Optional comment and namespace."
+            }
+        },
+        {
             "name": "jira_add_comment",
             "description": "Add a comment to a Jira issue. Use to log investigation notes or status updates. Requires issue key and comment text.",
             "inputSchema": {
@@ -917,6 +958,9 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "link_type": {
+                        "type": "string"
+                    },
                     "source_issue_key": {
                         "type": [
                             "string",
@@ -940,9 +984,6 @@
                             "string",
                             "null"
                         ]
-                    },
-                    "link_type": {
-                        "type": "string"
                     },
                     "comment": {
                         "type": [

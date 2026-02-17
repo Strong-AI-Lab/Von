@@ -90,6 +90,25 @@ class JiraMCPProxy:
             "jira_add_comment", {"issue_key": issue_key, "comment": comment}
         )
 
+    async def add_attachment(
+        self,
+        *,
+        issue_key: str,
+        filename: str,
+        content_base64: str,
+        mime_type: str,
+        comment: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        arguments: Dict[str, Any] = {
+            "issue_key": issue_key,
+            "filename": filename,
+            "content_base64": content_base64,
+            "mime_type": mime_type,
+        }
+        if isinstance(comment, str) and comment.strip():
+            arguments["comment"] = comment.strip()
+        return await self._call("jira_add_attachment", arguments)
+
     async def transition_issue(
         self, *, issue_key: str, transition_id: str
     ) -> Dict[str, Any]:

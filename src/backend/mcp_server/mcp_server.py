@@ -181,6 +181,94 @@ def jira_put(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return _request_json("PUT", url, payload=payload)
 
 
+def jira_add_attachment(
+    *,
+    issue_key: str,
+    filename: str,
+    content_bytes: bytes,
+    mime_type: str,
+) -> Dict[str, Any] | List[Any]:
+    """Upload an attachment to a Jira issue via multipart/form-data."""
+
+    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/attachments"
+    headers = {
+        "Authorization": HEADERS["Authorization"],
+        "Accept": "application/json",
+        "X-Atlassian-Token": "no-check",
+    }
+
+    max_attempts = 3
+    delay_sec = 0.5
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.post(
+                url,
+                headers=headers,
+                files={"file": (filename, content_bytes, mime_type)},
+                timeout=30,
+            )
+
+            if resp.ok:
+                try:
+                    body_text = resp.text
+                except Exception:
+                    body_text = ""
+                if not body_text or not body_text.strip():
+                    return {"success": True, "status_code": resp.status_code, "url": url}
+                try:
+                    return resp.json()
+                except Exception:
+                    return {
+                        "success": True,
+                        "status_code": resp.status_code,
+                        "url": url,
+                        "response": body_text[:2000],
+                    }
+
+            if resp.status_code == 429 and attempt < max_attempts:
+                retry_after_header = resp.headers.get("Retry-After")
+                retry_after_sec: float | None = None
+                if retry_after_header:
+                    try:
+                        retry_after_sec = float(retry_after_header)
+                    except Exception:
+                        retry_after_sec = None
+                sleep_for = (
+                    retry_after_sec if retry_after_sec is not None else delay_sec
+                )
+                time.sleep(max(0.1, min(sleep_for, 10.0)))
+                delay_sec = min(delay_sec * 2.0, 8.0)
+                continue
+
+            hint = _jira_error_hint(resp.status_code, url=url)
+            response_text = None
+            try:
+                response_text = resp.text
+            except Exception:
+                response_text = None
+
+            error: Dict[str, Any] = {
+                "success": False,
+                "status_code": resp.status_code,
+                "url": url,
+                "error": f"Jira API HTTP {resp.status_code}",
+            }
+            if response_text:
+                error["response"] = response_text[:2000]
+            if hint:
+                error["hint"] = hint
+            return error
+        except requests.exceptions.RequestException as exc:
+            if attempt < max_attempts:
+                time.sleep(max(0.1, min(delay_sec, 8.0)))
+                delay_sec = min(delay_sec * 2.0, 8.0)
+                continue
+            return {"success": False, "error": f"Jira request failed: {exc}"}
+
+    return {"success": False, "error": "Jira request failed after retries"}
+
+
 # ---------------------------------------------------------
 # Markdown to Atlassian Document Format (ADF) converter
 # ---------------------------------------------------------
@@ -515,6 +603,30 @@ async def list_tools() -> List[types.Tool]:
             },
         ),
         types.Tool(
+            name="jira_add_attachment",
+            description=(
+                "Add an attachment to a Jira issue. Requires base64 content, "
+                "MIME type, and safe filename."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string"},
+                    "filename": {"type": "string"},
+                    "content_base64": {
+                        "type": "string",
+                        "description": "Base64-encoded file content",
+                    },
+                    "mime_type": {"type": "string"},
+                    "comment": {
+                        "type": "string",
+                        "description": "Optional follow-up Jira comment text",
+                    },
+                },
+                "required": ["issue_key", "filename", "content_base64", "mime_type"],
+            },
+        ),
+        types.Tool(
             name="jira_transition",
             description="Transition a Jira issue using a transition ID.",
             inputSchema={
@@ -659,6 +771,74 @@ async def call_tool(
         payload = {"body": _ensure_adf(comment)}
         result = jira_post(f"issue/{issue_key}/comment", payload)
         text = json.dumps(result, indent=2)
+        return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_add_attachment":
+        issue_key = arguments.get("issue_key")
+        filename = arguments.get("filename")
+        content_base64 = arguments.get("content_base64")
+        mime_type = arguments.get("mime_type")
+        comment = arguments.get("comment")
+
+        missing = []
+        for key in ("issue_key", "filename", "content_base64", "mime_type"):
+            value = arguments.get(key)
+            if not isinstance(value, str) or not value.strip():
+                missing.append(key)
+        if missing:
+            error = {
+                "success": False,
+                "error": f"Missing required parameters: {', '.join(missing)}",
+            }
+            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+
+        try:
+            content_bytes = base64.b64decode(str(content_base64), validate=True)
+        except Exception:
+            error = {
+                "success": False,
+                "error": "Invalid content_base64 payload",
+            }
+            return [types.TextContent(type="text", text=json.dumps(error, indent=2))]
+
+        upload_result = jira_add_attachment(
+            issue_key=str(issue_key).strip(),
+            filename=str(filename).strip(),
+            content_bytes=content_bytes,
+            mime_type=str(mime_type).strip(),
+        )
+
+        if isinstance(upload_result, dict) and upload_result.get("success") is False:
+            text = json.dumps(upload_result, indent=2)
+            return [types.TextContent(type="text", text=text)]
+
+        attachments: List[Dict[str, Any]] = []
+        if isinstance(upload_result, list):
+            attachments = [
+                item for item in upload_result if isinstance(item, dict)
+            ]
+        elif isinstance(upload_result, dict):
+            attachments = [upload_result]
+
+        response: Dict[str, Any] = {
+            "success": True,
+            "issue_key": str(issue_key).strip(),
+            "attachments": attachments,
+        }
+
+        if isinstance(comment, str) and comment.strip():
+            comment_payload = {"body": _ensure_adf(comment.strip())}
+            comment_result = jira_post(
+                f"issue/{str(issue_key).strip()}/comment", comment_payload
+            )
+            if isinstance(comment_result, dict) and comment_result.get("success") is False:
+                response["comment_added"] = False
+                response["comment_error"] = comment_result
+            else:
+                response["comment_added"] = True
+                response["comment_result"] = comment_result
+
+        text = json.dumps(response, indent=2)
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_transition":

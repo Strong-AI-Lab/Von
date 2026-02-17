@@ -101,6 +101,7 @@ from src.backend.services.settings_service import (
 )
 from src.backend.integrations.internal_mcp.catalogue import _add_relationship
 from src.backend.integrations.internal_mcp.catalogue import _jira_add_comment
+from src.backend.integrations.internal_mcp.catalogue import _jira_add_attachment
 from src.backend.integrations.internal_mcp.catalogue import _jira_create_issue
 from src.backend.integrations.internal_mcp.catalogue import _jira_get_auth_config
 from src.backend.integrations.internal_mcp.catalogue import _jira_get_issue
@@ -2478,6 +2479,15 @@ async def _handle_jira_add_comment(arguments: dict[str, Any]) -> list[TextConten
     )
 
 
+async def _handle_jira_add_attachment(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _jira_add_attachment,
+        arguments,
+        tool_family_label="Jira",
+        suggestions=["Check Jira authentication and network connectivity"],
+    )
+
+
 async def _handle_jira_transition(arguments: dict[str, Any]) -> list[TextContent]:
     return _run_catalogue_proxy_handler(
         _jira_transition_issue,
@@ -2863,6 +2873,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "jira_get_issue": _handle_jira_get_issue,
     "jira_get_transitions": _handle_jira_get_transitions,
     "jira_add_comment": _handle_jira_add_comment,
+    "jira_add_attachment": _handle_jira_add_attachment,
     "jira_transition": _handle_jira_transition,
     "jira_create_issue": _handle_jira_create_issue,
     "jira_update_issue": _handle_jira_update_issue,

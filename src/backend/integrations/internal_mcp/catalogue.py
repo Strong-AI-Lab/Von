@@ -6356,6 +6356,27 @@ def _jira_add_comment_input_schema() -> Schema:
     )
 
 
+def _jira_add_attachment_input_schema() -> Schema:
+    return Schema(
+        required={
+            "issue_key": str,
+            "filename": str,
+            "content_base64": str,
+            "mime_type": str,
+        },
+        optional={
+            "comment": (str, type(None)),
+            # Accepted for LLM consistency; ignored by handler logic.
+            "namespace": (str, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_add_attachment input: issue_key, filename, content_base64, mime_type (all required). "
+            "Optional comment and namespace."
+        ),
+    )
+
+
 def _jira_transition_input_schema() -> Schema:
     return Schema(
         required={"issue_key": str, "transition_id": str},
@@ -6478,6 +6499,32 @@ def _jira_get_auth_config_output_schema() -> Schema:
         description=(
             "jira_get_auth_config output: base_url/email/token_present/token_length and which env keys were used. "
             "Never returns the token."
+        ),
+    )
+
+
+def _jira_add_attachment_output_schema() -> Schema:
+    return Schema(
+        required={
+            "success": bool,
+        },
+        optional={
+            "issue_key": (str, type(None)),
+            "attachment_id": (str, type(None)),
+            "filename": (str, type(None)),
+            "size_bytes": (int, type(None)),
+            "content_type": (str, type(None)),
+            "comment_added": (bool, type(None)),
+            "jira_attachment": (dict, type(None)),
+            "error": (str, type(None)),
+            "error_code": (str, type(None)),
+            "error_details": (dict, type(None)),
+            "suggestions": (list, type(None)),
+        },
+        allow_unknown=True,
+        description=(
+            "jira_add_attachment output: success flag plus structured attachment metadata "
+            "(issue_key, attachment_id, filename, size_bytes, content_type)."
         ),
     )
 
@@ -7409,6 +7456,19 @@ def _gmail_modify_labels(**kwargs):
 _JIRA_WRITE_CACHE: dict[str, dict[str, Any]] = {}
 _JIRA_WRITE_CACHE_TTL_SEC = 3600.0
 _JIRA_WRITE_CACHE_MAX = 200
+_JIRA_ATTACHMENT_MAX_SIZE_BYTES_DEFAULT = 10 * 1024 * 1024
+_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES_DEFAULT = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+        "application/pdf",
+        "text/plain",
+        "text/markdown",
+        "application/json",
+    }
+)
 
 
 def _jira_project_allow_list() -> list[str]:
@@ -7539,6 +7599,93 @@ def _jira_cache_set(tool: str, request_id: str, payload: dict[str, Any]) -> None
     }
 
 
+def _jira_attachment_max_size_bytes() -> int:
+    import os
+
+    raw = (
+        os.getenv("VON_INTERNAL_MCP_JIRA_ATTACHMENT_MAX_SIZE_BYTES")
+        or os.getenv("VON_JIRA_ATTACHMENT_MAX_SIZE_BYTES")
+        or str(_JIRA_ATTACHMENT_MAX_SIZE_BYTES_DEFAULT)
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _JIRA_ATTACHMENT_MAX_SIZE_BYTES_DEFAULT
+    if value <= 0:
+        return _JIRA_ATTACHMENT_MAX_SIZE_BYTES_DEFAULT
+    return value
+
+
+def _jira_attachment_allowed_mime_types() -> set[str]:
+    import os
+
+    raw = (
+        os.getenv("VON_INTERNAL_MCP_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES")
+        or os.getenv("VON_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES")
+    )
+    if not isinstance(raw, str) or not raw.strip():
+        return set(_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES_DEFAULT)
+
+    parsed: set[str] = set()
+    for item in raw.split(","):
+        candidate = item.strip().lower()
+        if candidate:
+            parsed.add(candidate)
+    if not parsed:
+        return set(_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES_DEFAULT)
+    return parsed
+
+
+def _jira_sanitise_attachment_filename(filename: Any) -> str | None:
+    from pathlib import PurePosixPath
+    from werkzeug.utils import secure_filename
+
+    if not isinstance(filename, str):
+        return None
+    cleaned = filename.strip().replace("\\", "/")
+    if not cleaned:
+        return None
+    leaf_name = PurePosixPath(cleaned).name
+    safe_name = secure_filename(leaf_name)
+    if not safe_name:
+        return None
+    if len(safe_name) > 180:
+        if "." in safe_name:
+            stem, ext = safe_name.rsplit(".", 1)
+            max_stem = max(1, 180 - len(ext) - 1)
+            safe_name = f"{stem[:max_stem]}.{ext[:32]}"
+        else:
+            safe_name = safe_name[:180]
+    return safe_name
+
+
+def _jira_decode_attachment_bytes(content_base64: Any) -> bytes | None:
+    import base64
+    import binascii
+
+    if not isinstance(content_base64, str):
+        return None
+    raw = content_base64.strip()
+    if not raw:
+        return None
+
+    if raw.lower().startswith("data:") and "," in raw:
+        raw = raw.split(",", 1)[1].strip()
+
+    compact = "".join(raw.split())
+    if not compact:
+        return None
+
+    try:
+        return base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError):
+        try:
+            padding = "=" * (-len(compact) % 4)
+            return base64.urlsafe_b64decode(compact + padding)
+        except (binascii.Error, ValueError):
+            return None
+
+
 def _jira_search(**kwargs):
     import asyncio
     from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
@@ -7650,6 +7797,212 @@ def _jira_add_comment(**kwargs):
         return _run_async_compat(_async_comment)
     except JiraProxyError as exc:
         return make_error_response("JIRA_ERROR", str(exc))
+
+
+def _jira_add_attachment(**kwargs):
+    import asyncio
+    import base64
+    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+
+    issue_key = kwargs.get("issue_key")
+    filename = kwargs.get("filename")
+    content_base64 = kwargs.get("content_base64")
+    mime_type = kwargs.get("mime_type")
+
+    missing: list[str] = []
+    if not issue_key:
+        missing.append("issue_key")
+    if not filename:
+        missing.append("filename")
+    if not content_base64:
+        missing.append("content_base64")
+    if not mime_type:
+        missing.append("mime_type")
+    if missing:
+        return make_error_response(
+            "missing_parameter",
+            f"Missing required parameters: {', '.join(missing)}",
+            details={"missing": missing},
+            suggestions=[
+                "Provide issue_key, filename, content_base64, and mime_type"
+            ],
+        )
+
+    issue_key_str = str(issue_key).strip()
+    if not _jira_project_from_issue_key(issue_key_str):
+        return make_error_response(
+            "invalid_issue_key",
+            "Invalid issue_key format; expected PROJECT-123",
+            suggestions=["Use the format PROJECT-123 for issue keys"],
+        )
+
+    safe_filename = _jira_sanitise_attachment_filename(filename)
+    if not safe_filename:
+        return make_error_response(
+            "invalid_filename",
+            "Invalid filename; provide a safe non-empty file name",
+            suggestions=[
+                "Use a simple filename such as diagram.png",
+                "Avoid path separators and control characters",
+            ],
+        )
+
+    mime_type_str = str(mime_type).strip().lower()
+    if not mime_type_str:
+        return make_error_response(
+            "invalid_mime_type",
+            "mime_type must be a non-empty string",
+            suggestions=["Provide a MIME type such as image/png"],
+        )
+
+    allowed_mime_types = _jira_attachment_allowed_mime_types()
+    if mime_type_str not in allowed_mime_types:
+        return make_error_response(
+            "unsupported_mime_type",
+            f"mime_type '{mime_type_str}' is not allowed",
+            details={"allowed_mime_types": sorted(allowed_mime_types)},
+            suggestions=[
+                "Use an allow-listed MIME type",
+                "Configure VON_INTERNAL_MCP_JIRA_ATTACHMENT_ALLOWED_MIME_TYPES if needed",
+            ],
+        )
+
+    attachment_bytes = _jira_decode_attachment_bytes(content_base64)
+    if attachment_bytes is None:
+        return make_error_response(
+            "invalid_base64",
+            "content_base64 is not valid base64-encoded file data",
+            suggestions=[
+                "Provide raw base64 data or a data URL with a base64 payload",
+            ],
+        )
+
+    if len(attachment_bytes) == 0:
+        return make_error_response(
+            "empty_attachment",
+            "Attachment content is empty",
+            suggestions=["Provide a non-empty file payload"],
+        )
+
+    max_size_bytes = _jira_attachment_max_size_bytes()
+    if len(attachment_bytes) > max_size_bytes:
+        return make_error_response(
+            "attachment_too_large",
+            (
+                f"Attachment size {len(attachment_bytes)} bytes exceeds limit "
+                f"{max_size_bytes} bytes"
+            ),
+            details={
+                "size_bytes": len(attachment_bytes),
+                "max_size_bytes": max_size_bytes,
+            },
+            suggestions=[
+                "Upload a smaller file",
+                "Adjust VON_INTERNAL_MCP_JIRA_ATTACHMENT_MAX_SIZE_BYTES if appropriate",
+            ],
+        )
+
+    comment = kwargs.get("comment")
+    if comment is not None and not isinstance(comment, str):
+        return make_error_response(
+            "invalid_parameter",
+            "comment must be a string when provided",
+            details={"parameter": "comment"},
+        )
+    comment_text = comment.strip() if isinstance(comment, str) else None
+    if comment_text == "":
+        comment_text = None
+
+    normalised_content_base64 = base64.b64encode(attachment_bytes).decode("ascii")
+
+    async def _async_add_attachment():
+        proxy = await get_jira_proxy()
+        return await proxy.add_attachment(
+            issue_key=issue_key_str,
+            filename=safe_filename,
+            content_base64=normalised_content_base64,
+            mime_type=mime_type_str,
+            comment=comment_text,
+        )
+
+    try:
+        raw_result = _run_async_compat(_async_add_attachment)
+    except JiraProxyError as exc:
+        return make_error_response(
+            "jira_proxy_error",
+            str(exc),
+            details={"exception_type": "JiraProxyError"},
+            suggestions=["Check Jira connectivity and authentication"],
+        )
+
+    if isinstance(raw_result, dict) and raw_result.get("success") is False:
+        return raw_result
+
+    attachment_payload: dict[str, Any] | None = None
+    comment_added = False
+    first_item_from_list: dict[str, Any] | None = None
+
+    if isinstance(raw_result, list):
+        for item in raw_result:
+            if isinstance(item, dict):
+                first_item_from_list = item
+                break
+        attachment_payload = first_item_from_list
+    elif isinstance(raw_result, dict):
+        attachments = raw_result.get("attachments")
+        if isinstance(attachments, list):
+            for item in attachments:
+                if isinstance(item, dict):
+                    first_item_from_list = item
+                    break
+        if first_item_from_list is not None:
+            attachment_payload = first_item_from_list
+        elif isinstance(raw_result.get("attachment"), dict):
+            attachment_payload = raw_result.get("attachment")
+        elif isinstance(raw_result.get("id"), (str, int)):
+            attachment_payload = raw_result
+        comment_added = bool(raw_result.get("comment_added"))
+
+    if not isinstance(attachment_payload, dict):
+        return make_error_response(
+            "jira_proxy_error",
+            "Jira attachment upload returned an unexpected response shape",
+            details={"response_type": type(raw_result).__name__},
+            suggestions=["Check Jira proxy/tool output for jira_add_attachment"],
+        )
+
+    attachment_id_raw = attachment_payload.get("id") or attachment_payload.get(
+        "attachment_id"
+    )
+    attachment_filename = attachment_payload.get("filename") or safe_filename
+    attachment_size_raw = attachment_payload.get("size") or attachment_payload.get(
+        "size_bytes"
+    )
+    attachment_content_type = (
+        attachment_payload.get("mimeType")
+        or attachment_payload.get("contentType")
+        or attachment_payload.get("content_type")
+        or mime_type_str
+    )
+
+    attachment_size: int | None = None
+    if isinstance(attachment_size_raw, int):
+        attachment_size = attachment_size_raw
+    elif isinstance(attachment_size_raw, str) and attachment_size_raw.strip().isdigit():
+        attachment_size = int(attachment_size_raw.strip())
+    else:
+        attachment_size = len(attachment_bytes)
+
+    return {
+        "success": True,
+        "issue_key": issue_key_str,
+        "attachment_id": str(attachment_id_raw) if attachment_id_raw is not None else None,
+        "filename": str(attachment_filename),
+        "size_bytes": attachment_size,
+        "content_type": str(attachment_content_type),
+        "comment_added": comment_added,
+        "jira_attachment": attachment_payload,
+    }
 
 
 def _jira_transition_issue(**kwargs):
@@ -9584,6 +9937,7 @@ def build_default_catalogue() -> MethodCatalogue:
     jira_get_issue_output_schema = _jira_generic_output_schema("get_issue")
     jira_get_transitions_output_schema = _jira_generic_output_schema("get_transitions")
     jira_add_comment_output_schema = _jira_generic_output_schema("add_comment")
+    jira_add_attachment_output_schema = _jira_add_attachment_output_schema()
     jira_transition_output_schema = _jira_generic_output_schema("transition")
     jira_create_issue_output_schema = _jira_generic_output_schema("create_issue")
     jira_update_issue_output_schema = _jira_generic_output_schema("update_issue")
@@ -10325,6 +10679,18 @@ def build_default_catalogue() -> MethodCatalogue:
             category="write",
             timeout_sec=15.0,
             description="Add a comment to a Jira issue. Use to log investigation notes or status updates. Requires issue key and comment text.",
+        ),
+        MethodDefinition(
+            name="jira_add_attachment",
+            handler=_jira_add_attachment,
+            input_schema=_jira_add_attachment_input_schema(),
+            output_schema=jira_add_attachment_output_schema,
+            category="write",
+            timeout_sec=20.0,
+            description=(
+                "Upload an attachment to a Jira issue using base64 content. "
+                "Validates MIME type, file size, and filename safety before upload."
+            ),
         ),
         MethodDefinition(
             name="jira_create_issue",

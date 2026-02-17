@@ -134,6 +134,11 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
         "category": "jira",
         "display_template": "Commented on: {key}",
     },
+    "jira_add_attachment": {
+        "salience": "high",
+        "category": "jira",
+        "display_template": "Attached: {filename}",
+    },
     "jira_transition": {
         "salience": "high",
         "category": "jira",
