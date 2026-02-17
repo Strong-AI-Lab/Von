@@ -64,11 +64,9 @@ def test_jira_handlers_require_minimum_fields():
     assert err_update.get("success") is False
     assert "issue_key" in err_update.get("error", "")
 
-    err_link = _jira_link_issue(
-        inward_issue_key=None, outward_issue_key=None, link_type=None
-    )
+    err_link = _jira_link_issue(link_type="Blocks")
     assert err_link.get("success") is False
-    assert "inward_issue_key" in err_link.get("error", "")
+    assert "link_type" in err_link.get("error", "")
 
 
 def test_jira_write_tools_allowlist_and_dry_run_defaults():
@@ -120,6 +118,29 @@ def test_jira_write_tools_allowlist_and_dry_run_defaults():
     assert ok_link.get("success") is True
     assert ok_link.get("dry_run") is True
     assert ok_link.get("executed") is False
+    assert ok_link.get("source_issue_key") == "JVNAUTOSCI-1"
+    assert ok_link.get("target_issue_key") == "JVNAUTOSCI-2"
+
+    ok_link_semantic = _jira_link_issue(
+        source_issue_key="JVNAUTOSCI-10",
+        target_issue_key="JVNAUTOSCI-11",
+        link_type="Blocks",
+    )
+    assert ok_link_semantic.get("success") is True
+    assert ok_link_semantic.get("dry_run") is True
+    assert ok_link_semantic.get("executed") is False
+    proposed = ok_link_semantic.get("proposed_payload", {})
+    assert proposed.get("inwardIssue", {}).get("key") == "JVNAUTOSCI-10"
+    assert proposed.get("outwardIssue", {}).get("key") == "JVNAUTOSCI-11"
+
+    err_conflicting_pair = _jira_link_issue(
+        source_issue_key="JVNAUTOSCI-10",
+        target_issue_key="JVNAUTOSCI-11",
+        outward_issue_key="JVNAUTOSCI-99",
+        link_type="Blocks",
+    )
+    assert err_conflicting_pair.get("success") is False
+    assert err_conflicting_pair.get("error_code") == "CONFLICTING_PARAMS"
 
     bad_link = _jira_link_issue(
         inward_issue_key="JVNAUTOSCI-1",

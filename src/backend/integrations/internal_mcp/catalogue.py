@@ -6394,11 +6394,16 @@ def _jira_update_issue_input_schema() -> Schema:
 def _jira_link_issue_input_schema() -> Schema:
     return Schema(
         required={
-            "inward_issue_key": str,
-            "outward_issue_key": str,
             "link_type": str,
         },
         optional={
+            # Preferred semantic aliases. source_issue_key maps to Jira inwardIssue,
+            # target_issue_key maps to Jira outwardIssue.
+            "source_issue_key": (str, type(None)),
+            "target_issue_key": (str, type(None)),
+            # Backward-compatible Jira-native fields.
+            "inward_issue_key": (str, type(None)),
+            "outward_issue_key": (str, type(None)),
             "comment": (str, type(None)),
             "dry_run": (bool,),
             "approved": (bool,),
@@ -6407,8 +6412,12 @@ def _jira_link_issue_input_schema() -> Schema:
         },
         allow_unknown=True,
         description=(
-            "jira_link_issue input: inward_issue_key, outward_issue_key, link_type (required; e.g. 'Relates'). "
-            "Optional comment. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+            "jira_link_issue input: link_type (required; e.g. 'Relates'). "
+            "Preferred issue fields: source_issue_key + target_issue_key "
+            "(source maps to Jira inwardIssue; target maps to Jira outwardIssue). "
+            "Backward-compatible fields: inward_issue_key + outward_issue_key. "
+            "Optional comment. Guardrails: dry_run (default true), approved, execute "
+            "(requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
         ),
     )
 
@@ -7866,20 +7875,78 @@ def _jira_link_issue(**kwargs):
 
     logger = logging.getLogger(__name__)
 
-    inward_issue_key = kwargs.get("inward_issue_key")
-    outward_issue_key = kwargs.get("outward_issue_key")
     link_type = kwargs.get("link_type")
-    if not inward_issue_key or not outward_issue_key or not link_type:
+
+    def _clean_issue_key_param(name: str) -> str | None:
+        value = kwargs.get(name)
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    source_key = _clean_issue_key_param("source_issue_key")
+    target_key = _clean_issue_key_param("target_issue_key")
+    inward_key_from_kwargs = _clean_issue_key_param("inward_issue_key")
+    outward_key_from_kwargs = _clean_issue_key_param("outward_issue_key")
+
+    # Prefer semantic aliases to avoid accidental direction inversions.
+    if source_key is not None or target_key is not None:
+        if not source_key or not target_key:
+            return make_error_response(
+                "MISSING_PARAMS",
+                "Missing required parameters: source_issue_key, target_issue_key, link_type",
+                suggestions=[
+                    "Provide both source_issue_key and target_issue_key, or use inward_issue_key and outward_issue_key."
+                ],
+            )
+        if inward_key_from_kwargs and inward_key_from_kwargs != source_key:
+            return make_error_response(
+                "CONFLICTING_PARAMS",
+                "Conflicting parameters: source_issue_key does not match inward_issue_key",
+                suggestions=[
+                    "Use only one key pair style, or provide matching values for source_issue_key/inward_issue_key."
+                ],
+                details={
+                    "source_issue_key": source_key,
+                    "inward_issue_key": inward_key_from_kwargs,
+                },
+            )
+        if outward_key_from_kwargs and outward_key_from_kwargs != target_key:
+            return make_error_response(
+                "CONFLICTING_PARAMS",
+                "Conflicting parameters: target_issue_key does not match outward_issue_key",
+                suggestions=[
+                    "Use only one key pair style, or provide matching values for target_issue_key/outward_issue_key."
+                ],
+                details={
+                    "target_issue_key": target_key,
+                    "outward_issue_key": outward_key_from_kwargs,
+                },
+            )
+        inward_key = source_key
+        outward_key = target_key
+    else:
+        if not inward_key_from_kwargs or not outward_key_from_kwargs or not link_type:
+            return make_error_response(
+                "MISSING_PARAMS",
+                "Missing required parameters: link_type and one issue key pair (source/target or inward/outward)",
+                suggestions=[
+                    "Preferred: source_issue_key + target_issue_key + link_type.",
+                    "Backward-compatible: inward_issue_key + outward_issue_key + link_type.",
+                ],
+            )
+        inward_key = inward_key_from_kwargs
+        outward_key = outward_key_from_kwargs
+        source_key = inward_key
+        target_key = outward_key
+
+    if not link_type:
         return make_error_response(
             "MISSING_PARAMS",
-            "Missing required parameters: inward_issue_key, outward_issue_key, link_type",
-            suggestions=[
-                "Provide both issue keys and a link type (e.g. 'Blocks', 'Relates')"
-            ],
+            "Missing required parameter: link_type",
+            suggestions=["Provide a link type (e.g. 'Blocks', 'Relates')."],
         )
 
-    inward_key = str(inward_issue_key).strip()
-    outward_key = str(outward_issue_key).strip()
     inward_project = _jira_project_from_issue_key(inward_key)
     outward_project = _jira_project_from_issue_key(outward_key)
     if not inward_project or not outward_project:
@@ -7926,6 +7993,8 @@ def _jira_link_issue(**kwargs):
             "dry_run": True,
             "executed": False,
             "action": "link_issue",
+            "source_issue_key": source_key,
+            "target_issue_key": target_key,
             "inward_issue_key": inward_key,
             "outward_issue_key": outward_key,
             "link_type": str(link_type),
@@ -7938,7 +8007,9 @@ def _jira_link_issue(**kwargs):
 
     try:
         logger.info(
-            "[jira_write] link_issue %s -> %s (%s)",
+            "[jira_write] link_issue source=%s target=%s jira_outward=%s jira_inward=%s (%s)",
+            source_key,
+            target_key,
             outward_key,
             inward_key,
             str(link_type),
@@ -7950,6 +8021,8 @@ def _jira_link_issue(**kwargs):
             result["dry_run"] = False
             result["executed"] = True
             result["action"] = "link_issue"
+            result["source_issue_key"] = source_key
+            result["target_issue_key"] = target_key
             result["inward_issue_key"] = inward_key
             result["outward_issue_key"] = outward_key
             result["link_type"] = str(link_type)

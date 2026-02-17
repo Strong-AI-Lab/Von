@@ -911,11 +911,29 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "source_issue_key": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "target_issue_key": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
                     "inward_issue_key": {
-                        "type": "string"
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     },
                     "outward_issue_key": {
-                        "type": "string"
+                        "type": [
+                            "string",
+                            "null"
+                        ]
                     },
                     "link_type": {
                         "type": "string"
@@ -943,12 +961,10 @@
                     }
                 },
                 "required": [
-                    "inward_issue_key",
-                    "outward_issue_key",
                     "link_type"
                 ],
                 "additionalProperties": true,
-                "description": "jira_link_issue input: inward_issue_key, outward_issue_key, link_type (required; e.g. 'Relates'). Optional comment. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+                "description": "jira_link_issue input: link_type (required; e.g. 'Relates'). Preferred issue fields: source_issue_key + target_issue_key (source maps to Jira inwardIssue; target maps to Jira outwardIssue). Backward-compatible fields: inward_issue_key + outward_issue_key. Optional comment. Guardrails: dry_run (default true), approved, execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
             }
         },
         {
