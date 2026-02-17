@@ -28,6 +28,7 @@ function buildDisplayElementsContract({
     spokenText = null,
     tablePayload = null,
     workflowPayload = null,
+    taskViewPayload = null,
     timelinePayload = null
 } = {}) {
     const elements = [];
@@ -72,6 +73,17 @@ function buildDisplayElementsContract({
             order: 26,
             intent: 'structured_workflow_view',
             payload: workflowPayload,
+            provenance: { source: 'test' }
+        });
+    }
+    if (taskViewPayload && typeof taskViewPayload === 'object') {
+        elements.push({
+            element_id: 'screen_task_view',
+            element_type: 'task_view',
+            channel: 'screen',
+            order: 31,
+            intent: 'structured_task_view',
+            payload: taskViewPayload,
             provenance: { source: 'test' }
         });
     }
@@ -723,6 +735,115 @@ describe('chat speech planning (presenter channels)', () => {
         const jiraLink = document.querySelector('a[href*="JVNAUTOSCI-1138"]');
         expect(jiraLink).toBeTruthy();
         expect(jiraLink.getAttribute('href')).toContain('/browse/JVNAUTOSCI-1138');
+
+        document.removeEventListener('von:selectConceptById', onSelect);
+    });
+
+    test('renders task view display elements with Von/Jira task links', async () => {
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({
+            user_id: 'user',
+            org_id: 'org',
+            language: 'en-NZ',
+            gmail_profile: null
+        });
+
+        const promptInput = document.getElementById('promptInput');
+        promptInput.value = 'show task cards';
+
+        const displayElements = buildDisplayElementsContract({
+            screenText: 'Task summary',
+            spokenText: 'Here are the task cards.',
+            taskViewPayload: {
+                tasks: [
+                    {
+                        task_id: '#V#task_alpha',
+                        title: 'Alpha task',
+                        status: 'in_progress',
+                        priority: 'high',
+                        due_date: '2026-02-20',
+                        assignee: '#V#user_alpha',
+                        description: 'Prepare task-view rendering hardening',
+                        task_links: [
+                            {
+                                link_type: 'von_task',
+                                target_id: '#V#task_alpha',
+                                label: '#V#task_alpha'
+                            },
+                            {
+                                link_type: 'jira_issue',
+                                target_id: 'JVNAUTOSCI-1174',
+                                href: 'https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1174',
+                                label: 'JVNAUTOSCI-1174'
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        global.fetch = jest.fn((url, options) => {
+            if (typeof url === 'string' && url.startsWith('/von/api/render_markdown')) {
+                let text = '';
+                try {
+                    text = JSON.parse(options?.body ?? '{}')?.text ?? '';
+                } catch (_) {
+                    text = '';
+                }
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ html: String(text) })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/history/length')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({ history_length: 0, authenticated: true })
+                });
+            }
+
+            if (typeof url === 'string' && url.startsWith('/von/generate')) {
+                return Promise.resolve({
+                    ok: true,
+                    json: async () => ({
+                        response: 'Task summary',
+                        display_elements: displayElements,
+                        llm_debug: {
+                            model: 'gpt-5.2',
+                            response: 'Task summary',
+                            messages: [],
+                            display_elements: displayElements
+                        }
+                    })
+                });
+            }
+
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+
+        const onSelect = jest.fn();
+        document.addEventListener('von:selectConceptById', onSelect);
+
+        await sendMessage();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const taskCard = document.querySelector('.chat-display-elements-task-view-item');
+        expect(taskCard).toBeTruthy();
+        expect(taskCard.textContent).toContain('Alpha task');
+        expect(taskCard.textContent).toContain('Priority: high');
+        expect(taskCard.textContent).toContain('Assignee: #V#user_alpha');
+
+        const conceptLink = document.querySelector('.chat-display-elements-concept-link');
+        expect(conceptLink).toBeTruthy();
+        expect(conceptLink.dataset.conceptId).toBe('#V#task_alpha');
+        conceptLink.click();
+        expect(onSelect).toHaveBeenCalledTimes(1);
+        expect(onSelect.mock.calls[0][0].detail.conceptId).toBe('#V#task_alpha');
+
+        const jiraLink = document.querySelector('a[href*="JVNAUTOSCI-1174"]');
+        expect(jiraLink).toBeTruthy();
+        expect(jiraLink.getAttribute('href')).toContain('/browse/JVNAUTOSCI-1174');
 
         document.removeEventListener('von:selectConceptById', onSelect);
     });

@@ -945,6 +945,7 @@ def test_renderer_selection_gates_screen_element_families(monkeypatch):
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": True,
+        "task_view": False,
         "timeline": False,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1039,6 +1040,7 @@ def test_renderer_selection_emits_timeline_elements_for_timeline_renderer(monkey
     assert result.render_plan.get("screen_element_targets") == {
         "table": False,
         "workflow_view": False,
+        "task_view": False,
         "timeline": True,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1052,6 +1054,110 @@ def test_renderer_selection_emits_timeline_elements_for_timeline_renderer(monkey
     assert isinstance(timeline_items, list)
     assert timeline_items[0]["item_id"] == "event_1"
     assert timeline_items[0]["task_links"][0]["target_id"] == "#V#task_alpha"
+
+
+def test_renderer_selection_emits_task_view_elements_for_task_renderer(monkeypatch):
+    """Task-view renderer selection should emit task-view elements only."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#task_view_renderer,#V#workflow_renderer,#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#task_view_renderer",
+                        "renderer_type": "task_view",
+                        "modalities": ["visual"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Task cards.",
+                "tool_messages": [
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "task_list",
+                                "status": "ok",
+                                "duration_ms": 2.8,
+                                "payload": {
+                                    "tasks": [
+                                        {
+                                            "task_concept_id": "#V#task_alpha",
+                                            "title": "Alpha task",
+                                            "status": "pending",
+                                            "priority": "high",
+                                            "jira_issue_key": "JVNAUTOSCI-1174",
+                                        }
+                                    ]
+                                },
+                            }
+                        ),
+                    }
+                ],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+    result = orchestrator.run(
+        prompt="Show task cards",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert result.render_plan.get("screen_element_targets") == {
+        "table": False,
+        "workflow_view": False,
+        "task_view": True,
+        "timeline": False,
+    }
+    assert "screen_table_record_sets" not in result.render_plan
+    assert "screen_workflow_elements" not in result.render_plan
+    assert "screen_timeline_elements" not in result.render_plan
+    assert result.render_plan.get("screen_task_view_element_count") == 1
+
+    task_view_elements = result.render_plan.get("screen_task_view_elements")
+    assert isinstance(task_view_elements, list)
+    assert len(task_view_elements) == 1
+    tasks = task_view_elements[0].get("payload", {}).get("tasks")
+    assert isinstance(tasks, list)
+    assert tasks[0]["task_id"] == "#V#task_alpha"
+    task_link_targets = {
+        str(link.get("target_id"))
+        for link in tasks[0].get("task_links", [])
+        if isinstance(link, Mapping)
+    }
+    assert "#V#task_alpha" in task_link_targets
+    assert "JVNAUTOSCI-1174" in task_link_targets
 
 
 def test_renderer_selection_fallback_when_no_types_selected(monkeypatch):
@@ -1129,6 +1235,7 @@ def test_renderer_selection_fallback_when_no_types_selected(monkeypatch):
     assert result.render_plan.get("screen_element_targets") == {
         "table": True,
         "workflow_view": True,
+        "task_view": False,
         "timeline": False,
     }
     assert result.render_plan.get("screen_table_record_set_count") == 1

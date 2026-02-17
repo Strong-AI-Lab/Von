@@ -1409,6 +1409,7 @@ const TABLE_NON_PAGINATED_ROW_LIMIT = 100;
 const TABLE_DEFAULT_PAGE_SIZE = 50;
 const TABLE_MAX_PAGE_SIZE = 200;
 const WORKFLOW_MAX_NODES = 100;
+const TASK_VIEW_MAX_ITEMS = 200;
 const TIMELINE_MAX_ITEMS = 200;
 const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
 
@@ -1836,6 +1837,96 @@ function resolveWorkflowDisplayElements(debugData) {
     return workflows;
 }
 
+function normaliseTaskViewDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'task_view') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const rawTasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+    const tasks = rawTasks
+        .map((task, index) => {
+            if (!task || typeof task !== 'object') {
+                return null;
+            }
+            const taskId = (
+                typeof task.task_id === 'string' && task.task_id.trim()
+                    ? task.task_id.trim()
+                    : (
+                        typeof task.task_concept_id === 'string' && task.task_concept_id.trim()
+                            ? task.task_concept_id.trim()
+                            : (typeof task.id === 'string' && task.id.trim() ? task.id.trim() : '')
+                    )
+            ) || `task_${index + 1}`;
+            const title = (
+                typeof task.title === 'string' && task.title.trim()
+                    ? task.title.trim()
+                    : (
+                        typeof task.label === 'string' && task.label.trim()
+                            ? task.label.trim()
+                            : taskId
+                    )
+            );
+            const status = typeof task.status === 'string' && task.status.trim()
+                ? task.status.trim().toLowerCase()
+                : '';
+            const priority = typeof task.priority === 'string' ? task.priority.trim() : '';
+            const dueDate = typeof task.due_date === 'string' ? task.due_date.trim() : '';
+            const assignee = typeof task.assignee === 'string' ? task.assignee.trim() : '';
+            const description = typeof task.description === 'string' ? task.description.trim() : '';
+            const rawTaskLinks = Array.isArray(task.task_links) ? task.task_links : [];
+            const taskLinks = rawTaskLinks
+                .map((link) => normaliseWorkflowTaskLink(link))
+                .filter(Boolean);
+
+            return {
+                task_id: taskId,
+                title,
+                status,
+                priority,
+                due_date: dueDate,
+                assignee,
+                description,
+                task_links: taskLinks
+            };
+        })
+        .filter(Boolean)
+        .slice(0, TASK_VIEW_MAX_ITEMS);
+
+    if (!tasks.length) {
+        return null;
+    }
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id : null,
+        tasks
+    };
+}
+
+function resolveTaskViewDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const taskViews = [];
+    for (const element of contract.elements) {
+        const taskViewElement = normaliseTaskViewDisplayElement(element);
+        if (!taskViewElement) {
+            continue;
+        }
+        taskViews.push(taskViewElement);
+    }
+    return taskViews;
+}
+
 function parseTimelineTimestamp(rawValue) {
     if (typeof rawValue !== 'string') {
         return null;
@@ -1998,8 +2089,9 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
 
     const tableElements = resolveTableDisplayElements(debugData);
     const workflowElements = resolveWorkflowDisplayElements(debugData);
+    const taskViewElements = resolveTaskViewDisplayElements(debugData);
     const timelineElements = resolveTimelineDisplayElements(debugData);
-    if (!tableElements.length && !workflowElements.length && !timelineElements.length) {
+    if (!tableElements.length && !workflowElements.length && !taskViewElements.length && !timelineElements.length) {
         return;
     }
 
@@ -2255,12 +2347,135 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         root.appendChild(section);
     });
 
+    taskViewElements.forEach((taskViewElement, taskViewIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-task-view-section';
+        section.style.cssText = (
+            tableElements.length > 0
+            || workflowElements.length > 0
+            || taskViewIndex > 0
+        ) ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-task-view-title';
+        title.textContent = taskViewElements.length > 1
+            ? `Task view ${taskViewIndex + 1}`
+            : 'Task view';
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const summary = document.createElement('div');
+        summary.className = 'chat-display-elements-task-view-summary';
+        summary.textContent = `${taskViewElement.tasks.length} task${taskViewElement.tasks.length === 1 ? '' : 's'}`;
+        summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+        section.appendChild(summary);
+
+        const list = document.createElement('div');
+        list.className = 'chat-display-elements-task-view-list';
+        list.style.cssText = 'display: grid; gap: 8px;';
+
+        taskViewElement.tasks.forEach((task) => {
+            const statusClass = String(task.status || 'unknown')
+                .toLowerCase()
+                .replace(/[^a-z0-9_-]+/g, '-');
+            const card = document.createElement('article');
+            card.className = `chat-display-elements-task-view-item status-${statusClass}`;
+            card.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; padding: 8px; background: #f8fbff;';
+
+            const header = document.createElement('div');
+            header.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px;';
+
+            const name = document.createElement('div');
+            name.className = 'chat-display-elements-task-view-item-name';
+            name.textContent = task.title;
+            name.style.cssText = 'font-size: 0.83em; font-weight: 600; color: #1f3d5a;';
+            header.appendChild(name);
+
+            if (task.status) {
+                const badge = document.createElement('span');
+                badge.className = `workflow-status-badge status-${statusClass}`;
+                badge.textContent = formatWorkflowStatusLabel(task.status);
+                header.appendChild(badge);
+            }
+            card.appendChild(header);
+
+            const details = [];
+            if (task.task_id) {
+                details.push(`Task: ${task.task_id}`);
+            }
+            if (task.priority) {
+                details.push(`Priority: ${task.priority}`);
+            }
+            if (task.assignee) {
+                details.push(`Assignee: ${task.assignee}`);
+            }
+            if (task.due_date) {
+                details.push(`Due: ${task.due_date}`);
+            }
+            if (task.description) {
+                details.push(task.description);
+            }
+            if (details.length) {
+                const meta = document.createElement('div');
+                meta.className = 'chat-display-elements-task-view-item-meta';
+                meta.textContent = details.join(' · ');
+                meta.style.cssText = 'margin-top: 4px; font-size: 0.78em; color: #44576a;';
+                card.appendChild(meta);
+            }
+
+            if (Array.isArray(task.task_links) && task.task_links.length) {
+                const linksWrap = document.createElement('div');
+                linksWrap.className = 'chat-display-elements-task-view-item-links';
+                linksWrap.style.cssText = 'margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px;';
+
+                task.task_links.forEach((link) => {
+                    if (!link || typeof link !== 'object') {
+                        return;
+                    }
+                    if (link.link_type === 'von_task') {
+                        const conceptId = _normalisePotentialConceptId(link.target_id);
+                        if (!conceptId) {
+                            return;
+                        }
+                        const button = document.createElement('button');
+                        button.type = 'button';
+                        button.className = 'chat-display-elements-concept-link';
+                        button.dataset.conceptId = conceptId;
+                        button.textContent = link.label || conceptId;
+                        button.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; cursor: pointer;';
+                        linksWrap.appendChild(button);
+                        return;
+                    }
+                    if (link.link_type === 'jira_issue' && link.href) {
+                        const anchor = document.createElement('a');
+                        anchor.href = link.href;
+                        anchor.target = '_blank';
+                        anchor.rel = 'noopener noreferrer';
+                        anchor.textContent = link.label || link.target_id;
+                        anchor.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; text-decoration: none;';
+                        linksWrap.appendChild(anchor);
+                    }
+                });
+
+                if (linksWrap.childElementCount > 0) {
+                    card.appendChild(linksWrap);
+                }
+            }
+
+            list.appendChild(card);
+        });
+
+        section.appendChild(list);
+        root.appendChild(section);
+    });
+
     timelineElements.forEach((timelineElement, timelineIndex) => {
         const section = document.createElement('section');
         section.className = 'chat-display-elements-timeline-section';
         section.style.cssText = (
             tableElements.length > 0
             || workflowElements.length > 0
+            || taskViewElements.length > 0
             || timelineIndex > 0
         ) ? 'margin-top: 10px;' : '';
 
@@ -2509,6 +2724,7 @@ function toUniqueStringList(rawValue) {
 function extractRenderPlanSourceSummary(
     screenTableRecordSets,
     screenWorkflowElements,
+    screenTaskViewElements,
     screenTimelineElements
 ) {
     const sourceTools = [];
@@ -2564,6 +2780,12 @@ function extractRenderPlanSourceSummary(
         }
         addProvenance(workflowElement.provenance);
     }
+    for (const taskViewElement of screenTaskViewElements) {
+        if (!taskViewElement || typeof taskViewElement !== 'object') {
+            continue;
+        }
+        addProvenance(taskViewElement.provenance);
+    }
     for (const timelineElement of screenTimelineElements) {
         if (!timelineElement || typeof timelineElement !== 'object') {
             continue;
@@ -2602,6 +2824,9 @@ function buildRenderPlanMetadataSummary(renderPlan) {
     const screenWorkflowElements = Array.isArray(renderPlan.screen_workflow_elements)
         ? renderPlan.screen_workflow_elements.filter(item => item && typeof item === 'object')
         : [];
+    const screenTaskViewElements = Array.isArray(renderPlan.screen_task_view_elements)
+        ? renderPlan.screen_task_view_elements.filter(item => item && typeof item === 'object')
+        : [];
     const screenTimelineElements = Array.isArray(renderPlan.screen_timeline_elements)
         ? renderPlan.screen_timeline_elements.filter(item => item && typeof item === 'object')
         : [];
@@ -2609,6 +2834,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
     const sourceSummary = extractRenderPlanSourceSummary(
         screenTableRecordSets,
         screenWorkflowElements,
+        screenTaskViewElements,
         screenTimelineElements
     );
 
@@ -2636,6 +2862,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         record_families: sourceSummary.record_families,
         screen_table_record_set_count: screenTableRecordSets.length,
         screen_workflow_element_count: screenWorkflowElements.length,
+        screen_task_view_element_count: screenTaskViewElements.length,
         screen_timeline_element_count: screenTimelineElements.length,
         unsupported_selected_renderer_types: unsupportedRendererTypes,
         resolver_suggestions: resolverSuggestions
@@ -2698,6 +2925,7 @@ function buildRenderPlanSummaryHtml(renderPlanSummary) {
     addList('Screen element families', renderPlanSummary.screen_element_families);
     addScalar('Screen table record sets', renderPlanSummary.screen_table_record_set_count);
     addScalar('Screen workflow elements', renderPlanSummary.screen_workflow_element_count);
+    addScalar('Screen task views', renderPlanSummary.screen_task_view_element_count);
     addScalar('Screen timeline elements', renderPlanSummary.screen_timeline_element_count);
     addList('Source tools', renderPlanSummary.source_tools);
     addList('Record families', renderPlanSummary.record_families);

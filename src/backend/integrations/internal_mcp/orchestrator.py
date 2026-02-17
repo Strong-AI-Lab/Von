@@ -11396,6 +11396,97 @@ class InternalMCPChatOrchestrator:
                 }
             ]
 
+        def _extract_renderer_screen_task_view_elements(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+        ) -> list[dict[str, Any]]:
+            """Derive task view payloads from task-oriented tool outputs."""
+
+            task_tool_names = {"task_list", "task_search", "list_my_tasks"}
+            source_tools: list[str] = []
+            seen_source_tools: set[str] = set()
+            tasks_payload: list[dict[str, Any]] = []
+
+            for tool_name, payload in _iter_renderer_tool_result_payloads(tool_messages):
+                if tool_name not in task_tool_names:
+                    continue
+
+                if tool_name not in seen_source_tools:
+                    seen_source_tools.add(tool_name)
+                    source_tools.append(tool_name)
+
+                task_rows = _mapping_list(payload.get("tasks") or payload.get("results"))
+                for index, task in enumerate(task_rows, start=1):
+                    task_id = _first_text(
+                        task.get("task_concept_id"),
+                        task.get("task_id"),
+                        task.get("concept_id"),
+                        task.get("id"),
+                    )
+                    title = _first_text(
+                        task.get("title"),
+                        task.get("task_title"),
+                        task.get("name"),
+                    ) or task_id or f"Task {index}"
+                    if not task_id:
+                        task_id = f"{tool_name}_task_{index}"
+                    task_entry: dict[str, Any] = {
+                        "task_id": task_id,
+                        "title": title,
+                    }
+                    status = _first_text(task.get("status"))
+                    if status:
+                        task_entry["status"] = status.lower()
+                    priority = _first_text(task.get("priority"))
+                    if priority:
+                        task_entry["priority"] = priority
+                    due_date = _first_text(task.get("due_date"), task.get("due_at"))
+                    if due_date:
+                        task_entry["due_date"] = due_date
+                    assignee = _first_text(
+                        task.get("assignee_concept_id"),
+                        task.get("assignee_id"),
+                        task.get("assignee"),
+                    )
+                    if assignee:
+                        task_entry["assignee"] = assignee
+                    description = _first_text(
+                        task.get("description"),
+                        task.get("summary"),
+                    )
+                    if description:
+                        task_entry["description"] = description
+
+                    task_links = _collect_renderer_task_links(task)
+                    if task_links:
+                        task_entry["task_links"] = task_links
+
+                    tasks_payload.append(task_entry)
+                    if len(tasks_payload) >= 200:
+                        break
+                if len(tasks_payload) >= 200:
+                    break
+
+            if not tasks_payload:
+                return []
+
+            return [
+                {
+                    "element_id": "screen_task_view",
+                    "intent": "structured_task_view",
+                    "payload": {"tasks": tasks_payload},
+                    "constraints": {
+                        "supports_task_links": True,
+                        "supports_status_badges": True,
+                    },
+                    "provenance": {
+                        "source": "tool_result_task_view",
+                        "source_tools": source_tools,
+                        "record_family": "tasks",
+                    },
+                }
+            ]
+
         def _extract_renderer_screen_timeline_elements(
             *,
             tool_messages: Sequence[Mapping[str, Any]] = (),
@@ -11689,6 +11780,8 @@ class InternalMCPChatOrchestrator:
         _RENDERER_SCREEN_ELEMENT_FAMILY_MAP: dict[str, tuple[str, ...]] = {
             "table": ("table",),
             "tabular": ("table",),
+            "task": ("task_view",),
+            "task_view": ("task_view",),
             "timeline": ("timeline",),
             "workflow": ("workflow_view",),
             "workflow_view": ("workflow_view",),
@@ -11759,6 +11852,7 @@ class InternalMCPChatOrchestrator:
 
             include_table_elements = "table" in selected_families
             include_workflow_elements = "workflow_view" in selected_families
+            include_task_view_elements = "task_view" in selected_families
             include_timeline_elements = "timeline" in selected_families
             decision["screen_element_mapping_mode"] = mapping_mode
             decision["screen_element_reason_codes"] = list(reason_codes)
@@ -11766,6 +11860,7 @@ class InternalMCPChatOrchestrator:
             decision["screen_element_targets"] = {
                 "table": include_table_elements,
                 "workflow_view": include_workflow_elements,
+                "task_view": include_task_view_elements,
                 "timeline": include_timeline_elements,
             }
             if unsupported_renderer_types:
@@ -11791,6 +11886,16 @@ class InternalMCPChatOrchestrator:
                     decision["screen_workflow_elements"] = screen_workflow_elements
                     decision["screen_workflow_element_count"] = len(
                         screen_workflow_elements
+                    )
+
+            if include_task_view_elements:
+                screen_task_view_elements = _extract_renderer_screen_task_view_elements(
+                    tool_messages=tool_messages
+                )
+                if screen_task_view_elements:
+                    decision["screen_task_view_elements"] = screen_task_view_elements
+                    decision["screen_task_view_element_count"] = len(
+                        screen_task_view_elements
                     )
 
             if include_timeline_elements:

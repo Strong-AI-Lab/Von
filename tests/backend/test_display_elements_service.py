@@ -328,6 +328,88 @@ def test_build_turn_display_elements_drops_invalid_supplied_workflows() -> None:
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_task_view_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Task view response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Task view response",
+            "spoken": None,
+        },
+        screen_task_view_elements=[
+            {
+                "element_id": "screen_task_view",
+                "intent": "structured_task_view",
+                "payload": {
+                    "tasks": [
+                        {
+                            "task_id": "#V#task_alpha",
+                            "title": "Alpha task",
+                            "status": "in_progress",
+                            "priority": "high",
+                            "task_links": [
+                                {
+                                    "link_type": "jira_issue",
+                                    "target_id": "JVNAUTOSCI-1174",
+                                    "label": "JVNAUTOSCI-1174",
+                                    "href": "https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1174",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    task_view_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "task_view"
+    ]
+    assert len(task_view_elements) == 1
+    task_view_element = task_view_elements[0]
+    assert task_view_element["element_id"] == "screen_task_view"
+    assert task_view_element["payload"]["tasks"][0]["task_id"] == "#V#task_alpha"
+    assert (
+        task_view_element["payload"]["tasks"][0]["task_links"][0]["target_id"]
+        == "JVNAUTOSCI-1174"
+    )
+    assert "screen_structured_task_views_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_supplied_task_views() -> None:
+    contract = build_turn_display_elements(
+        response_text="Task view response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Task view response",
+            "spoken": None,
+        },
+        screen_task_view_elements=[
+            {
+                "payload": {
+                    "tasks": [
+                        {
+                            "status": "pending",
+                        }
+                    ]
+                }
+            }
+        ],
+    )
+
+    task_view_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "task_view"
+    ]
+    assert task_view_elements == []
+    assert "screen_structured_task_views_invalid_dropped" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
 def test_build_turn_display_elements_includes_supplied_timeline_elements() -> None:
     contract = build_turn_display_elements(
         response_text="Timeline response",
@@ -526,6 +608,35 @@ def test_validate_turn_display_elements_rejects_timeline_without_temporal_anchor
 
     assert valid is False
     assert any("must provide at least one temporal anchor" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_task_view_without_task_id() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_task_view",
+                    "element_type": "task_view",
+                    "channel": "screen",
+                    "order": 31,
+                    "intent": "structured_task_view",
+                    "payload": {
+                        "tasks": [
+                            {
+                                "title": "Task without id",
+                            }
+                        ]
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any("must provide a non-empty task identifier" in message for message in errors)
 
 
 def test_build_canonical_table_payload_from_records_preserves_row_provenance() -> None:

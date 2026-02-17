@@ -341,6 +341,48 @@ def build_canonical_table_payload_from_records(
     }
 
 
+def _validate_task_links(
+    *,
+    links: Any,
+    label: str,
+    errors: list[str],
+) -> None:
+    """Validate link entries shared by workflow/timeline/task_view payloads."""
+    if links is None:
+        return
+    if not isinstance(links, list):
+        errors.append(f"{label} must be a list when provided")
+        return
+
+    for link_index, link in enumerate(links):
+        link_label = f"{label}[{link_index}]"
+        if not isinstance(link, Mapping):
+            errors.append(f"{link_label} must be a mapping")
+            continue
+        target_id = link.get("target_id")
+        if not isinstance(target_id, str) or not target_id.strip():
+            errors.append(f"{link_label}.target_id must be a non-empty string")
+        label_value = link.get("label")
+        if label_value is not None and (
+            not isinstance(label_value, str) or not label_value.strip()
+        ):
+            errors.append(
+                f"{link_label}.label must be a non-empty string when provided"
+            )
+        link_type = link.get("link_type")
+        if link_type is not None and (
+            not isinstance(link_type, str) or not link_type.strip()
+        ):
+            errors.append(
+                f"{link_label}.link_type must be a non-empty string when provided"
+            )
+        href = link.get("href")
+        if href is not None and (not isinstance(href, str) or not href.strip()):
+            errors.append(
+                f"{link_label}.href must be a non-empty string when provided"
+            )
+
+
 def validate_turn_display_elements(
     contract: Mapping[str, Any] | None,
 ) -> tuple[bool, list[str]]:
@@ -512,43 +554,70 @@ def validate_turn_display_elements(
                     errors.append(
                         f"{item_label}.status must be a non-empty string when provided"
                     )
+                _validate_task_links(
+                    links=item.get("task_links"),
+                    label=f"{item_label}.task_links",
+                    errors=errors,
+                )
+        elif element_type == "task_view":
+            tasks = payload.get("tasks")
+            if not isinstance(tasks, list) or not tasks:
+                errors.append(f"{label}.payload.tasks must be a non-empty list")
+                tasks = []
 
-                task_links = item.get("task_links")
-                if task_links is None:
-                    continue
-                if not isinstance(task_links, list):
-                    errors.append(f"{item_label}.task_links must be a list when provided")
+            for task_index, task in enumerate(tasks):
+                task_label = f"{label}.payload.tasks[{task_index}]"
+                if not isinstance(task, Mapping):
+                    errors.append(f"{task_label} must be a mapping")
                     continue
 
-                for link_index, link in enumerate(task_links):
-                    link_label = f"{item_label}.task_links[{link_index}]"
-                    if not isinstance(link, Mapping):
-                        errors.append(f"{link_label} must be a mapping")
+                task_id = task.get("task_id")
+                task_concept_id = task.get("task_concept_id")
+                fallback_id = task.get("id")
+                has_task_id = (
+                    isinstance(task_id, str) and bool(task_id.strip())
+                ) or (
+                    isinstance(task_concept_id, str) and bool(task_concept_id.strip())
+                ) or (
+                    isinstance(fallback_id, str) and bool(fallback_id.strip())
+                )
+                if not has_task_id:
+                    errors.append(
+                        f"{task_label} must provide a non-empty task identifier (task_id, task_concept_id, or id)"
+                    )
+
+                title = task.get("title")
+                label_value = task.get("label")
+                has_title = (
+                    isinstance(title, str) and bool(title.strip())
+                ) or (
+                    isinstance(label_value, str) and bool(label_value.strip())
+                )
+                if not has_title:
+                    errors.append(
+                        f"{task_label} must provide a non-empty title (title or label)"
+                    )
+
+                for field_name in (
+                    "status",
+                    "priority",
+                    "due_date",
+                    "assignee",
+                    "description",
+                ):
+                    field_value = task.get(field_name)
+                    if field_value is None:
                         continue
-                    target_id = link.get("target_id")
-                    if not isinstance(target_id, str) or not target_id.strip():
-                        errors.append(f"{link_label}.target_id must be a non-empty string")
-                    label_value = link.get("label")
-                    if label_value is not None and (
-                        not isinstance(label_value, str) or not label_value.strip()
-                    ):
+                    if not isinstance(field_value, str) or not field_value.strip():
                         errors.append(
-                            f"{link_label}.label must be a non-empty string when provided"
+                            f"{task_label}.{field_name} must be a non-empty string when provided"
                         )
-                    link_type = link.get("link_type")
-                    if link_type is not None and (
-                        not isinstance(link_type, str) or not link_type.strip()
-                    ):
-                        errors.append(
-                            f"{link_label}.link_type must be a non-empty string when provided"
-                        )
-                    href = link.get("href")
-                    if href is not None and (
-                        not isinstance(href, str) or not href.strip()
-                    ):
-                        errors.append(
-                            f"{link_label}.href must be a non-empty string when provided"
-                        )
+
+                _validate_task_links(
+                    links=task.get("task_links"),
+                    label=f"{task_label}.task_links",
+                    errors=errors,
+                )
         elif element_type == "workflow_view":
             nodes = payload.get("nodes")
             if not isinstance(nodes, list) or not nodes:
@@ -576,43 +645,11 @@ def validate_turn_display_elements(
                     not isinstance(status, str) or not status.strip()
                 ):
                     errors.append(f"{node_label}.status must be a non-empty string when provided")
-
-                task_links = node.get("task_links")
-                if task_links is None:
-                    continue
-                if not isinstance(task_links, list):
-                    errors.append(f"{node_label}.task_links must be a list when provided")
-                    continue
-
-                for link_index, link in enumerate(task_links):
-                    link_label = f"{node_label}.task_links[{link_index}]"
-                    if not isinstance(link, Mapping):
-                        errors.append(f"{link_label} must be a mapping")
-                        continue
-                    target_id = link.get("target_id")
-                    if not isinstance(target_id, str) or not target_id.strip():
-                        errors.append(f"{link_label}.target_id must be a non-empty string")
-                    label_value = link.get("label")
-                    if label_value is not None and (
-                        not isinstance(label_value, str) or not label_value.strip()
-                    ):
-                        errors.append(
-                            f"{link_label}.label must be a non-empty string when provided"
-                        )
-                    link_type = link.get("link_type")
-                    if link_type is not None and (
-                        not isinstance(link_type, str) or not link_type.strip()
-                    ):
-                        errors.append(
-                            f"{link_label}.link_type must be a non-empty string when provided"
-                        )
-                    href = link.get("href")
-                    if href is not None and (
-                        not isinstance(href, str) or not href.strip()
-                    ):
-                        errors.append(
-                            f"{link_label}.href must be a non-empty string when provided"
-                        )
+                _validate_task_links(
+                    links=node.get("task_links"),
+                    label=f"{node_label}.task_links",
+                    errors=errors,
+                )
 
             edges = payload.get("edges")
             if edges is not None and not isinstance(edges, list):
@@ -908,12 +945,95 @@ def _normalise_supplied_screen_timelines(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_task_views(
+    screen_task_view_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen task view specs."""
+    if (
+        not isinstance(screen_task_view_elements, Sequence)
+        or isinstance(screen_task_view_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_task_view_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "tasks" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = (
+            _normalise_text(metadata.get("intent"))
+            or "structured_task_view"
+        )
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_task_links": True,
+                "supports_status_badges": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_task_view_probe_{index}",
+                        "element_type": "task_view",
+                        "channel": "screen",
+                        "order": 31,
+                        "intent": intent,
+                        "payload": dict(payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def build_turn_display_elements(
     *,
     response_text: str | None,
     presenter_channels: Mapping[str, Any] | None,
     screen_table_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_task_view_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_timeline_elements: Sequence[Mapping[str, Any]] | None = None,
     supplemental_reason_codes: Sequence[str] | None = None,
     required_screen_json_fence: str | None = None,
@@ -1052,6 +1172,14 @@ def build_turn_display_elements(
     if supplied_workflows_dropped:
         reason_codes.append("screen_structured_workflows_invalid_dropped")
 
+    supplied_screen_task_views, supplied_task_views_dropped = (
+        _normalise_supplied_screen_task_views(screen_task_view_elements)
+    )
+    if supplied_screen_task_views:
+        reason_codes.append("screen_structured_task_views_supplied")
+    if supplied_task_views_dropped:
+        reason_codes.append("screen_structured_task_views_invalid_dropped")
+
     supplied_screen_timelines, supplied_timelines_dropped = (
         _normalise_supplied_screen_timelines(screen_timeline_elements)
     )
@@ -1125,6 +1253,27 @@ def build_turn_display_elements(
             }
         )
 
+    task_view_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_task_views, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_task_view")
+        provenance.setdefault("task_view_index", index)
+        task_view_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_task_view_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "structured_task_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_task_links": True,
+                    "supports_status_badges": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     timeline_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_timelines, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -1149,7 +1298,7 @@ def build_turn_display_elements(
     used_ids: set[str] = set()
     used_orders = {
         int(spec["order"])
-        for spec in [*table_specs, *workflow_specs, *timeline_specs]
+        for spec in [*table_specs, *workflow_specs, *task_view_specs, *timeline_specs]
         if isinstance(spec.get("order"), int)
     }
     next_table_order = 16
@@ -1215,6 +1364,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "workflow_view",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_task_view_order = 31
+    for spec in task_view_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_task_view_order in used_orders:
+                next_task_view_order += 1
+            order = next_task_view_order
+            used_orders.add(order)
+            next_task_view_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "task_view",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),

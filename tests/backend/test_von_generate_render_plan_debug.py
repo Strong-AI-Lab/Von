@@ -464,6 +464,69 @@ def test_generate_builds_timeline_from_render_plan_elements(monkeypatch):
     assert timeline_item["task_links"][0]["target_id"] == "#V#task_alpha"
 
 
+def test_generate_builds_task_view_from_render_plan_elements(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_task_view_elements": [
+            {
+                "element_id": "screen_task_view",
+                "intent": "structured_task_view",
+                "payload": {
+                    "tasks": [
+                        {
+                            "task_id": "#V#task_alpha",
+                            "title": "Alpha task",
+                            "status": "pending",
+                            "task_links": [
+                                {
+                                    "link_type": "jira_issue",
+                                    "target_id": "JVNAUTOSCI-1174",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Task summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show task cards"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    assert display_elements.get("validation", {}).get("valid") is True
+    assert "screen_structured_task_views_supplied" in display_elements.get(
+        "reason_codes", []
+    )
+
+    task_view_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "task_view"
+    ]
+    assert len(task_view_elements) == 1
+    task_entry = task_view_elements[0].get("payload", {}).get("tasks", [])[0]
+    assert task_entry["task_id"] == "#V#task_alpha"
+    assert task_entry["task_links"][0]["target_id"] == "JVNAUTOSCI-1174"
+
+
 def test_generate_respects_renderer_screen_element_targets(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
@@ -475,6 +538,7 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
         "screen_element_targets": {
             "table": False,
             "workflow_view": True,
+            "task_view": False,
             "timeline": False,
         },
         "screen_element_reason_codes": [
@@ -522,6 +586,22 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
                         }
                     ],
                     "edges": [],
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+        "screen_task_view_elements": [
+            {
+                "element_id": "screen_task_view",
+                "intent": "structured_task_view",
+                "payload": {
+                    "tasks": [
+                        {
+                            "task_id": "#V#task_alpha",
+                            "title": "Alpha task",
+                            "status": "pending",
+                        }
+                    ]
                 },
                 "provenance": {"source": "test_render_plan"},
             }
@@ -576,6 +656,12 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
         if isinstance(element, dict) and element.get("element_type") == "workflow_view"
     ]
     assert len(workflow_elements) == 1
+    task_view_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "task_view"
+    ]
+    assert not task_view_elements
     timeline_elements = [
         element
         for element in display_elements.get("elements", [])
