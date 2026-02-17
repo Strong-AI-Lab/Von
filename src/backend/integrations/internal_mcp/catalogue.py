@@ -6357,6 +6357,7 @@ def _jira_create_issue_input_schema() -> Schema:
             "parent": (str, type(None)),
             "assignee_account_id": (str, type(None)),
             "labels": (list, type(None)),
+            "components": (list, type(None)),
             "dry_run": (bool,),
             "approved": (bool,),
             "execute": (bool,),
@@ -6365,7 +6366,7 @@ def _jira_create_issue_input_schema() -> Schema:
         allow_unknown=True,
         description=(
             "jira_create_issue input: project_key, issue_type, summary (required). "
-            "Optional description/parent/assignee_account_id/labels. "
+            "Optional description/parent/assignee_account_id/labels/components. "
             "Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
         ),
     )
@@ -7721,6 +7722,31 @@ def _jira_create_issue(**kwargs):
     labels = kwargs.get("labels")
     if isinstance(labels, list):
         payload["fields"]["labels"] = [str(l) for l in labels if str(l).strip()]
+
+    components = kwargs.get("components")
+    if isinstance(components, list):
+        normalised_components: list[dict[str, str]] = []
+        for component in components:
+            if isinstance(component, str) and component.strip():
+                normalised_components.append({"name": component.strip()})
+                continue
+            if not isinstance(component, dict):
+                continue
+
+            normalised_component: dict[str, str] = {}
+            name = component.get("name")
+            if isinstance(name, str) and name.strip():
+                normalised_component["name"] = name.strip()
+
+            component_id = component.get("id")
+            if isinstance(component_id, (str, int)) and str(component_id).strip():
+                normalised_component["id"] = str(component_id).strip()
+
+            if normalised_component:
+                normalised_components.append(normalised_component)
+
+        if normalised_components:
+            payload["fields"]["components"] = normalised_components
 
     if dry_run:
         return {

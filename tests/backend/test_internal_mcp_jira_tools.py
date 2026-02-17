@@ -75,6 +75,13 @@ def test_jira_write_tools_allowlist_and_dry_run_defaults():
         project_key="JVNAUTOSCI",
         issue_type="Task",
         summary="Test create",
+        components=[
+            "Platform",
+            {"name": " UI "},
+            {"id": 10001},
+            {"name": "   "},
+            {"id": "   "},
+        ],
     )
     assert ok_create.get("success") is True
     assert ok_create.get("dry_run") is True
@@ -86,6 +93,11 @@ def test_jira_write_tools_allowlist_and_dry_run_defaults():
         .get("key")
         == "JVNAUTOSCI"
     )
+    assert ok_create.get("proposed_payload", {}).get("fields", {}).get("components") == [
+        {"name": "Platform"},
+        {"name": "UI"},
+        {"id": "10001"},
+    ]
 
     bad_create = _jira_create_issue(
         project_key="OTHER",
@@ -190,3 +202,41 @@ def test_jira_get_transitions_proxy_error_through_gateway_invoke(monkeypatch):
     payload = result.payload
     assert payload.get("success") is False
     assert payload.get("error_code") == "jira_proxy_error"
+
+
+def test_jira_create_issue_components_through_gateway_invoke():
+    from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+
+    gateway = InternalMCPGateway(
+        catalogue=build_default_catalogue(),
+        transport=InternalMCPTransport(),
+        enabled=True,
+    )
+
+    result = gateway.invoke(
+        "jira_create_issue",
+        {
+            "project_key": "JVNAUTOSCI",
+            "issue_type": "Task",
+            "summary": "Gateway create components test",
+            "components": [
+                "Backend",
+                {"name": "Frontend"},
+                {"id": 42},
+                None,
+            ],
+        },
+    )
+    payload = result.payload
+    assert payload.get("success") is True
+    assert payload.get("dry_run") is True
+    assert payload.get("executed") is False
+    assert (
+        payload.get("proposed_payload", {}).get("fields", {}).get("components")
+        == [
+            {"name": "Backend"},
+            {"name": "Frontend"},
+            {"id": "42"},
+        ]
+    )

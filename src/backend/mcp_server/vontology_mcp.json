@@ -822,6 +822,12 @@
                             "null"
                         ]
                     },
+                    "components": {
+                        "type": [
+                            "array",
+                            "null"
+                        ]
+                    },
                     "dry_run": {
                         "type": "boolean"
                     },
@@ -844,7 +850,7 @@
                     "summary"
                 ],
                 "additionalProperties": true,
-                "description": "jira_create_issue input: project_key, issue_type, summary (required). Optional description/parent/assignee_account_id/labels. Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
+                "description": "jira_create_issue input: project_key, issue_type, summary (required). Optional description/parent/assignee_account_id/labels/components. Guardrails: dry_run (default true), approved (per-write confirmation), execute (requires VON_INTERNAL_MCP_JIRA_EXECUTE_MODE=1)."
             }
         },
         {
