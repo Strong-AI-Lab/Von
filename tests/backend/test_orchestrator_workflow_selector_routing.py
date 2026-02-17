@@ -947,6 +947,7 @@ def test_renderer_selection_gates_screen_element_families(monkeypatch):
         "workflow_view": True,
         "task_view": False,
         "calendar_view": False,
+        "document_view": False,
         "kanban_view": False,
         "timeline": False,
         "relation_graph_view": False,
@@ -1045,6 +1046,7 @@ def test_renderer_selection_emits_timeline_elements_for_timeline_renderer(monkey
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "document_view": False,
         "kanban_view": False,
         "timeline": True,
         "relation_graph_view": False,
@@ -1145,6 +1147,7 @@ def test_renderer_selection_emits_calendar_elements_for_calendar_renderer(monkey
         "workflow_view": False,
         "task_view": False,
         "calendar_view": True,
+        "document_view": False,
         "kanban_view": False,
         "timeline": False,
         "relation_graph_view": False,
@@ -1165,6 +1168,111 @@ def test_renderer_selection_emits_calendar_elements_for_calendar_renderer(monkey
     assert items[0]["title"] == "Alpha task"
     assert items[0]["all_day"] is True
     assert items[0]["task_links"][0]["target_id"] == "#V#task_alpha"
+
+
+def test_renderer_selection_emits_document_elements_for_document_renderer(monkeypatch):
+    """Document renderer selection should emit document display elements only."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#document_renderer,#V#workflow_renderer,#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#document_renderer",
+                        "renderer_type": "document",
+                        "modalities": ["visual"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Document summary.",
+                "tool_messages": [
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "search_arxiv",
+                                "status": "ok",
+                                "duration_ms": 4.1,
+                                "payload": {
+                                    "results": [
+                                        {
+                                            "id": "arXiv:2501.12345",
+                                            "title": "Graph-based Document Reasoning",
+                                            "summary": "This paper proposes a retrieval-grounded graph pipeline for document reasoning.",
+                                            "pdf_url": "https://arxiv.org/pdf/2501.12345.pdf",
+                                            "published": "2026-01-20T00:00:00Z",
+                                        }
+                                    ]
+                                },
+                            }
+                        ),
+                    }
+                ],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+    result = orchestrator.run(
+        prompt="Show document excerpts",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert result.render_plan.get("screen_element_targets") == {
+        "table": False,
+        "workflow_view": False,
+        "task_view": False,
+        "calendar_view": False,
+        "document_view": True,
+        "kanban_view": False,
+        "timeline": False,
+        "relation_graph_view": False,
+    }
+    assert "screen_table_record_sets" not in result.render_plan
+    assert "screen_workflow_elements" not in result.render_plan
+    assert "screen_task_view_elements" not in result.render_plan
+    assert "screen_timeline_elements" not in result.render_plan
+    assert result.render_plan.get("screen_document_element_count") == 1
+
+    document_elements = result.render_plan.get("screen_document_elements")
+    assert isinstance(document_elements, list)
+    assert len(document_elements) == 1
+    payload = document_elements[0].get("payload", {})
+    documents = payload.get("documents")
+    assert isinstance(documents, list)
+    assert documents[0]["document_id"] == "arXiv:2501.12345"
+    assert documents[0]["title"] == "Graph-based Document Reasoning"
+    assert documents[0]["sections"][0]["heading"] == "Graph-based Document Reasoning"
 
 
 def test_renderer_selection_emits_task_view_elements_for_task_renderer(monkeypatch):
@@ -1250,6 +1358,7 @@ def test_renderer_selection_emits_task_view_elements_for_task_renderer(monkeypat
         "workflow_view": False,
         "task_view": True,
         "calendar_view": False,
+        "document_view": False,
         "kanban_view": False,
         "timeline": False,
         "relation_graph_view": False,
@@ -1362,6 +1471,7 @@ def test_renderer_selection_emits_kanban_elements_for_kanban_renderer(monkeypatc
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "document_view": False,
         "kanban_view": True,
         "timeline": False,
         "relation_graph_view": False,
@@ -1474,6 +1584,7 @@ def test_renderer_selection_emits_relation_graph_elements_for_graph_renderer(mon
         "workflow_view": False,
         "task_view": False,
         "calendar_view": False,
+        "document_view": False,
         "kanban_view": False,
         "timeline": False,
         "relation_graph_view": True,
@@ -1576,6 +1687,7 @@ def test_renderer_selection_fallback_when_no_types_selected(monkeypatch):
         "workflow_view": True,
         "task_view": False,
         "calendar_view": False,
+        "document_view": False,
         "kanban_view": False,
         "timeline": False,
         "relation_graph_view": False,

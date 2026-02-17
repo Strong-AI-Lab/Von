@@ -16,6 +16,7 @@ DISPLAY_ELEMENT_SCHEMA_VERSION = "turn_display_elements_v1"
 ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
     {
         "calendar_view",
+        "document_view",
         "text_block",
         "json_block",
         "kanban_view",
@@ -34,6 +35,9 @@ RELATION_GRAPH_ALLOWED_DIRECTIONS = frozenset({"directed", "undirected"})
 RELATION_GRAPH_MAX_NODES = 200
 RELATION_GRAPH_MAX_EDGES = 400
 CALENDAR_ALLOWED_GRANULARITIES = frozenset({"month", "week", "day"})
+DOCUMENT_SECTION_EXCERPT_MAX_CHARS = 700
+DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS = 280
+DOCUMENT_EXCERPT_TRUNCATION_MARKER = " ... [truncated]"
 
 _JSON_FENCE_PATTERN = re.compile(
     r"```json\s*\n(?P<body>[\s\S]*?)\n```",
@@ -55,6 +59,30 @@ def _normalise_text(value: object) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _truncate_document_text(
+    value: object,
+    *,
+    max_chars: int,
+) -> tuple[str | None, bool, int | None]:
+    """Normalise + truncate document text while surfacing truncation metadata."""
+    text = _normalise_text(value)
+    if not text:
+        return None, False, None
+    original_length = len(text)
+    if original_length <= max_chars:
+        return text, False, original_length
+
+    marker = DOCUMENT_EXCERPT_TRUNCATION_MARKER
+    if max_chars <= len(marker):
+        return marker[:max_chars], True, original_length
+
+    prefix_limit = max(24, max_chars - len(marker))
+    truncated = text[:prefix_limit].rstrip()
+    if not truncated:
+        truncated = text[:prefix_limit]
+    return f"{truncated}{marker}", True, original_length
 
 
 def _dedupe_preserve_order(values: Sequence[str]) -> list[str]:
@@ -849,6 +877,154 @@ def validate_turn_display_elements(
                 errors.append(
                     f"{label}.payload.focus_date must be a non-empty string when provided"
                 )
+        elif element_type == "document_view":
+            documents = payload.get("documents")
+            if not isinstance(documents, list) or not documents:
+                errors.append(f"{label}.payload.documents must be a non-empty list")
+                documents = []
+
+            for document_index, document in enumerate(documents):
+                document_label = f"{label}.payload.documents[{document_index}]"
+                if not isinstance(document, Mapping):
+                    errors.append(f"{document_label} must be a mapping")
+                    continue
+
+                document_id = document.get("document_id")
+                if not isinstance(document_id, str) or not document_id.strip():
+                    errors.append(
+                        f"{document_label}.document_id must be a non-empty string"
+                    )
+
+                title = document.get("title")
+                if not isinstance(title, str) or not title.strip():
+                    errors.append(f"{document_label}.title must be a non-empty string")
+
+                source_uri = document.get("source_uri")
+                has_source_uri = isinstance(source_uri, str) and bool(source_uri.strip())
+                if source_uri is not None and not has_source_uri:
+                    errors.append(
+                        f"{document_label}.source_uri must be a non-empty string when provided"
+                    )
+
+                source_label = document.get("source_label")
+                has_source_label = isinstance(source_label, str) and bool(
+                    source_label.strip()
+                )
+                if source_label is not None and not has_source_label:
+                    errors.append(
+                        f"{document_label}.source_label must be a non-empty string when provided"
+                    )
+                if not has_source_uri and not has_source_label:
+                    errors.append(
+                        f"{document_label} must provide provenance (source_uri or source_label)"
+                    )
+
+                updated_at = document.get("updated_at")
+                if updated_at is not None and (
+                    not isinstance(updated_at, str) or not updated_at.strip()
+                ):
+                    errors.append(
+                        f"{document_label}.updated_at must be a non-empty string when provided"
+                    )
+
+                sections = document.get("sections")
+                if not isinstance(sections, list) or not sections:
+                    errors.append(
+                        f"{document_label}.sections must be a non-empty list"
+                    )
+                    sections = []
+
+                for section_index, section in enumerate(sections):
+                    section_label = f"{document_label}.sections[{section_index}]"
+                    if not isinstance(section, Mapping):
+                        errors.append(f"{section_label} must be a mapping")
+                        continue
+
+                    section_id = section.get("section_id")
+                    if not isinstance(section_id, str) or not section_id.strip():
+                        errors.append(
+                            f"{section_label}.section_id must be a non-empty string"
+                        )
+
+                    heading = section.get("heading")
+                    if not isinstance(heading, str) or not heading.strip():
+                        errors.append(
+                            f"{section_label}.heading must be a non-empty string"
+                        )
+
+                    excerpt = section.get("excerpt")
+                    if not isinstance(excerpt, str) or not excerpt.strip():
+                        errors.append(
+                            f"{section_label}.excerpt must be a non-empty string"
+                        )
+                        excerpt_value = ""
+                    else:
+                        excerpt_value = excerpt.strip()
+                        if len(excerpt_value) > DOCUMENT_SECTION_EXCERPT_MAX_CHARS:
+                            errors.append(
+                                f"{section_label}.excerpt must be {DOCUMENT_SECTION_EXCERPT_MAX_CHARS} chars or less"
+                            )
+
+                    excerpt_truncated = section.get("excerpt_truncated")
+                    if excerpt_truncated is not None and not isinstance(
+                        excerpt_truncated, bool
+                    ):
+                        errors.append(
+                            f"{section_label}.excerpt_truncated must be a boolean when provided"
+                        )
+                    elif excerpt_truncated and not excerpt_value.endswith(
+                        DOCUMENT_EXCERPT_TRUNCATION_MARKER
+                    ):
+                        errors.append(
+                            f"{section_label}.excerpt must include explicit truncation marker when excerpt_truncated is true"
+                        )
+
+                    excerpt_original_char_count = section.get(
+                        "excerpt_original_char_count"
+                    )
+                    if excerpt_original_char_count is not None:
+                        if not isinstance(excerpt_original_char_count, int):
+                            errors.append(
+                                f"{section_label}.excerpt_original_char_count must be an integer when provided"
+                            )
+                        elif excerpt_original_char_count <= 0:
+                            errors.append(
+                                f"{section_label}.excerpt_original_char_count must be positive when provided"
+                            )
+                        elif excerpt_value and excerpt_original_char_count < len(
+                            excerpt_value
+                        ):
+                            errors.append(
+                                f"{section_label}.excerpt_original_char_count must be >= excerpt length"
+                            )
+
+                    citation = section.get("citation")
+                    if citation is not None and (
+                        not isinstance(citation, str) or not citation.strip()
+                    ):
+                        errors.append(
+                            f"{section_label}.citation must be a non-empty string when provided"
+                        )
+
+                    diff_summary = section.get("diff_summary")
+                    if diff_summary is not None:
+                        if not isinstance(diff_summary, str) or not diff_summary.strip():
+                            errors.append(
+                                f"{section_label}.diff_summary must be a non-empty string when provided"
+                            )
+                        elif (
+                            len(diff_summary.strip())
+                            > DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS
+                        ):
+                            errors.append(
+                                f"{section_label}.diff_summary must be {DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS} chars or less"
+                            )
+
+                    _validate_task_links(
+                        links=section.get("task_links"),
+                        label=f"{section_label}.task_links",
+                        errors=errors,
+                    )
         elif element_type == "task_view":
             tasks = payload.get("tasks")
             if not isinstance(tasks, list) or not tasks:
@@ -1403,6 +1579,222 @@ def _normalise_supplied_screen_calendar_views(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_document_views(
+    screen_document_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen document view specs."""
+    if (
+        not isinstance(screen_document_elements, Sequence)
+        or isinstance(screen_document_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_document_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "documents" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = (
+            _normalise_text(metadata.get("intent"))
+            or "structured_document_view"
+        )
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_section_links": True,
+                "supports_citation_links": True,
+                "supports_excerpt_expand": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+
+        canonical_documents: list[dict[str, Any]] = []
+        raw_documents = payload.get("documents")
+        if isinstance(raw_documents, list):
+            for document_index, raw_document in enumerate(raw_documents, start=1):
+                if not isinstance(raw_document, Mapping):
+                    continue
+
+                document_id = (
+                    _normalise_text(raw_document.get("document_id"))
+                    or _normalise_text(raw_document.get("id"))
+                    or f"document_{document_index}"
+                )
+                title = (
+                    _normalise_text(raw_document.get("title"))
+                    or _normalise_text(raw_document.get("name"))
+                    or document_id
+                )
+
+                source_uri = (
+                    _normalise_text(raw_document.get("source_uri"))
+                    or _normalise_text(raw_document.get("uri"))
+                    or _normalise_text(raw_document.get("url"))
+                    or _normalise_text(raw_document.get("href"))
+                )
+                source_label = (
+                    _normalise_text(raw_document.get("source_label"))
+                    or _normalise_text(raw_document.get("source"))
+                    or _normalise_text(raw_document.get("source_name"))
+                    or _normalise_text(provenance.get("source_tool"))
+                    or _normalise_text(provenance.get("source"))
+                )
+                if not source_uri and not source_label:
+                    source_label = "Unknown source"
+
+                updated_at = (
+                    _normalise_text(raw_document.get("updated_at"))
+                    or _normalise_text(raw_document.get("last_updated_at"))
+                    or _normalise_text(raw_document.get("published"))
+                    or _normalise_text(raw_document.get("created_at"))
+                )
+
+                sections: list[dict[str, Any]] = []
+                raw_sections = raw_document.get("sections")
+                if isinstance(raw_sections, list):
+                    for section_index, raw_section in enumerate(raw_sections, start=1):
+                        if not isinstance(raw_section, Mapping):
+                            continue
+
+                        section_id = (
+                            _normalise_text(raw_section.get("section_id"))
+                            or _normalise_text(raw_section.get("id"))
+                            or f"{document_id}_section_{section_index}"
+                        )
+                        heading = (
+                            _normalise_text(raw_section.get("heading"))
+                            or _normalise_text(raw_section.get("title"))
+                            or f"Section {section_index}"
+                        )
+                        excerpt_raw = (
+                            raw_section.get("excerpt")
+                            if raw_section.get("excerpt") is not None
+                            else raw_section.get("text")
+                        )
+                        if excerpt_raw is None:
+                            excerpt_raw = (
+                                raw_section.get("summary")
+                                if raw_section.get("summary") is not None
+                                else raw_section.get("content")
+                            )
+                        excerpt, excerpt_truncated, original_excerpt_length = (
+                            _truncate_document_text(
+                                excerpt_raw,
+                                max_chars=DOCUMENT_SECTION_EXCERPT_MAX_CHARS,
+                            )
+                        )
+                        if not excerpt:
+                            continue
+
+                        section_payload: dict[str, Any] = {
+                            "section_id": section_id,
+                            "heading": heading,
+                            "excerpt": excerpt,
+                        }
+                        if excerpt_truncated:
+                            section_payload["excerpt_truncated"] = True
+                            if isinstance(original_excerpt_length, int):
+                                section_payload["excerpt_original_char_count"] = (
+                                    original_excerpt_length
+                                )
+
+                        citation = (
+                            _normalise_text(raw_section.get("citation"))
+                            or _normalise_text(raw_section.get("source_uri"))
+                            or _normalise_text(raw_section.get("source_url"))
+                            or _normalise_text(raw_section.get("url"))
+                            or _normalise_text(raw_section.get("href"))
+                        )
+                        if citation:
+                            section_payload["citation"] = citation
+
+                        diff_summary, _diff_truncated, _original_diff_length = (
+                            _truncate_document_text(
+                                raw_section.get("diff_summary"),
+                                max_chars=DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS,
+                            )
+                        )
+                        if diff_summary:
+                            section_payload["diff_summary"] = diff_summary
+
+                        task_links = raw_section.get("task_links")
+                        if isinstance(task_links, list):
+                            section_payload["task_links"] = list(task_links)
+
+                        sections.append(section_payload)
+
+                if not sections:
+                    continue
+
+                document_payload: dict[str, Any] = {
+                    "document_id": document_id,
+                    "title": title,
+                    "sections": sections,
+                }
+                if source_uri:
+                    document_payload["source_uri"] = source_uri
+                if source_label:
+                    document_payload["source_label"] = source_label
+                if updated_at:
+                    document_payload["updated_at"] = updated_at
+                canonical_documents.append(document_payload)
+
+        canonical_payload = {"documents": canonical_documents}
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_document_view_probe_{index}",
+                        "element_type": "document_view",
+                        "channel": "screen",
+                        "order": 40,
+                        "intent": intent,
+                        "payload": dict(canonical_payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(canonical_payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def _normalise_supplied_screen_task_views(
     screen_task_view_elements: Sequence[Mapping[str, Any]] | None,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -1733,6 +2125,7 @@ def build_turn_display_elements(
     screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_task_view_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_calendar_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_document_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_kanban_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_timeline_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_relation_graph_elements: Sequence[Mapping[str, Any]] | None = None,
@@ -1890,6 +2283,14 @@ def build_turn_display_elements(
     if supplied_calendar_views_dropped:
         reason_codes.append("screen_structured_calendar_views_invalid_dropped")
 
+    supplied_screen_document_views, supplied_document_views_dropped = (
+        _normalise_supplied_screen_document_views(screen_document_elements)
+    )
+    if supplied_screen_document_views:
+        reason_codes.append("screen_structured_document_views_supplied")
+    if supplied_document_views_dropped:
+        reason_codes.append("screen_structured_document_views_invalid_dropped")
+
     supplied_screen_kanban_views, supplied_kanban_views_dropped = (
         _normalise_supplied_screen_kanban_views(screen_kanban_elements)
     )
@@ -2033,6 +2434,28 @@ def build_turn_display_elements(
             }
         )
 
+    document_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_document_views, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_document_view")
+        provenance.setdefault("document_view_index", index)
+        document_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_document_view_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "structured_document_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_section_links": True,
+                    "supports_citation_links": True,
+                    "supports_excerpt_expand": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     kanban_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_kanban_views, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -2125,6 +2548,7 @@ def build_turn_display_elements(
             *workflow_specs,
             *task_view_specs,
             *calendar_specs,
+            *document_specs,
             *kanban_specs,
             *timeline_specs,
             *relation_graph_specs,
@@ -2195,6 +2619,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "calendar_view",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_document_order = 40
+    for spec in document_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_document_order in used_orders:
+                next_document_order += 1
+            order = next_document_order
+            used_orders.add(order)
+            next_document_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "document_view",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),

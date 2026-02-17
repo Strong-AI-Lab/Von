@@ -750,6 +750,74 @@ describe('calendar display elements', () => {
     });
 });
 
+describe('document display elements', () => {
+    test('renders collapsible document cards with section excerpts and citations', () => {
+        const container = document.createElement('div');
+        const debugData = {
+            display_elements: {
+                schema_version: 'turn_display_elements_v1',
+                elements: [
+                    {
+                        element_id: 'screen_document_view',
+                        element_type: 'document_view',
+                        channel: 'screen',
+                        order: 40,
+                        intent: 'structured_document_view',
+                        payload: {
+                            documents: [
+                                {
+                                    document_id: 'doc_alpha',
+                                    title: 'Alpha document',
+                                    source_uri: 'https://example.com/doc-alpha',
+                                    source_label: 'search_knowledge_base',
+                                    updated_at: '2026-02-17T10:00:00Z',
+                                    sections: [
+                                        {
+                                            section_id: 's1',
+                                            heading: 'Summary',
+                                            excerpt: 'Alpha excerpt ... [truncated]',
+                                            excerpt_truncated: true,
+                                            excerpt_original_char_count: 1200,
+                                            citation: 'https://example.com/doc-alpha#summary',
+                                            task_links: [
+                                                {
+                                                    link_type: 'von_task',
+                                                    target_id: '#V#task_alpha',
+                                                    label: '#V#task_alpha'
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        provenance: { source: 'test' }
+                    }
+                ]
+            }
+        };
+
+        __testOnly_renderDisplayElementsIntoContainer(container, debugData);
+
+        const section = container.querySelector('.chat-display-elements-document-section');
+        expect(section).not.toBeNull();
+        expect(section.textContent).toContain('Document view');
+        expect(section.textContent).toContain('Alpha document');
+        expect(section.textContent).toContain('Excerpt truncated');
+
+        const details = section.querySelectorAll('.chat-display-elements-document-card');
+        expect(details.length).toBe(1);
+        expect(details[0].open).toBe(true);
+
+        const citationLink = section.querySelector('a[href="https://example.com/doc-alpha#summary"]');
+        expect(citationLink).not.toBeNull();
+
+        const conceptButton = section.querySelector('.chat-display-elements-concept-link');
+        expect(conceptButton).not.toBeNull();
+        expect(conceptButton.dataset.conceptId).toBe('#V#task_alpha');
+    });
+});
+
 describe('relation graph display elements', () => {
     beforeEach(() => {
         const { createVontologyCartouche } = require('../utils/textDecorator.js');
@@ -1357,6 +1425,39 @@ describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
             screen_calendar_element_count: 1,
             source_tools: ['task_list', 'workflow_list_instances'],
             record_families: ['calendar_items']
+        });
+    });
+
+    test('includes document render plan provenance counts when present', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            render_plan: {
+                enabled: true,
+                attempted: true,
+                success: true,
+                reason: 'resolved',
+                selected_renderer_ids: ['#V#renderer_document'],
+                selected_renderer_types: ['document'],
+                screen_element_families: ['document_view'],
+                screen_document_elements: [
+                    {
+                        element_id: 'screen_document_view',
+                        provenance: {
+                            source_tools: ['search_knowledge_base'],
+                            record_family: 'documents'
+                        }
+                    }
+                ]
+            }
+        });
+
+        expect(metadata.render_plan).toMatchObject({
+            selected_renderer_types: ['document'],
+            screen_element_families: ['document_view'],
+            screen_document_element_count: 1,
+            source_tools: ['search_knowledge_base'],
+            record_families: ['documents']
         });
     });
 

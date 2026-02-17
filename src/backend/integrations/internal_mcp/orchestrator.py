@@ -12109,6 +12109,368 @@ class InternalMCPChatOrchestrator:
                 }
             ]
 
+        def _extract_renderer_screen_document_elements(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+        ) -> list[dict[str, Any]]:
+            """Derive document payloads from paper/notes/history style tool outputs."""
+
+            max_documents = 12
+            max_sections = 12
+            source_tools: list[str] = []
+            seen_source_tools: set[str] = set()
+            documents: list[dict[str, Any]] = []
+            seen_document_ids: set[str] = set()
+
+            def _register_source_tool(tool_name: str) -> None:
+                if tool_name in seen_source_tools:
+                    return
+                seen_source_tools.add(tool_name)
+                source_tools.append(tool_name)
+
+            def _next_document_id(base: str) -> str:
+                candidate = base
+                suffix = 2
+                while candidate in seen_document_ids:
+                    candidate = f"{base}_{suffix}"
+                    suffix += 1
+                seen_document_ids.add(candidate)
+                return candidate
+
+            def _safe_text(value: Any) -> str | None:
+                if isinstance(value, str):
+                    cleaned = value.strip()
+                    return cleaned or None
+                if value is None:
+                    return None
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    cleaned = str(value).strip()
+                    return cleaned or None
+                return None
+
+            def _first_text_or_safe(*values: Any) -> str | None:
+                text = _first_text(*values)
+                if text:
+                    return text
+                for value in values:
+                    text = _safe_text(value)
+                    if text:
+                        return text
+                return None
+
+            def _section_from_mapping(
+                mapping: Mapping[str, Any],
+                *,
+                section_id: str,
+                default_heading: str,
+                fallback_excerpt: Any = None,
+            ) -> dict[str, Any] | None:
+                heading = (
+                    _first_text_or_safe(
+                        mapping.get("heading"),
+                        mapping.get("title"),
+                        mapping.get("label"),
+                        mapping.get("event_type"),
+                    )
+                    or default_heading
+                )
+                excerpt = _first_text_or_safe(
+                    mapping.get("excerpt"),
+                    mapping.get("summary"),
+                    mapping.get("abstract"),
+                    mapping.get("text"),
+                    mapping.get("content"),
+                    mapping.get("body"),
+                    mapping.get("snippet"),
+                    mapping.get("description"),
+                    mapping.get("message"),
+                    fallback_excerpt,
+                )
+                if not excerpt:
+                    details = mapping.get("details")
+                    if isinstance(details, Mapping):
+                        excerpt = _first_text_or_safe(
+                            details.get("summary"),
+                            details.get("description"),
+                            details.get("comment"),
+                            details.get("reason"),
+                        )
+                if not excerpt:
+                    return None
+
+                section: dict[str, Any] = {
+                    "section_id": section_id,
+                    "heading": heading,
+                    "excerpt": excerpt,
+                }
+                citation = _first_text_or_safe(
+                    mapping.get("citation"),
+                    mapping.get("source_uri"),
+                    mapping.get("source_url"),
+                    mapping.get("url"),
+                    mapping.get("href"),
+                    mapping.get("pdf_url"),
+                    mapping.get("doi"),
+                )
+                if citation:
+                    section["citation"] = citation
+
+                diff_summary = _first_text_or_safe(
+                    mapping.get("diff_summary"),
+                    mapping.get("change_summary"),
+                )
+                if diff_summary:
+                    section["diff_summary"] = diff_summary
+
+                task_links = _collect_renderer_task_links(mapping)
+                if task_links:
+                    section["task_links"] = task_links
+                return section
+
+            def _extract_sections(
+                document_row: Mapping[str, Any],
+                *,
+                base_document_id: str,
+            ) -> list[dict[str, Any]]:
+                sections: list[dict[str, Any]] = []
+                seen_section_ids: set[str] = set()
+
+                def _append_section(
+                    section: dict[str, Any] | None,
+                    fallback_section_id: str,
+                ) -> None:
+                    if not isinstance(section, dict):
+                        return
+                    candidate = _first_text_or_safe(section.get("section_id"))
+                    if not candidate:
+                        candidate = fallback_section_id
+                    section_id = candidate
+                    suffix = 2
+                    while section_id in seen_section_ids:
+                        section_id = f"{candidate}_{suffix}"
+                        suffix += 1
+                    seen_section_ids.add(section_id)
+                    section["section_id"] = section_id
+                    sections.append(section)
+
+                raw_sections = _mapping_list(document_row.get("sections"), limit=max_sections)
+                for section_index, raw_section in enumerate(raw_sections, start=1):
+                    raw_section_id = _first_text_or_safe(
+                        raw_section.get("section_id"),
+                        raw_section.get("id"),
+                    ) or f"{base_document_id}_section_{section_index}"
+                    section = _section_from_mapping(
+                        raw_section,
+                        section_id=raw_section_id,
+                        default_heading=f"Section {section_index}",
+                    )
+                    _append_section(section, raw_section_id)
+                    if len(sections) >= max_sections:
+                        return sections
+
+                collection_keys = (
+                    "history",
+                    "events",
+                    "notes",
+                    "chunks",
+                    "matches",
+                    "references",
+                )
+                for collection_key in collection_keys:
+                    rows = _mapping_list(document_row.get(collection_key), limit=max_sections)
+                    for row_index, row in enumerate(rows, start=1):
+                        section_id = f"{base_document_id}_{collection_key}_{row_index}"
+                        heading = (
+                            _first_text_or_safe(
+                                row.get("heading"),
+                                row.get("title"),
+                                row.get("event_type"),
+                            )
+                            or {
+                                "history": f"History event {row_index}",
+                                "events": f"Event {row_index}",
+                                "notes": f"Note {row_index}",
+                                "chunks": f"Chunk {row_index}",
+                                "matches": f"Match {row_index}",
+                                "references": f"Reference {row_index}",
+                            }.get(collection_key, f"Section {row_index}")
+                        )
+                        section = _section_from_mapping(
+                            row,
+                            section_id=section_id,
+                            default_heading=heading,
+                        )
+                        _append_section(section, section_id)
+                        if len(sections) >= max_sections:
+                            return sections
+
+                if sections:
+                    return sections
+
+                fallback_section = _section_from_mapping(
+                    document_row,
+                    section_id=f"{base_document_id}_overview",
+                    default_heading=(
+                        _first_text_or_safe(document_row.get("heading")) or "Overview"
+                    ),
+                )
+                _append_section(fallback_section, f"{base_document_id}_overview")
+                return sections
+
+            def _append_document(
+                *,
+                source_tool: str,
+                document_row: Mapping[str, Any],
+                payload_fallback: Mapping[str, Any] | None = None,
+            ) -> None:
+                if len(documents) >= max_documents:
+                    return
+                _register_source_tool(source_tool)
+
+                payload_fallback = payload_fallback or {}
+                base_document_id = (
+                    _first_text_or_safe(
+                        document_row.get("document_id"),
+                        document_row.get("paper_id"),
+                        document_row.get("arxiv_id"),
+                        document_row.get("id"),
+                        document_row.get("session_id"),
+                        document_row.get("concept_id"),
+                        payload_fallback.get("document_id"),
+                        payload_fallback.get("arxiv_id"),
+                    )
+                    or f"{source_tool}_document_{len(documents) + 1}"
+                )
+                document_id = _next_document_id(base_document_id)
+
+                title = (
+                    _first_text_or_safe(
+                        document_row.get("title"),
+                        document_row.get("name"),
+                        document_row.get("document_title"),
+                        document_row.get("paper_title"),
+                        payload_fallback.get("title"),
+                        payload_fallback.get("name"),
+                    )
+                    or document_id
+                )
+                source_uri = _first_text_or_safe(
+                    document_row.get("source_uri"),
+                    document_row.get("uri"),
+                    document_row.get("url"),
+                    document_row.get("href"),
+                    document_row.get("pdf_url"),
+                    payload_fallback.get("source_uri"),
+                    payload_fallback.get("url"),
+                    payload_fallback.get("pdf_url"),
+                )
+                source_label = (
+                    _first_text_or_safe(
+                        document_row.get("source_label"),
+                        document_row.get("source"),
+                        document_row.get("source_name"),
+                        payload_fallback.get("source_label"),
+                        payload_fallback.get("source"),
+                    )
+                    or source_tool
+                )
+                updated_at = _first_text_or_safe(
+                    document_row.get("updated_at"),
+                    document_row.get("last_updated_at"),
+                    document_row.get("published"),
+                    document_row.get("created_at"),
+                    payload_fallback.get("updated_at"),
+                    payload_fallback.get("published"),
+                )
+
+                sections = _extract_sections(
+                    document_row,
+                    base_document_id=document_id,
+                )
+                if not sections:
+                    return
+
+                document_payload: dict[str, Any] = {
+                    "document_id": document_id,
+                    "title": title,
+                    "source_label": source_label,
+                    "sections": sections[:max_sections],
+                }
+                if source_uri:
+                    document_payload["source_uri"] = source_uri
+                if updated_at:
+                    document_payload["updated_at"] = updated_at
+                documents.append(document_payload)
+
+            tool_payloads = list(_iter_renderer_tool_result_payloads(tool_messages))
+            if not tool_payloads:
+                return []
+
+            for tool_name, payload in tool_payloads:
+                if len(documents) >= max_documents:
+                    break
+
+                if tool_name == "get_paper_metadata":
+                    _append_document(
+                        source_tool=tool_name,
+                        document_row=payload,
+                        payload_fallback=payload,
+                    )
+                    continue
+
+                document_collections = (
+                    payload.get("documents"),
+                    payload.get("papers"),
+                    payload.get("results"),
+                    payload.get("items"),
+                )
+                appended_from_collection = False
+                for collection in document_collections:
+                    rows = _mapping_list(collection, limit=max_documents * 4)
+                    if not rows:
+                        continue
+                    for row in rows:
+                        _append_document(
+                            source_tool=tool_name,
+                            document_row=row,
+                            payload_fallback=payload,
+                        )
+                        if len(documents) >= max_documents:
+                            break
+                    appended_from_collection = True
+                    if len(documents) >= max_documents:
+                        break
+
+                if appended_from_collection:
+                    continue
+
+                _append_document(
+                    source_tool=tool_name,
+                    document_row=payload,
+                    payload_fallback=payload,
+                )
+
+            if not documents:
+                return []
+
+            return [
+                {
+                    "element_id": "screen_document_view",
+                    "intent": "structured_document_view",
+                    "payload": {"documents": documents[:max_documents]},
+                    "constraints": {
+                        "supports_section_links": True,
+                        "supports_citation_links": True,
+                        "supports_excerpt_expand": True,
+                    },
+                    "provenance": {
+                        "source": "tool_result_document_view",
+                        "source_tools": source_tools,
+                        "record_family": "documents",
+                    },
+                }
+            ]
+
         def _extract_renderer_screen_relation_graph_elements(
             *,
             tool_messages: Sequence[Mapping[str, Any]] = (),
@@ -12628,6 +12990,9 @@ class InternalMCPChatOrchestrator:
             "tabular": ("table",),
             "calendar": ("calendar_view",),
             "calendar_view": ("calendar_view",),
+            "citation": ("document_view",),
+            "document": ("document_view",),
+            "document_view": ("document_view",),
             "kanban": ("kanban_view",),
             "kanban_view": ("kanban_view",),
             "graph": ("relation_graph_view",),
@@ -12707,6 +13072,7 @@ class InternalMCPChatOrchestrator:
             include_workflow_elements = "workflow_view" in selected_families
             include_task_view_elements = "task_view" in selected_families
             include_calendar_elements = "calendar_view" in selected_families
+            include_document_elements = "document_view" in selected_families
             include_kanban_elements = "kanban_view" in selected_families
             include_timeline_elements = "timeline" in selected_families
             include_relation_graph_elements = "relation_graph_view" in selected_families
@@ -12718,6 +13084,7 @@ class InternalMCPChatOrchestrator:
                 "workflow_view": include_workflow_elements,
                 "task_view": include_task_view_elements,
                 "calendar_view": include_calendar_elements,
+                "document_view": include_document_elements,
                 "kanban_view": include_kanban_elements,
                 "timeline": include_timeline_elements,
                 "relation_graph_view": include_relation_graph_elements,
@@ -12767,6 +13134,18 @@ class InternalMCPChatOrchestrator:
                     decision["screen_calendar_elements"] = screen_calendar_elements
                     decision["screen_calendar_element_count"] = len(
                         screen_calendar_elements
+                    )
+
+            if include_document_elements:
+                screen_document_elements = (
+                    _extract_renderer_screen_document_elements(
+                        tool_messages=tool_messages
+                    )
+                )
+                if screen_document_elements:
+                    decision["screen_document_elements"] = screen_document_elements
+                    decision["screen_document_element_count"] = len(
+                        screen_document_elements
                     )
 
             if include_kanban_elements:

@@ -532,6 +532,74 @@ def test_generate_builds_calendar_from_render_plan_elements(monkeypatch):
     assert calendar_item["all_day"] is True
 
 
+def test_generate_builds_document_view_from_render_plan_elements(monkeypatch):
+    from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
+
+    render_plan = {
+        "enabled": True,
+        "reason": "resolved",
+        "render_mode": "screen_only",
+        "should_narrate": False,
+        "screen_document_elements": [
+            {
+                "element_id": "screen_document_view",
+                "intent": "structured_document_view",
+                "payload": {
+                    "documents": [
+                        {
+                            "document_id": "arXiv:2501.12345",
+                            "title": "Graph-based Document Reasoning",
+                            "source_uri": "https://arxiv.org/pdf/2501.12345.pdf",
+                            "source_label": "search_arxiv",
+                            "updated_at": "2026-01-20T00:00:00Z",
+                            "sections": [
+                                {
+                                    "section_id": "abstract",
+                                    "heading": "Abstract",
+                                    "excerpt": "This paper proposes a retrieval-grounded graph pipeline for document reasoning.",
+                                    "citation": "https://arxiv.org/abs/2501.12345",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+    }
+    orchestrator_result = OrchestratorResult(
+        response_text="Document summary",
+        extra_messages=(),
+        tool_invocations=(),
+        aux_llm_calls=(),
+        render_plan=render_plan,
+    )
+    app = _make_app(monkeypatch, _StubOrchestrator(orchestrator_result))
+
+    client = app.test_client()
+    response = client.post("/von/generate", json={"prompt": "Show documents"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert isinstance(body, dict)
+    display_elements = body.get("display_elements")
+    assert isinstance(display_elements, dict)
+    assert display_elements.get("validation", {}).get("valid") is True
+    assert "screen_structured_document_views_supplied" in display_elements.get(
+        "reason_codes", []
+    )
+
+    document_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "document_view"
+    ]
+    assert len(document_elements) == 1
+    documents = document_elements[0].get("payload", {}).get("documents", [])
+    assert isinstance(documents, list)
+    assert documents[0]["document_id"] == "arXiv:2501.12345"
+    assert documents[0]["sections"][0]["heading"] == "Abstract"
+
+
 def test_generate_builds_task_view_from_render_plan_elements(monkeypatch):
     from src.backend.integrations.internal_mcp.orchestrator import OrchestratorResult
 
@@ -837,6 +905,7 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
             "workflow_view": True,
             "task_view": False,
             "calendar_view": False,
+            "document_view": False,
             "kanban_view": False,
             "timeline": False,
             "relation_graph_view": False,
@@ -933,6 +1002,29 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
                             "title": "Alpha task",
                             "start_at": "2026-02-17",
                             "all_day": True,
+                        }
+                    ]
+                },
+                "provenance": {"source": "test_render_plan"},
+            }
+        ],
+        "screen_document_elements": [
+            {
+                "element_id": "screen_document_view",
+                "intent": "structured_document_view",
+                "payload": {
+                    "documents": [
+                        {
+                            "document_id": "doc_alpha",
+                            "title": "Alpha document",
+                            "source_label": "test_render_plan",
+                            "sections": [
+                                {
+                                    "section_id": "s1",
+                                    "heading": "Summary",
+                                    "excerpt": "Alpha excerpt",
+                                }
+                            ],
                         }
                     ]
                 },
@@ -1040,6 +1132,12 @@ def test_generate_respects_renderer_screen_element_targets(monkeypatch):
         and element.get("element_type") == "calendar_view"
     ]
     assert not calendar_elements
+    document_elements = [
+        element
+        for element in display_elements.get("elements", [])
+        if isinstance(element, dict) and element.get("element_type") == "document_view"
+    ]
+    assert not document_elements
     kanban_elements = [
         element
         for element in display_elements.get("elements", [])

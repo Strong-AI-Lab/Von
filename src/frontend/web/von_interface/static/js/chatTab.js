@@ -1414,6 +1414,11 @@ const KANBAN_MAX_COLUMNS = 30;
 const KANBAN_MAX_CARDS = 200;
 const TIMELINE_MAX_ITEMS = 200;
 const CALENDAR_MAX_ITEMS = 240;
+const DOCUMENT_MAX_DOCUMENTS = 12;
+const DOCUMENT_MAX_SECTIONS_PER_DOCUMENT = 12;
+const DOCUMENT_SECTION_EXCERPT_MAX_CHARS = 700;
+const DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS = 280;
+const DOCUMENT_EXCERPT_TRUNCATION_MARKER = ' ... [truncated]';
 const RELATION_GRAPH_MAX_NODES = 120;
 const RELATION_GRAPH_MAX_EDGES = 240;
 const RELATION_TRUTH_STATE_MAX_GROUPS = 50;
@@ -2439,6 +2444,210 @@ function resolveCalendarDisplayElements(debugData) {
     return calendarViews;
 }
 
+function truncateDocumentSectionText(value, maxChars) {
+    if (typeof value !== 'string') {
+        return {
+            text: '',
+            truncated: false,
+            original_char_count: 0
+        };
+    }
+    const cleaned = value.trim();
+    if (!cleaned) {
+        return {
+            text: '',
+            truncated: false,
+            original_char_count: 0
+        };
+    }
+    const originalCharCount = cleaned.length;
+    if (!Number.isFinite(maxChars) || maxChars <= 0 || originalCharCount <= maxChars) {
+        return {
+            text: cleaned,
+            truncated: false,
+            original_char_count: originalCharCount
+        };
+    }
+
+    const marker = DOCUMENT_EXCERPT_TRUNCATION_MARKER;
+    if (maxChars <= marker.length) {
+        return {
+            text: marker.slice(0, maxChars),
+            truncated: true,
+            original_char_count: originalCharCount
+        };
+    }
+
+    const prefixLength = Math.max(24, maxChars - marker.length);
+    const prefix = cleaned.slice(0, prefixLength).trimEnd();
+    return {
+        text: `${prefix || cleaned.slice(0, prefixLength)}${marker}`,
+        truncated: true,
+        original_char_count: originalCharCount
+    };
+}
+
+function normaliseDocumentCitation(value) {
+    if (typeof value === 'string') {
+        const citationText = value.trim();
+        if (!citationText) {
+            return null;
+        }
+        const looksLikeUrl = /^https?:\/\//i.test(citationText);
+        return {
+            label: citationText,
+            href: looksLikeUrl ? citationText : ''
+        };
+    }
+    if (!value || typeof value !== 'object') {
+        return null;
+    }
+    const label = typeof value.label === 'string' && value.label.trim()
+        ? value.label.trim()
+        : (typeof value.text === 'string' && value.text.trim() ? value.text.trim() : '');
+    const href = typeof value.href === 'string' && value.href.trim()
+        ? value.href.trim()
+        : (typeof value.url === 'string' && value.url.trim() ? value.url.trim() : '');
+    if (!label && !href) {
+        return null;
+    }
+    return {
+        label: label || href,
+        href
+    };
+}
+
+function normaliseDocumentDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'document_view') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const rawDocuments = Array.isArray(payload.documents) ? payload.documents : [];
+    const documents = rawDocuments
+        .map((rawDocument, documentIndex) => {
+            if (!rawDocument || typeof rawDocument !== 'object') {
+                return null;
+            }
+            const documentId = typeof rawDocument.document_id === 'string' && rawDocument.document_id.trim()
+                ? rawDocument.document_id.trim()
+                : (typeof rawDocument.id === 'string' && rawDocument.id.trim()
+                    ? rawDocument.id.trim()
+                    : `document_${documentIndex + 1}`);
+            const title = typeof rawDocument.title === 'string' && rawDocument.title.trim()
+                ? rawDocument.title.trim()
+                : documentId;
+            const sourceUri = typeof rawDocument.source_uri === 'string' && rawDocument.source_uri.trim()
+                ? rawDocument.source_uri.trim()
+                : '';
+            const sourceLabel = typeof rawDocument.source_label === 'string' && rawDocument.source_label.trim()
+                ? rawDocument.source_label.trim()
+                : '';
+            if (!sourceUri && !sourceLabel) {
+                return null;
+            }
+            const updatedAt = typeof rawDocument.updated_at === 'string' && rawDocument.updated_at.trim()
+                ? rawDocument.updated_at.trim()
+                : '';
+
+            const rawSections = Array.isArray(rawDocument.sections) ? rawDocument.sections : [];
+            const sections = rawSections
+                .map((rawSection, sectionIndex) => {
+                    if (!rawSection || typeof rawSection !== 'object') {
+                        return null;
+                    }
+                    const sectionId = typeof rawSection.section_id === 'string' && rawSection.section_id.trim()
+                        ? rawSection.section_id.trim()
+                        : `${documentId}_section_${sectionIndex + 1}`;
+                    const heading = typeof rawSection.heading === 'string' && rawSection.heading.trim()
+                        ? rawSection.heading.trim()
+                        : `Section ${sectionIndex + 1}`;
+                    const excerptMeta = truncateDocumentSectionText(
+                        rawSection.excerpt,
+                        DOCUMENT_SECTION_EXCERPT_MAX_CHARS
+                    );
+                    if (!excerptMeta.text) {
+                        return null;
+                    }
+                    const excerptTruncated = (typeof rawSection.excerpt_truncated === 'boolean' && rawSection.excerpt_truncated)
+                        || excerptMeta.truncated
+                        || excerptMeta.text.endsWith('[truncated]');
+                    const citation = normaliseDocumentCitation(rawSection.citation);
+                    const diffSummaryMeta = truncateDocumentSectionText(
+                        typeof rawSection.diff_summary === 'string' ? rawSection.diff_summary : '',
+                        DOCUMENT_SECTION_DIFF_SUMMARY_MAX_CHARS
+                    );
+                    const rawTaskLinks = Array.isArray(rawSection.task_links) ? rawSection.task_links : [];
+                    const taskLinks = rawTaskLinks
+                        .map((link) => normaliseWorkflowTaskLink(link))
+                        .filter(Boolean);
+
+                    return {
+                        section_id: sectionId,
+                        heading,
+                        excerpt: excerptMeta.text,
+                        excerpt_truncated: excerptTruncated,
+                        excerpt_original_char_count: Number.isInteger(rawSection.excerpt_original_char_count)
+                            ? Number(rawSection.excerpt_original_char_count)
+                            : excerptMeta.original_char_count,
+                        citation,
+                        diff_summary: diffSummaryMeta.text,
+                        task_links: taskLinks
+                    };
+                })
+                .filter(Boolean)
+                .slice(0, DOCUMENT_MAX_SECTIONS_PER_DOCUMENT);
+
+            if (!sections.length) {
+                return null;
+            }
+
+            return {
+                document_id: documentId,
+                title,
+                source_uri: sourceUri,
+                source_label: sourceLabel,
+                updated_at: updatedAt,
+                sections
+            };
+        })
+        .filter(Boolean)
+        .slice(0, DOCUMENT_MAX_DOCUMENTS);
+
+    if (!documents.length) {
+        return null;
+    }
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
+        documents
+    };
+}
+
+function resolveDocumentDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const documentViews = [];
+    for (const element of contract.elements) {
+        const documentElement = normaliseDocumentDisplayElement(element);
+        if (!documentElement) {
+            continue;
+        }
+        documentViews.push(documentElement);
+    }
+    return documentViews;
+}
+
 function normaliseRelationGraphDirection(value) {
     const direction = typeof value === 'string' ? value.trim().toLowerCase() : '';
     return direction === 'undirected' ? 'undirected' : 'directed';
@@ -3049,6 +3258,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     const kanbanElements = resolveKanbanDisplayElements(debugData);
     const timelineElements = resolveTimelineDisplayElements(debugData);
     const calendarElements = resolveCalendarDisplayElements(debugData);
+    const documentElements = resolveDocumentDisplayElements(debugData);
     const relationGraphElements = resolveRelationGraphDisplayElements(debugData);
     const relationTruthStateElements = resolveRelationTruthStateDisplayElements(debugData);
     if (
@@ -3058,6 +3268,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         && !kanbanElements.length
         && !timelineElements.length
         && !calendarElements.length
+        && !documentElements.length
         && !relationGraphElements.length
         && !relationTruthStateElements.length
     ) {
@@ -3727,6 +3938,153 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         root.appendChild(section);
     });
 
+    documentElements.forEach((documentElement, documentIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-document-section';
+        section.style.cssText = (
+            tableElements.length > 0
+            || workflowElements.length > 0
+            || taskViewElements.length > 0
+            || kanbanElements.length > 0
+            || timelineElements.length > 0
+            || calendarElements.length > 0
+            || documentIndex > 0
+        ) ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-document-title';
+        title.textContent = documentElements.length > 1
+            ? `Document view ${documentIndex + 1}`
+            : 'Document view';
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const summary = document.createElement('div');
+        summary.className = 'chat-display-elements-document-summary';
+        summary.textContent = `${documentElement.documents.length} document${documentElement.documents.length === 1 ? '' : 's'}`;
+        summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+        section.appendChild(summary);
+
+        const list = document.createElement('div');
+        list.className = 'chat-display-elements-document-list';
+        list.style.cssText = 'display: grid; gap: 8px;';
+
+        documentElement.documents.forEach((documentEntry, entryIndex) => {
+            const details = document.createElement('details');
+            details.className = 'chat-display-elements-document-card';
+            details.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; background: #f8fbff; padding: 6px 8px;';
+            if (entryIndex === 0) {
+                details.open = true;
+            }
+
+            const summaryRow = document.createElement('summary');
+            summaryRow.className = 'chat-display-elements-document-card-header';
+            summaryRow.style.cssText = 'cursor: pointer; font-size: 0.83em; font-weight: 600; color: #1f3d5a;';
+            summaryRow.textContent = documentEntry.title;
+            details.appendChild(summaryRow);
+
+            const sourceParts = [];
+            if (documentEntry.source_label) {
+                sourceParts.push(documentEntry.source_label);
+            }
+            if (documentEntry.updated_at) {
+                sourceParts.push(`Updated: ${documentEntry.updated_at}`);
+            }
+            if (sourceParts.length > 0) {
+                const sourceMeta = document.createElement('div');
+                sourceMeta.className = 'chat-display-elements-document-card-meta';
+                sourceMeta.textContent = sourceParts.join(' · ');
+                sourceMeta.style.cssText = 'margin-top: 4px; font-size: 0.77em; color: #44576a;';
+                details.appendChild(sourceMeta);
+            }
+
+            if (documentEntry.source_uri) {
+                const sourceLink = document.createElement('a');
+                sourceLink.href = documentEntry.source_uri;
+                sourceLink.target = '_blank';
+                sourceLink.rel = 'noopener noreferrer';
+                sourceLink.className = 'chat-display-elements-document-source-link';
+                sourceLink.textContent = 'Open source';
+                sourceLink.style.cssText = 'display: inline-block; margin-top: 6px; font-size: 0.76em; color: #1f4f7a;';
+                details.appendChild(sourceLink);
+            }
+
+            const sectionList = document.createElement('div');
+            sectionList.className = 'chat-display-elements-document-section-list';
+            sectionList.style.cssText = 'display: grid; gap: 7px; margin-top: 8px;';
+
+            documentEntry.sections.forEach((documentSection) => {
+                const sectionCard = document.createElement('article');
+                sectionCard.className = 'chat-display-elements-document-section-card';
+                sectionCard.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; background: #fff; padding: 7px;';
+
+                const sectionHeading = document.createElement('div');
+                sectionHeading.className = 'chat-display-elements-document-section-heading';
+                sectionHeading.textContent = documentSection.heading;
+                sectionHeading.style.cssText = 'font-size: 0.8em; font-weight: 600; color: #1f3d5a;';
+                sectionCard.appendChild(sectionHeading);
+
+                const excerpt = document.createElement('div');
+                excerpt.className = 'chat-display-elements-document-section-excerpt';
+                excerpt.textContent = documentSection.excerpt;
+                excerpt.style.cssText = 'margin-top: 4px; font-size: 0.79em; color: #2b3e52; white-space: pre-wrap;';
+                sectionCard.appendChild(excerpt);
+
+                const sectionMetaParts = [];
+                if (documentSection.excerpt_truncated) {
+                    sectionMetaParts.push('Excerpt truncated');
+                }
+                if (
+                    Number.isInteger(documentSection.excerpt_original_char_count)
+                    && documentSection.excerpt_original_char_count > 0
+                ) {
+                    sectionMetaParts.push(`Original chars: ${documentSection.excerpt_original_char_count}`);
+                }
+                if (documentSection.diff_summary) {
+                    sectionMetaParts.push(`Diff: ${documentSection.diff_summary}`);
+                }
+                if (sectionMetaParts.length > 0) {
+                    const sectionMeta = document.createElement('div');
+                    sectionMeta.className = 'chat-display-elements-document-section-meta';
+                    sectionMeta.textContent = sectionMetaParts.join(' · ');
+                    sectionMeta.style.cssText = 'margin-top: 4px; font-size: 0.75em; color: #5a6b7b;';
+                    sectionCard.appendChild(sectionMeta);
+                }
+
+                if (documentSection.citation) {
+                    const citationWrap = document.createElement('div');
+                    citationWrap.className = 'chat-display-elements-document-section-citation';
+                    citationWrap.style.cssText = 'margin-top: 6px; font-size: 0.76em;';
+                    if (documentSection.citation.href) {
+                        const citationLink = document.createElement('a');
+                        citationLink.href = documentSection.citation.href;
+                        citationLink.target = '_blank';
+                        citationLink.rel = 'noopener noreferrer';
+                        citationLink.textContent = documentSection.citation.label;
+                        citationWrap.appendChild(citationLink);
+                    } else {
+                        citationWrap.textContent = `Citation: ${documentSection.citation.label}`;
+                    }
+                    sectionCard.appendChild(citationWrap);
+                }
+
+                appendTaskLinksToCard(
+                    sectionCard,
+                    documentSection.task_links,
+                    'chat-display-elements-document-section-links'
+                );
+
+                sectionList.appendChild(sectionCard);
+            });
+
+            details.appendChild(sectionList);
+            list.appendChild(details);
+        });
+
+        section.appendChild(list);
+        root.appendChild(section);
+    });
+
     relationGraphElements.forEach((relationGraphElement, relationGraphIndex) => {
         const section = document.createElement('section');
         section.className = 'chat-display-elements-relation-graph-section';
@@ -3737,6 +4095,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || kanbanElements.length > 0
             || timelineElements.length > 0
             || calendarElements.length > 0
+            || documentElements.length > 0
             || relationGraphIndex > 0
         ) ? 'margin-top: 10px;' : '';
 
@@ -3772,6 +4131,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             || timelineElements.length > 0
             || relationGraphElements.length > 0
             || calendarElements.length > 0
+            || documentElements.length > 0
             || relationIndex > 0
         ) ? 'margin-top: 10px;' : '';
 
@@ -4014,6 +4374,7 @@ function extractRenderPlanSourceSummary(
     screenKanbanElements,
     screenTimelineElements,
     screenCalendarElements,
+    screenDocumentElements,
     screenRelationGraphElements
 ) {
     const sourceTools = [];
@@ -4093,6 +4454,12 @@ function extractRenderPlanSourceSummary(
         }
         addProvenance(calendarElement.provenance);
     }
+    for (const documentElement of screenDocumentElements) {
+        if (!documentElement || typeof documentElement !== 'object') {
+            continue;
+        }
+        addProvenance(documentElement.provenance);
+    }
     for (const relationGraphElement of screenRelationGraphElements) {
         if (!relationGraphElement || typeof relationGraphElement !== 'object') {
             continue;
@@ -4143,6 +4510,9 @@ function buildRenderPlanMetadataSummary(renderPlan) {
     const screenCalendarElements = Array.isArray(renderPlan.screen_calendar_elements)
         ? renderPlan.screen_calendar_elements.filter(item => item && typeof item === 'object')
         : [];
+    const screenDocumentElements = Array.isArray(renderPlan.screen_document_elements)
+        ? renderPlan.screen_document_elements.filter(item => item && typeof item === 'object')
+        : [];
     const screenRelationGraphElements = Array.isArray(renderPlan.screen_relation_graph_elements)
         ? renderPlan.screen_relation_graph_elements.filter(item => item && typeof item === 'object')
         : [];
@@ -4154,6 +4524,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screenKanbanElements,
         screenTimelineElements,
         screenCalendarElements,
+        screenDocumentElements,
         screenRelationGraphElements
     );
 
@@ -4185,6 +4556,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screen_kanban_element_count: screenKanbanElements.length,
         screen_timeline_element_count: screenTimelineElements.length,
         screen_calendar_element_count: screenCalendarElements.length,
+        screen_document_element_count: screenDocumentElements.length,
         screen_relation_graph_element_count: screenRelationGraphElements.length,
         unsupported_selected_renderer_types: unsupportedRendererTypes,
         resolver_suggestions: resolverSuggestions
@@ -4251,6 +4623,7 @@ function buildRenderPlanSummaryHtml(renderPlanSummary) {
     addScalar('Screen kanban elements', renderPlanSummary.screen_kanban_element_count);
     addScalar('Screen timeline elements', renderPlanSummary.screen_timeline_element_count);
     addScalar('Screen calendar elements', renderPlanSummary.screen_calendar_element_count);
+    addScalar('Screen document elements', renderPlanSummary.screen_document_element_count);
     addScalar('Screen relation graph elements', renderPlanSummary.screen_relation_graph_element_count);
     addList('Source tools', renderPlanSummary.source_tools);
     addList('Record families', renderPlanSummary.record_families);

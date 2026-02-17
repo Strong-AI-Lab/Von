@@ -670,6 +670,133 @@ def test_build_turn_display_elements_drops_invalid_supplied_calendar_views() -> 
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_document_views() -> None:
+    contract = build_turn_display_elements(
+        response_text="Document response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Document response",
+            "spoken": None,
+        },
+        screen_document_elements=[
+            {
+                "element_id": "screen_document_view",
+                "intent": "structured_document_view",
+                "payload": {
+                    "documents": [
+                        {
+                            "document_id": "doc_alpha",
+                            "title": "Alpha document",
+                            "source_uri": "https://example.com/doc-alpha",
+                            "source_label": "search_knowledge_base",
+                            "updated_at": "2026-02-17T10:00:00Z",
+                            "sections": [
+                                {
+                                    "section_id": "sec_1",
+                                    "heading": "Summary",
+                                    "excerpt": "Alpha excerpt",
+                                    "citation": "https://example.com/doc-alpha#summary",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        ],
+    )
+
+    document_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "document_view"
+    ]
+    assert len(document_elements) == 1
+    document_element = document_elements[0]
+    assert document_element["element_id"] == "screen_document_view"
+    document = document_element["payload"]["documents"][0]
+    assert document["document_id"] == "doc_alpha"
+    assert document["sections"][0]["heading"] == "Summary"
+    assert "screen_structured_document_views_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_truncates_oversized_document_excerpt() -> None:
+    oversized_excerpt = "A" * 1200
+    contract = build_turn_display_elements(
+        response_text="Document response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Document response",
+            "spoken": None,
+        },
+        screen_document_elements=[
+            {
+                "payload": {
+                    "documents": [
+                        {
+                            "document_id": "doc_alpha",
+                            "title": "Alpha document",
+                            "source_label": "search_knowledge_base",
+                            "sections": [
+                                {
+                                    "section_id": "sec_1",
+                                    "heading": "Summary",
+                                    "excerpt": oversized_excerpt,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        ],
+    )
+
+    document_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "document_view"
+    ]
+    assert len(document_elements) == 1
+    section = document_elements[0]["payload"]["documents"][0]["sections"][0]
+    assert section["excerpt"].endswith("... [truncated]")
+    assert section["excerpt_truncated"] is True
+    assert section["excerpt_original_char_count"] == len(oversized_excerpt)
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_supplied_document_views() -> None:
+    contract = build_turn_display_elements(
+        response_text="Document response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Document response",
+            "spoken": None,
+        },
+        screen_document_elements=[
+            {
+                "payload": {
+                    "documents": [
+                        {
+                            "document_id": "doc_alpha",
+                            "title": "Alpha document",
+                            "sections": [],
+                        }
+                    ]
+                }
+            }
+        ],
+    )
+
+    document_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "document_view"
+    ]
+    assert document_elements == []
+    assert "screen_structured_document_views_invalid_dropped" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
 def test_build_turn_display_elements_includes_supplied_relation_graph_elements() -> None:
     contract = build_turn_display_elements(
         response_text="Relation graph response",
@@ -1018,6 +1145,44 @@ def test_validate_turn_display_elements_rejects_calendar_item_without_title() ->
     assert any(".title must be a non-empty string" in message for message in errors)
     assert any(".all_day must be a boolean" in message for message in errors)
     assert any("default_granularity must be one of" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_invalid_document_view_shape() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_document_view",
+                    "element_type": "document_view",
+                    "channel": "screen",
+                    "order": 40,
+                    "intent": "structured_document_view",
+                    "payload": {
+                        "documents": [
+                            {
+                                "document_id": "doc_alpha",
+                                "title": "Alpha document",
+                                "sections": [
+                                    {
+                                        "section_id": "sec_1",
+                                        "heading": "Summary",
+                                        "excerpt": "X" * 900,
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any("must provide provenance (source_uri or source_label)" in msg for msg in errors)
+    assert any(".excerpt must be 700 chars or less" in msg for msg in errors)
 
 
 def test_validate_turn_display_elements_rejects_task_view_without_task_id() -> None:
