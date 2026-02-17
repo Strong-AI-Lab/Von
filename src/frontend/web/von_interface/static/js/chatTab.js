@@ -158,11 +158,14 @@ const HISTORY_TAIL_SEGMENT_SIZE = 30;
 
 // JVNAUTOSCI-1014: Hidden conversations (localStorage per user)
 const LS_HIDDEN_CHAT_SESSIONS_PREFIX = 'von:hiddenChatSessionIds';
+const LS_PINNED_CHAT_SESSIONS_PREFIX = 'von:pinnedChatSessionIds';
 const LS_CHAT_SESSION_LAST_ACCESSED_PREFIX = 'von:chatSessionLastAccessed';
 const MAX_DELETABLE_TURNS = 4;
 let hiddenChatSessionIds = new Set();
+let pinnedChatSessionIds = new Set();
 let showHiddenSessions = false;
 let _hiddenSessionsUserKey = null; // Track current user's localStorage key
+let _pinnedSessionsUserKey = null; // Track current user's localStorage key
 let chatSessionLastAccessedMap = new Map();
 let _chatSessionLastAccessedUserKey = null;
 let showAllConversationHistoryMatches = false;
@@ -171,15 +174,25 @@ let showAllConversationHistoryMatches = false;
  * Get the user-scoped localStorage key for hidden sessions.
  * Falls back to global key if no user is logged in.
  */
-function getHiddenSessionsStorageKey() {
+function buildUserScopedStorageKey(prefix) {
+    if (typeof prefix !== 'string' || !prefix.trim()) {
+        return prefix;
+    }
     const userConceptId = getCurrentUserConceptId();
     if (userConceptId) {
         // Sanitise concept_id to be safe for localStorage key
         const sanitised = String(userConceptId).replace(/[^a-zA-Z0-9_#-]/g, '_');
-        return `${LS_HIDDEN_CHAT_SESSIONS_PREFIX}:${sanitised}`;
+        return `${prefix}:${sanitised}`;
     }
-    // Fallback to global key when not logged in
-    return LS_HIDDEN_CHAT_SESSIONS_PREFIX;
+    return prefix;
+}
+
+function getHiddenSessionsStorageKey() {
+    return buildUserScopedStorageKey(LS_HIDDEN_CHAT_SESSIONS_PREFIX);
+}
+
+function getPinnedSessionsStorageKey() {
+    return buildUserScopedStorageKey(LS_PINNED_CHAT_SESSIONS_PREFIX);
 }
 
 function loadHiddenChatSessionIds() {
@@ -212,12 +225,34 @@ function saveHiddenChatSessionIds() {
 }
 
 function getChatSessionLastAccessedStorageKey() {
-    const userConceptId = getCurrentUserConceptId();
-    if (userConceptId) {
-        const sanitised = String(userConceptId).replace(/[^a-zA-Z0-9_#-]/g, '_');
-        return `${LS_CHAT_SESSION_LAST_ACCESSED_PREFIX}:${sanitised}`;
+    return buildUserScopedStorageKey(LS_CHAT_SESSION_LAST_ACCESSED_PREFIX);
+}
+
+function loadPinnedChatSessionIds() {
+    const storageKey = getPinnedSessionsStorageKey();
+    _pinnedSessionsUserKey = storageKey;
+    try {
+        const stored = localStorage.getItem(storageKey);
+        if (stored) {
+            const parsed = JSON.parse(stored);
+            if (Array.isArray(parsed)) {
+                pinnedChatSessionIds = new Set(parsed.filter(id => typeof id === 'string'));
+                return;
+            }
+        }
+    } catch (e) {
+        console.warn('[chatTab] Failed to load pinned session IDs from localStorage:', e);
     }
-    return LS_CHAT_SESSION_LAST_ACCESSED_PREFIX;
+    pinnedChatSessionIds = new Set();
+}
+
+function savePinnedChatSessionIds() {
+    const storageKey = _pinnedSessionsUserKey || getPinnedSessionsStorageKey();
+    try {
+        localStorage.setItem(storageKey, JSON.stringify([...pinnedChatSessionIds]));
+    } catch (e) {
+        console.warn('[chatTab] Failed to save pinned session IDs to localStorage:', e);
+    }
 }
 
 function loadChatSessionLastAccessedMap() {
@@ -328,6 +363,37 @@ function isConversationHidden(sessionId) {
     return hiddenChatSessionIds.has(sessionId);
 }
 
+function isConversationPinned(sessionId) {
+    return pinnedChatSessionIds.has(sessionId);
+}
+
+function pinConversation(sessionId) {
+    if (!sessionId) return;
+    pinnedChatSessionIds.add(sessionId);
+    savePinnedChatSessionIds();
+    if (Array.isArray(sessionTabsCache)) {
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+    }
+}
+
+function unpinConversation(sessionId) {
+    if (!sessionId) return;
+    pinnedChatSessionIds.delete(sessionId);
+    savePinnedChatSessionIds();
+    if (Array.isArray(sessionTabsCache)) {
+        renderChatSessionTabs(sessionTabsCache, activeChatSessionId);
+    }
+}
+
+function toggleConversationPinned(sessionId) {
+    if (!sessionId) return;
+    if (isConversationPinned(sessionId)) {
+        unpinConversation(sessionId);
+        return;
+    }
+    pinConversation(sessionId);
+}
+
 function toggleShowHiddenSessions() {
     showHiddenSessions = !showHiddenSessions;
     // Re-render tabs to show/hide hidden conversations
@@ -357,7 +423,9 @@ async function deleteConversation(sessionId) {
         sessionTabsCache = sessionTabsCache.filter(s => s?.session_id !== sessionId);
         // Also remove from hidden set if present
         hiddenChatSessionIds.delete(sessionId);
+        pinnedChatSessionIds.delete(sessionId);
         saveHiddenChatSessionIds();
+        savePinnedChatSessionIds();
         // If deleted the active session, switch to first available or null
         if (activeChatSessionId === sessionId) {
             const nextSession = sessionTabsCache.find(s => s?.session_id);
@@ -2845,7 +2913,7 @@ function normaliseRelationTruthStateDisplayElement(element) {
     const rawGroups = Array.isArray(payload.groups) ? payload.groups : [];
 
     const groups = rawGroups
-        .map((rawGroup, groupIndex) => {
+        .map((rawGroup) => {
             if (!rawGroup || typeof rawGroup !== 'object') {
                 return null;
             }
@@ -9247,12 +9315,57 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         recentWindowDays: conversationHistorySettings.recentWindowDays,
         showAll: showAllConversationHistoryMatches
     });
-    const visibleSessions = filteredResult.sessionsToRender;
+    const visibleSessions = Array.isArray(filteredResult.sessionsToRender)
+        ? filteredResult.sessionsToRender
+        : [];
+
+    // Pinned sessions are user-prioritised and remain visible at the top even when
+    // they would otherwise be hidden by recency window/limit filtering.
+    const pinnedSessionMap = new Map();
+    const pinnedSessionsInFilteredOrder = [];
+    const unpinnedSessions = [];
+    visibleSessions.forEach((session) => {
+        const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+        if (!sid) {
+            return;
+        }
+        if (isConversationPinned(sid)) {
+            pinnedSessionMap.set(sid, session);
+            pinnedSessionsInFilteredOrder.push(session);
+            return;
+        }
+        unpinnedSessions.push(session);
+    });
+
+    sessionsAfterHiddenFilter.forEach((session) => {
+        const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+        if (!sid || !isConversationPinned(sid) || pinnedSessionMap.has(sid)) {
+            return;
+        }
+        pinnedSessionMap.set(sid, session);
+    });
+
+    const pinnedSessionIdsInFilteredOrder = new Set(
+        pinnedSessionsInFilteredOrder
+            .map((session) => (typeof session?.session_id === 'string' ? session.session_id.trim() : ''))
+            .filter(Boolean)
+    );
+    const pinnedSessions = [
+        ...pinnedSessionsInFilteredOrder,
+        ...Array.from(pinnedSessionMap.values()).filter((session) => {
+            const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
+            if (!sid) {
+                return false;
+            }
+            return !pinnedSessionIdsInFilteredOrder.has(sid);
+        })
+    ];
+    const orderedVisibleSessions = [...pinnedSessions, ...unpinnedSessions];
 
     container.hidden = false;
     container.innerHTML = '';
-    lastRenderedSessionCount = visibleSessions.length;
-    setChatSessionCount(filteredResult.totalMatchingCount);
+    lastRenderedSessionCount = orderedVisibleSessions.length;
+    setChatSessionCount(Math.max(filteredResult.totalMatchingCount, orderedVisibleSessions.length));
 
     const fragment = document.createDocumentFragment();
 
@@ -9268,17 +9381,32 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     });
     fragment.appendChild(newTab);
 
-    if (visibleSessions.length === 0) {
+    if (orderedVisibleSessions.length === 0) {
         const placeholder = document.createElement('div');
         placeholder.className = 'chat-session-tabs-placeholder chat-session-tabs-placeholder-filtered';
         placeholder.textContent = `No conversations match the current ${filteredResult.recentWindowDays}-day window. Adjust in Settings > Conversations.`;
         fragment.appendChild(placeholder);
     }
 
-    visibleSessions.forEach((session) => {
+    if (pinnedSessions.length > 0) {
+        const pinnedGroupLabel = document.createElement('div');
+        pinnedGroupLabel.className = 'chat-session-tabs-group-label';
+        pinnedGroupLabel.textContent = `Pinned (${pinnedSessions.length})`;
+        fragment.appendChild(pinnedGroupLabel);
+    }
+
+    orderedVisibleSessions.forEach((session, index) => {
         const sid = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
         if (!sid) {
             return;
+        }
+        const isPinned = isConversationPinned(sid);
+
+        if (pinnedSessions.length > 0 && unpinnedSessions.length > 0 && index === pinnedSessions.length) {
+            const recentGroupLabel = document.createElement('div');
+            recentGroupLabel.className = 'chat-session-tabs-group-label';
+            recentGroupLabel.textContent = 'Recent';
+            fragment.appendChild(recentGroupLabel);
         }
 
         const displayName = getSessionDisplayName(session);
@@ -9306,6 +9434,10 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             tab.classList.add('is-loading');
         }
 
+        if (isPinned) {
+            tab.classList.add('is-pinned');
+        }
+
         if (session?.shared_with_me || session?.shared_from_user_id || session?.invite_id) {
             tab.classList.add('is-shared');
         }
@@ -9325,6 +9457,10 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             tab.title = `${displayName} • ${timestampLabel}`;
         }
 
+        if (isPinned) {
+            tab.title = `${tab.title} • Pinned`;
+        }
+
         if (session?.shared_with_me || session?.shared_from_user_id || session?.invite_id) {
             tab.title = `${tab.title} • Shared`;
         }
@@ -9338,6 +9474,20 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         const header = document.createElement('span');
         header.className = 'chat-session-tab-header';
+
+        const pinToggle = document.createElement('button');
+        pinToggle.type = 'button';
+        pinToggle.className = 'chat-session-tab-pin-toggle';
+        pinToggle.setAttribute('aria-label', isPinned ? 'Unpin conversation' : 'Pin conversation');
+        pinToggle.setAttribute('aria-pressed', isPinned ? 'true' : 'false');
+        pinToggle.title = isPinned ? 'Unpin conversation' : 'Pin conversation';
+        pinToggle.textContent = isPinned ? '★' : '☆';
+        pinToggle.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleConversationPinned(sid);
+        });
+        header.appendChild(pinToggle);
 
         const label = document.createElement('span');
         label.className = 'chat-session-tab-label';
@@ -9411,6 +9561,12 @@ function renderChatSessionTabs(sessions, activeSessionId) {
                     label: 'Rename',
                     onClick: () => {
                         void promptRenameChatSession(sid, session?.session_name || displayName);
+                    }
+                },
+                {
+                    label: isPinned ? 'Unpin conversation' : 'Pin conversation',
+                    onClick: () => {
+                        toggleConversationPinned(sid);
                     }
                 }
             ];
@@ -12914,6 +13070,7 @@ try {
 
 function handleAuthStatusChangeForChatTab(detail) {
     loadHiddenChatSessionIds();
+    loadPinnedChatSessionIds();
     loadChatSessionLastAccessedMap();
     showAllConversationHistoryMatches = false;
 
@@ -12946,12 +13103,14 @@ export function initializeChatTab() {
 
     // JVNAUTOSCI-1014: Load hidden session IDs from localStorage (user-scoped)
     loadHiddenChatSessionIds();
+    loadPinnedChatSessionIds();
     loadChatSessionLastAccessedMap();
 
     // Reload hidden sessions when user changes (settings change event)
     try {
         document.addEventListener('von:settingsChanged', () => {
             const newHiddenKey = getHiddenSessionsStorageKey();
+            const newPinnedKey = getPinnedSessionsStorageKey();
             const newAccessKey = getChatSessionLastAccessedStorageKey();
             let shouldRerenderTabs = false;
 
@@ -12965,6 +13124,12 @@ export function initializeChatTab() {
                 console.log(`[chatTab] User changed, reloading conversation last-accessed map (${_chatSessionLastAccessedUserKey} -> ${newAccessKey})`);
                 loadChatSessionLastAccessedMap();
                 showAllConversationHistoryMatches = false;
+                shouldRerenderTabs = true;
+            }
+
+            if (newPinnedKey !== _pinnedSessionsUserKey) {
+                console.log(`[chatTab] User changed, reloading pinned sessions (${_pinnedSessionsUserKey} -> ${newPinnedKey})`);
+                loadPinnedChatSessionIds();
                 shouldRerenderTabs = true;
             }
 
