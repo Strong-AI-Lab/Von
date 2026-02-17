@@ -1,6 +1,16 @@
 from src.backend.services import renderer_applicability_vontology_service as service
 
 
+def test_canonical_renderer_profile_concept_ids_are_deterministic() -> None:
+    concept_ids = service.canonical_renderer_profile_concept_ids()
+    assert concept_ids == (
+        "#V#timeline_renderer",
+        "#V#workflow_renderer",
+        "#V#table_renderer",
+        "#V#narration_renderer",
+    )
+
+
 def test_load_renderer_definitions_from_concept_ids_parses_profile_json(
     monkeypatch,
 ) -> None:
@@ -31,6 +41,42 @@ def test_load_renderer_definitions_from_concept_ids_parses_profile_json(
     assert definitions[0]["renderer_type"] == "timeline"
     assert diagnostics["loaded_concept_ids"] == ["#V#timeline_renderer"]
     assert diagnostics["loaded_definition_count"] == 1
+
+
+def test_load_renderer_definitions_reports_malformed_profile_json(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {"concept_id": concept_id, "relationships": {}},
+    )
+    monkeypatch.setattr(
+        service,
+        "get_texts_for_concept",
+        lambda concept_id, predicate=None, limit=50: [
+            {
+                "predicate": predicate,
+                "text": "{not valid json}",
+            }
+        ]
+        if predicate == "#V#has_renderer_profile_json"
+        else [],
+    )
+
+    definitions, diagnostics = service.load_renderer_definitions_from_concept_ids(
+        ["#V#timeline_renderer"]
+    )
+
+    assert definitions == []
+    assert diagnostics["loaded_definition_count"] == 0
+    assert diagnostics["missing_profile_concept_ids"] == []
+    assert diagnostics["malformed_profile_concept_ids"] == ["#V#timeline_renderer"]
+    assert diagnostics["malformed_profile_count"] == 1
+    malformed = diagnostics["malformed_profile_entries"]
+    assert isinstance(malformed, list) and malformed
+    assert malformed[0]["concept_id"] == "#V#timeline_renderer"
+    assert "json_decode_failed" in malformed[0]["error"]
 
 
 def test_enrich_request_payload_from_concept_derives_type_and_predicates(
@@ -108,3 +154,40 @@ def test_upsert_renderer_profile_validates_and_persists_singleton_text(
     assert result["renderer_concept_id"] == "#V#timeline_renderer"
     assert result["renderer_profile"]["renderer_id"] == "#V#timeline_renderer"
     assert result["text_relation"]["kept_relation_id"] == "rel_1"
+
+
+def test_bootstrap_canonical_renderer_profiles_persists_existing_only(
+    monkeypatch,
+) -> None:
+    existing_concepts = {
+        "#V#table_renderer",
+        "#V#narration_renderer",
+    }
+    monkeypatch.setattr(
+        service,
+        "get_concept_by_concept_id",
+        lambda concept_id: {"concept_id": concept_id, "relationships": {}}
+        if concept_id in existing_concepts
+        else None,
+    )
+    persisted: list[str] = []
+    monkeypatch.setattr(
+        service,
+        "upsert_renderer_profile",
+        lambda **kwargs: (
+            persisted.append(kwargs["renderer_concept_id"]),
+            {"success": True},
+        )[1],
+    )
+
+    report = service.bootstrap_canonical_renderer_profiles(
+        concept_ids=["#V#table_renderer", "#V#narration_renderer", "#V#workflow_renderer"]
+    )
+
+    assert report["success"] is False
+    assert set(report["persisted_profile_concept_ids"]) == {
+        "#V#table_renderer",
+        "#V#narration_renderer",
+    }
+    assert report["missing_concept_ids"] == ["#V#workflow_renderer"]
+    assert set(persisted) == {"#V#table_renderer", "#V#narration_renderer"}

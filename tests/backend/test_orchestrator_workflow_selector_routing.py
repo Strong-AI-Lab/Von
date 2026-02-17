@@ -1151,6 +1151,7 @@ def test_renderer_applicability_missing_definitions_falls_back_screen_only(monke
     orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
     monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
     monkeypatch.delenv("VON_RENDERER_APPLICABILITY_DEFINITION_IDS", raising=False)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_BOOTSTRAP_DEFAULTS_ENABLE", "0")
 
     def _invoke(_tool_name: str, _payload: Mapping[str, Any]):
         raise AssertionError("Renderer applicability tool should not be invoked")
@@ -1191,6 +1192,85 @@ def test_renderer_applicability_missing_definitions_falls_back_screen_only(monke
     assert isinstance(result.render_plan, dict)
     assert result.render_plan.get("render_mode") == "screen_only"
     assert result.render_plan.get("reason") == "renderer_definition_ids_missing"
+
+
+def test_renderer_applicability_bootstrap_defaults_surface_resolver_error_details(
+    monkeypatch,
+):
+    """When env IDs are missing, canonical defaults should be used and diagnostics preserved."""
+    from src.backend.services.renderer_applicability_vontology_service import (
+        canonical_renderer_profile_concept_ids,
+    )
+
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.delenv("VON_RENDERER_APPLICABILITY_DEFINITION_IDS", raising=False)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_BOOTSTRAP_DEFAULTS_ENABLE", "1")
+
+    captured_payloads: list[dict[str, Any]] = []
+
+    def _invoke(tool_name: str, payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        captured_payloads.append(dict(payload))
+        return _InvokeResult(
+            {
+                "success": False,
+                "error": "No renderer profile metadata available",
+                "error_code": "missing_parameter",
+                "error_details": {
+                    "renderer_definition_loading": {
+                        "missing_profile_concept_ids": ["#V#table_renderer"],
+                        "malformed_profile_concept_ids": ["#V#workflow_renderer"],
+                    }
+                },
+                "suggestions": [
+                    "Use upsert_renderer_profile to persist valid profile JSON",
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    llm = _CapturingLLM(["tool_seeking", "Here is the answer on screen."])
+
+    result = orchestrator.run(
+        prompt="Explain this briefly",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert result.response_text == "Here is the answer on screen."
+    assert captured_payloads
+    expected_ids = list(canonical_renderer_profile_concept_ids())
+    assert (
+        captured_payloads[0]["renderer_definition_concept_ids"]
+        == expected_ids
+    )
+
+    renderer_entry = next(
+        (
+            entry
+            for entry in result.aux_llm_calls
+            if isinstance(entry, dict)
+            and entry.get("type") == "renderer_applicability_routing"
+        ),
+        None,
+    )
+    assert renderer_entry is not None
+    assert renderer_entry.get("attempted") is True
+    assert renderer_entry.get("success") is False
+    assert renderer_entry.get("reason") == "resolver_unsuccessful"
+    assert renderer_entry.get("renderer_definition_source") == "canonical_bootstrap_defaults"
+    assert renderer_entry.get("resolver_error_code") == "missing_parameter"
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("resolver_error_code") == "missing_parameter"
+    error_details = result.render_plan.get("resolver_error_details") or {}
+    loading = error_details.get("renderer_definition_loading") or {}
+    assert loading.get("missing_profile_concept_ids") == ["#V#table_renderer"]
+    assert loading.get("malformed_profile_concept_ids") == ["#V#workflow_renderer"]
 
 
 def test_renderer_applicability_multimodal_selection_sets_spoken_plus_screen(monkeypatch):

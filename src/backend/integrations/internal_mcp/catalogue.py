@@ -5095,6 +5095,7 @@ def _renderer_resolve_applicability(**kwargs):
         resolve_renderer_applicability_from_metadata,
     )
     from ...services.renderer_applicability_vontology_service import (
+        canonical_renderer_profile_concept_ids,
         enrich_request_payload_from_concept,
         load_renderer_definitions_from_concept_ids,
     )
@@ -5136,18 +5137,29 @@ def _renderer_resolve_applicability(**kwargs):
         effective_renderer_definitions.extend(loaded_definitions)
 
     if not effective_renderer_definitions:
+        canonical_profile_ids = list(canonical_renderer_profile_concept_ids())
+        error_details: dict[str, Any] = {
+            "missing": [
+                "renderer_definitions",
+                "renderer_definition_concept_ids",
+            ],
+            "renderer_definition_inputs": {
+                "inline_count": len(renderer_definitions or []),
+                "concept_id_count": len(renderer_definition_concept_ids or []),
+                "effective_count": len(effective_renderer_definitions),
+            },
+            "renderer_definition_loading": loading_diagnostics,
+        }
+        if canonical_profile_ids:
+            error_details["canonical_renderer_profile_concept_ids"] = canonical_profile_ids
         return make_error_response(
             "missing_parameter",
             "No renderer definitions were supplied. Provide renderer_definitions or renderer_definition_concept_ids with valid profile text.",
-            details={
-                "missing": [
-                    "renderer_definitions",
-                    "renderer_definition_concept_ids",
-                ]
-            },
+            details=error_details,
             suggestions=[
                 "Provide renderer_definitions as inline renderer metadata",
                 "Or provide renderer_definition_concept_ids where text relations contain renderer profile JSON",
+                "Use upsert_renderer_profile to persist valid profile JSON for missing/malformed renderer concepts",
             ],
         )
 

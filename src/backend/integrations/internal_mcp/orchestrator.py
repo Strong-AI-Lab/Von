@@ -10762,6 +10762,26 @@ class InternalMCPChatOrchestrator:
         renderer_definition_concept_ids = self._env_csv_values(
             "VON_RENDERER_APPLICABILITY_DEFINITION_IDS"
         )
+        renderer_definition_source = "environment"
+        bootstrap_default_renderer_ids_enabled = self._env_flag_enabled(
+            "VON_RENDERER_APPLICABILITY_BOOTSTRAP_DEFAULTS_ENABLE",
+            default="1",
+        )
+        if (
+            not renderer_definition_concept_ids
+            and bootstrap_default_renderer_ids_enabled
+        ):
+            try:
+                from ...services.renderer_applicability_vontology_service import (
+                    canonical_renderer_profile_concept_ids,
+                )
+
+                canonical_renderer_ids = canonical_renderer_profile_concept_ids()
+            except Exception:
+                canonical_renderer_ids = ()
+            if canonical_renderer_ids:
+                renderer_definition_concept_ids = tuple(canonical_renderer_ids)
+                renderer_definition_source = "canonical_bootstrap_defaults"
         renderer_preferred_modalities = self._env_csv_values(
             "VON_RENDERER_APPLICABILITY_PREFERRED_MODALITIES"
         )
@@ -11570,6 +11590,11 @@ class InternalMCPChatOrchestrator:
                 "success": False,
                 "reason": "not_evaluated",
                 "renderer_definition_count": len(renderer_definition_concept_ids),
+                "renderer_definition_source": renderer_definition_source,
+                "renderer_definition_ids": list(renderer_definition_concept_ids),
+                "bootstrap_default_renderer_ids_enabled": (
+                    bootstrap_default_renderer_ids_enabled
+                ),
                 "preferred_modalities": list(renderer_preferred_modalities),
                 "allow_multimodal": renderer_allow_multimodal,
                 "render_mode": "screen_only",
@@ -11675,6 +11700,19 @@ class InternalMCPChatOrchestrator:
                 error_text = result_payload.get("error")
                 if isinstance(error_text, str) and error_text.strip():
                     decision["error"] = error_text.strip()
+                error_code = result_payload.get("error_code")
+                if isinstance(error_code, str) and error_code.strip():
+                    decision["resolver_error_code"] = error_code.strip()
+                error_details = result_payload.get("error_details")
+                if isinstance(error_details, Mapping):
+                    decision["resolver_error_details"] = dict(error_details)
+                suggestions = result_payload.get("suggestions")
+                if isinstance(suggestions, list):
+                    decision["resolver_suggestions"] = [
+                        str(item).strip()
+                        for item in suggestions
+                        if isinstance(item, str) and str(item).strip()
+                    ]
                 _apply_screen_element_mapping(
                     decision,
                     tool_messages=tool_messages,
@@ -11730,6 +11768,9 @@ class InternalMCPChatOrchestrator:
                 selection_rationale = diagnostics_obj.get("selection_rationale")
                 if isinstance(selection_rationale, str) and selection_rationale.strip():
                     decision["selection_rationale"] = selection_rationale.strip()
+                loading_diag = diagnostics_obj.get("renderer_definition_loading")
+                if isinstance(loading_diag, Mapping):
+                    decision["renderer_definition_loading"] = dict(loading_diag)
 
             decision["reason"] = "resolved"
             decision["should_narrate"] = narration_selected

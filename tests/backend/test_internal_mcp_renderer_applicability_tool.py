@@ -155,6 +155,55 @@ def test_renderer_resolve_applicability_gateway_error_schema() -> None:
     _assert_schema_conformance(gateway, "renderer_resolve_applicability", payload)
 
 
+def test_renderer_resolve_applicability_reports_missing_or_malformed_concepts(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        renderer_applicability_vontology_service,
+        "load_renderer_definitions_from_concept_ids",
+        lambda concept_ids, profile_text_predicates=None: (
+            [],
+            {
+                "renderer_definition_source": "vontology_concept_text_relations",
+                "requested_concept_ids": list(concept_ids),
+                "loaded_concept_ids": [],
+                "unresolved_concept_ids": [],
+                "missing_profile_concept_ids": ["#V#table_renderer"],
+                "malformed_profile_concept_ids": ["#V#workflow_renderer"],
+                "malformed_profile_count": 1,
+                "malformed_profile_entries": [
+                    {
+                        "concept_id": "#V#workflow_renderer",
+                        "predicate": "#V#has_renderer_profile_json",
+                        "error": "json_decode_failed",
+                    }
+                ],
+                "loaded_definition_count": 0,
+            },
+        ),
+    )
+    gateway = _build_gateway()
+    payload = gateway.invoke(
+        "renderer_resolve_applicability",
+        {
+            "renderer_definition_concept_ids": [
+                "#V#table_renderer",
+                "#V#workflow_renderer",
+            ],
+            "request_payload": {"object_kind": "concept"},
+        },
+    ).payload
+
+    assert payload.get("success") is False
+    assert payload.get("error_code") == "missing_parameter"
+    details = payload.get("error_details") or {}
+    loading = details.get("renderer_definition_loading") or {}
+    assert loading.get("malformed_profile_concept_ids") == ["#V#workflow_renderer"]
+    assert loading.get("missing_profile_concept_ids") == ["#V#table_renderer"]
+    assert "canonical_renderer_profile_concept_ids" in details
+    _assert_schema_conformance(gateway, "renderer_resolve_applicability", payload)
+
+
 def test_upsert_renderer_profile_gateway_success(monkeypatch) -> None:
     monkeypatch.setattr(
         renderer_applicability_vontology_service,
