@@ -17,6 +17,7 @@ ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
     {
         "text_block",
         "json_block",
+        "kanban_view",
         "table",
         "relation_truth_state",
         "timeline",
@@ -688,6 +689,92 @@ def validate_turn_display_elements(
                     label=f"{task_label}.task_links",
                     errors=errors,
                 )
+        elif element_type == "kanban_view":
+            columns = payload.get("columns")
+            if not isinstance(columns, list) or not columns:
+                errors.append(f"{label}.payload.columns must be a non-empty list")
+                columns = []
+
+            valid_column_ids: set[str] = set()
+            for column_index, column in enumerate(columns):
+                column_label = f"{label}.payload.columns[{column_index}]"
+                if not isinstance(column, Mapping):
+                    errors.append(f"{column_label} must be a mapping")
+                    continue
+
+                column_id = column.get("column_id")
+                if not isinstance(column_id, str) or not column_id.strip():
+                    errors.append(f"{column_label}.column_id must be a non-empty string")
+                    continue
+                if column_id in valid_column_ids:
+                    errors.append(f"{column_label}.column_id must be unique")
+                    continue
+                valid_column_ids.add(column_id)
+
+                column_name = column.get("label")
+                if not isinstance(column_name, str) or not column_name.strip():
+                    errors.append(f"{column_label}.label must be a non-empty string")
+
+                order = column.get("order")
+                if order is not None and not isinstance(order, int):
+                    errors.append(
+                        f"{column_label}.order must be an integer when provided"
+                    )
+
+                wip_limit = column.get("wip_limit")
+                if wip_limit is not None and (
+                    not isinstance(wip_limit, int) or wip_limit <= 0
+                ):
+                    errors.append(
+                        f"{column_label}.wip_limit must be a positive integer when provided"
+                    )
+
+            cards = payload.get("cards")
+            if not isinstance(cards, list):
+                errors.append(f"{label}.payload.cards must be a list")
+                cards = []
+
+            seen_card_ids: set[str] = set()
+            for card_index, card in enumerate(cards):
+                card_label = f"{label}.payload.cards[{card_index}]"
+                if not isinstance(card, Mapping):
+                    errors.append(f"{card_label} must be a mapping")
+                    continue
+
+                card_id = card.get("card_id")
+                if not isinstance(card_id, str) or not card_id.strip():
+                    errors.append(f"{card_label}.card_id must be a non-empty string")
+                elif card_id in seen_card_ids:
+                    errors.append(f"{card_label}.card_id must be unique")
+                else:
+                    seen_card_ids.add(card_id)
+
+                title = card.get("title")
+                if not isinstance(title, str) or not title.strip():
+                    errors.append(f"{card_label}.title must be a non-empty string")
+
+                column_id = card.get("column_id")
+                if not isinstance(column_id, str) or not column_id.strip():
+                    errors.append(f"{card_label}.column_id must be a non-empty string")
+                elif valid_column_ids and column_id not in valid_column_ids:
+                    errors.append(
+                        f"{card_label}.column_id must reference a declared column"
+                    )
+
+                for field_name in ("priority", "assignee", "due_date", "description"):
+                    field_value = card.get(field_name)
+                    if field_value is None:
+                        continue
+                    if not isinstance(field_value, str) or not field_value.strip():
+                        errors.append(
+                            f"{card_label}.{field_name} must be a non-empty string when provided"
+                        )
+
+                _validate_task_links(
+                    links=card.get("task_links"),
+                    label=f"{card_label}.task_links",
+                    errors=errors,
+                )
         elif element_type == "workflow_view":
             nodes = payload.get("nodes")
             if not isinstance(nodes, list) or not nodes:
@@ -1097,6 +1184,85 @@ def _normalise_supplied_screen_task_views(
     return normalised, dropped_count
 
 
+def _normalise_supplied_screen_kanban_views(
+    screen_kanban_elements: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Normalise externally supplied screen kanban view specs."""
+    if (
+        not isinstance(screen_kanban_elements, Sequence)
+        or isinstance(screen_kanban_elements, (str, bytes, bytearray))
+    ):
+        return [], 0
+
+    normalised: list[dict[str, Any]] = []
+    dropped_count = 0
+
+    for index, raw_spec in enumerate(screen_kanban_elements, start=1):
+        if not isinstance(raw_spec, Mapping):
+            dropped_count += 1
+            continue
+
+        payload: Mapping[str, Any] | None = None
+        metadata = raw_spec
+        wrapped_payload = raw_spec.get("payload")
+        if isinstance(wrapped_payload, Mapping):
+            payload = wrapped_payload
+        elif "columns" in raw_spec and "cards" in raw_spec:
+            payload = raw_spec
+
+        if not isinstance(payload, Mapping):
+            dropped_count += 1
+            continue
+
+        intent = _normalise_text(metadata.get("intent")) or "structured_kanban_view"
+        constraints = metadata.get("constraints")
+        if not isinstance(constraints, Mapping):
+            constraints = {
+                "supports_column_grouping": True,
+                "supports_task_links": True,
+            }
+        provenance = metadata.get("provenance")
+        if not isinstance(provenance, Mapping):
+            provenance = {}
+
+        is_valid, _errors = validate_turn_display_elements(
+            {
+                "schema_version": DISPLAY_ELEMENT_SCHEMA_VERSION,
+                "elements": [
+                    {
+                        "element_id": f"screen_structured_kanban_view_probe_{index}",
+                        "element_type": "kanban_view",
+                        "channel": "screen",
+                        "order": 33,
+                        "intent": intent,
+                        "payload": dict(payload),
+                        "constraints": dict(constraints),
+                        "provenance": dict(provenance),
+                    }
+                ],
+                "reason_codes": [],
+            }
+        )
+        if not is_valid:
+            dropped_count += 1
+            continue
+
+        normalised.append(
+            {
+                "element_id": _normalise_text(metadata.get("element_id")),
+                "order": metadata.get("order")
+                if isinstance(metadata.get("order"), int)
+                else None,
+                "intent": intent,
+                "payload": dict(payload),
+                "constraints": dict(constraints),
+                "provenance": dict(provenance),
+            }
+        )
+
+    return normalised, dropped_count
+
+
 def _normalise_supplied_screen_relation_truth_states(
     screen_relation_truth_state_elements: Sequence[Mapping[str, Any]] | None,
 ) -> tuple[list[dict[str, Any]], int]:
@@ -1186,6 +1352,7 @@ def build_turn_display_elements(
     screen_table_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_task_view_elements: Sequence[Mapping[str, Any]] | None = None,
+    screen_kanban_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_timeline_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_relation_truth_state_elements: Sequence[Mapping[str, Any]] | None = None,
     supplemental_reason_codes: Sequence[str] | None = None,
@@ -1333,6 +1500,14 @@ def build_turn_display_elements(
     if supplied_task_views_dropped:
         reason_codes.append("screen_structured_task_views_invalid_dropped")
 
+    supplied_screen_kanban_views, supplied_kanban_views_dropped = (
+        _normalise_supplied_screen_kanban_views(screen_kanban_elements)
+    )
+    if supplied_screen_kanban_views:
+        reason_codes.append("screen_structured_kanban_views_supplied")
+    if supplied_kanban_views_dropped:
+        reason_codes.append("screen_structured_kanban_views_invalid_dropped")
+
     supplied_screen_timelines, supplied_timelines_dropped = (
         _normalise_supplied_screen_timelines(screen_timeline_elements)
     )
@@ -1437,6 +1612,27 @@ def build_turn_display_elements(
             }
         )
 
+    kanban_specs: list[dict[str, Any]] = []
+    for index, spec in enumerate(supplied_screen_kanban_views, start=1):
+        provenance = dict(spec.get("provenance") or {})
+        provenance.setdefault("source", "screen_structured_kanban_view")
+        provenance.setdefault("kanban_index", index)
+        kanban_specs.append(
+            {
+                "element_id": spec.get("element_id")
+                or f"screen_structured_kanban_view_{index}",
+                "order": spec.get("order"),
+                "intent": spec.get("intent") or "structured_kanban_view",
+                "payload": spec.get("payload") or {},
+                "constraints": spec.get("constraints")
+                or {
+                    "supports_column_grouping": True,
+                    "supports_task_links": True,
+                },
+                "provenance": provenance,
+            }
+        )
+
     timeline_specs: list[dict[str, Any]] = []
     for index, spec in enumerate(supplied_screen_timelines, start=1):
         provenance = dict(spec.get("provenance") or {})
@@ -1486,6 +1682,7 @@ def build_turn_display_elements(
             *table_specs,
             *workflow_specs,
             *task_view_specs,
+            *kanban_specs,
             *timeline_specs,
             *relation_truth_state_specs,
         ]
@@ -1578,6 +1775,30 @@ def build_turn_display_elements(
             {
                 "element_id": element_id,
                 "element_type": "task_view",
+                "channel": "screen",
+                "order": int(order),
+                "intent": str(spec["intent"]),
+                "payload": dict(spec["payload"]),
+                "constraints": dict(spec["constraints"]),
+                "provenance": dict(spec["provenance"]),
+            }
+        )
+
+    next_kanban_order = 33
+    for spec in kanban_specs:
+        order = spec.get("order") if isinstance(spec.get("order"), int) else None
+        if order is None:
+            while next_kanban_order in used_orders:
+                next_kanban_order += 1
+            order = next_kanban_order
+            used_orders.add(order)
+            next_kanban_order += 1
+
+        element_id = _next_unique_element_id(str(spec["element_id"]), used_ids)
+        elements.append(
+            {
+                "element_id": element_id,
+                "element_type": "kanban_view",
                 "channel": "screen",
                 "order": int(order),
                 "intent": str(spec["intent"]),

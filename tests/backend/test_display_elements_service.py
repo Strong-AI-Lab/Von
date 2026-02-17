@@ -410,6 +410,94 @@ def test_build_turn_display_elements_drops_invalid_supplied_task_views() -> None
     assert contract["validation"]["valid"] is True
 
 
+def test_build_turn_display_elements_includes_supplied_kanban_elements() -> None:
+    contract = build_turn_display_elements(
+        response_text="Kanban response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Kanban response",
+            "spoken": None,
+        },
+        screen_kanban_elements=[
+            {
+                "element_id": "screen_kanban_view",
+                "intent": "structured_kanban_view",
+                "payload": {
+                    "columns": [
+                        {"column_id": "pending", "label": "Pending", "order": 10},
+                        {"column_id": "done", "label": "Done", "order": 20},
+                    ],
+                    "cards": [
+                        {
+                            "card_id": "#V#task_alpha",
+                            "title": "Alpha task",
+                            "column_id": "pending",
+                            "priority": "high",
+                            "task_links": [
+                                {
+                                    "link_type": "jira_issue",
+                                    "target_id": "JVNAUTOSCI-1181",
+                                    "label": "JVNAUTOSCI-1181",
+                                    "href": "https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1181",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    kanban_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "kanban_view"
+    ]
+    assert len(kanban_elements) == 1
+    kanban_element = kanban_elements[0]
+    assert kanban_element["element_id"] == "screen_kanban_view"
+    assert kanban_element["payload"]["columns"][0]["column_id"] == "pending"
+    assert kanban_element["payload"]["cards"][0]["column_id"] == "pending"
+    assert "screen_structured_kanban_views_supplied" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
+def test_build_turn_display_elements_drops_invalid_supplied_kanban_views() -> None:
+    contract = build_turn_display_elements(
+        response_text="Kanban response",
+        presenter_channels={
+            "format": "tagged_blocks_v1",
+            "screen": "Kanban response",
+            "spoken": None,
+        },
+        screen_kanban_elements=[
+            {
+                "payload": {
+                    "columns": [
+                        {"column_id": "pending", "label": "Pending"},
+                    ],
+                    "cards": [
+                        {
+                            "card_id": "#V#task_alpha",
+                            "title": "Alpha task",
+                            "column_id": "missing_column",
+                        }
+                    ],
+                }
+            }
+        ],
+    )
+
+    kanban_elements = [
+        element
+        for element in contract["elements"]
+        if element["element_type"] == "kanban_view"
+    ]
+    assert kanban_elements == []
+    assert "screen_structured_kanban_views_invalid_dropped" in contract["reason_codes"]
+    assert contract["validation"]["valid"] is True
+
+
 def test_build_turn_display_elements_includes_supplied_timeline_elements() -> None:
     contract = build_turn_display_elements(
         response_text="Timeline response",
@@ -742,6 +830,40 @@ def test_validate_turn_display_elements_rejects_task_view_without_task_id() -> N
 
     assert valid is False
     assert any("must provide a non-empty task identifier" in message for message in errors)
+
+
+def test_validate_turn_display_elements_rejects_kanban_card_without_column() -> None:
+    valid, errors = validate_turn_display_elements(
+        {
+            "schema_version": "turn_display_elements_v1",
+            "elements": [
+                {
+                    "element_id": "screen_kanban_view",
+                    "element_type": "kanban_view",
+                    "channel": "screen",
+                    "order": 33,
+                    "intent": "structured_kanban_view",
+                    "payload": {
+                        "columns": [
+                            {"column_id": "pending", "label": "Pending"},
+                        ],
+                        "cards": [
+                            {
+                                "card_id": "card_1",
+                                "title": "Task without valid column",
+                                "column_id": "missing",
+                            }
+                        ],
+                    },
+                    "provenance": {"source": "test"},
+                }
+            ],
+            "reason_codes": [],
+        }
+    )
+
+    assert valid is False
+    assert any("column_id must reference a declared column" in message for message in errors)
 
 
 def test_validate_turn_display_elements_rejects_invalid_relation_truth_state_shape() -> None:

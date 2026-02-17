@@ -1410,6 +1410,8 @@ const TABLE_DEFAULT_PAGE_SIZE = 50;
 const TABLE_MAX_PAGE_SIZE = 200;
 const WORKFLOW_MAX_NODES = 100;
 const TASK_VIEW_MAX_ITEMS = 200;
+const KANBAN_MAX_COLUMNS = 30;
+const KANBAN_MAX_CARDS = 200;
 const TIMELINE_MAX_ITEMS = 200;
 const RELATION_TRUTH_STATE_MAX_GROUPS = 50;
 const RELATION_TRUTH_STATE_MAX_ASSERTIONS_PER_GROUP = 200;
@@ -1725,6 +1727,96 @@ function normaliseWorkflowTaskLink(rawLink) {
     };
 }
 
+function normaliseTaskLikeDisplayItem(rawTask, index, fallbackPrefix = 'task') {
+    if (!rawTask || typeof rawTask !== 'object') {
+        return null;
+    }
+
+    const taskId = (
+        typeof rawTask.task_id === 'string' && rawTask.task_id.trim()
+            ? rawTask.task_id.trim()
+            : (
+                typeof rawTask.task_concept_id === 'string' && rawTask.task_concept_id.trim()
+                    ? rawTask.task_concept_id.trim()
+                    : (typeof rawTask.id === 'string' && rawTask.id.trim() ? rawTask.id.trim() : '')
+            )
+    ) || `${fallbackPrefix}_${index + 1}`;
+    const title = (
+        typeof rawTask.title === 'string' && rawTask.title.trim()
+            ? rawTask.title.trim()
+            : (
+                typeof rawTask.label === 'string' && rawTask.label.trim()
+                    ? rawTask.label.trim()
+                    : taskId
+            )
+    );
+    const status = typeof rawTask.status === 'string' && rawTask.status.trim()
+        ? rawTask.status.trim().toLowerCase()
+        : '';
+    const priority = typeof rawTask.priority === 'string' ? rawTask.priority.trim() : '';
+    const dueDate = typeof rawTask.due_date === 'string' ? rawTask.due_date.trim() : '';
+    const assignee = typeof rawTask.assignee === 'string' ? rawTask.assignee.trim() : '';
+    const description = typeof rawTask.description === 'string' ? rawTask.description.trim() : '';
+    const rawTaskLinks = Array.isArray(rawTask.task_links) ? rawTask.task_links : [];
+    const taskLinks = rawTaskLinks
+        .map((link) => normaliseWorkflowTaskLink(link))
+        .filter(Boolean);
+
+    return {
+        task_id: taskId,
+        title,
+        status,
+        priority,
+        due_date: dueDate,
+        assignee,
+        description,
+        task_links: taskLinks
+    };
+}
+
+function appendTaskLinksToCard(parent, rawLinks, linksClassName) {
+    if (!parent || !Array.isArray(rawLinks) || rawLinks.length === 0) {
+        return;
+    }
+
+    const linksWrap = document.createElement('div');
+    linksWrap.className = linksClassName;
+    linksWrap.style.cssText = 'margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px;';
+
+    rawLinks.forEach((link) => {
+        if (!link || typeof link !== 'object') {
+            return;
+        }
+        if (link.link_type === 'von_task') {
+            const conceptId = _normalisePotentialConceptId(link.target_id);
+            if (!conceptId) {
+                return;
+            }
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'chat-display-elements-concept-link';
+            button.dataset.conceptId = conceptId;
+            button.textContent = link.label || conceptId;
+            button.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; cursor: pointer;';
+            linksWrap.appendChild(button);
+            return;
+        }
+        if (link.link_type === 'jira_issue' && link.href) {
+            const anchor = document.createElement('a');
+            anchor.href = link.href;
+            anchor.target = '_blank';
+            anchor.rel = 'noopener noreferrer';
+            anchor.textContent = link.label || link.target_id;
+            anchor.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; text-decoration: none;';
+            linksWrap.appendChild(anchor);
+        }
+    });
+
+    if (linksWrap.childElementCount > 0) {
+        parent.appendChild(linksWrap);
+    }
+}
+
 function normaliseWorkflowDisplayElement(element) {
     if (!element || typeof element !== 'object') {
         return null;
@@ -1854,51 +1946,7 @@ function normaliseTaskViewDisplayElement(element) {
 
     const rawTasks = Array.isArray(payload.tasks) ? payload.tasks : [];
     const tasks = rawTasks
-        .map((task, index) => {
-            if (!task || typeof task !== 'object') {
-                return null;
-            }
-            const taskId = (
-                typeof task.task_id === 'string' && task.task_id.trim()
-                    ? task.task_id.trim()
-                    : (
-                        typeof task.task_concept_id === 'string' && task.task_concept_id.trim()
-                            ? task.task_concept_id.trim()
-                            : (typeof task.id === 'string' && task.id.trim() ? task.id.trim() : '')
-                    )
-            ) || `task_${index + 1}`;
-            const title = (
-                typeof task.title === 'string' && task.title.trim()
-                    ? task.title.trim()
-                    : (
-                        typeof task.label === 'string' && task.label.trim()
-                            ? task.label.trim()
-                            : taskId
-                    )
-            );
-            const status = typeof task.status === 'string' && task.status.trim()
-                ? task.status.trim().toLowerCase()
-                : '';
-            const priority = typeof task.priority === 'string' ? task.priority.trim() : '';
-            const dueDate = typeof task.due_date === 'string' ? task.due_date.trim() : '';
-            const assignee = typeof task.assignee === 'string' ? task.assignee.trim() : '';
-            const description = typeof task.description === 'string' ? task.description.trim() : '';
-            const rawTaskLinks = Array.isArray(task.task_links) ? task.task_links : [];
-            const taskLinks = rawTaskLinks
-                .map((link) => normaliseWorkflowTaskLink(link))
-                .filter(Boolean);
-
-            return {
-                task_id: taskId,
-                title,
-                status,
-                priority,
-                due_date: dueDate,
-                assignee,
-                description,
-                task_links: taskLinks
-            };
-        })
+        .map((task, index) => normaliseTaskLikeDisplayItem(task, index, 'task'))
         .filter(Boolean)
         .slice(0, TASK_VIEW_MAX_ITEMS);
 
@@ -1927,6 +1975,145 @@ function resolveTaskViewDisplayElements(debugData) {
         taskViews.push(taskViewElement);
     }
     return taskViews;
+}
+
+function normaliseKanbanDisplayElement(element) {
+    if (!element || typeof element !== 'object') {
+        return null;
+    }
+    if (String(element.element_type || '').trim() !== 'kanban_view') {
+        return null;
+    }
+
+    const payload = element.payload;
+    if (!payload || typeof payload !== 'object') {
+        return null;
+    }
+
+    const rawColumns = Array.isArray(payload.columns) ? payload.columns : [];
+    const columnMap = new Map();
+    rawColumns.forEach((column, index) => {
+        if (!column || typeof column !== 'object') {
+            return;
+        }
+        const columnId = typeof column.column_id === 'string' ? column.column_id.trim() : '';
+        const label = typeof column.label === 'string' ? column.label.trim() : '';
+        if (!columnId || !label || columnMap.has(columnId)) {
+            return;
+        }
+        const order = Number.isInteger(column.order) ? Number(column.order) : (index + 1);
+        const wipLimit = Number.isInteger(column.wip_limit) && Number(column.wip_limit) > 0
+            ? Number(column.wip_limit)
+            : null;
+        columnMap.set(columnId, {
+            column_id: columnId,
+            label,
+            order,
+            wip_limit: wipLimit
+        });
+    });
+
+    if (!columnMap.size) {
+        return null;
+    }
+
+    const orderedColumns = Array.from(columnMap.values())
+        .sort((left, right) => {
+            if (left.order !== right.order) {
+                return left.order - right.order;
+            }
+            return String(left.column_id).localeCompare(String(right.column_id));
+        })
+        .slice(0, KANBAN_MAX_COLUMNS);
+    const validColumnIds = new Set(orderedColumns.map((column) => column.column_id));
+    const fallbackColumnId = orderedColumns[0]?.column_id || null;
+
+    const rawCards = Array.isArray(payload.cards) ? payload.cards : [];
+    const seenCardIds = new Set();
+    const cards = rawCards
+        .map((card, index) => {
+            if (!card || typeof card !== 'object') {
+                return null;
+            }
+            const cardId = typeof card.card_id === 'string' && card.card_id.trim()
+                ? card.card_id.trim()
+                : `card_${index + 1}`;
+            if (seenCardIds.has(cardId)) {
+                return null;
+            }
+            seenCardIds.add(cardId);
+
+            const title = typeof card.title === 'string' && card.title.trim()
+                ? card.title.trim()
+                : cardId;
+            const rawColumnId = typeof card.column_id === 'string' ? card.column_id.trim() : '';
+            const resolvedColumnId = validColumnIds.has(rawColumnId)
+                ? rawColumnId
+                : fallbackColumnId;
+            if (!resolvedColumnId) {
+                return null;
+            }
+            const normalisedCard = normaliseTaskLikeDisplayItem(
+                {
+                    task_id: cardId,
+                    title,
+                    status: resolvedColumnId,
+                    priority: card.priority,
+                    assignee: card.assignee,
+                    due_date: card.due_date,
+                    description: card.description,
+                    task_links: card.task_links
+                },
+                index,
+                'card'
+            );
+            if (!normalisedCard) {
+                return null;
+            }
+            return {
+                card_id: cardId,
+                title: normalisedCard.title,
+                column_id: resolvedColumnId,
+                priority: normalisedCard.priority,
+                assignee: normalisedCard.assignee,
+                due_date: normalisedCard.due_date,
+                description: normalisedCard.description,
+                task_links: normalisedCard.task_links
+            };
+        })
+        .filter(Boolean)
+        .slice(0, KANBAN_MAX_CARDS)
+        .sort((left, right) => {
+            const leftOrder = orderedColumns.find((column) => column.column_id === left.column_id)?.order ?? Number.MAX_SAFE_INTEGER;
+            const rightOrder = orderedColumns.find((column) => column.column_id === right.column_id)?.order ?? Number.MAX_SAFE_INTEGER;
+            if (leftOrder !== rightOrder) {
+                return leftOrder - rightOrder;
+            }
+            return String(left.card_id).localeCompare(String(right.card_id));
+        });
+
+    return {
+        element_id: typeof element.element_id === 'string' ? element.element_id : null,
+        columns: orderedColumns,
+        cards
+    };
+}
+
+function resolveKanbanDisplayElements(debugData) {
+    const contract = normaliseDisplayElementsContract(debugData?.display_elements);
+    if (!contract) {
+        return [];
+    }
+
+    const kanbanViews = [];
+    for (const element of contract.elements) {
+        const kanbanElement = normaliseKanbanDisplayElement(element);
+        if (!kanbanElement) {
+            continue;
+        }
+        kanbanViews.push(kanbanElement);
+    }
+    return kanbanViews;
 }
 
 function parseTimelineTimestamp(rawValue) {
@@ -2230,12 +2417,14 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     const tableElements = resolveTableDisplayElements(debugData);
     const workflowElements = resolveWorkflowDisplayElements(debugData);
     const taskViewElements = resolveTaskViewDisplayElements(debugData);
+    const kanbanElements = resolveKanbanDisplayElements(debugData);
     const timelineElements = resolveTimelineDisplayElements(debugData);
     const relationTruthStateElements = resolveRelationTruthStateDisplayElements(debugData);
     if (
         !tableElements.length
         && !workflowElements.length
         && !taskViewElements.length
+        && !kanbanElements.length
         && !timelineElements.length
         && !relationTruthStateElements.length
     ) {
@@ -2447,45 +2636,11 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
                 card.appendChild(meta);
             }
 
-            if (Array.isArray(node.task_links) && node.task_links.length) {
-                const linksWrap = document.createElement('div');
-                linksWrap.className = 'chat-display-elements-workflow-node-links';
-                linksWrap.style.cssText = 'margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px;';
-
-                node.task_links.forEach((link) => {
-                    if (!link || typeof link !== 'object') {
-                        return;
-                    }
-                    if (link.link_type === 'von_task') {
-                        const conceptId = _normalisePotentialConceptId(link.target_id);
-                        if (!conceptId) {
-                            return;
-                        }
-                        const button = document.createElement('button');
-                        button.type = 'button';
-                        button.className = 'chat-display-elements-concept-link';
-                        button.dataset.conceptId = conceptId;
-                        button.textContent = link.label || conceptId;
-                        button.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; cursor: pointer;';
-                        linksWrap.appendChild(button);
-                        return;
-                    }
-                    if (link.link_type === 'jira_issue' && link.href) {
-                        const anchor = document.createElement('a');
-                        anchor.href = link.href;
-                        anchor.target = '_blank';
-                        anchor.rel = 'noopener noreferrer';
-                        anchor.textContent = link.label || link.target_id;
-                        anchor.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; text-decoration: none;';
-                        linksWrap.appendChild(anchor);
-                        return;
-                    }
-                });
-
-                if (linksWrap.childElementCount > 0) {
-                    card.appendChild(linksWrap);
-                }
-            }
+            appendTaskLinksToCard(
+                card,
+                node.task_links,
+                'chat-display-elements-workflow-node-links'
+            );
 
             list.appendChild(card);
         });
@@ -2570,49 +2725,157 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
                 card.appendChild(meta);
             }
 
-            if (Array.isArray(task.task_links) && task.task_links.length) {
-                const linksWrap = document.createElement('div');
-                linksWrap.className = 'chat-display-elements-task-view-item-links';
-                linksWrap.style.cssText = 'margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px;';
-
-                task.task_links.forEach((link) => {
-                    if (!link || typeof link !== 'object') {
-                        return;
-                    }
-                    if (link.link_type === 'von_task') {
-                        const conceptId = _normalisePotentialConceptId(link.target_id);
-                        if (!conceptId) {
-                            return;
-                        }
-                        const button = document.createElement('button');
-                        button.type = 'button';
-                        button.className = 'chat-display-elements-concept-link';
-                        button.dataset.conceptId = conceptId;
-                        button.textContent = link.label || conceptId;
-                        button.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; cursor: pointer;';
-                        linksWrap.appendChild(button);
-                        return;
-                    }
-                    if (link.link_type === 'jira_issue' && link.href) {
-                        const anchor = document.createElement('a');
-                        anchor.href = link.href;
-                        anchor.target = '_blank';
-                        anchor.rel = 'noopener noreferrer';
-                        anchor.textContent = link.label || link.target_id;
-                        anchor.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; text-decoration: none;';
-                        linksWrap.appendChild(anchor);
-                    }
-                });
-
-                if (linksWrap.childElementCount > 0) {
-                    card.appendChild(linksWrap);
-                }
-            }
+            appendTaskLinksToCard(
+                card,
+                task.task_links,
+                'chat-display-elements-task-view-item-links'
+            );
 
             list.appendChild(card);
         });
 
         section.appendChild(list);
+        root.appendChild(section);
+    });
+
+    kanbanElements.forEach((kanbanElement, kanbanIndex) => {
+        const section = document.createElement('section');
+        section.className = 'chat-display-elements-kanban-section';
+        section.style.cssText = (
+            tableElements.length > 0
+            || workflowElements.length > 0
+            || taskViewElements.length > 0
+            || kanbanIndex > 0
+        ) ? 'margin-top: 10px;' : '';
+
+        const title = document.createElement('div');
+        title.className = 'chat-display-elements-kanban-title';
+        title.textContent = kanbanElements.length > 1
+            ? `Kanban view ${kanbanIndex + 1}`
+            : 'Kanban view';
+        title.style.cssText = 'font-weight: 600; font-size: 0.85em; color: #2f4f6f; margin-bottom: 6px;';
+        section.appendChild(title);
+
+        const summary = document.createElement('div');
+        summary.className = 'chat-display-elements-kanban-summary';
+        summary.textContent = `${kanbanElement.cards.length} card${kanbanElement.cards.length === 1 ? '' : 's'} in ${kanbanElement.columns.length} column${kanbanElement.columns.length === 1 ? '' : 's'}`;
+        summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
+        section.appendChild(summary);
+
+        const board = document.createElement('div');
+        board.className = 'chat-display-elements-kanban-board';
+        board.style.cssText = 'display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));';
+
+        const cardsByColumnId = new Map();
+        for (const card of kanbanElement.cards) {
+            const columnId = typeof card.column_id === 'string' ? card.column_id : '';
+            if (!columnId) {
+                continue;
+            }
+            if (!cardsByColumnId.has(columnId)) {
+                cardsByColumnId.set(columnId, []);
+            }
+            cardsByColumnId.get(columnId).push(card);
+        }
+
+        kanbanElement.columns.forEach((column) => {
+            const columnCards = cardsByColumnId.get(column.column_id) || [];
+            const columnWrap = document.createElement('article');
+            columnWrap.className = 'chat-display-elements-kanban-column';
+            columnWrap.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; padding: 8px; background: #f8fbff;';
+
+            const columnHeader = document.createElement('div');
+            columnHeader.className = 'chat-display-elements-kanban-column-header';
+            columnHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px;';
+
+            const columnName = document.createElement('div');
+            columnName.className = 'chat-display-elements-kanban-column-name';
+            columnName.textContent = column.label;
+            columnName.style.cssText = 'font-size: 0.82em; font-weight: 600; color: #1f3d5a;';
+            columnHeader.appendChild(columnName);
+
+            const columnMeta = document.createElement('div');
+            columnMeta.className = 'chat-display-elements-kanban-column-meta';
+            const wipLabel = Number.isInteger(column.wip_limit) && Number(column.wip_limit) > 0
+                ? ` / WIP ${column.wip_limit}`
+                : '';
+            columnMeta.textContent = `${columnCards.length}${wipLabel}`;
+            columnMeta.style.cssText = 'font-size: 0.74em; color: #5a6b7b;';
+            columnHeader.appendChild(columnMeta);
+
+            columnWrap.appendChild(columnHeader);
+
+            const cardList = document.createElement('div');
+            cardList.className = 'chat-display-elements-kanban-card-list';
+            cardList.style.cssText = 'display: grid; gap: 6px;';
+
+            if (!columnCards.length) {
+                const empty = document.createElement('div');
+                empty.className = 'chat-display-elements-kanban-empty';
+                empty.textContent = 'No cards';
+                empty.style.cssText = 'font-size: 0.76em; color: #7b8794; padding: 6px 4px;';
+                cardList.appendChild(empty);
+            } else {
+                columnCards.forEach((card) => {
+                    const priorityClass = String(card.priority || 'none')
+                        .toLowerCase()
+                        .replace(/[^a-z0-9_-]+/g, '-');
+                    const cardEl = document.createElement('article');
+                    cardEl.className = `chat-display-elements-kanban-card priority-${priorityClass}`;
+                    cardEl.style.cssText = 'border: 1px solid #dce3ea; border-radius: 6px; background: #fff; padding: 7px;';
+
+                    const cardHeader = document.createElement('div');
+                    cardHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px;';
+
+                    const cardTitle = document.createElement('div');
+                    cardTitle.className = 'chat-display-elements-kanban-card-title';
+                    cardTitle.textContent = card.title;
+                    cardTitle.style.cssText = 'font-size: 0.81em; font-weight: 600; color: #1f3d5a;';
+                    cardHeader.appendChild(cardTitle);
+
+                    if (card.priority) {
+                        const priorityBadge = document.createElement('span');
+                        priorityBadge.className = `workflow-status-badge status-${priorityClass}`;
+                        priorityBadge.textContent = String(card.priority);
+                        cardHeader.appendChild(priorityBadge);
+                    }
+                    cardEl.appendChild(cardHeader);
+
+                    const details = [];
+                    if (card.card_id) {
+                        details.push(`Card: ${card.card_id}`);
+                    }
+                    if (card.assignee) {
+                        details.push(`Assignee: ${card.assignee}`);
+                    }
+                    if (card.due_date) {
+                        details.push(`Due: ${card.due_date}`);
+                    }
+                    if (card.description) {
+                        details.push(card.description);
+                    }
+                    if (details.length) {
+                        const meta = document.createElement('div');
+                        meta.className = 'chat-display-elements-kanban-card-meta';
+                        meta.textContent = details.join(' · ');
+                        meta.style.cssText = 'margin-top: 4px; font-size: 0.78em; color: #44576a;';
+                        cardEl.appendChild(meta);
+                    }
+
+                    appendTaskLinksToCard(
+                        cardEl,
+                        card.task_links,
+                        'chat-display-elements-kanban-card-links'
+                    );
+                    cardList.appendChild(cardEl);
+                });
+            }
+
+            columnWrap.appendChild(cardList);
+            board.appendChild(columnWrap);
+        });
+
+        section.appendChild(board);
         root.appendChild(section);
     });
 
@@ -2623,6 +2886,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             tableElements.length > 0
             || workflowElements.length > 0
             || taskViewElements.length > 0
+            || kanbanElements.length > 0
             || timelineIndex > 0
         ) ? 'margin-top: 10px;' : '';
 
@@ -2685,44 +2949,11 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
                 card.appendChild(meta);
             }
 
-            if (Array.isArray(item.task_links) && item.task_links.length) {
-                const linksWrap = document.createElement('div');
-                linksWrap.className = 'chat-display-elements-timeline-item-links';
-                linksWrap.style.cssText = 'margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px;';
-
-                item.task_links.forEach((link) => {
-                    if (!link || typeof link !== 'object') {
-                        return;
-                    }
-                    if (link.link_type === 'von_task') {
-                        const conceptId = _normalisePotentialConceptId(link.target_id);
-                        if (!conceptId) {
-                            return;
-                        }
-                        const button = document.createElement('button');
-                        button.type = 'button';
-                        button.className = 'chat-display-elements-concept-link';
-                        button.dataset.conceptId = conceptId;
-                        button.textContent = link.label || conceptId;
-                        button.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; cursor: pointer;';
-                        linksWrap.appendChild(button);
-                        return;
-                    }
-                    if (link.link_type === 'jira_issue' && link.href) {
-                        const anchor = document.createElement('a');
-                        anchor.href = link.href;
-                        anchor.target = '_blank';
-                        anchor.rel = 'noopener noreferrer';
-                        anchor.textContent = link.label || link.target_id;
-                        anchor.style.cssText = 'border: 1px solid #cad5df; background: #f4f8fc; border-radius: 999px; padding: 1px 8px; font-size: 0.75em; color: #1f4f7a; text-decoration: none;';
-                        linksWrap.appendChild(anchor);
-                    }
-                });
-
-                if (linksWrap.childElementCount > 0) {
-                    card.appendChild(linksWrap);
-                }
-            }
+            appendTaskLinksToCard(
+                card,
+                item.task_links,
+                'chat-display-elements-timeline-item-links'
+            );
 
             list.appendChild(card);
         });
@@ -2738,6 +2969,7 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
             tableElements.length > 0
             || workflowElements.length > 0
             || taskViewElements.length > 0
+            || kanbanElements.length > 0
             || timelineElements.length > 0
             || relationIndex > 0
         ) ? 'margin-top: 10px;' : '';
@@ -2978,6 +3210,7 @@ function extractRenderPlanSourceSummary(
     screenTableRecordSets,
     screenWorkflowElements,
     screenTaskViewElements,
+    screenKanbanElements,
     screenTimelineElements
 ) {
     const sourceTools = [];
@@ -3039,6 +3272,12 @@ function extractRenderPlanSourceSummary(
         }
         addProvenance(taskViewElement.provenance);
     }
+    for (const kanbanElement of screenKanbanElements) {
+        if (!kanbanElement || typeof kanbanElement !== 'object') {
+            continue;
+        }
+        addProvenance(kanbanElement.provenance);
+    }
     for (const timelineElement of screenTimelineElements) {
         if (!timelineElement || typeof timelineElement !== 'object') {
             continue;
@@ -3080,6 +3319,9 @@ function buildRenderPlanMetadataSummary(renderPlan) {
     const screenTaskViewElements = Array.isArray(renderPlan.screen_task_view_elements)
         ? renderPlan.screen_task_view_elements.filter(item => item && typeof item === 'object')
         : [];
+    const screenKanbanElements = Array.isArray(renderPlan.screen_kanban_elements)
+        ? renderPlan.screen_kanban_elements.filter(item => item && typeof item === 'object')
+        : [];
     const screenTimelineElements = Array.isArray(renderPlan.screen_timeline_elements)
         ? renderPlan.screen_timeline_elements.filter(item => item && typeof item === 'object')
         : [];
@@ -3088,6 +3330,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screenTableRecordSets,
         screenWorkflowElements,
         screenTaskViewElements,
+        screenKanbanElements,
         screenTimelineElements
     );
 
@@ -3116,6 +3359,7 @@ function buildRenderPlanMetadataSummary(renderPlan) {
         screen_table_record_set_count: screenTableRecordSets.length,
         screen_workflow_element_count: screenWorkflowElements.length,
         screen_task_view_element_count: screenTaskViewElements.length,
+        screen_kanban_element_count: screenKanbanElements.length,
         screen_timeline_element_count: screenTimelineElements.length,
         unsupported_selected_renderer_types: unsupportedRendererTypes,
         resolver_suggestions: resolverSuggestions
@@ -3179,6 +3423,7 @@ function buildRenderPlanSummaryHtml(renderPlanSummary) {
     addScalar('Screen table record sets', renderPlanSummary.screen_table_record_set_count);
     addScalar('Screen workflow elements', renderPlanSummary.screen_workflow_element_count);
     addScalar('Screen task views', renderPlanSummary.screen_task_view_element_count);
+    addScalar('Screen kanban elements', renderPlanSummary.screen_kanban_element_count);
     addScalar('Screen timeline elements', renderPlanSummary.screen_timeline_element_count);
     addList('Source tools', renderPlanSummary.source_tools);
     addList('Record families', renderPlanSummary.record_families);

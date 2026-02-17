@@ -10989,6 +10989,85 @@ class InternalMCPChatOrchestrator:
 
             return links
 
+        def _extract_renderer_task_entries(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+            limit: int = 200,
+        ) -> tuple[list[dict[str, Any]], list[str]]:
+            """Extract canonical task entries from task-oriented tool payloads."""
+
+            task_tool_names = {"task_list", "task_search", "list_my_tasks"}
+            source_tools: list[str] = []
+            seen_source_tools: set[str] = set()
+            task_entries: list[dict[str, Any]] = []
+            seen_task_ids: set[str] = set()
+
+            for tool_name, payload in _iter_renderer_tool_result_payloads(tool_messages):
+                if tool_name not in task_tool_names:
+                    continue
+
+                if tool_name not in seen_source_tools:
+                    seen_source_tools.add(tool_name)
+                    source_tools.append(tool_name)
+
+                task_rows = _mapping_list(payload.get("tasks") or payload.get("results"))
+                for index, task in enumerate(task_rows, start=1):
+                    task_id = _first_text(
+                        task.get("task_concept_id"),
+                        task.get("task_id"),
+                        task.get("concept_id"),
+                        task.get("id"),
+                    )
+                    if not task_id:
+                        task_id = f"{tool_name}_task_{index}"
+                    if task_id in seen_task_ids:
+                        continue
+                    seen_task_ids.add(task_id)
+
+                    title = _first_text(
+                        task.get("title"),
+                        task.get("task_title"),
+                        task.get("name"),
+                    ) or task_id
+                    task_entry: dict[str, Any] = {
+                        "task_id": task_id,
+                        "title": title,
+                    }
+                    status = _first_text(task.get("status"))
+                    if status:
+                        task_entry["status"] = status.lower()
+                    priority = _first_text(task.get("priority"))
+                    if priority:
+                        task_entry["priority"] = priority
+                    due_date = _first_text(task.get("due_date"), task.get("due_at"))
+                    if due_date:
+                        task_entry["due_date"] = due_date
+                    assignee = _first_text(
+                        task.get("assignee_concept_id"),
+                        task.get("assignee_id"),
+                        task.get("assignee"),
+                    )
+                    if assignee:
+                        task_entry["assignee"] = assignee
+                    description = _first_text(
+                        task.get("description"),
+                        task.get("summary"),
+                    )
+                    if description:
+                        task_entry["description"] = description
+
+                    task_links = _collect_renderer_task_links(task)
+                    if task_links:
+                        task_entry["task_links"] = task_links
+
+                    task_entries.append(task_entry)
+                    if len(task_entries) >= limit:
+                        break
+                if len(task_entries) >= limit:
+                    break
+
+            return task_entries, source_tools
+
         def _extract_renderer_screen_table_record_sets(
             *,
             tool_messages: Sequence[Mapping[str, Any]] = (),
@@ -11386,70 +11465,10 @@ class InternalMCPChatOrchestrator:
         ) -> list[dict[str, Any]]:
             """Derive task view payloads from task-oriented tool outputs."""
 
-            task_tool_names = {"task_list", "task_search", "list_my_tasks"}
-            source_tools: list[str] = []
-            seen_source_tools: set[str] = set()
-            tasks_payload: list[dict[str, Any]] = []
-
-            for tool_name, payload in _iter_renderer_tool_result_payloads(tool_messages):
-                if tool_name not in task_tool_names:
-                    continue
-
-                if tool_name not in seen_source_tools:
-                    seen_source_tools.add(tool_name)
-                    source_tools.append(tool_name)
-
-                task_rows = _mapping_list(payload.get("tasks") or payload.get("results"))
-                for index, task in enumerate(task_rows, start=1):
-                    task_id = _first_text(
-                        task.get("task_concept_id"),
-                        task.get("task_id"),
-                        task.get("concept_id"),
-                        task.get("id"),
-                    )
-                    title = _first_text(
-                        task.get("title"),
-                        task.get("task_title"),
-                        task.get("name"),
-                    ) or task_id or f"Task {index}"
-                    if not task_id:
-                        task_id = f"{tool_name}_task_{index}"
-                    task_entry: dict[str, Any] = {
-                        "task_id": task_id,
-                        "title": title,
-                    }
-                    status = _first_text(task.get("status"))
-                    if status:
-                        task_entry["status"] = status.lower()
-                    priority = _first_text(task.get("priority"))
-                    if priority:
-                        task_entry["priority"] = priority
-                    due_date = _first_text(task.get("due_date"), task.get("due_at"))
-                    if due_date:
-                        task_entry["due_date"] = due_date
-                    assignee = _first_text(
-                        task.get("assignee_concept_id"),
-                        task.get("assignee_id"),
-                        task.get("assignee"),
-                    )
-                    if assignee:
-                        task_entry["assignee"] = assignee
-                    description = _first_text(
-                        task.get("description"),
-                        task.get("summary"),
-                    )
-                    if description:
-                        task_entry["description"] = description
-
-                    task_links = _collect_renderer_task_links(task)
-                    if task_links:
-                        task_entry["task_links"] = task_links
-
-                    tasks_payload.append(task_entry)
-                    if len(tasks_payload) >= 200:
-                        break
-                if len(tasks_payload) >= 200:
-                    break
+            tasks_payload, source_tools = _extract_renderer_task_entries(
+                tool_messages=tool_messages,
+                limit=200,
+            )
 
             if not tasks_payload:
                 return []
@@ -11467,6 +11486,164 @@ class InternalMCPChatOrchestrator:
                         "source": "tool_result_task_view",
                         "source_tools": source_tools,
                         "record_family": "tasks",
+                    },
+                }
+            ]
+
+        def _extract_renderer_screen_kanban_elements(
+            *,
+            tool_messages: Sequence[Mapping[str, Any]] = (),
+        ) -> list[dict[str, Any]]:
+            """Derive kanban payloads from task and workflow tool outputs."""
+
+            tasks_payload, source_tools = _extract_renderer_task_entries(
+                tool_messages=tool_messages,
+                limit=200,
+            )
+            source_tool_set: set[str] = set(source_tools)
+
+            seen_card_ids: set[str] = set()
+            cards: list[dict[str, Any]] = []
+
+            def _normalise_column_id(raw_status: Any) -> str:
+                if isinstance(raw_status, str) and raw_status.strip():
+                    base = raw_status.strip().lower()
+                else:
+                    base = "uncategorised"
+                return re.sub(r"[^a-z0-9_]+", "_", base).strip("_") or "uncategorised"
+
+            def _append_task_card(task_row: Mapping[str, Any], fallback_card_id: str) -> None:
+                card_id = _first_text(task_row.get("task_id"), task_row.get("task_concept_id"))
+                if not card_id:
+                    card_id = fallback_card_id
+                if card_id in seen_card_ids:
+                    return
+                seen_card_ids.add(card_id)
+
+                title = _first_text(task_row.get("title")) or card_id
+                column_id = _normalise_column_id(task_row.get("status"))
+                card: dict[str, Any] = {
+                    "card_id": card_id,
+                    "title": title,
+                    "column_id": column_id,
+                }
+                for field_name in ("priority", "assignee", "due_date", "description"):
+                    field_value = _first_text(task_row.get(field_name))
+                    if field_value:
+                        card[field_name] = field_value
+
+                task_links = _collect_renderer_task_links(task_row)
+                if task_links:
+                    card["task_links"] = task_links
+                cards.append(card)
+
+            for index, task in enumerate(tasks_payload, start=1):
+                _append_task_card(task, f"task_card_{index}")
+                if len(cards) >= 200:
+                    break
+
+            if len(cards) < 200:
+                for tool_name, payload in _iter_renderer_tool_result_payloads(tool_messages):
+                    workflow_rows: list[Mapping[str, Any]]
+                    if tool_name == "workflow_list_instances":
+                        workflow_rows = _mapping_list(payload.get("instances"), limit=200)
+                    elif tool_name == "workflow_get_instance":
+                        workflow_rows = [payload] if isinstance(payload, Mapping) else []
+                    else:
+                        continue
+
+                    if tool_name not in source_tool_set:
+                        source_tool_set.add(tool_name)
+                        source_tools.append(tool_name)
+
+                    for index, workflow_row in enumerate(workflow_rows, start=1):
+                        instance_id = _first_text(workflow_row.get("instance_id"))
+                        workflow_id = _first_text(workflow_row.get("workflow_id"))
+                        card_id = (
+                            instance_id
+                            or workflow_id
+                            or f"{tool_name}_workflow_card_{index}"
+                        )
+                        title = workflow_id or instance_id or f"Workflow {index}"
+                        status = _first_text(workflow_row.get("status"))
+                        current_state = _first_text(workflow_row.get("current_state"))
+                        task_like_row: dict[str, Any] = {
+                            "task_id": card_id,
+                            "title": title,
+                        }
+                        if status:
+                            task_like_row["status"] = status
+                        if current_state:
+                            task_like_row["description"] = current_state
+                        task_links = _collect_renderer_task_links(workflow_row)
+                        if task_links:
+                            task_like_row["task_links"] = task_links
+                        _append_task_card(task_like_row, card_id)
+                        if len(cards) >= 200:
+                            break
+                    if len(cards) >= 200:
+                        break
+
+            if not cards:
+                return []
+
+            order_by_column_id: dict[str, int] = {
+                "backlog": 10,
+                "todo": 20,
+                "pending": 30,
+                "running": 40,
+                "in_progress": 50,
+                "blocked": 60,
+                "in_review": 70,
+                "done": 80,
+                "completed": 90,
+                "cancelled": 100,
+                "failed": 110,
+                "unknown": 120,
+                "uncategorised": 130,
+            }
+            columns_map: dict[str, dict[str, Any]] = {}
+            next_dynamic_order = 200
+            for card in cards:
+                column_id = str(card.get("column_id") or "").strip()
+                if not column_id:
+                    column_id = "uncategorised"
+                    card["column_id"] = column_id
+                if column_id in columns_map:
+                    continue
+
+                order = order_by_column_id.get(column_id)
+                if order is None:
+                    order = next_dynamic_order
+                    next_dynamic_order += 1
+                label = re.sub(r"_+", " ", column_id).strip().title() or "Uncategorised"
+                columns_map[column_id] = {
+                    "column_id": column_id,
+                    "label": label,
+                    "order": int(order),
+                }
+
+            ordered_columns = sorted(
+                columns_map.values(),
+                key=lambda item: (int(item.get("order", 0)), str(item.get("column_id", ""))),
+            )
+
+            return [
+                {
+                    "element_id": "screen_kanban_view",
+                    "intent": "structured_kanban_view",
+                    "payload": {
+                        "columns": ordered_columns,
+                        "cards": cards,
+                    },
+                    "constraints": {
+                        "supports_column_grouping": True,
+                        "supports_task_links": True,
+                    },
+                    "provenance": {
+                        "source": "tool_result_kanban_view",
+                        "source_tools": source_tools,
+                        "record_family": "tasks_and_workflows",
                     },
                 }
             ]
@@ -11764,6 +11941,8 @@ class InternalMCPChatOrchestrator:
         _RENDERER_SCREEN_ELEMENT_FAMILY_MAP: dict[str, tuple[str, ...]] = {
             "table": ("table",),
             "tabular": ("table",),
+            "kanban": ("kanban_view",),
+            "kanban_view": ("kanban_view",),
             "task": ("task_view",),
             "task_view": ("task_view",),
             "timeline": ("timeline",),
@@ -11837,6 +12016,7 @@ class InternalMCPChatOrchestrator:
             include_table_elements = "table" in selected_families
             include_workflow_elements = "workflow_view" in selected_families
             include_task_view_elements = "task_view" in selected_families
+            include_kanban_elements = "kanban_view" in selected_families
             include_timeline_elements = "timeline" in selected_families
             decision["screen_element_mapping_mode"] = mapping_mode
             decision["screen_element_reason_codes"] = list(reason_codes)
@@ -11845,6 +12025,7 @@ class InternalMCPChatOrchestrator:
                 "table": include_table_elements,
                 "workflow_view": include_workflow_elements,
                 "task_view": include_task_view_elements,
+                "kanban_view": include_kanban_elements,
                 "timeline": include_timeline_elements,
             }
             if unsupported_renderer_types:
@@ -11880,6 +12061,16 @@ class InternalMCPChatOrchestrator:
                     decision["screen_task_view_elements"] = screen_task_view_elements
                     decision["screen_task_view_element_count"] = len(
                         screen_task_view_elements
+                    )
+
+            if include_kanban_elements:
+                screen_kanban_elements = _extract_renderer_screen_kanban_elements(
+                    tool_messages=tool_messages
+                )
+                if screen_kanban_elements:
+                    decision["screen_kanban_elements"] = screen_kanban_elements
+                    decision["screen_kanban_element_count"] = len(
+                        screen_kanban_elements
                     )
 
             if include_timeline_elements:

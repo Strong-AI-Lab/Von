@@ -617,6 +617,74 @@ describe('relation truth-state display elements', () => {
     });
 });
 
+describe('kanban display elements', () => {
+    test('renders kanban columns/cards with concept and jira links', () => {
+        const container = document.createElement('div');
+        const debugData = {
+            display_elements: {
+                schema_version: 'turn_display_elements_v1',
+                elements: [
+                    {
+                        element_id: 'screen_kanban_view',
+                        element_type: 'kanban_view',
+                        channel: 'screen',
+                        order: 33,
+                        intent: 'structured_kanban_view',
+                        payload: {
+                            columns: [
+                                { column_id: 'pending', label: 'Pending', order: 10 },
+                                { column_id: 'done', label: 'Done', order: 20 }
+                            ],
+                            cards: [
+                                {
+                                    card_id: '#V#task_alpha',
+                                    title: 'Alpha task',
+                                    column_id: 'pending',
+                                    priority: 'high',
+                                    task_links: [
+                                        {
+                                            link_type: 'von_task',
+                                            target_id: '#V#task_alpha',
+                                            label: '#V#task_alpha'
+                                        },
+                                        {
+                                            link_type: 'jira_issue',
+                                            target_id: 'JVNAUTOSCI-1181',
+                                            label: 'JVNAUTOSCI-1181',
+                                            href: 'https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1181'
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        provenance: { source: 'test' }
+                    }
+                ]
+            }
+        };
+
+        __testOnly_renderDisplayElementsIntoContainer(container, debugData);
+
+        const section = container.querySelector('.chat-display-elements-kanban-section');
+        expect(section).not.toBeNull();
+
+        const columns = container.querySelectorAll('.chat-display-elements-kanban-column');
+        expect(columns.length).toBe(2);
+        expect(columns[0].textContent).toContain('Pending');
+
+        const cards = container.querySelectorAll('.chat-display-elements-kanban-card');
+        expect(cards.length).toBe(1);
+        expect(cards[0].textContent).toContain('Alpha task');
+
+        const conceptButton = cards[0].querySelector('.chat-display-elements-concept-link');
+        expect(conceptButton).not.toBeNull();
+        expect(conceptButton.dataset.conceptId).toBe('#V#task_alpha');
+
+        const jiraLink = cards[0].querySelector('a[href="https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-1181"]');
+        expect(jiraLink).not.toBeNull();
+    });
+});
+
 describe('chat insert prompt button behaviour', () => {
     beforeEach(() => {
         document.body.innerHTML = `
@@ -1094,6 +1162,39 @@ describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
             record_families: ['tasks', 'workflow_instances'],
             screen_table_record_set_count: 1,
             screen_workflow_element_count: 1
+        });
+    });
+
+    test('includes kanban render plan provenance counts when present', () => {
+        const metadata = __testOnly_buildLlmDebugMetadata({
+            model: 'gpt-test',
+            messages: [],
+            render_plan: {
+                enabled: true,
+                attempted: true,
+                success: true,
+                reason: 'resolved',
+                selected_renderer_ids: ['#V#renderer_kanban'],
+                selected_renderer_types: ['kanban'],
+                screen_element_families: ['kanban_view'],
+                screen_kanban_elements: [
+                    {
+                        element_id: 'screen_kanban_view',
+                        provenance: {
+                            source_tools: ['task_list', 'workflow_list_instances'],
+                            record_family: 'tasks_and_workflows'
+                        }
+                    }
+                ]
+            }
+        });
+
+        expect(metadata.render_plan).toMatchObject({
+            selected_renderer_types: ['kanban'],
+            screen_element_families: ['kanban_view'],
+            screen_kanban_element_count: 1,
+            source_tools: ['task_list', 'workflow_list_instances'],
+            record_families: ['tasks_and_workflows']
         });
     });
 

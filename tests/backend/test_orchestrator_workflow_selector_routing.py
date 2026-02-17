@@ -946,6 +946,7 @@ def test_renderer_selection_gates_screen_element_families(monkeypatch):
         "table": False,
         "workflow_view": True,
         "task_view": False,
+        "kanban_view": False,
         "timeline": False,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1041,6 +1042,7 @@ def test_renderer_selection_emits_timeline_elements_for_timeline_renderer(monkey
         "table": False,
         "workflow_view": False,
         "task_view": False,
+        "kanban_view": False,
         "timeline": True,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1138,6 +1140,7 @@ def test_renderer_selection_emits_task_view_elements_for_task_renderer(monkeypat
         "table": False,
         "workflow_view": False,
         "task_view": True,
+        "kanban_view": False,
         "timeline": False,
     }
     assert "screen_table_record_sets" not in result.render_plan
@@ -1158,6 +1161,115 @@ def test_renderer_selection_emits_task_view_elements_for_task_renderer(monkeypat
     }
     assert "#V#task_alpha" in task_link_targets
     assert "JVNAUTOSCI-1174" in task_link_targets
+
+
+def test_renderer_selection_emits_kanban_elements_for_kanban_renderer(monkeypatch):
+    """Kanban renderer selection should emit kanban display elements only."""
+    orchestrator = _build_orchestrator(monkeypatch, selector_enabled=True)
+    monkeypatch.setenv("VON_RENDERER_APPLICABILITY_ROUTING_ENABLE", "1")
+    monkeypatch.setenv(
+        "VON_RENDERER_APPLICABILITY_DEFINITION_IDS",
+        "#V#kanban_renderer,#V#workflow_renderer,#V#table_renderer",
+    )
+
+    def _invoke(tool_name: str, _payload: Mapping[str, Any]):
+        if tool_name != "renderer_resolve_applicability":
+            raise AssertionError(f"Unexpected tool invocation: {tool_name}")
+        return _InvokeResult(
+            {
+                "success": True,
+                "selected_renderers": [
+                    {
+                        "renderer_id": "#V#kanban_renderer",
+                        "renderer_type": "kanban",
+                        "modalities": ["visual"],
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(orchestrator._gateway, "invoke", _invoke)
+
+    class _WorkflowResult:
+        def __init__(self):
+            self.data = {
+                "final_response": "Kanban cards.",
+                "tool_messages": [
+                    {
+                        "role": "tool",
+                        "content": json.dumps(
+                            {
+                                "tool": "task_list",
+                                "status": "ok",
+                                "duration_ms": 2.8,
+                                "payload": {
+                                    "tasks": [
+                                        {
+                                            "task_concept_id": "#V#task_alpha",
+                                            "title": "Alpha task",
+                                            "status": "pending",
+                                            "priority": "high",
+                                            "jira_issue_key": "JVNAUTOSCI-1181",
+                                        },
+                                        {
+                                            "task_concept_id": "#V#task_beta",
+                                            "title": "Beta task",
+                                            "status": "done",
+                                        },
+                                    ]
+                                },
+                            }
+                        ),
+                    }
+                ],
+                "invocations": [],
+                "iteration_count": 1,
+            }
+            self.final_state = "completed"
+            self.completed = True
+
+    def _execute_workflow(workflow_id: str, **_kwargs: Any):
+        if workflow_id != TOOL_CALLING_WORKFLOW_ID:
+            raise AssertionError(f"Unexpected workflow execution: {workflow_id}")
+        return _WorkflowResult()
+
+    monkeypatch.setattr(orchestrator, "execute_workflow", _execute_workflow)
+
+    llm = _CapturingLLM(["tool_seeking"])
+    result = orchestrator.run(
+        prompt="Show task kanban",
+        context=[],
+        llm_client=llm,
+        model=None,
+        user_namespace="#V#user",
+    )
+
+    assert isinstance(result.render_plan, dict)
+    assert result.render_plan.get("screen_element_mapping_mode") == "selected_renderer_types"
+    assert result.render_plan.get("screen_element_targets") == {
+        "table": False,
+        "workflow_view": False,
+        "task_view": False,
+        "kanban_view": True,
+        "timeline": False,
+    }
+    assert "screen_table_record_sets" not in result.render_plan
+    assert "screen_workflow_elements" not in result.render_plan
+    assert "screen_task_view_elements" not in result.render_plan
+    assert "screen_timeline_elements" not in result.render_plan
+    assert result.render_plan.get("screen_kanban_element_count") == 1
+
+    kanban_elements = result.render_plan.get("screen_kanban_elements")
+    assert isinstance(kanban_elements, list)
+    assert len(kanban_elements) == 1
+    payload = kanban_elements[0].get("payload", {})
+    columns = payload.get("columns")
+    cards = payload.get("cards")
+    assert isinstance(columns, list)
+    assert isinstance(cards, list)
+    assert {column.get("column_id") for column in columns} == {"pending", "done"}
+    assert cards[0]["card_id"] == "#V#task_alpha"
+    assert cards[0]["column_id"] == "pending"
 
 
 def test_renderer_selection_fallback_when_no_types_selected(monkeypatch):
@@ -1236,6 +1348,7 @@ def test_renderer_selection_fallback_when_no_types_selected(monkeypatch):
         "table": True,
         "workflow_view": True,
         "task_view": False,
+        "kanban_view": False,
         "timeline": False,
     }
     assert result.render_plan.get("screen_table_record_set_count") == 1
