@@ -115,6 +115,7 @@ const seenSharedTurnIds = new Map();
 const sharedConversationUnreadSessions = new Set();
 const sharedConversationLastHistoryIndex = new Map();
 const sharedConversationResyncInFlight = new Set();
+let latestUnreadBoundaryElement = null;
 const SSE_RECONNECT_BASE_DELAY_MS = 1000;
 const SSE_RECONNECT_MAX_DELAY_MS = 30000;
 
@@ -10094,6 +10095,7 @@ async function switchToChatSession(sessionId) {
 
     setActiveChatSession(sid, cachedSession?.session_name);
     clearSharedSessionUnread(sid);
+    clearLatestUnreadBoundary();
     hideNewSharedMessagesIndicator();
     if (sessionTabsCache.length > 0) {
         renderChatSessionTabs(sessionTabsCache, sid);
@@ -11967,10 +11969,63 @@ function appendSharedTurnToTranscript(message) {
     // Auto-scroll if user was at bottom
     if (wasAtBottom) {
         scrollableField.scrollTop = scrollableField.scrollHeight;
+        clearLatestUnreadBoundary();
+        hideNewSharedMessagesIndicator();
     } else {
+        setLatestUnreadBoundary(messageDiv);
         // Show "new messages" indicator
         showNewSharedMessagesIndicator();
     }
+}
+
+function setLatestUnreadBoundary(messageElement) {
+    if (!(messageElement instanceof HTMLElement) || !messageElement.parentElement) {
+        return null;
+    }
+
+    if (latestUnreadBoundaryElement?.isConnected) {
+        latestUnreadBoundaryElement.remove();
+    }
+
+    const boundary = document.createElement('div');
+    boundary.className = 'latest-unread-boundary';
+    boundary.setAttribute('role', 'separator');
+    boundary.setAttribute('aria-label', 'Latest unread boundary');
+    boundary.setAttribute('tabindex', '-1');
+    boundary.textContent = 'Latest unread';
+    messageElement.parentElement.insertBefore(boundary, messageElement);
+    latestUnreadBoundaryElement = boundary;
+    return boundary;
+}
+
+function hasLatestUnreadBoundary() {
+    return Boolean(latestUnreadBoundaryElement?.isConnected);
+}
+
+function clearLatestUnreadBoundary() {
+    if (latestUnreadBoundaryElement?.isConnected) {
+        latestUnreadBoundaryElement.remove();
+    }
+    latestUnreadBoundaryElement = null;
+}
+
+function jumpToLatestUnreadBoundary() {
+    if (!hasLatestUnreadBoundary()) {
+        return false;
+    }
+
+    const boundary = latestUnreadBoundaryElement;
+    try {
+        boundary.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (_e) {
+        boundary.scrollIntoView();
+    }
+    try {
+        boundary.focus({ preventScroll: true });
+    } catch (_e) {
+        boundary.focus();
+    }
+    return true;
 }
 
 /**
@@ -11979,16 +12034,14 @@ function appendSharedTurnToTranscript(message) {
 function showNewSharedMessagesIndicator() {
     let indicator = document.getElementById('newSharedMessagesIndicator');
     if (!indicator) {
-        indicator = document.createElement('div');
+        indicator = document.createElement('button');
+        indicator.type = 'button';
         indicator.id = 'newSharedMessagesIndicator';
         indicator.className = 'new-shared-messages-indicator';
-        indicator.textContent = 'New messages from shared conversation';
+        indicator.setAttribute('aria-label', 'Jump to latest unread message');
+        indicator.textContent = 'Jump to latest unread';
         indicator.addEventListener('click', () => {
-            const scrollableField = document.getElementById('scrollableField');
-            if (scrollableField) {
-                scrollableField.scrollTop = scrollableField.scrollHeight;
-            }
-            indicator.style.display = 'none';
+            void jumpToLatestUnreadBoundary();
         });
 
         const scrollableField = document.getElementById('scrollableField');
@@ -11996,7 +12049,10 @@ function showNewSharedMessagesIndicator() {
             scrollableField.parentElement.insertBefore(indicator, scrollableField);
         }
     }
-    indicator.style.display = 'block';
+
+    const hasUnread = hasLatestUnreadBoundary();
+    indicator.disabled = !hasUnread;
+    indicator.style.display = hasUnread ? 'block' : 'none';
 }
 
 /**
@@ -12005,6 +12061,7 @@ function showNewSharedMessagesIndicator() {
 function hideNewSharedMessagesIndicator() {
     const indicator = document.getElementById('newSharedMessagesIndicator');
     if (indicator) {
+        indicator.disabled = true;
         indicator.style.display = 'none';
     }
 }
@@ -13335,6 +13392,7 @@ export function initializeChatTab() {
                 const isAtBottom = scrollableField.scrollHeight - scrollableField.scrollTop
                     <= scrollableField.clientHeight + 50;
                 if (isAtBottom) {
+                    clearLatestUnreadBoundary();
                     hideNewSharedMessagesIndicator();
                 }
             });
@@ -15392,6 +15450,19 @@ export function __testOnly_buildWorkflowMonitorExportPayload() {
 }
 export function __testOnly_renderDisplayElementsIntoContainer(container, debugData) {
     renderTableDisplayElementsIntoContainer(container, debugData);
+}
+export function __testOnly_setLatestUnreadBoundary(targetElement) {
+    return setLatestUnreadBoundary(targetElement);
+}
+export function __testOnly_showNewSharedMessagesIndicator() {
+    showNewSharedMessagesIndicator();
+}
+export function __testOnly_jumpToLatestUnreadBoundary() {
+    return jumpToLatestUnreadBoundary();
+}
+export function __testOnly_clearLatestUnreadJumpState() {
+    clearLatestUnreadBoundary();
+    hideNewSharedMessagesIndicator();
 }
 
 // Export for testing.

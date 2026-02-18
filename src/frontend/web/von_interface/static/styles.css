@@ -2721,16 +2721,39 @@ h1 {
     font-style: italic;
 }
 
+.latest-unread-boundary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin: 10px 0 8px;
+    color: #7b1fa2;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.latest-unread-boundary::before,
+.latest-unread-boundary::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid rgba(123, 31, 162, 0.35);
+}
+
 .new-shared-messages-indicator {
     position: sticky;
     top: 0;
     z-index: 10;
     background: linear-gradient(135deg, #9c27b0, #7b1fa2);
     color: white;
+    border: none;
     padding: 8px 16px;
     text-align: center;
     cursor: pointer;
     font-size: 0.85rem;
+    font-weight: 600;
+    line-height: 1.2;
     border-radius: 0 0 8px 8px;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
     display: none;
@@ -2738,6 +2761,16 @@ h1 {
 
 .new-shared-messages-indicator:hover {
     background: linear-gradient(135deg, #7b1fa2, #6a1b9a);
+}
+
+.new-shared-messages-indicator:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 2px;
+}
+
+.new-shared-messages-indicator:disabled {
+    cursor: default;
+    opacity: 0.6;
 }
 
 /* Dropdown */

@@ -8,10 +8,14 @@ import {
     __testOnly_convertInlineQuotedStrongSegmentsToButtons,
     __testOnly_convertQuotedInstructionBlockquotesToButtons,
     __testOnly_convertQuotedInstructionListItemsToButtons,
+    __testOnly_clearLatestUnreadJumpState,
     __testOnly_convertReplyOptionsListsToButtons,
     __testOnly_deriveLlmDebugWarnings,
     __testOnly_hydrateChatConceptCartouches,
+    __testOnly_jumpToLatestUnreadBoundary,
     __testOnly_renderDisplayElementsIntoContainer,
+    __testOnly_setLatestUnreadBoundary,
+    __testOnly_showNewSharedMessagesIndicator,
     __testOnly_resetChatConceptMetaCaches,
     formatChatTimestamp,
     sendMessage
@@ -1634,5 +1638,48 @@ describe('LLM debug popup metadata (internal MCP caps + usage)', () => {
             categories: ['file_upload_failure'],
             latest_event_type: 'file_upload_failure'
         });
+    });
+});
+
+describe('latest unread jump affordance', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="chatTab">
+                <div class="content-wrapper">
+                    <div id="scrollableField"></div>
+                </div>
+            </div>
+        `;
+        __testOnly_clearLatestUnreadJumpState();
+    });
+
+    test('stays hidden when no unread boundary exists', () => {
+        __testOnly_showNewSharedMessagesIndicator();
+        const indicator = document.getElementById('newSharedMessagesIndicator');
+        expect(indicator).toBeTruthy();
+        expect(indicator.style.display).toBe('none');
+        expect(indicator.disabled).toBe(true);
+    });
+
+    test('jumps to the latest unread boundary when clicked', () => {
+        const scrollableField = document.getElementById('scrollableField');
+        const message = document.createElement('div');
+        message.className = 'chat-message assistant-message';
+        scrollableField.appendChild(message);
+
+        const boundary = __testOnly_setLatestUnreadBoundary(message);
+        boundary.scrollIntoView = jest.fn();
+        boundary.focus = jest.fn();
+
+        __testOnly_showNewSharedMessagesIndicator();
+        const indicator = document.getElementById('newSharedMessagesIndicator');
+        expect(indicator.style.display).toBe('block');
+        expect(indicator.disabled).toBe(false);
+
+        indicator.click();
+
+        expect(__testOnly_jumpToLatestUnreadBoundary()).toBe(true);
+        expect(boundary.scrollIntoView).toHaveBeenCalled();
+        expect(boundary.focus).toHaveBeenCalled();
     });
 });
