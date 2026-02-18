@@ -125,6 +125,39 @@ Required environment secrets for workflow-dispatch deploy:
 - `OPENSTACK_DEPLOY_PORT` (optional, defaults to `22`)
 - `OPENSTACK_DEPLOY_KNOWN_HOSTS` (recommended; if omitted, host key checking is disabled for that run)
 
+## Monitoring, Alerting, and Recovery Automation
+
+Managed bootstrap now installs systemd-driven reliability automation:
+
+- `von-monitor.timer` -> `/usr/local/bin/von_monitor_health.sh`
+  - checks service uptime (`von.service`)
+  - checks `/health` response
+  - checks auth-failure and DB-failure rates from journald window
+  - checks TLS expiry threshold
+- `von-log-collector.timer` -> `/usr/local/bin/von_collect_logs.sh`
+  - consolidates app/service/proxy logs into `/var/log/von/central/`
+- `von-backup.timer` -> `/usr/local/bin/von_backup_snapshot.sh`
+  - creates backup archives in `/var/backups/von`
+- `von-restore-drill.timer` -> `/usr/local/bin/von_restore_drill.sh`
+  - validates latest backup extractability and required artefacts
+
+Audit logs:
+
+- monitoring: `/var/log/von/monitoring_events.jsonl`
+- central-log collection: `/var/log/von/central_log_audit.jsonl`
+- backup: `/var/log/von/backup_audit.jsonl`
+- restore drill: `/var/log/von/restore_drill_audit.jsonl`
+- deploy: `/var/log/von/deploy_audit.jsonl`
+
+Optional alert webhook:
+
+- set `bootstrap_alert_webhook_url` to deliver operational alerts.
+- if unset, alerts are logged locally (no external delivery).
+
+Runbooks:
+
+- `docs/engineering/openstack_operations_runbooks.md`
+
 ## Guardrails built in
 
 - Required input checks (`network_id`, `subnet_id`, `image_id`, `key_pair_name`, etc.).
@@ -134,3 +167,4 @@ Required environment secrets for workflow-dispatch deploy:
 - HTTPS reverse proxy defaults (HTTP redirect + TLS files), with optional self-signed bootstrap cert generation.
 - Deployment health gating with rollback in managed host deploy script.
 - Deployment audit logging (`deploy_audit.jsonl`) for version/time/outcome traceability.
+- Monitoring/backup/restore-drill timers with auditable JSONL event logs.

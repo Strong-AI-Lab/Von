@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /usr/local/bin/von_ops_common.sh
+
+BACKUP_DIRECTORY="${backup_directory}"
+RESTORE_DRILL_AUDIT_LOG_PATH="${restore_drill_audit_log_path}"
+RELEASE_ROOT="${release_root}"
+ENV_FILE="${env_file}"
+
+latest_backup="$(ls -1t "$BACKUP_DIRECTORY"/von-backup-*.tar.gz 2>/dev/null | head -n 1 || true)"
+if [[ -z "$latest_backup" || ! -f "$latest_backup" ]]; then
+  summary="Restore drill failed: no backup archive found."
+  details="backup_directory=$BACKUP_DIRECTORY"
+  von_ops_send_alert "critical" "von-restore-drill" "$summary" "$details" || true
+  von_ops_append_audit_event "$RESTORE_DRILL_AUDIT_LOG_PATH" "von-restore-drill" "failed" "$summary" "$details"
+  exit 1
+fi
+
+temp_dir="$(mktemp -d /tmp/von-restore-drill-XXXXXX)"
+cleanup() {
+  rm -rf "$temp_dir"
+}
+trap cleanup EXIT
+
+tar -xzf "$latest_backup" -C "$temp_dir"
+
+issues=()
+if [[ ! -d "$temp_dir/${RELEASE_ROOT#/}" ]]; then
+  issues+=("missing release root path in backup: ${RELEASE_ROOT}")
+fi
+
+if [[ ! -f "$temp_dir/${ENV_FILE#/}" ]]; then
+  issues+=("missing env file in backup: ${ENV_FILE}")
+fi
+
+if [[ ! -f "$temp_dir/etc/nginx/sites-available/von.conf" ]]; then
+  issues+=("missing nginx config in backup: /etc/nginx/sites-available/von.conf")
+fi
+
+if [[ "${#issues[@]}" -gt 0 ]]; then
+  details="$(printf '%s; ' "${issues[@]}")"
+  summary="Restore drill validation failed."
+  von_ops_send_alert "critical" "von-restore-drill" "$summary" "$details" || true
+  von_ops_append_audit_event "$RESTORE_DRILL_AUDIT_LOG_PATH" "von-restore-drill" "failed" "$summary" "$details"
+  exit 1
+fi
+
+summary="Restore drill passed."
+details="backup=$latest_backup extracted_to=$temp_dir"
+von_ops_append_audit_event "$RESTORE_DRILL_AUDIT_LOG_PATH" "von-restore-drill" "success" "$summary" "$details"
+von_ops_log "$summary $details"

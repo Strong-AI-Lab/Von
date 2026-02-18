@@ -122,7 +122,33 @@ Required GitHub environment secrets for deploy runs:
 - `OPENSTACK_DEPLOY_PORT` (optional)
 - `OPENSTACK_DEPLOY_KNOWN_HOSTS` (recommended)
 
+## 7) Monitoring, alerting, backup drills, and runbooks
+
+Managed bootstrap installs systemd timers for operational reliability:
+
+- `von-monitor.timer` for uptime/auth/db/TLS checks
+- `von-log-collector.timer` for central log snapshots
+- `von-backup.timer` for scheduled backup snapshots
+- `von-restore-drill.timer` for scheduled backup restore validation
+
+Primary audit trails:
+
+- `/var/log/von/monitoring_events.jsonl`
+- `/var/log/von/central_log_audit.jsonl`
+- `/var/log/von/backup_audit.jsonl`
+- `/var/log/von/restore_drill_audit.jsonl`
+- `/var/log/von/deploy_audit.jsonl`
+
+Optional webhook alerting:
+
+- configure `bootstrap_alert_webhook_url` in non-committed environment tfvars or runtime injection path.
+
+Operational incident runbooks:
+
+- `docs/engineering/openstack_operations_runbooks.md`
+
 ## Related docs
 
 - `infra/openstack/README.md`
 - `docs/engineering/catalyst_cloud_swift_setup.md`
+- `docs/engineering/openstack_operations_runbooks.md`

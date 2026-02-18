@@ -1,0 +1,11 @@
+[Unit]
+Description=Run central Von log collection on schedule
+
+[Timer]
+OnBootSec=4min
+OnUnitActiveSec=${log_collection_interval_minutes}min
+Persistent=true
+Unit=von-log-collector.service
+
+[Install]
+WantedBy=timers.target

@@ -61,3 +61,9 @@ bootstrap_enable_https   = true
 # For a first bootstrap on a new host, this creates a temporary self-signed cert.
 # Replace with managed cert paths for trusted production/staging TLS.
 bootstrap_generate_self_signed_cert = true
+
+bootstrap_enable_monitoring        = true
+bootstrap_enable_log_collection    = true
+bootstrap_enable_backup_automation = true
+bootstrap_enable_restore_drill     = true
+bootstrap_alert_webhook_url        = null

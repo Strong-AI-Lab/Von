@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Von monitoring checks on schedule
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=${monitor_interval_minutes}min
+Persistent=true
+Unit=von-monitor.service
+
+[Install]
+WantedBy=timers.target

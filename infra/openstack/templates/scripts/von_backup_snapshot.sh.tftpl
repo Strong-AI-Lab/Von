@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /usr/local/bin/von_ops_common.sh
+
+BACKUP_DIRECTORY="${backup_directory}"
+BACKUP_RETENTION_DAYS="${backup_retention_days}"
+BACKUP_AUDIT_LOG_PATH="${backup_audit_log_path}"
+CURRENT_SYMLINK="${current_symlink}"
+ENV_FILE="${env_file}"
+
+mkdir -p "$BACKUP_DIRECTORY"
+
+timestamp="$(date -u '+%Y%m%d%H%M%S')"
+backup_file="$BACKUP_DIRECTORY/von-backup-$timestamp.tar.gz"
+
+release_path="$(readlink -f "$CURRENT_SYMLINK" || true)"
+if [[ -z "$release_path" || ! -d "$release_path" ]]; then
+  summary="Backup failed: active release path is unavailable."
+  details="current_symlink=$CURRENT_SYMLINK release_path=$release_path"
+  von_ops_send_alert "critical" "von-backup" "$summary" "$details" || true
+  von_ops_append_audit_event "$BACKUP_AUDIT_LOG_PATH" "von-backup" "failed" "$summary" "$details"
+  exit 1
+fi
+
+tar_items=()
+for path in "$release_path" "$ENV_FILE" "/etc/nginx/sites-available/von.conf" "/var/log/von/deploy_audit.jsonl"; do
+  if [[ -e "$path" ]]; then
+    tar_items+=("${path#/}")
+  fi
+done
+
+if [[ "${#tar_items[@]}" -eq 0 ]]; then
+  summary="Backup failed: no source files were available."
+  details="release=$release_path env_file=$ENV_FILE"
+  von_ops_send_alert "critical" "von-backup" "$summary" "$details" || true
+  von_ops_append_audit_event "$BACKUP_AUDIT_LOG_PATH" "von-backup" "failed" "$summary" "$details"
+  exit 1
+fi
+
+tar -czf "$backup_file" -C / "${tar_items[@]}"
+
+backup_sha256="$(sha256sum "$backup_file" | awk '{print $1}')"
+pruned_count="$(find "$BACKUP_DIRECTORY" -type f -name 'von-backup-*.tar.gz' -mtime "+$BACKUP_RETENTION_DAYS" -print -delete | wc -l | tr -d ' ')"
+
+summary="Created backup snapshot."
+details="file=$backup_file sha256=$backup_sha256 pruned=$pruned_count retention_days=$BACKUP_RETENTION_DAYS"
+von_ops_append_audit_event "$BACKUP_AUDIT_LOG_PATH" "von-backup" "success" "$summary" "$details"
+von_ops_log "$summary $details"

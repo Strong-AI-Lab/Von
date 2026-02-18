@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Von backup snapshots on schedule
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=${backup_interval_hours}h
+Persistent=true
+Unit=von-backup.service
+
+[Install]
+WantedBy=timers.target

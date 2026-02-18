@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Von restore drills on schedule
+
+[Timer]
+OnBootSec=25min
+OnUnitActiveSec=${restore_drill_interval_days}d
+Persistent=true
+Unit=von-restore-drill.service
+
+[Install]
+WantedBy=timers.target

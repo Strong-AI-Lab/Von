@@ -54,14 +54,105 @@ ${indent(6, nginx_config_content)}
     content: |
 ${indent(6, deploy_script_content)}
 
+  - path: /usr/local/bin/von_ops_common.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+${indent(6, ops_common_script_content)}
+
+  - path: /usr/local/bin/von_monitor_health.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+${indent(6, monitor_script_content)}
+
+  - path: /usr/local/bin/von_collect_logs.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+${indent(6, log_collector_script_content)}
+
+  - path: /usr/local/bin/von_backup_snapshot.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+${indent(6, backup_script_content)}
+
+  - path: /usr/local/bin/von_restore_drill.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+${indent(6, restore_drill_script_content)}
+
+  - path: /etc/systemd/system/von-monitor.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+${indent(6, monitor_service_content)}
+
+  - path: /etc/systemd/system/von-monitor.timer
+    owner: root:root
+    permissions: "0644"
+    content: |
+${indent(6, monitor_timer_content)}
+
+  - path: /etc/systemd/system/von-log-collector.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+${indent(6, log_collector_service_content)}
+
+  - path: /etc/systemd/system/von-log-collector.timer
+    owner: root:root
+    permissions: "0644"
+    content: |
+${indent(6, log_collector_timer_content)}
+
+  - path: /etc/systemd/system/von-backup.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+${indent(6, backup_service_content)}
+
+  - path: /etc/systemd/system/von-backup.timer
+    owner: root:root
+    permissions: "0644"
+    content: |
+${indent(6, backup_timer_content)}
+
+  - path: /etc/systemd/system/von-restore-drill.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+${indent(6, restore_drill_service_content)}
+
+  - path: /etc/systemd/system/von-restore-drill.timer
+    owner: root:root
+    permissions: "0644"
+    content: |
+${indent(6, restore_drill_timer_content)}
+
 runcmd:
   - [bash, -lc, "set -euo pipefail; install -d -m 0755 -o ${service_user} -g ${service_group} '${app_dir}' '${release_root}' '${current_symlink_parent}' '/var/log/von'"]
+  - [bash, -lc, "set -euo pipefail; install -d -m 0755 -o root -g root '${backup_directory}' '${central_log_directory}'"]
   - [bash, -lc, "set -euo pipefail; install -d -m 0755 -o root -g root /etc/von"]
 %{ if enable_https && generate_self_signed_cert ~}
   - [bash, -lc, "set -euo pipefail; if [ ! -f '${tls_cert_path}' ] || [ ! -f '${tls_key_path}' ]; then install -d -m 0755 /etc/ssl/certs /etc/ssl/private; openssl req -x509 -nodes -newkey rsa:4096 -days 365 -subj '/CN=${domain_name}' -keyout '${tls_key_path}' -out '${tls_cert_path}'; chmod 0600 '${tls_key_path}'; fi"]
 %{ endif ~}
   - [bash, -lc, "set -euo pipefail; ln -sfn /etc/nginx/sites-available/von.conf /etc/nginx/sites-enabled/von.conf; rm -f /etc/nginx/sites-enabled/default; nginx -t"]
   - [bash, -lc, "set -euo pipefail; systemctl daemon-reload; systemctl enable von.service; systemctl enable nginx.service; systemctl restart nginx.service"]
+%{ if enable_monitoring ~}
+  - [bash, -lc, "set -euo pipefail; systemctl enable von-monitor.timer; systemctl start von-monitor.timer"]
+%{ endif ~}
+%{ if enable_log_collection ~}
+  - [bash, -lc, "set -euo pipefail; systemctl enable von-log-collector.timer; systemctl start von-log-collector.timer"]
+%{ endif ~}
+%{ if enable_backup_automation ~}
+  - [bash, -lc, "set -euo pipefail; systemctl enable von-backup.timer; systemctl start von-backup.timer"]
+%{ endif ~}
+%{ if enable_restore_drill ~}
+  - [bash, -lc, "set -euo pipefail; systemctl enable von-restore-drill.timer; systemctl start von-restore-drill.timer"]
+%{ endif ~}
   - [bash, -lc, "set -euo pipefail; /usr/local/bin/deploy_von_release.sh --repo-url '${bootstrap_repo_url}' --repo-ref '${bootstrap_repo_ref}' --bootstrap"]
 
 final_message: "Von managed bootstrap completed."

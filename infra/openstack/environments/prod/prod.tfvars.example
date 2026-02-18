@@ -66,3 +66,9 @@ bootstrap_enable_https   = true
 # Set to false and provide bootstrap_tls_cert_path/bootstrap_tls_key_path when
 # using pre-provisioned certificates.
 bootstrap_generate_self_signed_cert = true
+
+bootstrap_enable_monitoring        = true
+bootstrap_enable_log_collection    = true
+bootstrap_enable_backup_automation = true
+bootstrap_enable_restore_drill     = true
+bootstrap_alert_webhook_url        = null

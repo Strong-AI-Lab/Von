@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Von backup snapshot job
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/bin/von_backup_snapshot.sh

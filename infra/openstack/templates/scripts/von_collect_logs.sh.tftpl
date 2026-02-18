@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /usr/local/bin/von_ops_common.sh
+
+CENTRAL_LOG_DIRECTORY="${central_log_directory}"
+CENTRAL_LOG_AUDIT_PATH="${central_log_audit_log_path}"
+LOOKBACK_MINUTES="${log_collection_lookback_minutes}"
+
+mkdir -p "$CENTRAL_LOG_DIRECTORY"
+
+timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+journal_window="-$LOOKBACK_MINUTES min"
+
+journal_output_file="$CENTRAL_LOG_DIRECTORY/systemd_journal.log"
+nginx_access_file="$CENTRAL_LOG_DIRECTORY/nginx_access_tail.log"
+nginx_error_file="$CENTRAL_LOG_DIRECTORY/nginx_error_tail.log"
+deploy_audit_tail_file="$CENTRAL_LOG_DIRECTORY/deploy_audit_tail.log"
+
+{
+  echo "===== $timestamp ====="
+  journalctl -u von.service -u nginx.service --since "$journal_window" --no-pager
+  echo
+} >> "$journal_output_file"
+
+if [[ -f /var/log/nginx/access.log ]]; then
+  {
+    echo "===== $timestamp ====="
+    tail -n 200 /var/log/nginx/access.log
+    echo
+  } >> "$nginx_access_file"
+fi
+
+if [[ -f /var/log/nginx/error.log ]]; then
+  {
+    echo "===== $timestamp ====="
+    tail -n 200 /var/log/nginx/error.log
+    echo
+  } >> "$nginx_error_file"
+fi
+
+if [[ -f /var/log/von/deploy_audit.jsonl ]]; then
+  {
+    echo "===== $timestamp ====="
+    tail -n 200 /var/log/von/deploy_audit.jsonl
+    echo
+  } >> "$deploy_audit_tail_file"
+fi
+
+summary="Collected central log snapshot from app/service/reverse-proxy sources."
+details="target=$CENTRAL_LOG_DIRECTORY lookback_minutes=$LOOKBACK_MINUTES"
+von_ops_append_audit_event "$CENTRAL_LOG_AUDIT_PATH" "von-log-collector" "success" "$summary" "$details"
+von_ops_log "$summary $details"

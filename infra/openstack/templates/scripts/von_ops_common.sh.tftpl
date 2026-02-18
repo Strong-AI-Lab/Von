@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_ALERT_WEBHOOK_URL="${alert_webhook_url}"
+
+von_ops_log() {
+  printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
+}
+
+von_ops_resolve_alert_webhook() {
+  if [[ -n "${VON_ALERT_WEBHOOK_URL:-}" ]]; then
+    printf '%s' "${VON_ALERT_WEBHOOK_URL}"
+    return
+  fi
+  printf '%s' "${DEFAULT_ALERT_WEBHOOK_URL}"
+}
+
+von_ops_send_alert() {
+  local severity="${1:-warning}"
+  local component="${2:-operations}"
+  local summary="${3:-Operational event}"
+  local details="${4:-}"
+
+  local webhook
+  webhook="$(von_ops_resolve_alert_webhook)"
+  if [[ -z "$webhook" ]]; then
+    von_ops_log "ALERT[$severity][$component] $summary :: $details"
+    return 0
+  fi
+
+  local payload
+  payload="$(
+    ALERT_SEVERITY="$severity" \
+    ALERT_COMPONENT="$component" \
+    ALERT_SUMMARY="$summary" \
+    ALERT_DETAILS="$details" \
+    python3 - <<'PY'
+import json
+import os
+
+payload = {
+    "source": "von-openstack-ops",
+    "severity": os.environ.get("ALERT_SEVERITY"),
+    "component": os.environ.get("ALERT_COMPONENT"),
+    "summary": os.environ.get("ALERT_SUMMARY"),
+    "details": os.environ.get("ALERT_DETAILS"),
+}
+print(json.dumps(payload, sort_keys=True))
+PY
+  )"
+
+  if ! curl -fsS -X POST -H "Content-Type: application/json" --data "$payload" "$webhook" >/dev/null; then
+    von_ops_log "WARN: failed to deliver alert to webhook ($component/$severity)."
+    return 1
+  fi
+
+  return 0
+}
+
+von_ops_append_audit_event() {
+  local audit_log_path="$1"
+  local component="$2"
+  local outcome="$3"
+  local summary="$4"
+  local details="${5:-}"
+
+  mkdir -p "$(dirname "$audit_log_path")"
+  touch "$audit_log_path"
+
+  AUDIT_COMPONENT="$component" \
+  AUDIT_OUTCOME="$outcome" \
+  AUDIT_SUMMARY="$summary" \
+  AUDIT_DETAILS="$details" \
+  AUDIT_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+  python3 - "$audit_log_path" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+event = {
+    "timestamp_utc": os.environ.get("AUDIT_TS"),
+    "component": os.environ.get("AUDIT_COMPONENT"),
+    "outcome": os.environ.get("AUDIT_OUTCOME"),
+    "summary": os.environ.get("AUDIT_SUMMARY"),
+    "details": os.environ.get("AUDIT_DETAILS"),
+}
+with path.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, sort_keys=True) + "\n")
+PY
+}

@@ -438,3 +438,209 @@ variable "bootstrap_deploy_audit_log_path" {
     error_message = "bootstrap_deploy_audit_log_path must be an absolute Linux path."
   }
 }
+
+variable "bootstrap_enable_monitoring" {
+  type        = bool
+  description = "Enable systemd-timer-driven operational monitoring checks."
+  default     = true
+}
+
+variable "bootstrap_monitor_interval_minutes" {
+  type        = number
+  description = "Interval in minutes for operational monitoring checks."
+  default     = 5
+
+  validation {
+    condition     = var.bootstrap_monitor_interval_minutes >= 1 && var.bootstrap_monitor_interval_minutes <= 1440
+    error_message = "bootstrap_monitor_interval_minutes must be between 1 and 1440."
+  }
+}
+
+variable "bootstrap_monitor_log_lookback_minutes" {
+  type        = number
+  description = "Journald lookback window in minutes for auth/DB failure detection."
+  default     = 15
+
+  validation {
+    condition     = var.bootstrap_monitor_log_lookback_minutes >= 1 && var.bootstrap_monitor_log_lookback_minutes <= 1440
+    error_message = "bootstrap_monitor_log_lookback_minutes must be between 1 and 1440."
+  }
+}
+
+variable "bootstrap_monitor_auth_failure_threshold" {
+  type        = number
+  description = "Auth-failure event threshold before raising an alert."
+  default     = 5
+
+  validation {
+    condition     = var.bootstrap_monitor_auth_failure_threshold >= 1 && var.bootstrap_monitor_auth_failure_threshold <= 10000
+    error_message = "bootstrap_monitor_auth_failure_threshold must be between 1 and 10000."
+  }
+}
+
+variable "bootstrap_monitor_db_failure_threshold" {
+  type        = number
+  description = "Database-failure event threshold before raising an alert."
+  default     = 3
+
+  validation {
+    condition     = var.bootstrap_monitor_db_failure_threshold >= 1 && var.bootstrap_monitor_db_failure_threshold <= 10000
+    error_message = "bootstrap_monitor_db_failure_threshold must be between 1 and 10000."
+  }
+}
+
+variable "bootstrap_tls_expiry_warning_days" {
+  type        = number
+  description = "Raise an alert when TLS cert expires within this many days."
+  default     = 21
+
+  validation {
+    condition     = var.bootstrap_tls_expiry_warning_days >= 1 && var.bootstrap_tls_expiry_warning_days <= 3650
+    error_message = "bootstrap_tls_expiry_warning_days must be between 1 and 3650."
+  }
+}
+
+variable "bootstrap_monitoring_events_log_path" {
+  type        = string
+  description = "JSONL log path for monitoring check events."
+  default     = "/var/log/von/monitoring_events.jsonl"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_monitoring_events_log_path))
+    error_message = "bootstrap_monitoring_events_log_path must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_enable_log_collection" {
+  type        = bool
+  description = "Enable periodic central log snapshot collection."
+  default     = true
+}
+
+variable "bootstrap_log_collection_interval_minutes" {
+  type        = number
+  description = "Interval in minutes for central log snapshot collection."
+  default     = 15
+
+  validation {
+    condition     = var.bootstrap_log_collection_interval_minutes >= 1 && var.bootstrap_log_collection_interval_minutes <= 1440
+    error_message = "bootstrap_log_collection_interval_minutes must be between 1 and 1440."
+  }
+}
+
+variable "bootstrap_log_collection_lookback_minutes" {
+  type        = number
+  description = "Lookback in minutes for journald export in central log collection."
+  default     = 15
+
+  validation {
+    condition     = var.bootstrap_log_collection_lookback_minutes >= 1 && var.bootstrap_log_collection_lookback_minutes <= 1440
+    error_message = "bootstrap_log_collection_lookback_minutes must be between 1 and 1440."
+  }
+}
+
+variable "bootstrap_central_log_directory" {
+  type        = string
+  description = "Directory for consolidated app/systemd/reverse-proxy logs."
+  default     = "/var/log/von/central"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_central_log_directory))
+    error_message = "bootstrap_central_log_directory must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_central_log_audit_log_path" {
+  type        = string
+  description = "JSONL log path for central-log collection runs."
+  default     = "/var/log/von/central_log_audit.jsonl"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_central_log_audit_log_path))
+    error_message = "bootstrap_central_log_audit_log_path must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_enable_backup_automation" {
+  type        = bool
+  description = "Enable scheduled backup snapshots."
+  default     = true
+}
+
+variable "bootstrap_backup_interval_hours" {
+  type        = number
+  description = "Interval in hours for backup snapshots."
+  default     = 24
+
+  validation {
+    condition     = var.bootstrap_backup_interval_hours >= 1 && var.bootstrap_backup_interval_hours <= 720
+    error_message = "bootstrap_backup_interval_hours must be between 1 and 720."
+  }
+}
+
+variable "bootstrap_backup_retention_days" {
+  type        = number
+  description = "Retention period in days for backup artefacts."
+  default     = 14
+
+  validation {
+    condition     = var.bootstrap_backup_retention_days >= 1 && var.bootstrap_backup_retention_days <= 3650
+    error_message = "bootstrap_backup_retention_days must be between 1 and 3650."
+  }
+}
+
+variable "bootstrap_backup_directory" {
+  type        = string
+  description = "Directory where backup archives are written."
+  default     = "/var/backups/von"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_backup_directory))
+    error_message = "bootstrap_backup_directory must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_backup_audit_log_path" {
+  type        = string
+  description = "JSONL log path for backup runs."
+  default     = "/var/log/von/backup_audit.jsonl"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_backup_audit_log_path))
+    error_message = "bootstrap_backup_audit_log_path must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_enable_restore_drill" {
+  type        = bool
+  description = "Enable scheduled restore-drill validation from latest backup."
+  default     = true
+}
+
+variable "bootstrap_restore_drill_interval_days" {
+  type        = number
+  description = "Interval in days for automated restore drills."
+  default     = 7
+
+  validation {
+    condition     = var.bootstrap_restore_drill_interval_days >= 1 && var.bootstrap_restore_drill_interval_days <= 3650
+    error_message = "bootstrap_restore_drill_interval_days must be between 1 and 3650."
+  }
+}
+
+variable "bootstrap_restore_drill_audit_log_path" {
+  type        = string
+  description = "JSONL log path for restore-drill runs."
+  default     = "/var/log/von/restore_drill_audit.jsonl"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_restore_drill_audit_log_path))
+    error_message = "bootstrap_restore_drill_audit_log_path must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_alert_webhook_url" {
+  type        = string
+  description = "Optional webhook URL for operational alerts. Leave null to disable external alert delivery."
+  default     = null
+}

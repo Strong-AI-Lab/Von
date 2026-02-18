@@ -79,6 +79,63 @@ locals {
     bootstrap_repo_ref     = var.bootstrap_repo_ref
   })
 
+  von_ops_common_script = templatefile("${path.module}/templates/scripts/von_ops_common.sh.tftpl", {
+    alert_webhook_url = var.bootstrap_alert_webhook_url != null ? var.bootstrap_alert_webhook_url : ""
+  })
+
+  von_monitor_script = templatefile("${path.module}/templates/scripts/von_monitor_health.sh.tftpl", {
+    monitoring_events_log_path      = var.bootstrap_monitoring_events_log_path
+    monitor_log_lookback_minutes    = var.bootstrap_monitor_log_lookback_minutes
+    monitor_auth_failure_threshold  = var.bootstrap_monitor_auth_failure_threshold
+    monitor_db_failure_threshold    = var.bootstrap_monitor_db_failure_threshold
+    tls_expiry_warning_days         = var.bootstrap_tls_expiry_warning_days
+    tls_cert_path                   = var.bootstrap_tls_cert_path
+    enable_https                    = var.bootstrap_enable_https
+    app_port                        = var.bootstrap_app_port
+    healthcheck_path                = var.bootstrap_healthcheck_path
+  })
+
+  von_log_collector_script = templatefile("${path.module}/templates/scripts/von_collect_logs.sh.tftpl", {
+    central_log_directory          = var.bootstrap_central_log_directory
+    central_log_audit_log_path     = var.bootstrap_central_log_audit_log_path
+    log_collection_lookback_minutes = var.bootstrap_log_collection_lookback_minutes
+  })
+
+  von_backup_script = templatefile("${path.module}/templates/scripts/von_backup_snapshot.sh.tftpl", {
+    backup_directory      = var.bootstrap_backup_directory
+    backup_retention_days = var.bootstrap_backup_retention_days
+    backup_audit_log_path = var.bootstrap_backup_audit_log_path
+    current_symlink       = var.bootstrap_current_symlink
+    env_file              = var.bootstrap_env_file
+  })
+
+  von_restore_drill_script = templatefile("${path.module}/templates/scripts/von_restore_drill.sh.tftpl", {
+    backup_directory            = var.bootstrap_backup_directory
+    restore_drill_audit_log_path = var.bootstrap_restore_drill_audit_log_path
+    release_root               = var.bootstrap_release_root
+    env_file                   = var.bootstrap_env_file
+  })
+
+  von_monitor_service_unit = templatefile("${path.module}/templates/systemd/von-monitor.service.tftpl", {})
+  von_monitor_timer_unit = templatefile("${path.module}/templates/systemd/von-monitor.timer.tftpl", {
+    monitor_interval_minutes = var.bootstrap_monitor_interval_minutes
+  })
+
+  von_log_collector_service_unit = templatefile("${path.module}/templates/systemd/von-log-collector.service.tftpl", {})
+  von_log_collector_timer_unit = templatefile("${path.module}/templates/systemd/von-log-collector.timer.tftpl", {
+    log_collection_interval_minutes = var.bootstrap_log_collection_interval_minutes
+  })
+
+  von_backup_service_unit = templatefile("${path.module}/templates/systemd/von-backup.service.tftpl", {})
+  von_backup_timer_unit = templatefile("${path.module}/templates/systemd/von-backup.timer.tftpl", {
+    backup_interval_hours = var.bootstrap_backup_interval_hours
+  })
+
+  von_restore_drill_service_unit = templatefile("${path.module}/templates/systemd/von-restore-drill.service.tftpl", {})
+  von_restore_drill_timer_unit = templatefile("${path.module}/templates/systemd/von-restore-drill.timer.tftpl", {
+    restore_drill_interval_days = var.bootstrap_restore_drill_interval_days
+  })
+
   managed_bootstrap_user_data = templatefile("${path.module}/templates/cloud-init/von_bootstrap.yaml.tftpl", {
     service_user               = var.bootstrap_service_user
     service_group              = var.bootstrap_service_group
@@ -101,9 +158,28 @@ locals {
     bootstrap_repo_url         = var.bootstrap_repo_url
     bootstrap_repo_ref         = var.bootstrap_repo_ref
     bootstrap_waitress_threads = var.bootstrap_waitress_threads
+    enable_monitoring          = var.bootstrap_enable_monitoring
+    enable_log_collection      = var.bootstrap_enable_log_collection
+    enable_backup_automation   = var.bootstrap_enable_backup_automation
+    enable_restore_drill       = var.bootstrap_enable_restore_drill
+    backup_directory           = var.bootstrap_backup_directory
+    central_log_directory      = var.bootstrap_central_log_directory
     service_unit_content       = local.von_service_unit
     nginx_config_content       = local.von_nginx_config
     deploy_script_content      = local.von_deploy_script
+    ops_common_script_content  = local.von_ops_common_script
+    monitor_script_content     = local.von_monitor_script
+    log_collector_script_content = local.von_log_collector_script
+    backup_script_content      = local.von_backup_script
+    restore_drill_script_content = local.von_restore_drill_script
+    monitor_service_content    = local.von_monitor_service_unit
+    monitor_timer_content      = local.von_monitor_timer_unit
+    log_collector_service_content = local.von_log_collector_service_unit
+    log_collector_timer_content = local.von_log_collector_timer_unit
+    backup_service_content     = local.von_backup_service_unit
+    backup_timer_content       = local.von_backup_timer_unit
+    restore_drill_service_content = local.von_restore_drill_service_unit
+    restore_drill_timer_content = local.von_restore_drill_timer_unit
   })
 
   effective_user_data = (

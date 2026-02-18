@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /usr/local/bin/von_ops_common.sh
+
+MONITOR_EVENTS_LOG_PATH="${monitoring_events_log_path}"
+LOOKBACK_MINUTES="${monitor_log_lookback_minutes}"
+AUTH_FAILURE_THRESHOLD="${monitor_auth_failure_threshold}"
+DB_FAILURE_THRESHOLD="${monitor_db_failure_threshold}"
+TLS_EXPIRY_WARNING_DAYS="${tls_expiry_warning_days}"
+TLS_CERT_PATH="${tls_cert_path}"
+ENABLE_HTTPS="${enable_https}"
+HEALTHCHECK_URL="http://127.0.0.1:${app_port}${healthcheck_path}"
+
+issues=()
+
+if ! systemctl is-active --quiet von.service; then
+  issues+=("downtime: von.service is not active")
+fi
+
+if ! curl -fsS "$HEALTHCHECK_URL" >/dev/null; then
+  issues+=("downtime: health endpoint failed ($HEALTHCHECK_URL)")
+fi
+
+journal_window="-$LOOKBACK_MINUTES min"
+
+auth_failure_count="$(
+  journalctl -u von.service --since "$journal_window" --no-pager \
+    | grep -Eic '(401|403|auth(entication)? fail|invalid token|unauthori[sz]ed)' || true
+)"
+if [[ "$auth_failure_count" -ge "$AUTH_FAILURE_THRESHOLD" ]]; then
+  issues+=("auth_failures: detected $auth_failure_count events in last $LOOKBACK_MINUTES minute(s)")
+fi
+
+db_failure_count="$(
+  journalctl -u von.service --since "$journal_window" --no-pager \
+    | grep -Eic '(mongo|database|db_|connection refused|serverselectiontimeout|authentication failed|timed out)' || true
+)"
+if [[ "$db_failure_count" -ge "$DB_FAILURE_THRESHOLD" ]]; then
+  issues+=("db_failures: detected $db_failure_count events in last $LOOKBACK_MINUTES minute(s)")
+fi
+
+if [[ "$ENABLE_HTTPS" == "true" ]]; then
+  if [[ ! -f "$TLS_CERT_PATH" ]]; then
+    issues+=("tls_expiry: TLS certificate is missing at $TLS_CERT_PATH")
+  else
+    check_seconds="$((TLS_EXPIRY_WARNING_DAYS * 86400))"
+    if ! openssl x509 -checkend "$check_seconds" -noout -in "$TLS_CERT_PATH" >/dev/null 2>&1; then
+      issues+=("tls_expiry: certificate expires within $TLS_EXPIRY_WARNING_DAYS day(s) ($TLS_CERT_PATH)")
+    fi
+  fi
+fi
+
+if [[ "${#issues[@]}" -gt 0 ]]; then
+  details="$(printf '%s; ' "${issues[@]}")"
+  summary="Monitoring detected ${#issues[@]} reliability/security issue(s)."
+  von_ops_send_alert "critical" "von-monitor" "$summary" "$details" || true
+  von_ops_append_audit_event "$MONITOR_EVENTS_LOG_PATH" "von-monitor" "failed" "$summary" "$details"
+  von_ops_log "ERROR: $summary $details"
+  exit 1
+fi
+
+summary="Monitoring checks passed (auth_failures=$auth_failure_count, db_failures=$db_failure_count)."
+von_ops_append_audit_event "$MONITOR_EVENTS_LOG_PATH" "von-monitor" "success" "$summary" "$HEALTHCHECK_URL"
+von_ops_log "$summary"
