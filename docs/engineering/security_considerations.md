@@ -200,6 +200,7 @@ If `jira_get_myself` returns `401 Unauthorised`, confirm the configured email/ba
 - Manual backup action requires explicit opt-in: `VON_ENABLE_BACKUP_ACTION=1`.
 - Backup apply mode is blocked for repository-local output unless explicitly overridden with `VON_ALLOW_BACKUP_IN_REPO=1`.
 - Scheduled daily backups use the same output-path safety check.
+- Backup root defaults now prefer non-repository paths before any repo-local fallback.
 - `.githooks/pre-commit.ps1` blocks staged files under `backups/`.
 
 See `docs/engineering/backup_tooling_security.md` for detailed threat model and operational policy.

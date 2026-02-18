@@ -22,6 +22,11 @@ We keep backup execution as local-operator tooling (not a remote server endpoint
 2. Backup apply mode is blocked when output resolves under the repository root, unless explicitly overridden with `VON_ALLOW_BACKUP_IN_REPO=1`.
 3. Scheduled daily backups use the same in-repo output safety check and skip if unsafe.
 4. Backup artefacts in `backups/` are blocked by pre-commit guardrails.
+5. Default backup root resolution prefers non-repository locations:
+   - `VON_BACKUP_ROOT`
+   - `W:\von_backups`
+   - `%LOCALAPPDATA%\Von\backups`
+   - repository `backups/` only as a last resort
 
 ## Required operator configuration
 

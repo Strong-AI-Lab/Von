@@ -171,8 +171,10 @@ function Test-BackupOutputPathAllowed {
 # Backup root resolution:
 # - Prefer explicit VON_BACKUP_ROOT if already present in environment.
 # - Else prefer W:\von_backups if W: exists and is writable.
-# - Else fall back to repo-local 'backups'.
+# - Else prefer a non-repo local path (%LOCALAPPDATA%\Von\backups).
+# - Else fall back to repo-local 'backups' as a last resort.
 $BackupRoot = $null
+$script:DefaultNonRepoBackupRoot = $null
 
 function Test-WDriveAvailable {
     <#
@@ -218,6 +220,29 @@ function Resolve-BackupOutDir {
     return $effective
 }
 
+function Get-BackupFallbackDir {
+    if ($script:DefaultNonRepoBackupRoot -and $script:DefaultNonRepoBackupRoot.ToString().Trim()) {
+        return $script:DefaultNonRepoBackupRoot
+    }
+    return (Join-Path $Root 'backups')
+}
+
+$localAppDataRoot = if ($env:LOCALAPPDATA -and $env:LOCALAPPDATA.ToString().Trim()) {
+    $env:LOCALAPPDATA.ToString().Trim()
+}
+else {
+    Join-Path $HOME 'AppData\Local'
+}
+
+$defaultCandidate = Join-Path $localAppDataRoot 'Von\backups'
+try {
+    New-Item -ItemType Directory -Force -Path $defaultCandidate | Out-Null
+    $script:DefaultNonRepoBackupRoot = $defaultCandidate
+}
+catch {
+    Write-LauncherLog "[backup] WARN: Cannot create/write default non-repo backup root '$defaultCandidate'."
+}
+
 if ($env:VON_BACKUP_ROOT -and $env:VON_BACKUP_ROOT.ToString().Trim()) {
     $preferred = $env:VON_BACKUP_ROOT.ToString().Trim().Trim('"')
     try {
@@ -241,8 +266,14 @@ if (-not $BackupRoot -and (Test-WDriveAvailable)) {
 }
 
 if (-not $BackupRoot) {
-    $BackupRoot = Join-Path $Root 'backups'
-    try { New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null } catch { }
+    if ($script:DefaultNonRepoBackupRoot) {
+        $BackupRoot = $script:DefaultNonRepoBackupRoot
+    }
+    else {
+        $BackupRoot = Join-Path $Root 'backups'
+        try { New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null } catch { }
+        Write-LauncherLog "[backup] WARN: Falling back to repo-local backups root '$BackupRoot'. Set VON_BACKUP_ROOT to an external path for safer defaults."
+    }
 }
 
 if (-not $BackupOutDir) {
@@ -853,7 +884,7 @@ function Invoke-DailyBackupIfDue {
         return
     }
     $pdmExe = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
-    $localFallback = Join-Path $Root 'backups'
+    $localFallback = Get-BackupFallbackDir
     $effectiveBackupRoot = Resolve-BackupOutDir -OutDir $BackupRoot -FallbackDir $localFallback -Reason 'daily-backup'
     if (-not (Test-BackupOutputPathAllowed -Path $effectiveBackupRoot -Context 'daily-backup' -ApplyMode $true)) {
         Write-LauncherLog "[daily-backup] WARN: skipping scheduled backup until VON_BACKUP_ROOT points outside repo (or VON_ALLOW_BACKUP_IN_REPO=1)."
@@ -2302,11 +2333,13 @@ Von Launcher Help
         -HealthDebug           Verbose health polling diagnostics
         -BackupDryRun           For backup action: do not run mongodump (prints what would happen)
         -BackupTag <tag>        For backup action: tag suffix for backup dir (default manual)
-        -BackupOutDir <path>    For backup action: output root dir (default VON_BACKUP_ROOT)
+        -BackupOutDir <path>    For backup action: output root dir (default resolved backup root)
     Backup safety environment variables:
         VON_ENABLE_BACKUP_ACTION=1   Required to run on-demand ".\run.ps1 backup"
-        VON_BACKUP_ROOT=<path>       Recommended backup root outside this repo
+        VON_BACKUP_ROOT=<path>       Recommended explicit backup root outside this repo
         VON_ALLOW_BACKUP_IN_REPO=1   Override safety block for in-repo backup apply mode
+    Default backup root resolution order:
+        VON_BACKUP_ROOT -> W:\von_backups -> %LOCALAPPDATA%\Von\backups -> .\backups (last resort)
         -UpdateIntervalMinutes <n>  Minutes between git update checks (autoupdate action; default 60)
         -UpdateBranch <name>        Branch to track (default main)
         -UpdateNoRestartIfRunning   Skip restart if server already running (still pull code)
@@ -2392,7 +2425,7 @@ function Invoke-BackupNow {
     <#
         Run an on-demand DB backup without restarting the server.
         Defaults:
-          - Output directory: VON_BACKUP_ROOT (resolved at launch)
+          - Output directory: resolved backup root (VON_BACKUP_ROOT or safe fallback)
           - Tag: "manual"
           - Mode: apply unless -BackupDryRun
     #>
@@ -2409,7 +2442,7 @@ function Invoke-BackupNow {
     $pdm = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
     $tag = if ($BackupTag) { $BackupTag } else { 'manual' }
     $requestedOutDir = if ($BackupOutDir) { $BackupOutDir } else { $BackupRoot }
-    $outDir = Resolve-BackupOutDir -OutDir $requestedOutDir -FallbackDir (Join-Path $Root 'backups') -Reason 'manual-backup'
+    $outDir = Resolve-BackupOutDir -OutDir $requestedOutDir -FallbackDir (Get-BackupFallbackDir) -Reason 'manual-backup'
     $apply = -not $BackupDryRun
     if (-not (Test-BackupOutputPathAllowed -Path $outDir -Context 'backup' -ApplyMode $apply)) {
         return
