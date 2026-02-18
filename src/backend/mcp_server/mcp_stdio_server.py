@@ -51,7 +51,6 @@ except ImportError:
 # Absolute imports (works when run as a script)
 from datetime import datetime, timezone
 from src.backend.vontology.utils_vontology import (
-    create_vontology_concept,
     get_all_vontology_nodes_with_details,
     get_vontology_node_content,
     get_vontology_tree,
@@ -80,13 +79,6 @@ from src.backend.services.text_value_service import (
     update_text_relation_text,
     delete_text_relation,
     delete_text_relation_by_predicate_and_text,
-)
-from src.backend.services.create_concepts_parent_resolution_service import (
-    resolve_parent_for_create_concepts,
-)
-from src.backend.services.create_concepts_duplicate_guard_service import (
-    build_duplicate_prevented_create_concepts_result,
-    find_existing_concept_for_create_concepts,
 )
 from src.backend.services.rag_text_relation_change_hook_service import (
     maybe_delete_text_relation_doc_from_rag,
@@ -555,181 +547,9 @@ async def _handle_get_context(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_create_concepts(arguments: dict[str, Any]) -> list[TextContent]:
-    from src.backend.vontology.code_concepts_registry import PREDICATE_TYPE_ID
-
-    parent_id = arguments.get("parent_id")
-    concepts = arguments.get("concepts", [])
-    raw_namespace = arguments.get("namespace")
-    namespace = (
-        raw_namespace.strip()
-        if isinstance(raw_namespace, str) and raw_namespace.strip()
-        else None
-    )
-    allow_duplicate_instances_raw = arguments.get("allow_duplicate_instances", False)
-    allow_duplicate_instances = (
-        allow_duplicate_instances_raw
-        if isinstance(allow_duplicate_instances_raw, bool)
-        else str(allow_duplicate_instances_raw).strip().lower()
-        in {"1", "true", "yes", "on"}
-    )
-    if not parent_id or not concepts:
-        return [
-            _json_error(
-                "Missing required parameters: parent_id and concepts array",
-                error_code="missing_parameter",
-                details={
-                    "missing": [
-                        p for p in ["parent_id", "concepts"] if not arguments.get(p)
-                    ]
-                },
-                suggestions=[
-                    "Specify parent_id (e.g., '#V#person' or '#V#abstract_object')",
-                    "Provide concepts array with at least one {name: '...'} object",
-                    "Use search_concepts to find existing parent concepts",
-                ],
-            )
-        ]
-
-    parent_resolution = resolve_parent_for_create_concepts(str(parent_id))
-    if not parent_resolution.success:
-        canonical_parent = parent_resolution.canonical_parent_id
-        related_ids = [
-            cid
-            for cid in [
-                canonical_parent,
-                *parent_resolution.fallback_candidates_checked,
-            ]
-            if cid
-        ]
-        suggestions = [
-            "Create the parent concept first",
-            "Search for similar concepts using search_concepts",
-        ]
-        if parent_resolution.fallback_candidates_checked:
-            suggestions.append(
-                "For workflow concepts, prefer an existing workflow supertype "
-                f"({', '.join(parent_resolution.fallback_candidates_checked)})"
-            )
-        return [
-            _json_error(
-                f"Parent concept '{canonical_parent}' not found. Create it first or check the ID.",
-                error_code="parent_not_found",
-                details={
-                    "canonical_parent_id": canonical_parent,
-                    "original_parent_id": parent_id,
-                    "fallback_candidates_checked": list(
-                        parent_resolution.fallback_candidates_checked
-                    ),
-                },
-                suggestions=suggestions,
-                related_concept_ids=related_ids,
-            )
-        ]
-
-    assert parent_resolution.resolved_parent_id is not None
-    resolved_parent_id = parent_resolution.resolved_parent_id
-
-    results = []
-    for concept_data in concepts:
-        name_val = concept_data.get("name")
-        kind_raw = concept_data.get("kind", "type")
-        kind = str(kind_raw or "type").strip().lower()
-        if kind == "individual":
-            kind = "instance"
-        description = concept_data.get("description")
-        notes = concept_data.get("notes")
-        instance_of_type = concept_data.get("instance_of_type")
-
-        if not name_val:
-            results.append(
-                {"error": "Concept missing required 'name' field", "data": concept_data}
-            )
-            continue
-
-        if kind == "predicate":
-            create_as_instance = True
-            parent_id_for_concept = PREDICATE_TYPE_ID
-        else:
-            create_as_instance = kind == "instance"
-            parent_id_for_concept = resolved_parent_id
-
-        duplicate_match = find_existing_concept_for_create_concepts(
-            concept_name=str(name_val),
-            kind=kind,
-            parent_id_for_concept=parent_id_for_concept,
-            preferred_language="en-NZ",
-            allow_duplicate_instances=allow_duplicate_instances,
-        )
-        if duplicate_match is not None:
-            result = build_duplicate_prevented_create_concepts_result(
-                requested_name=str(name_val),
-                requested_kind=kind,
-                existing_concept_id=duplicate_match.existing_concept_id,
-                guard_scope=duplicate_match.guard_scope,
-                match_source=duplicate_match.match_source,
-            )
-            result["concept_id"] = duplicate_match.existing_concept_id
-            results.append(result)
-            continue
-
-        result = create_vontology_concept(
-            parent_id=parent_id_for_concept,
-            new_concept_name=name_val,
-            create_as_instance=create_as_instance,
-            description=description,
-            notes=notes,
-            instance_of_type=instance_of_type,
-            event_namespace=namespace,
-        )
-        if isinstance(result, dict):
-            result["requested_name"] = str(name_val)
-            result["requested_kind"] = str(kind)
-            concept_id_value = result.get("concept_id")
-            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
-                nested_concept = result.get("concept")
-                if isinstance(nested_concept, dict):
-                    nested_id = nested_concept.get("concept_id")
-                    if isinstance(nested_id, str) and nested_id.strip():
-                        concept_id_value = nested_id
-            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
-                canonical_id = result.get("canonical_concept_id")
-                if isinstance(canonical_id, str) and canonical_id.strip():
-                    concept_id_value = canonical_id
-            if not isinstance(concept_id_value, str) or not concept_id_value.strip():
-                existing_id = result.get("existing_concept_id")
-                if isinstance(existing_id, str) and existing_id.strip():
-                    concept_id_value = existing_id
-            if isinstance(concept_id_value, str) and concept_id_value.strip():
-                result["concept_id"] = concept_id_value.strip()
-        results.append(result)
-
-    created_concept_ids = [
-        str(r.get("concept_id")).strip()
-        for r in results
-        if isinstance(r, dict)
-        and r.get("success")
-        and isinstance(r.get("concept_id"), str)
-        and str(r.get("concept_id")).strip()
-    ]
-    successful = sum(
-        1 for r in results if isinstance(r, dict) and bool(r.get("success"))
-    )
-    already_exists = sum(
-        1
-        for r in results
-        if isinstance(r, dict) and r.get("error_code") == "already_exists"
-    )
-    payload = {
-        "results": results,
-        "total": len(concepts),
-        "successful": successful,
-        "already_existed": already_exists,
-        "failed": len(concepts) - successful - already_exists,
-        "created_concept_ids": created_concept_ids,
-        "parent_id_used": resolved_parent_id,
-        "parent_resolution": parent_resolution.to_dict(),
-    }
-    return [_json_text(payload)]
+    # Route through the internal catalogue handler to keep stdio and gateway
+    # semantics identical for parent resolution, duplicate policy, and scoping.
+    return [_json_text(internal_mcp_catalogue_module._create_concepts(**arguments))]
 
 
 async def _handle_find_subconcepts(arguments: dict[str, Any]) -> list[TextContent]:

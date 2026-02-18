@@ -222,6 +222,32 @@ def _get_paper_metadata(**kwargs):
     return _run_async_compat(_async_metadata)
 
 
+_CREATE_CONCEPTS_SCOPE_DEFAULT = "user_org_default"
+_CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL = "organisation_general"
+_CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL = "global_general"
+_CREATE_CONCEPTS_SCOPE_MODE_ALIASES: dict[str, str] = {
+    "default": _CREATE_CONCEPTS_SCOPE_DEFAULT,
+    "user_org_default": _CREATE_CONCEPTS_SCOPE_DEFAULT,
+    "user_org": _CREATE_CONCEPTS_SCOPE_DEFAULT,
+    "private": _CREATE_CONCEPTS_SCOPE_DEFAULT,
+    "organisation_general": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
+    "organization_general": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
+    "org_general": _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
+    "global_general": _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
+    "global": _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
+    "public": _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
+}
+
+
+def _normalise_create_concepts_scope_mode(raw_value: Any) -> str | None:
+    if not isinstance(raw_value, str):
+        return None
+    cleaned = raw_value.strip().lower().replace("-", "_")
+    if not cleaned:
+        return None
+    return _CREATE_CONCEPTS_SCOPE_MODE_ALIASES.get(cleaned)
+
+
 def _create_concepts(**kwargs):
     from ...vontology.utils_vontology import create_vontology_concept
     from ...vontology.code_concepts_registry import PREDICATE_TYPE_ID
@@ -248,6 +274,58 @@ def _create_concepts(**kwargs):
         else str(allow_duplicate_instances_raw).strip().lower()
         in {"1", "true", "yes", "on"}
     )
+    raw_scope_mode = kwargs.get("scope_mode")
+    if raw_scope_mode is None:
+        raw_scope_mode = kwargs.get("visibility_scope_mode")
+    scope_mode = _normalise_create_concepts_scope_mode(raw_scope_mode)
+    if (
+        raw_scope_mode is not None
+        and isinstance(raw_scope_mode, str)
+        and raw_scope_mode.strip()
+        and scope_mode is None
+    ):
+        return make_error_response(
+            "invalid_parameter",
+            f"Invalid scope_mode '{raw_scope_mode}'.",
+            details={
+                "scope_mode": raw_scope_mode,
+                "supported_scope_modes": [
+                    _CREATE_CONCEPTS_SCOPE_DEFAULT,
+                    _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL,
+                    _CREATE_CONCEPTS_SCOPE_GLOBAL_GENERAL,
+                ],
+            },
+            suggestions=[
+                "Use scope_mode='user_org_default' for authenticated default scoping",
+                "Use scope_mode='organisation_general' for organisation-scoped shared concepts",
+                "Use scope_mode='global_general' for broadly visible concepts",
+            ],
+        )
+
+    from ...services.workflow_event_integration_service import resolve_event_actor_context
+
+    actor_user_id, actor_org_id = resolve_event_actor_context(
+        user_id=kwargs.get("created_by_concept_id"),
+        org_id=kwargs.get("organisation_concept_id") or kwargs.get("org_id"),
+        namespace=namespace,
+    )
+
+    if scope_mode == _CREATE_CONCEPTS_SCOPE_ORGANISATION_GENERAL and not actor_org_id:
+        return make_error_response(
+            "missing_organisation_context",
+            "organisation_general scope requires an organisation context.",
+            details={
+                "scope_mode": scope_mode,
+                "namespace": namespace,
+                "created_by_concept_id": actor_user_id,
+                "organisation_concept_id": actor_org_id,
+            },
+            suggestions=[
+                "Provide namespace in #V#user@org form",
+                "Or include organisation_concept_id in the tool payload",
+                "Or use scope_mode='user_org_default' or 'global_general'",
+            ],
+        )
 
     if not parent_id:
         return make_error_response(
@@ -410,7 +488,10 @@ def _create_concepts(**kwargs):
             create_as_instance=create_as_instance,
             description=concept_data.get("description"),
             notes=concept_data.get("notes"),
+            created_by_concept_id=actor_user_id,
+            organisation_concept_id=actor_org_id,
             event_namespace=namespace,
+            visibility_scope_mode=scope_mode,
         )
         # Enrich result with the requested name for traceability and surface
         # the canonical created concept_id at a stable top-level key so UI
@@ -451,6 +532,24 @@ def _create_concepts(**kwargs):
         and isinstance(r.get("concept_id"), str)
         and str(r.get("concept_id")).strip()
     ]
+    applied_scope_modes = sorted(
+        {
+            str(
+                (((r.get("concept") or {}).get("creation_visibility") or {}).get(
+                    "effective_scope_mode"
+                ))
+            ).strip()
+            for r in results
+            if isinstance(r, dict)
+            and isinstance(r.get("concept"), dict)
+            and isinstance((r.get("concept") or {}).get("creation_visibility"), dict)
+            and str(
+                (((r.get("concept") or {}).get("creation_visibility") or {}).get(
+                    "effective_scope_mode"
+                ))
+            ).strip()
+        }
+    )
 
     return {
         "results": results,
@@ -461,6 +560,18 @@ def _create_concepts(**kwargs):
         "created_concept_ids": created_concept_ids,
         "parent_id_used": validated_parent_id,  # Canonicalised parent ID that was actually used
         "parent_resolution": parent_resolution.to_dict(),
+        "scope_selection": {
+            "requested_scope_mode": scope_mode or _CREATE_CONCEPTS_SCOPE_DEFAULT,
+            "scope_mode_source": (
+                "request.scope_mode"
+                if isinstance(raw_scope_mode, str) and raw_scope_mode.strip()
+                else "default.user_org_default"
+            ),
+            "created_by_concept_id": actor_user_id,
+            "organisation_concept_id": actor_org_id,
+            "effective_scope_modes": applied_scope_modes,
+            "namespace": namespace,
+        },
     }
 
 
@@ -3571,6 +3682,10 @@ def _concepts_create_input_schema() -> Schema:
         optional={
             "allow_duplicate_instances": (bool,),
             "namespace": (str, type(None)),
+            "scope_mode": (str, type(None)),
+            "visibility_scope_mode": (str, type(None)),
+            "created_by_concept_id": (str, type(None)),
+            "organisation_concept_id": (str, type(None)),
         },
         allow_unknown=True,
         description=(
@@ -3578,6 +3693,9 @@ def _concepts_create_input_schema() -> Schema:
             "kind: 'instance' for individuals, 'type' for subtypes (default), 'predicate' for relationships. "
             "By default, deterministic pre-create lookup blocks duplicate instances/types/predicates; "
             "set allow_duplicate_instances=true to opt into legacy instance suffixing. "
+            "Scope defaults to authenticated user+organisation visibility when context is available. "
+            "Use scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' "
+            "for broadly visible concepts. organisation_general requires organisation context (namespace #V#user@org or organisation_concept_id). "
             "Optional namespace is accepted and propagated into event-triggered workflow launches for tenancy attribution. "
             "Unknown top-level fields are still tolerated for orchestrator-added context."
         ),
@@ -3591,7 +3709,9 @@ def _concepts_create_output_schema() -> Schema:
             "total": int,
             "successful": int,
         },
-        optional={},
+        optional={
+            "scope_selection": (dict,),
+        },
         allow_unknown=True,
         description="create_concepts output: results (list of creation results), total (int), successful (int)",
     )
@@ -10218,7 +10338,7 @@ def build_default_catalogue() -> MethodCatalogue:
             input_schema=_concepts_create_input_schema(),
             output_schema=_concepts_create_output_schema(),
             category="write",
-            description="Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
+            description="Create one or more concepts (instances, types, or predicates). Each concept needs name and kind ('instance' for individuals, 'type' for subtypes/default, 'predicate' for relationships). Accepts array of {name, kind?, description?, notes?}. Default visibility is user+organisation scoped when authenticated context exists. Override with scope_mode='organisation_general' for organisation-shared concepts, or scope_mode='global_general' for broadly visible concepts when the concept is clearly general. Supports singleton arrays. Use add_names afterward for alternative names/translations.",
         ),
         MethodDefinition(
             name="extract_annotations",

@@ -85,6 +85,25 @@ logger = logging.getLogger(__name__)
 # REFACTORING_NOTE: Define a type alias for MongoDB query objects for clarity
 MongoQuery = Dict[str, Any]
 
+# Concept visibility scope modes used during concept creation.
+# Keep these identifiers stable because MCP payloads and diagnostics depend on them.
+CONCEPT_SCOPE_USER_ORG_DEFAULT = "user_org_default"
+CONCEPT_SCOPE_USER_ONLY_DEFAULT = "user_only_default"
+CONCEPT_SCOPE_ORGANISATION_GENERAL = "organisation_general"
+CONCEPT_SCOPE_GLOBAL_GENERAL = "global_general"
+_CONCEPT_SCOPE_MODE_ALIASES: Dict[str, str] = {
+    "default": CONCEPT_SCOPE_USER_ORG_DEFAULT,
+    "user_org_default": CONCEPT_SCOPE_USER_ORG_DEFAULT,
+    "user_org": CONCEPT_SCOPE_USER_ORG_DEFAULT,
+    "private": CONCEPT_SCOPE_USER_ORG_DEFAULT,
+    "organisation_general": CONCEPT_SCOPE_ORGANISATION_GENERAL,
+    "organization_general": CONCEPT_SCOPE_ORGANISATION_GENERAL,
+    "org_general": CONCEPT_SCOPE_ORGANISATION_GENERAL,
+    "global_general": CONCEPT_SCOPE_GLOBAL_GENERAL,
+    "global": CONCEPT_SCOPE_GLOBAL_GENERAL,
+    "public": CONCEPT_SCOPE_GLOBAL_GENERAL,
+}
+
 
 def _invalidate_concept_mutation_caches() -> None:
     """Invalidate caches that may become stale after concept mutations.
@@ -124,6 +143,94 @@ def _invalidate_concept_mutation_caches() -> None:
         invalidate_vontology_concept_stats_cache(reason="concept_mutation")
     except Exception:
         pass
+
+
+def _normalise_creation_scope_mode(scope_mode: Any) -> Optional[str]:
+    if not isinstance(scope_mode, str):
+        return None
+    cleaned = scope_mode.strip().lower().replace("-", "_")
+    if not cleaned:
+        return None
+    return _CONCEPT_SCOPE_MODE_ALIASES.get(cleaned)
+
+
+def _resolve_creation_visibility_scope(
+    *,
+    created_by_concept_id: Optional[str],
+    organisation_concept_id: Optional[str],
+    event_namespace: Optional[str],
+    visibility_scope_mode: Optional[str],
+) -> Dict[str, Any]:
+    """Resolve concept visibility restrictions and diagnostics for create_concept."""
+
+    from .workflow_event_integration_service import resolve_event_actor_context
+
+    warnings: List[str] = []
+    requested_scope_mode = _normalise_creation_scope_mode(visibility_scope_mode)
+    if (
+        isinstance(visibility_scope_mode, str)
+        and visibility_scope_mode.strip()
+        and requested_scope_mode is None
+    ):
+        warnings.append(
+            f"Unknown visibility_scope_mode '{visibility_scope_mode}'. Using default authenticated scoping."
+        )
+
+    actor_user_id, actor_org_id = resolve_event_actor_context(
+        user_id=created_by_concept_id,
+        org_id=organisation_concept_id,
+        namespace=event_namespace,
+    )
+
+    relationships: Dict[str, List[str]] = {}
+    effective_scope_mode = CONCEPT_SCOPE_GLOBAL_GENERAL
+    scope_source = "missing_authenticated_context"
+
+    if requested_scope_mode == CONCEPT_SCOPE_GLOBAL_GENERAL:
+        effective_scope_mode = CONCEPT_SCOPE_GLOBAL_GENERAL
+        scope_source = "request.scope_mode"
+    else:
+        mode_for_resolution = requested_scope_mode
+        if mode_for_resolution == CONCEPT_SCOPE_ORGANISATION_GENERAL and not actor_org_id:
+            warnings.append(
+                "organisation_general requested without organisation context; falling back to authenticated defaults."
+            )
+            mode_for_resolution = CONCEPT_SCOPE_USER_ORG_DEFAULT
+
+        if mode_for_resolution == CONCEPT_SCOPE_ORGANISATION_GENERAL:
+            if actor_org_id:
+                relationships["specific_to_org"] = [actor_org_id]
+                effective_scope_mode = CONCEPT_SCOPE_ORGANISATION_GENERAL
+                scope_source = "request.scope_mode"
+            else:
+                # Defensive fallback for static typing and unexpected context drift.
+                effective_scope_mode = CONCEPT_SCOPE_GLOBAL_GENERAL
+                scope_source = "missing_authenticated_context"
+        elif actor_user_id:
+            relationships["specific_to_user"] = [actor_user_id]
+            if actor_org_id:
+                relationships["specific_to_org"] = [actor_org_id]
+                effective_scope_mode = CONCEPT_SCOPE_USER_ORG_DEFAULT
+            else:
+                effective_scope_mode = CONCEPT_SCOPE_USER_ONLY_DEFAULT
+            scope_source = (
+                "request.scope_mode"
+                if mode_for_resolution == CONCEPT_SCOPE_USER_ORG_DEFAULT
+                else "authenticated_context"
+            )
+        else:
+            effective_scope_mode = CONCEPT_SCOPE_GLOBAL_GENERAL
+            scope_source = "missing_authenticated_context"
+
+    return {
+        "requested_scope_mode": requested_scope_mode,
+        "effective_scope_mode": effective_scope_mode,
+        "scope_source": scope_source,
+        "created_by_concept_id": actor_user_id,
+        "organisation_concept_id": actor_org_id,
+        "relationships": relationships,
+        "warnings": warnings,
+    }
 
 
 # REFACTORING_NOTE: Placeholder for potential error/exception classes
@@ -242,11 +349,17 @@ def create_concept(
     created_by_concept_id: Optional[str] = None,
     organisation_concept_id: Optional[str] = None,
     event_namespace: Optional[str] = None,
+    visibility_scope_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Creates a new concept in the 'concepts' collection.
     REFACTORING_NOTE: This is the first CRUD operation for the new generalized concept model.
     It adheres to the schema defined in Sub-Task 1.2 of concept_refactoring.md.
     Now accepts concept_id.
+
+    visibility_scope_mode controls default visibility restrictions:
+    - None/default: user+organisation scoped when authenticated context is available
+    - organisation_general: organisation scoped, not user scoped
+    - global_general: no user/org restriction
     """
     # Use repository for concepts collection access
     concepts_coll = ConceptsRepository.collection()
@@ -303,6 +416,14 @@ def create_concept(
         is_instance_of = parent_ids if create_as_instance else []
         is_a_type_of = [] if create_as_instance else parent_ids
 
+    visibility_scope = _resolve_creation_visibility_scope(
+        created_by_concept_id=created_by_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        event_namespace=event_namespace,
+        visibility_scope_mode=visibility_scope_mode,
+    )
+    visibility_relationships = visibility_scope.get("relationships") or {}
+
     concept_doc: Dict[str, Any] = {
         # DO NOT include "names" field - will be created as text_relations below
         "guid": str(uuid.uuid4()),  # JVNAUTOSCI-730: Stable GUID
@@ -316,6 +437,7 @@ def create_concept(
             "is_a_type_of": is_a_type_of,
             "is_an_instance_of": is_instance_of,
             "linked_to": linked_concepts or [],
+            **visibility_relationships,
         },
     }
 
@@ -324,6 +446,16 @@ def create_concept(
 
     if vontology_path:
         concept_doc["vontology_path"] = vontology_path
+
+    logger.info(
+        "create_concept visibility_scope concept_id=%s requested=%s effective=%s source=%s user=%s org=%s",
+        concept_doc.get("concept_id") or vontology_path,
+        visibility_scope.get("requested_scope_mode"),
+        visibility_scope.get("effective_scope_mode"),
+        visibility_scope.get("scope_source"),
+        visibility_scope.get("created_by_concept_id"),
+        visibility_scope.get("organisation_concept_id"),
+    )
 
     try:
         result: InsertOneResult = concepts_coll.insert_one(concept_doc)
@@ -473,6 +605,16 @@ def create_concept(
         if created_concept:
             if "_id" in created_concept:
                 created_concept["id"] = str(created_concept.pop("_id"))
+            created_concept["creation_visibility"] = {
+                "requested_scope_mode": visibility_scope.get("requested_scope_mode"),
+                "effective_scope_mode": visibility_scope.get("effective_scope_mode"),
+                "scope_source": visibility_scope.get("scope_source"),
+                "created_by_concept_id": visibility_scope.get("created_by_concept_id"),
+                "organisation_concept_id": visibility_scope.get(
+                    "organisation_concept_id"
+                ),
+                "warnings": list(visibility_scope.get("warnings") or []),
+            }
             # Ensure a display name is present in response using centralized accessor
             try:
                 from ..vontology.utils_vontology import (

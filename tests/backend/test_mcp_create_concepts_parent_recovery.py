@@ -31,10 +31,6 @@ def _patch_create_concept_success(monkeypatch):
         "src.backend.vontology.utils_vontology.create_vontology_concept",
         _fake_create_vontology_concept,
     )
-    monkeypatch.setattr(
-        "src.backend.mcp_server.mcp_stdio_server.create_vontology_concept",
-        _fake_create_vontology_concept,
-    )
 
 
 def test_create_concepts_recovers_workflow_definition_parent(monkeypatch):

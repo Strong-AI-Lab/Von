@@ -42,7 +42,11 @@ def seed_core_concepts():
     yield
     # Cleanup test-created concepts
     concepts.delete_many(
-        {"concept_id": {"$regex": "^#V#(test_concept_|multi_extra_|test_predicate_)"}}
+        {
+            "concept_id": {
+                "$regex": "^#V#(test_concept_|multi_extra_|test_predicate_|scope_mode_test_|no_scope_context_test_)"
+            }
+        }
     )
 
 
@@ -165,3 +169,110 @@ def test_create_concepts_predicate_kind_creates_predicate_instance():
     first_result = result["results"][0]
     assert isinstance(first_result, dict)
     assert first_result.get("success") is True or "concept_id" in first_result
+
+
+def test_create_concepts_defaults_to_user_org_scope_from_namespace():
+    """Default creation should scope to user+organisation when namespace has both."""
+    import uuid
+
+    unique_name = f"scope_mode_test_default_{uuid.uuid4().hex[:8]}"
+    payload = {
+        "parent_id": "#V#abstract_object",
+        "namespace": "#V#scope_user@scope_org",
+        "concepts": [{"name": unique_name, "kind": "type"}],
+    }
+
+    result = _create_concepts(**payload)
+    first_result = (result.get("results") or [{}])[0]
+    concept = first_result.get("concept") or {}
+    relationships = concept.get("relationships") or {}
+
+    assert first_result.get("success") is True
+    assert relationships.get("specific_to_user") == ["#V#scope_user"]
+    assert relationships.get("specific_to_org") == ["#V#scope_org"]
+    scope_selection = result.get("scope_selection") or {}
+    assert scope_selection.get("requested_scope_mode") == "user_org_default"
+
+
+def test_create_concepts_scope_mode_organisation_general():
+    """organisation_general should be org-scoped and not user-scoped."""
+    import uuid
+
+    unique_name = f"scope_mode_test_org_{uuid.uuid4().hex[:8]}"
+    payload = {
+        "parent_id": "#V#abstract_object",
+        "namespace": "#V#scope_user@scope_org",
+        "scope_mode": "organisation_general",
+        "concepts": [{"name": unique_name, "kind": "type"}],
+    }
+
+    result = _create_concepts(**payload)
+    first_result = (result.get("results") or [{}])[0]
+    concept = first_result.get("concept") or {}
+    relationships = concept.get("relationships") or {}
+
+    assert first_result.get("success") is True
+    assert "specific_to_user" not in relationships
+    assert relationships.get("specific_to_org") == ["#V#scope_org"]
+    scope_selection = result.get("scope_selection") or {}
+    assert scope_selection.get("requested_scope_mode") == "organisation_general"
+    assert "organisation_general" in (scope_selection.get("effective_scope_modes") or [])
+
+
+def test_create_concepts_scope_mode_global_general():
+    """global_general should avoid user/org visibility restrictions."""
+    import uuid
+
+    unique_name = f"scope_mode_test_global_{uuid.uuid4().hex[:8]}"
+    payload = {
+        "parent_id": "#V#abstract_object",
+        "namespace": "#V#scope_user@scope_org",
+        "scope_mode": "global_general",
+        "concepts": [{"name": unique_name, "kind": "type"}],
+    }
+
+    result = _create_concepts(**payload)
+    first_result = (result.get("results") or [{}])[0]
+    concept = first_result.get("concept") or {}
+    relationships = concept.get("relationships") or {}
+
+    assert first_result.get("success") is True
+    assert "specific_to_user" not in relationships
+    assert "specific_to_org" not in relationships
+    scope_selection = result.get("scope_selection") or {}
+    assert scope_selection.get("requested_scope_mode") == "global_general"
+    assert "global_general" in (scope_selection.get("effective_scope_modes") or [])
+
+
+def test_create_concepts_scope_mode_org_general_requires_org_context():
+    """organisation_general should return a clear error when org context is missing."""
+    payload = {
+        "parent_id": "#V#abstract_object",
+        "namespace": "#V#scope_user",
+        "scope_mode": "organisation_general",
+        "concepts": [{"name": "scope_mode_test_missing_org", "kind": "type"}],
+    }
+
+    result = _create_concepts(**payload)
+    assert result.get("success") is False
+    assert result.get("error_code") == "missing_organisation_context"
+
+
+def test_create_concepts_defaults_to_global_when_context_missing():
+    """Without authenticated context, default create_concepts should be global."""
+    import uuid
+
+    unique_name = f"no_scope_context_test_{uuid.uuid4().hex[:8]}"
+    payload = {
+        "parent_id": "#V#abstract_object",
+        "concepts": [{"name": unique_name, "kind": "type"}],
+    }
+
+    result = _create_concepts(**payload)
+    first_result = (result.get("results") or [{}])[0]
+    concept = first_result.get("concept") or {}
+    relationships = concept.get("relationships") or {}
+
+    assert first_result.get("success") is True
+    assert "specific_to_user" not in relationships
+    assert "specific_to_org" not in relationships

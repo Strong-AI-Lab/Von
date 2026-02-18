@@ -3571,6 +3571,7 @@ def create_vontology_concept(
     created_by_concept_id: Optional[str] = None,
     organisation_concept_id: Optional[str] = None,
     event_namespace: Optional[str] = None,
+    visibility_scope_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Creates a new concept in the Vontology.
@@ -3589,6 +3590,8 @@ def create_vontology_concept(
         created_by_concept_id: Optional actor override for event-triggered workflows.
         organisation_concept_id: Optional organisation override for event-triggered workflows.
         event_namespace: Optional namespace override for event-triggered workflows.
+        visibility_scope_mode: Optional visibility override ("organisation_general",
+            "global_general", or default authenticated scoping).
 
     Returns:
         Dict with keys:
@@ -3662,6 +3665,7 @@ def create_vontology_concept(
             created_by_concept_id=created_by_concept_id,
             organisation_concept_id=organisation_concept_id,
             event_namespace=event_namespace,
+            visibility_scope_mode=visibility_scope_mode,
         )
 
         if created_concept:
