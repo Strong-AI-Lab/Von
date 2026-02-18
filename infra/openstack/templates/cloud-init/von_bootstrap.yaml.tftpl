@@ -40,6 +40,14 @@ write_files:
       FLASK_SESSION_COOKIE_SECURE=${enable_https ? 1 : 0}
       GOOGLE_OAUTH_STRICT_STARTUP=${google_oauth_strict_startup ? 1 : 0}
       GOOGLE_OAUTH_ENABLE_DYNAMIC_REDIRECTS=${google_oauth_enable_dynamic_redirects ? "true" : "false"}
+      VON_MONGO_STRICT_STARTUP=${mongo_strict_startup ? 1 : 0}
+      VON_MONGO_STARTUP_PROBE=${mongo_startup_probe ? 1 : 0}
+      VON_MONGO_REQUIRE_TLS=${mongo_require_tls ? 1 : 0}
+      MONGO_ALLOW_LOCAL_FALLBACK=${mongo_allow_local_fallback ? 1 : 0}
+      VON_MONGO_ALLOWED_HOST_SUFFIXES=${join(",", mongo_allowed_host_suffixes)}
+      VON_MONGO_READ_PROBE_COLLECTION=${mongo_read_probe_collection}
+      VON_MONGO_STARTUP_PROBE_COLLECTION=${mongo_write_probe_collection}
+      MONGO_URI_FILE=${mongo_uri_file}
 %{ if flask_secret_key != null ~}
       FLASK_SECRET_KEY=${jsonencode(flask_secret_key)}
 %{ endif ~}
@@ -63,6 +71,14 @@ write_files:
     permissions: "0600"
     content: |
       ${google_oauth_client_secret}
+%{ endif ~}
+
+%{ if mongo_uri != null ~}
+  - path: ${mongo_uri_file}
+    owner: root:root
+    permissions: "0600"
+    content: |
+      ${mongo_uri}
 %{ endif ~}
 
   - path: /etc/systemd/system/von.service

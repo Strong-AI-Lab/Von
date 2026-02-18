@@ -7,6 +7,7 @@ from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import ConnectionFailure, OperationFailure
 import datetime  # Added for type hinting and __main__ example
+from ..services.runtime_env import get_env_bool, load_secret_from_env_or_file
 
 logger = logging.getLogger(__name__)
 
@@ -116,18 +117,18 @@ def _get_nonempty_env_value(name: str) -> str | None:
     return value if value else None
 
 
-MONGO_URI = _get_nonempty_env_value("MONGO_URI") or "mongodb://localhost:27017/"
+MONGO_URI = (
+    load_secret_from_env_or_file("MONGO_URI", "MONGO_URI_FILE")
+    or _get_nonempty_env_value("MONGO_URI")
+    or "mongodb://localhost:27017/"
+)
 # Optional fallback URI to use when SRV DNS resolution fails (useful offline)
 MONGO_LOCAL_URI = (
     _get_nonempty_env_value("MONGO_LOCAL_URI")
     or "mongodb://127.0.0.1:27017/?directConnection=true"
 )
 MONGO_DNS_FALLBACK_URI = _get_nonempty_env_value("MONGO_DNS_FALLBACK_URI")
-MONGO_ALLOW_LOCAL_FALLBACK = os.environ.get("MONGO_ALLOW_LOCAL_FALLBACK", "1") in (
-    "1",
-    "true",
-    "True",
-)
+MONGO_ALLOW_LOCAL_FALLBACK = get_env_bool("MONGO_ALLOW_LOCAL_FALLBACK", True)
 
 
 def _is_running_under_pytest() -> bool:

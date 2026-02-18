@@ -46,6 +46,12 @@ def test_cloud_init_bootstrap_executes_non_interactive_bootstrap_deploy() -> Non
     assert "GOOGLE_OAUTH_STRICT_STARTUP" in content
     assert "GOOGLE_OAUTH_CLIENT_SECRET_FILE" in content
     assert "FLASK_SESSION_COOKIE_SECURE" in content
+    assert "VON_MONGO_STRICT_STARTUP" in content
+    assert "VON_MONGO_STARTUP_PROBE" in content
+    assert "VON_MONGO_REQUIRE_TLS" in content
+    assert "MONGO_ALLOW_LOCAL_FALLBACK" in content
+    assert "VON_MONGO_ALLOWED_HOST_SUFFIXES" in content
+    assert "MONGO_URI_FILE" in content
 
 
 def test_workflow_contains_ci_gates_and_manual_deploy_trigger() -> None:
@@ -78,4 +84,5 @@ def test_operations_runbook_doc_exists_with_incident_sections() -> None:
     assert "Service Outage" in content
     assert "Auth Failure" in content
     assert "DB Credential Rotation" in content
+    assert "/admin/db/health?probe=rw" in content
     assert "Rebuild from IaC" in content

@@ -166,6 +166,31 @@ Avoid committed plaintext secrets:
 With strict startup enabled, Von fails fast with actionable diagnostics when
 OAuth configuration is missing, localhost/insecure, or otherwise unsafe.
 
+## 9) Mongo Atlas hardening and credential rotation posture
+
+Managed bootstrap exposes Mongo startup guardrails for hosted deployments:
+
+- `bootstrap_mongo_strict_startup = true` (recommended for staging/prod)
+- `bootstrap_mongo_startup_probe = true`
+- `bootstrap_mongo_require_tls = true`
+- `bootstrap_mongo_allow_local_fallback = false`
+- `bootstrap_mongo_allowed_host_suffixes = [".mongodb.net"]`
+- `bootstrap_mongo_uri_file = "/etc/von/secrets/mongo_uri"`
+
+Secret handling guidance:
+
+- keep `bootstrap_mongo_uri = null` in committed tfvars.
+- inject `TF_VAR_bootstrap_mongo_uri` at apply time, or pre-provision
+  `/etc/von/secrets/mongo_uri` out-of-band.
+
+Operational checks:
+
+- restrict Atlas network allowlist to approved host/NAT egress IPs only.
+- validate post-deploy DB path with `/admin/db/health?probe=rw`.
+
+With strict startup enabled, Von fails fast with clear diagnostics when Mongo
+URI policy or startup connectivity/auth/read/write probe checks fail.
+
 ## Related docs
 
 - `infra/openstack/README.md`

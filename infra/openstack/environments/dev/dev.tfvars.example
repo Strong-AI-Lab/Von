@@ -83,3 +83,14 @@ bootstrap_google_oauth_enable_dynamic_redirects = false
 bootstrap_flask_secret_key                     = null
 bootstrap_google_oauth_client_id               = null
 bootstrap_google_oauth_client_secret           = null
+
+# Mongo Atlas hardening (dev can remain non-strict while preserving TLS defaults).
+bootstrap_mongo_strict_startup        = false
+bootstrap_mongo_startup_probe         = false
+bootstrap_mongo_require_tls           = true
+bootstrap_mongo_allow_local_fallback  = true
+bootstrap_mongo_allowed_host_suffixes = [".mongodb.net"]
+bootstrap_mongo_uri                   = null
+bootstrap_mongo_uri_file              = "/etc/von/secrets/mongo_uri"
+bootstrap_mongo_read_probe_collection = "application_settings"
+bootstrap_mongo_write_probe_collection = "_von_startup_probe"

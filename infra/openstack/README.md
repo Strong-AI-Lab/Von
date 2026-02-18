@@ -175,6 +175,28 @@ committing plaintext credentials:
 
 Do not commit real OAuth secrets in tracked tfvars files.
 
+## Mongo Atlas hardening and startup probes
+
+Managed bootstrap also supports MongoDB Atlas startup hardening:
+
+- `bootstrap_mongo_strict_startup=true` enforces fail-fast startup validation.
+- `bootstrap_mongo_require_tls=true` enforces TLS URI policy checks.
+- `bootstrap_mongo_allowed_host_suffixes` defaults to `[".mongodb.net"]`.
+- `bootstrap_mongo_allow_local_fallback` should be `false` for hosted staging/prod.
+- `bootstrap_mongo_startup_probe=true` runs auth/read/write probe checks at service startup.
+- `bootstrap_mongo_uri_file` defaults to `/etc/von/secrets/mongo_uri`.
+
+Secret handling:
+
+- keep `bootstrap_mongo_uri = null` in committed tfvars.
+- inject secrets at runtime using `TF_VAR_bootstrap_mongo_uri`, or pre-provision
+  `bootstrap_mongo_uri_file` on host.
+
+Operational note:
+
+- Atlas network access should be restricted to approved host/NAT egress addresses.
+- after deploy, use `/admin/db/health?probe=rw` for basic DB auth/read/write verification.
+
 ## Guardrails built in
 
 - Required input checks (`network_id`, `subnet_id`, `image_id`, `key_pair_name`, etc.).
@@ -186,3 +208,4 @@ Do not commit real OAuth secrets in tracked tfvars files.
 - Deployment audit logging (`deploy_audit.jsonl`) for version/time/outcome traceability.
 - Monitoring/backup/restore-drill timers with auditable JSONL event logs.
 - Strict OAuth startup mode rejects unsafe/missing hosted OAuth configuration.
+- Strict Mongo startup mode rejects unsafe/missing hosted Mongo configuration.

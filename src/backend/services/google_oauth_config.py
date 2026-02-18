@@ -7,53 +7,21 @@ loading logic in one place so auth paths and startup validation stay aligned.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from urllib.parse import urlparse
-
-
-def _truthy(raw: str | None) -> bool:
-    if raw is None:
-        return False
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _clean(raw: str | None) -> str | None:
-    if raw is None:
-        return None
-    value = raw.strip()
-    if not value:
-        return None
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        value = value[1:-1].strip()
-    return value or None
-
-
-def _read_secret_file(path: str | None) -> str | None:
-    clean_path = _clean(path)
-    if not clean_path:
-        return None
-    try:
-        data = Path(clean_path).read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return data or None
-
-
-def load_secret_from_env_or_file(env_name: str, file_env_name: str) -> str | None:
-    """Resolve a secret value from ENV directly or from a file path ENV."""
-    direct = _clean(os.getenv(env_name))
-    if direct:
-        return direct
-    return _read_secret_file(os.getenv(file_env_name))
+from .runtime_env import (
+    clean_env_value,
+    load_secret_from_env_or_file,
+    truthy,
+)
 
 
 def google_oauth_strict_startup_enabled() -> bool:
     """Return True when production-style OAuth startup validation is required."""
-    return _truthy(os.getenv("GOOGLE_OAUTH_STRICT_STARTUP"))
+    return truthy(os.getenv("GOOGLE_OAUTH_STRICT_STARTUP"))
 
 
 def _is_local_development_redirect(redirect_uri: str | None) -> bool:
-    value = _clean(redirect_uri)
+    value = clean_env_value(redirect_uri)
     if not value:
         return False
     parsed = urlparse(value)
@@ -63,7 +31,7 @@ def _is_local_development_redirect(redirect_uri: str | None) -> bool:
 
 def configure_oauthlib_insecure_transport(redirect_uri: str | None) -> None:
     """Set OAUTHLIB insecure transport only for explicit/local development flows."""
-    if _truthy(os.getenv("GOOGLE_OAUTH_ALLOW_INSECURE_TRANSPORT")):
+    if truthy(os.getenv("GOOGLE_OAUTH_ALLOW_INSECURE_TRANSPORT")):
         os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
         return
     if _is_local_development_redirect(redirect_uri):
@@ -85,9 +53,9 @@ def collect_google_oauth_startup_errors() -> list[str]:
     client_secret = load_secret_from_env_or_file(
         "GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_OAUTH_CLIENT_SECRET_FILE"
     )
-    redirect_uri = _clean(os.getenv("GOOGLE_OAUTH_REDIRECT_URI"))
-    dynamic_redirects_enabled = _truthy(os.getenv("GOOGLE_OAUTH_ENABLE_DYNAMIC_REDIRECTS"))
-    dynamic_redirects_override = _truthy(
+    redirect_uri = clean_env_value(os.getenv("GOOGLE_OAUTH_REDIRECT_URI"))
+    dynamic_redirects_enabled = truthy(os.getenv("GOOGLE_OAUTH_ENABLE_DYNAMIC_REDIRECTS"))
+    dynamic_redirects_override = truthy(
         os.getenv("GOOGLE_OAUTH_ALLOW_DYNAMIC_REDIRECTS_IN_PRODUCTION")
     )
 
@@ -123,7 +91,7 @@ def collect_google_oauth_startup_errors() -> list[str]:
             "GOOGLE_OAUTH_ENABLE_DYNAMIC_REDIRECTS must be disabled in strict startup mode."
         )
 
-    if _truthy(os.getenv("OAUTHLIB_INSECURE_TRANSPORT")) and not _is_local_development_redirect(
+    if truthy(os.getenv("OAUTHLIB_INSECURE_TRANSPORT")) and not _is_local_development_redirect(
         redirect_uri
     ):
         errors.append(

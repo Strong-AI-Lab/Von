@@ -516,6 +516,96 @@ variable "bootstrap_google_oauth_enable_dynamic_redirects" {
   }
 }
 
+variable "bootstrap_mongo_strict_startup" {
+  type        = bool
+  description = "When true, Von startup fails-fast if Mongo URI/security policy checks fail."
+  default     = false
+
+  validation {
+    condition     = !(var.bootstrap_mongo_strict_startup && var.bootstrap_mongo_allow_local_fallback)
+    error_message = "bootstrap_mongo_allow_local_fallback must be false when bootstrap_mongo_strict_startup=true."
+  }
+
+  validation {
+    condition     = !var.bootstrap_mongo_strict_startup || var.bootstrap_mongo_require_tls
+    error_message = "bootstrap_mongo_require_tls must be true when bootstrap_mongo_strict_startup=true."
+  }
+}
+
+variable "bootstrap_mongo_startup_probe" {
+  type        = bool
+  description = "Enable Mongo auth/read/write startup probe at Von process startup."
+  default     = false
+}
+
+variable "bootstrap_mongo_require_tls" {
+  type        = bool
+  description = "Require TLS-enabled MongoDB URI policy checks."
+  default     = true
+}
+
+variable "bootstrap_mongo_allow_local_fallback" {
+  type        = bool
+  description = "Allow fallback from Atlas URI to local Mongo URI on connection failures."
+  default     = true
+}
+
+variable "bootstrap_mongo_allowed_host_suffixes" {
+  type        = list(string)
+  description = "Allowed Mongo host suffixes for strict startup validation."
+  default     = [".mongodb.net"]
+
+  validation {
+    condition     = length(var.bootstrap_mongo_allowed_host_suffixes) > 0
+    error_message = "bootstrap_mongo_allowed_host_suffixes must contain at least one suffix."
+  }
+}
+
+variable "bootstrap_mongo_uri" {
+  type        = string
+  description = "Optional inline Mongo URI for managed bootstrap secret-file injection."
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.bootstrap_mongo_uri == null || can(regex("^mongodb(\\+srv)?://", trim(var.bootstrap_mongo_uri)))
+    error_message = "bootstrap_mongo_uri must be null or a mongodb:// / mongodb+srv:// URI."
+  }
+}
+
+variable "bootstrap_mongo_uri_file" {
+  type        = string
+  description = "Path used by runtime MONGO_URI_FILE."
+  default     = "/etc/von/secrets/mongo_uri"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_mongo_uri_file))
+    error_message = "bootstrap_mongo_uri_file must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_mongo_read_probe_collection" {
+  type        = string
+  description = "Collection name used for Mongo read-path startup probe."
+  default     = "application_settings"
+
+  validation {
+    condition     = trim(var.bootstrap_mongo_read_probe_collection) != ""
+    error_message = "bootstrap_mongo_read_probe_collection cannot be empty."
+  }
+}
+
+variable "bootstrap_mongo_write_probe_collection" {
+  type        = string
+  description = "Collection name used for Mongo write-path startup probe."
+  default     = "_von_startup_probe"
+
+  validation {
+    condition     = trim(var.bootstrap_mongo_write_probe_collection) != ""
+    error_message = "bootstrap_mongo_write_probe_collection cannot be empty."
+  }
+}
+
 variable "bootstrap_deploy_log_path" {
   type        = string
   description = "Deployment log file path used by /usr/local/bin/deploy_von_release.sh."

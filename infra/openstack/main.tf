@@ -166,6 +166,15 @@ locals {
     google_oauth_client_id_file = var.bootstrap_google_oauth_client_id_file
     google_oauth_client_secret_file = var.bootstrap_google_oauth_client_secret_file
     google_oauth_enable_dynamic_redirects = var.bootstrap_google_oauth_enable_dynamic_redirects
+    mongo_strict_startup       = var.bootstrap_mongo_strict_startup
+    mongo_startup_probe        = var.bootstrap_mongo_startup_probe
+    mongo_require_tls          = var.bootstrap_mongo_require_tls
+    mongo_allow_local_fallback = var.bootstrap_mongo_allow_local_fallback
+    mongo_allowed_host_suffixes = var.bootstrap_mongo_allowed_host_suffixes
+    mongo_uri                  = var.bootstrap_mongo_uri
+    mongo_uri_file             = var.bootstrap_mongo_uri_file
+    mongo_read_probe_collection = var.bootstrap_mongo_read_probe_collection
+    mongo_write_probe_collection = var.bootstrap_mongo_write_probe_collection
     enable_monitoring          = var.bootstrap_enable_monitoring
     enable_log_collection      = var.bootstrap_enable_log_collection
     enable_backup_automation   = var.bootstrap_enable_backup_automation

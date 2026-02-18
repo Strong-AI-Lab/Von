@@ -83,15 +83,21 @@ Primary logs and audits:
 ### Preparation
 
 1. Obtain new DB credential and validate connectivity out-of-band.
-2. Schedule low-traffic window.
+2. Confirm Atlas IP/network allowlist contains only approved host/NAT egress addresses.
+3. Schedule low-traffic window.
 
 ### Execution
 
-1. Update DB credential in `/etc/von/von.env` (or equivalent secret injection path).
-2. Restart service:
+1. Update Mongo secret file content (default `/etc/von/secrets/mongo_uri`) or equivalent secure secret injection path.
+2. Verify Mongo runtime policy flags in `/etc/von/von.env`:
+   - `VON_MONGO_STRICT_STARTUP=1` (staging/prod)
+   - `VON_MONGO_REQUIRE_TLS=1`
+   - `MONGO_ALLOW_LOCAL_FALLBACK=0`
+3. Restart service:
    - `sudo systemctl restart von.service`
-3. Validate:
+4. Validate:
    - `curl -fsS http://127.0.0.1:5000/health`
+   - `curl -fsS http://127.0.0.1:5000/admin/db/health?probe=rw`
    - `sudo journalctl -u von.service --since "-15 min" --no-pager | grep -Ei 'mongo|database|authentication failed|timed out'`
 
 ### Rollback

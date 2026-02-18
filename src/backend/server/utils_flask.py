@@ -65,6 +65,12 @@ from ..services.google_oauth_config import (
     google_oauth_strict_startup_enabled,
     validate_google_oauth_startup_or_raise,
 )
+from ..services.mongo_startup_config import (
+    mongo_startup_probe_enabled,
+    mongo_strict_startup_enabled,
+    run_mongo_startup_probe,
+    validate_mongo_startup_or_raise,
+)
 
 # Define a version string
 APP_VERSION = "v20250421_1015_backend"  # Updated version
@@ -408,6 +414,20 @@ def create_flask_app(
                 "GOOGLE_OAUTH_STRICT_STARTUP requires FLASK_SECRET_KEY length >= 32 characters."
             )
         validate_google_oauth_startup_or_raise()
+
+    strict_mongo_startup = mongo_strict_startup_enabled()
+    if strict_mongo_startup:
+        validate_mongo_startup_or_raise()
+
+    startup_probe_enabled = mongo_startup_probe_enabled()
+    if startup_probe_enabled and not _is_running_under_pytest():
+        probe_result = run_mongo_startup_probe()
+        app.logger.info(
+            "Mongo startup probe succeeded (read=%s write=%s collection=%s).",
+            probe_result.get("read_ok"),
+            probe_result.get("write_ok"),
+            probe_result.get("write_collection"),
+        )
 
     # Enable template auto-reload in development
     app.config["TEMPLATES_AUTO_RELOAD"] = True
