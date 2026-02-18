@@ -427,3 +427,14 @@ variable "bootstrap_deploy_log_path" {
     error_message = "bootstrap_deploy_log_path must be an absolute Linux path."
   }
 }
+
+variable "bootstrap_deploy_audit_log_path" {
+  type        = string
+  description = "Audit log file path (JSONL) written by /usr/local/bin/deploy_von_release.sh."
+  default     = "/var/log/von/deploy_audit.jsonl"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_deploy_audit_log_path))
+    error_message = "bootstrap_deploy_audit_log_path must be an absolute Linux path."
+  }
+}

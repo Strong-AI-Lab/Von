@@ -91,12 +91,39 @@ The generated deploy script executes:
 2. release activation + `systemctl restart von`
 3. post-restart `GET /health` validation
 4. automatic rollback to the previous release if health checks fail
+5. append a JSON audit event to `/var/log/von/deploy_audit.jsonl`
 
 You can trigger later deployments directly on the host:
 
 ```bash
 sudo /usr/local/bin/deploy_von_release.sh --repo-url https://github.com/Strong-AI-Lab/Von.git --repo-ref main
 ```
+
+Or deploy a pre-built versioned artefact (for CI/CD pipelines):
+
+```bash
+sudo /usr/local/bin/deploy_von_release.sh --artifact-path /tmp/von-<commit>.tar.gz --repo-ref main
+```
+
+## GitHub Actions deployment pipeline
+
+Workflow: `.github/workflows/openstack-deploy.yml`
+
+- Pull requests touching OpenStack deployment files run CI gates:
+  - lint gate (`terraform fmt -check`, deploy script syntax check)
+  - type gate (`terraform validate`)
+  - tests (`tests/infra/test_openstack_deploy_templates.py`)
+  - versioned release artefact build/upload (`von-<sha>.tar.gz`)
+- Manual `workflow_dispatch` can deploy non-interactively to the target host over SSH.
+- Deployment summary includes release metadata and captured deploy audit payload.
+
+Required environment secrets for workflow-dispatch deploy:
+
+- `OPENSTACK_DEPLOY_HOST`
+- `OPENSTACK_DEPLOY_USER`
+- `OPENSTACK_DEPLOY_SSH_PRIVATE_KEY`
+- `OPENSTACK_DEPLOY_PORT` (optional, defaults to `22`)
+- `OPENSTACK_DEPLOY_KNOWN_HOSTS` (recommended; if omitted, host key checking is disabled for that run)
 
 ## Guardrails built in
 
@@ -106,3 +133,4 @@ sudo /usr/local/bin/deploy_von_release.sh --repo-url https://github.com/Strong-A
 - Safety toggle for production change operations in the PowerShell runner.
 - HTTPS reverse proxy defaults (HTTP redirect + TLS files), with optional self-signed bootstrap cert generation.
 - Deployment health gating with rollback in managed host deploy script.
+- Deployment audit logging (`deploy_audit.jsonl`) for version/time/outcome traceability.

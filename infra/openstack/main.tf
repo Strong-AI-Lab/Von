@@ -66,16 +66,17 @@ locals {
   })
 
   von_deploy_script = templatefile("${path.module}/templates/scripts/deploy_von_release.sh.tftpl", {
-    service_name       = "von"
-    service_user       = var.bootstrap_service_user
-    service_group      = var.bootstrap_service_group
-    release_root       = var.bootstrap_release_root
-    current_symlink    = var.bootstrap_current_symlink
-    deploy_log_path    = var.bootstrap_deploy_log_path
-    healthcheck_path   = var.bootstrap_healthcheck_path
-    app_port           = var.bootstrap_app_port
-    bootstrap_repo_url = var.bootstrap_repo_url
-    bootstrap_repo_ref = var.bootstrap_repo_ref
+    service_name           = "von"
+    service_user           = var.bootstrap_service_user
+    service_group          = var.bootstrap_service_group
+    release_root           = var.bootstrap_release_root
+    current_symlink        = var.bootstrap_current_symlink
+    deploy_log_path        = var.bootstrap_deploy_log_path
+    deploy_audit_log_path  = var.bootstrap_deploy_audit_log_path
+    healthcheck_path       = var.bootstrap_healthcheck_path
+    app_port               = var.bootstrap_app_port
+    bootstrap_repo_url     = var.bootstrap_repo_url
+    bootstrap_repo_ref     = var.bootstrap_repo_ref
   })
 
   managed_bootstrap_user_data = templatefile("${path.module}/templates/cloud-init/von_bootstrap.yaml.tftpl", {

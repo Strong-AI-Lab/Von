@@ -98,6 +98,29 @@ The deploy script will:
 2. activate the new release and restart `von.service`
 3. poll `http://127.0.0.1:5000/health`
 4. roll back to the previous release automatically if health checks fail
+5. append deployment audit metadata to `/var/log/von/deploy_audit.jsonl`
+
+## 6) CI/CD deployment workflow
+
+Workflow file: `.github/workflows/openstack-deploy.yml`
+
+Capabilities:
+
+- CI gates for OpenStack deployment changes:
+  - lint (`terraform fmt -check`, shell syntax check of deploy template)
+  - type (`terraform validate`)
+  - tests (`tests/infra/test_openstack_deploy_templates.py`)
+- Build and upload versioned release artefact (`von-<commit>.tar.gz` + SHA256 file)
+- Manual non-interactive OpenStack host deployment via SSH with health-gated rollout and rollback
+- Deployment summary with release metadata and captured audit payload
+
+Required GitHub environment secrets for deploy runs:
+
+- `OPENSTACK_DEPLOY_HOST`
+- `OPENSTACK_DEPLOY_USER`
+- `OPENSTACK_DEPLOY_SSH_PRIVATE_KEY`
+- `OPENSTACK_DEPLOY_PORT` (optional)
+- `OPENSTACK_DEPLOY_KNOWN_HOSTS` (recommended)
 
 ## Related docs
 

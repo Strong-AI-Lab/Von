@@ -7,6 +7,7 @@ SERVICE_GROUP="${service_group}"
 RELEASE_ROOT="${release_root}"
 CURRENT_SYMLINK="${current_symlink}"
 DEPLOY_LOG_PATH="${deploy_log_path}"
+DEPLOY_AUDIT_LOG_PATH="${deploy_audit_log_path}"
 HEALTHCHECK_URL="http://127.0.0.1:${app_port}${healthcheck_path}"
 DEFAULT_REPO_URL="${bootstrap_repo_url}"
 DEFAULT_REPO_REF="${bootstrap_repo_ref}"
@@ -14,13 +15,17 @@ DEFAULT_REPO_REF="${bootstrap_repo_ref}"
 usage() {
   cat <<'USAGE'
 Usage:
-  deploy_von_release.sh [--repo-url <url>] [--repo-ref <ref>] [--release-path <path>] [--bootstrap]
+  deploy_von_release.sh [--repo-url <url>] [--repo-ref <ref>] [--release-path <path>] [--artifact-path <tar.gz>] [--bootstrap]
 
 Behaviour:
   - Runs preflight checks.
-  - Deploys either a supplied release path or a git checkout into a versioned release directory.
+  - Deploys either:
+      - a supplied release path,
+      - a supplied release artefact (.tar.gz), or
+      - a git checkout into a versioned release directory.
   - Restarts the systemd service and waits for health.
   - Rolls back to previous release if health checks fail.
+  - Emits one JSONL audit event per execution.
 USAGE
 }
 
@@ -38,6 +43,96 @@ require_cmd() {
 
 run_as_service_user() {
   sudo -u "$SERVICE_USER" "$@"
+}
+
+to_bool() {
+  case "${1,,}" in
+    1|true|yes|y|on) printf 'true' ;;
+    *) printf 'false' ;;
+  esac
+}
+
+write_audit_event() {
+  local outcome="$1"
+  local exit_code="${2:-0}"
+
+  if [[ "$AUDIT_WRITTEN" -eq 1 ]]; then
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$DEPLOY_AUDIT_LOG_PATH")"
+
+  DEPLOY_FINISHED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  DEPLOY_OUTCOME="$outcome"
+  DEPLOY_EXIT_CODE="$exit_code"
+
+  DEPLOY_STARTED_AT="$DEPLOY_STARTED_AT" \
+  DEPLOY_FINISHED_AT="$DEPLOY_FINISHED_AT" \
+  DEPLOY_OUTCOME="$DEPLOY_OUTCOME" \
+  DEPLOY_EXIT_CODE="$DEPLOY_EXIT_CODE" \
+  DEPLOY_ACTOR="$DEPLOY_ACTOR" \
+  DEPLOY_SERVICE_NAME="$SERVICE_NAME" \
+  DEPLOY_REPO_URL="$REPO_URL" \
+  DEPLOY_REPO_REF="$REPO_REF" \
+  DEPLOY_RELEASE_PATH="$RELEASE_PATH" \
+  DEPLOY_ARTIFACT_PATH="$ARTIFACT_PATH" \
+  DEPLOY_NEW_RELEASE="$NEW_RELEASE" \
+  DEPLOY_PREVIOUS_RELEASE="$PREVIOUS_RELEASE" \
+  DEPLOY_HEALTHCHECK_URL="$HEALTHCHECK_URL" \
+  DEPLOY_ROLLBACK_APPLIED="$(to_bool "$ROLLBACK_APPLIED")" \
+  DEPLOY_ROLLBACK_SUCCEEDED="$(to_bool "$ROLLBACK_SUCCEEDED")" \
+  DEPLOY_BOOTSTRAP_MODE="$(to_bool "$BOOTSTRAP_MODE")" \
+  python3 - "$DEPLOY_AUDIT_LOG_PATH" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+event = {
+    "started_at_utc": os.environ.get("DEPLOY_STARTED_AT"),
+    "finished_at_utc": os.environ.get("DEPLOY_FINISHED_AT"),
+    "outcome": os.environ.get("DEPLOY_OUTCOME"),
+    "exit_code": int(os.environ.get("DEPLOY_EXIT_CODE", "1")),
+    "actor": os.environ.get("DEPLOY_ACTOR"),
+    "service_name": os.environ.get("DEPLOY_SERVICE_NAME"),
+    "repo_url": os.environ.get("DEPLOY_REPO_URL"),
+    "repo_ref": os.environ.get("DEPLOY_REPO_REF"),
+    "release_path_input": os.environ.get("DEPLOY_RELEASE_PATH") or None,
+    "artifact_path_input": os.environ.get("DEPLOY_ARTIFACT_PATH") or None,
+    "new_release_path": os.environ.get("DEPLOY_NEW_RELEASE") or None,
+    "previous_release_path": os.environ.get("DEPLOY_PREVIOUS_RELEASE") or None,
+    "healthcheck_url": os.environ.get("DEPLOY_HEALTHCHECK_URL"),
+    "rollback_applied": os.environ.get("DEPLOY_ROLLBACK_APPLIED", "false") == "true",
+    "rollback_succeeded": os.environ.get("DEPLOY_ROLLBACK_SUCCEEDED", "false") == "true",
+    "bootstrap_mode": os.environ.get("DEPLOY_BOOTSTRAP_MODE", "false") == "true",
+}
+
+path.parent.mkdir(parents=True, exist_ok=True)
+with path.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(event, sort_keys=True) + "\n")
+PY
+
+  AUDIT_WRITTEN=1
+  log "Deployment audit event appended to $DEPLOY_AUDIT_LOG_PATH (outcome=$outcome, exit_code=$exit_code)."
+}
+
+on_exit() {
+  local exit_code=$?
+  local fallback_outcome="$DEPLOY_OUTCOME"
+  if [[ "$AUDIT_WRITTEN" -eq 1 ]]; then
+    return
+  fi
+
+  if [[ -z "$fallback_outcome" || "$fallback_outcome" == "started" ]]; then
+    if [[ "$exit_code" -eq 0 ]]; then
+      fallback_outcome="success"
+    else
+      fallback_outcome="failed"
+    fi
+  fi
+
+  write_audit_event "$fallback_outcome" "$exit_code" || true
 }
 
 wait_for_health() {
@@ -80,7 +175,17 @@ fi
 REPO_URL="$DEFAULT_REPO_URL"
 REPO_REF="$DEFAULT_REPO_REF"
 RELEASE_PATH=""
+ARTIFACT_PATH=""
 BOOTSTRAP_MODE=0
+DEPLOY_STARTED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+DEPLOY_ACTOR="${SUDO_USER:-root}"
+DEPLOY_OUTCOME="started"
+NEW_RELEASE=""
+PREVIOUS_RELEASE=""
+ROLLBACK_APPLIED=0
+ROLLBACK_SUCCEEDED=0
+AUDIT_WRITTEN=0
+trap on_exit EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -94,6 +199,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --release-path)
       RELEASE_PATH="$2"
+      shift 2
+      ;;
+    --artifact-path)
+      ARTIFACT_PATH="$2"
       shift 2
       ;;
     --bootstrap)
@@ -117,12 +226,20 @@ touch "$DEPLOY_LOG_PATH"
 exec > >(tee -a "$DEPLOY_LOG_PATH") 2>&1
 
 log "Starting Von deployment pipeline (preflight -> restart -> health check -> rollback-on-failure)."
-
-require_cmd git
+require_cmd tar
 require_cmd python3
 require_cmd systemctl
 require_cmd curl
 require_cmd sudo
+
+if [[ -z "$RELEASE_PATH" && -z "$ARTIFACT_PATH" ]]; then
+  require_cmd git
+fi
+
+if [[ -n "$RELEASE_PATH" && -n "$ARTIFACT_PATH" ]]; then
+  log "ERROR: --release-path and --artifact-path are mutually exclusive."
+  exit 1
+fi
 
 if ! id "$SERVICE_USER" >/dev/null 2>&1; then
   log "ERROR: service user '$SERVICE_USER' does not exist."
@@ -132,12 +249,9 @@ fi
 mkdir -p "$RELEASE_ROOT"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$RELEASE_ROOT"
 
-PREVIOUS_RELEASE=""
 if [[ -L "$CURRENT_SYMLINK" ]]; then
   PREVIOUS_RELEASE="$(readlink -f "$CURRENT_SYMLINK" || true)"
 fi
-
-NEW_RELEASE=""
 
 if [[ -n "$RELEASE_PATH" ]]; then
   if [[ ! -d "$RELEASE_PATH" ]]; then
@@ -146,6 +260,19 @@ if [[ -n "$RELEASE_PATH" ]]; then
   fi
   NEW_RELEASE="$(realpath "$RELEASE_PATH")"
   log "Using provided release path: $NEW_RELEASE"
+elif [[ -n "$ARTIFACT_PATH" ]]; then
+  if [[ ! -f "$ARTIFACT_PATH" ]]; then
+    log "ERROR: supplied --artifact-path does not exist: $ARTIFACT_PATH"
+    exit 1
+  fi
+
+  TIMESTAMP="$(date -u '+%Y%m%d%H%M%S')"
+  NEW_RELEASE="$RELEASE_ROOT/von-$TIMESTAMP"
+  log "Extracting release artefact into $NEW_RELEASE from $ARTIFACT_PATH"
+
+  mkdir -p "$NEW_RELEASE"
+  tar -xzf "$ARTIFACT_PATH" -C "$NEW_RELEASE" --strip-components=1
+  chown -R "$SERVICE_USER:$SERVICE_GROUP" "$NEW_RELEASE"
 else
   TIMESTAMP="$(date -u '+%Y%m%d%H%M%S')"
   NEW_RELEASE="$RELEASE_ROOT/von-$TIMESTAMP"
@@ -177,13 +304,23 @@ if wait_for_health; then
   else
     log "Deployment completed successfully."
   fi
+  DEPLOY_OUTCOME="success"
   log "Active release: $NEW_RELEASE"
+  write_audit_event "$DEPLOY_OUTCOME" 0
   exit 0
 fi
 
 log "ERROR: post-deploy health check failed."
 if rollback_release "$PREVIOUS_RELEASE"; then
+  ROLLBACK_APPLIED=1
+  ROLLBACK_SUCCEEDED=1
+  DEPLOY_OUTCOME="healthcheck_failed_rollback_succeeded"
+  write_audit_event "$DEPLOY_OUTCOME" 1
   exit 1
 fi
 
+ROLLBACK_APPLIED=1
+ROLLBACK_SUCCEEDED=0
+DEPLOY_OUTCOME="healthcheck_failed_rollback_failed"
+write_audit_event "$DEPLOY_OUTCOME" 1
 exit 1

@@ -1,0 +1,220 @@
+name: OpenStack Deploy
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "infra/openstack/**"
+      - "scripts/powershell/invoke_openstack_deploy.ps1"
+      - ".github/workflows/openstack-deploy.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target deployment environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      release_ref:
+        description: "Git ref to package and deploy"
+        required: true
+        default: "main"
+        type: string
+      dry_run:
+        description: "Run gates and artefact packaging only (no host deployment)"
+        required: true
+        default: true
+        type: boolean
+
+env:
+  RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.sha }}
+
+jobs:
+  ci-gates:
+    name: CI Gates and Artefact
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.build.outputs.artifact_name }}
+      artifact_sha256: ${{ steps.build.outputs.artifact_sha256 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.6"
+
+      - name: Lint Gate (Terraform fmt + shell syntax)
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform -chdir=infra/openstack fmt -check -recursive
+          bash -n infra/openstack/templates/scripts/deploy_von_release.sh.tftpl
+
+      - name: Type Gate (Terraform validate)
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform -chdir=infra/openstack init -backend=false -input=false
+          terraform -chdir=infra/openstack validate -no-color
+
+      - name: Test Gate (template regression tests)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          pytest -q tests/infra/test_openstack_deploy_templates.py
+
+      - name: Build versioned release artefact
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .run/release
+          artifact_name="von-${GITHUB_SHA}.tar.gz"
+          artifact_path=".run/release/${artifact_name}"
+          git archive --format=tar.gz --prefix="von-${GITHUB_SHA}/" -o "$artifact_path" HEAD
+          artifact_sha256="$(sha256sum "$artifact_path" | awk '{print $1}')"
+          printf '%s  %s\n' "$artifact_sha256" "$artifact_name" > ".run/release/${artifact_name}.sha256"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "artifact_sha256=$artifact_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openstack-release-${{ github.sha }}
+          path: |
+            .run/release/${{ steps.build.outputs.artifact_name }}
+            .run/release/${{ steps.build.outputs.artifact_name }}.sha256
+          retention-days: 14
+
+      - name: CI Summary
+        shell: bash
+        run: |
+          {
+            echo "## OpenStack CI Gates"
+            echo "- Release ref: \`${RELEASE_REF}\`"
+            echo "- Artefact: \`${{ steps.build.outputs.artifact_name }}\`"
+            echo "- SHA256: \`${{ steps.build.outputs.artifact_sha256 }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to OpenStack host
+    needs: ci-gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_REF }}
+
+      - name: Download release artefact
+        uses: actions/download-artifact@v4
+        with:
+          name: openstack-release-${{ github.sha }}
+          path: .run/release
+
+      - name: Prepare SSH credentials
+        id: ssh_prep
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $sshDir = Join-Path $HOME '.ssh'
+          New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+
+          $keyPath = Join-Path $sshDir 'openstack_deploy_key'
+          Set-Content -Path $keyPath -Value "${{ secrets.OPENSTACK_DEPLOY_SSH_PRIVATE_KEY }}" -NoNewline
+          chmod 600 $keyPath
+          "key_path=$keyPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+          $knownHostsSecret = "${{ secrets.OPENSTACK_DEPLOY_KNOWN_HOSTS }}"
+          if ($knownHostsSecret -and $knownHostsSecret.Trim()) {
+            $knownHostsPath = Join-Path $sshDir 'known_hosts'
+            Set-Content -Path $knownHostsPath -Value $knownHostsSecret -NoNewline
+            chmod 600 $knownHostsPath
+            "known_hosts_path=$knownHostsPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
+      - name: Deploy release
+        id: deploy
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $artifact = Get-ChildItem -LiteralPath '.run/release' -Filter 'von-*.tar.gz' | Select-Object -First 1
+          if (-not $artifact) {
+            throw "Release artefact not found in .run/release."
+          }
+
+          $deployPort = "${{ secrets.OPENSTACK_DEPLOY_PORT }}"
+          if (-not $deployPort) { $deployPort = '22' }
+
+          $params = @{
+            Host             = "${{ secrets.OPENSTACK_DEPLOY_HOST }}"
+            User             = "${{ secrets.OPENSTACK_DEPLOY_USER }}"
+            ArtifactPath     = $artifact.FullName
+            Port             = [int]$deployPort
+            SshKeyPath       = "${{ steps.ssh_prep.outputs.key_path }}"
+            RepoRef          = "${{ inputs.release_ref }}"
+            AuditOutputPath  = '.run/release/deploy-audit.json'
+          }
+
+          $knownHostsPath = "${{ steps.ssh_prep.outputs.known_hosts_path }}"
+          if ($knownHostsPath) {
+            $params.KnownHostsPath = $knownHostsPath
+          } else {
+            $params.SkipHostKeyChecking = $true
+          }
+
+          ./scripts/powershell/invoke_openstack_deploy.ps1 @params
+
+      - name: Upload deploy audit artefact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openstack-deploy-audit-${{ github.sha }}
+          path: .run/release/deploy-audit.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Deploy Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## OpenStack Deploy Result"
+            echo "- Environment: \`${{ inputs.environment }}\`"
+            echo "- Release ref: \`${{ inputs.release_ref }}\`"
+            echo "- Job status: \`${{ job.status }}\`"
+            if [ -f ".run/release/deploy-audit.json" ]; then
+              echo "- Deploy audit payload:"
+              echo '```json'
+              cat .run/release/deploy-audit.json
+              echo
+              echo '```'
+            else
+              echo "- Deploy audit payload was not produced."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
