@@ -158,6 +158,14 @@ locals {
     bootstrap_repo_url         = var.bootstrap_repo_url
     bootstrap_repo_ref         = var.bootstrap_repo_ref
     bootstrap_waitress_threads = var.bootstrap_waitress_threads
+    flask_secret_key           = var.bootstrap_flask_secret_key
+    google_oauth_strict_startup = var.bootstrap_google_oauth_strict_startup
+    google_oauth_redirect_uri  = var.bootstrap_google_oauth_redirect_uri
+    google_oauth_client_id     = var.bootstrap_google_oauth_client_id
+    google_oauth_client_secret = var.bootstrap_google_oauth_client_secret
+    google_oauth_client_id_file = var.bootstrap_google_oauth_client_id_file
+    google_oauth_client_secret_file = var.bootstrap_google_oauth_client_secret_file
+    google_oauth_enable_dynamic_redirects = var.bootstrap_google_oauth_enable_dynamic_redirects
     enable_monitoring          = var.bootstrap_enable_monitoring
     enable_log_collection      = var.bootstrap_enable_log_collection
     enable_backup_automation   = var.bootstrap_enable_backup_automation

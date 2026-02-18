@@ -6,6 +6,10 @@ from urllib.parse import urlparse
 
 from google_auth_oauthlib.flow import Flow
 from google.oauth2 import id_token
+from .services.google_oauth_config import (
+    configure_oauthlib_insecure_transport,
+    load_secret_from_env_or_file,
+)
 
 
 @runtime_checkable
@@ -20,19 +24,21 @@ except Exception:  # pragma: no cover
 from google.auth.transport.requests import Request
 import requests
 
-# This is required for OpenID Connect and to get the user's profile info.
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-
 
 class GoogleAuthService:
     def __init__(self):
-        self.client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
-        self.client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+        self.client_id = load_secret_from_env_or_file(
+            "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID_FILE"
+        )
+        self.client_secret = load_secret_from_env_or_file(
+            "GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_OAUTH_CLIENT_SECRET_FILE"
+        )
         # Default now prefers localhost (previously 127.0.0.1) for consistency with docs & Google console entries.
         self.redirect_uri = os.getenv(
             "GOOGLE_OAUTH_REDIRECT_URI",
             "http://localhost:5000/von/api/auth/google/callback",
         )
+        configure_oauthlib_insecure_transport(self.redirect_uri)
         # Optional tolerance for minor system clock differences when verifying ID tokens.
         # Keep small (e.g., 5-10s). Default 0s to preserve strict behaviour.
         try:
@@ -78,8 +84,8 @@ class GoogleAuthService:
         self.flow = Flow.from_client_config(
             client_config={
                 "web": {
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
+                    "client_id": self.client_id or "",
+                    "client_secret": self.client_secret or "",
                     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                     "token_uri": "https://oauth2.googleapis.com/token",
                     "redirect_uris": [self.redirect_uri],

@@ -417,6 +417,105 @@ variable "bootstrap_waitress_threads" {
   }
 }
 
+variable "bootstrap_flask_secret_key" {
+  type        = string
+  description = "Optional Flask secret key injected into runtime env for secure session signing."
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.bootstrap_flask_secret_key == null || length(trim(var.bootstrap_flask_secret_key)) >= 32
+    error_message = "bootstrap_flask_secret_key must be null or at least 32 characters."
+  }
+}
+
+variable "bootstrap_google_oauth_strict_startup" {
+  type        = bool
+  description = "When true, Von startup fails-fast if Google OAuth settings are missing or unsafe."
+  default     = false
+
+  validation {
+    condition     = !var.bootstrap_google_oauth_strict_startup || (var.bootstrap_google_oauth_redirect_uri != null && trim(var.bootstrap_google_oauth_redirect_uri) != "")
+    error_message = "bootstrap_google_oauth_redirect_uri must be provided when bootstrap_google_oauth_strict_startup=true."
+  }
+}
+
+variable "bootstrap_google_oauth_redirect_uri" {
+  type        = string
+  description = "Optional OAuth redirect URI override. Expected callback path: /von/api/auth/google/callback."
+  default     = null
+
+  validation {
+    condition     = var.bootstrap_google_oauth_redirect_uri == null || can(regex("^https?://", trim(var.bootstrap_google_oauth_redirect_uri)))
+    error_message = "bootstrap_google_oauth_redirect_uri must be null or an absolute http/https URI."
+  }
+}
+
+variable "bootstrap_google_oauth_client_id" {
+  type        = string
+  description = "Optional inline OAuth client id for managed bootstrap env injection."
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.bootstrap_google_oauth_client_id == null || trim(var.bootstrap_google_oauth_client_id) != ""
+    error_message = "bootstrap_google_oauth_client_id must be null or non-empty."
+  }
+}
+
+variable "bootstrap_google_oauth_client_secret" {
+  type        = string
+  description = "Optional inline OAuth client secret for managed bootstrap env injection."
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition     = var.bootstrap_google_oauth_client_secret == null || trim(var.bootstrap_google_oauth_client_secret) != ""
+    error_message = "bootstrap_google_oauth_client_secret must be null or non-empty."
+  }
+
+  validation {
+    condition = (
+      (var.bootstrap_google_oauth_client_id == null && var.bootstrap_google_oauth_client_secret == null) ||
+      (var.bootstrap_google_oauth_client_id != null && var.bootstrap_google_oauth_client_secret != null)
+    )
+    error_message = "bootstrap_google_oauth_client_id and bootstrap_google_oauth_client_secret must be set together when using inline OAuth secrets."
+  }
+}
+
+variable "bootstrap_google_oauth_client_id_file" {
+  type        = string
+  description = "File path used by runtime GOOGLE_OAUTH_CLIENT_ID_FILE when inline client id is not provided."
+  default     = "/etc/von/secrets/google_oauth_client_id"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_google_oauth_client_id_file))
+    error_message = "bootstrap_google_oauth_client_id_file must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_google_oauth_client_secret_file" {
+  type        = string
+  description = "File path used by runtime GOOGLE_OAUTH_CLIENT_SECRET_FILE when inline client secret is not provided."
+  default     = "/etc/von/secrets/google_oauth_client_secret"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_google_oauth_client_secret_file))
+    error_message = "bootstrap_google_oauth_client_secret_file must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_google_oauth_enable_dynamic_redirects" {
+  type        = bool
+  description = "Enable dynamic host-based redirect URI rewriting (intended for local/ngrok development only)."
+  default     = false
+
+  validation {
+    condition     = !(var.bootstrap_google_oauth_enable_dynamic_redirects && var.bootstrap_google_oauth_strict_startup)
+    error_message = "bootstrap_google_oauth_enable_dynamic_redirects cannot be true when bootstrap_google_oauth_strict_startup is enabled."
+  }
+}
+
 variable "bootstrap_deploy_log_path" {
   type        = string
   description = "Deployment log file path used by /usr/local/bin/deploy_von_release.sh."

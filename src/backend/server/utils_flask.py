@@ -30,7 +30,6 @@ from flask import (
     request,
     g,
 )  # Added request for shutdown endpoint
-import os
 import time
 
 # --- Updated Typing Imports ---
@@ -61,6 +60,10 @@ from ..db.connection_manager import (
 from ..services.annotation_extraction_service import (
     prompt_concept_health_status,
     PROMPT_CONCEPT_ID,
+)
+from ..services.google_oauth_config import (
+    google_oauth_strict_startup_enabled,
+    validate_google_oauth_startup_or_raise,
 )
 
 # Define a version string
@@ -291,6 +294,33 @@ def _startup_requeue_unindexed_interaction_sessions(app_logger: logging.Logger) 
             pass
 
 
+_DEV_SECRET_KEY = "von-dev-secret-key-change-in-production"
+
+
+def _truthy_env_value(raw: str | None) -> bool:
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return _truthy_env_value(raw)
+
+
+def _normalise_session_cookie_samesite(raw: str | None) -> str:
+    if raw is None:
+        return "Lax"
+    normalised = raw.strip().lower()
+    if normalised == "strict":
+        return "Strict"
+    if normalised == "none":
+        return "None"
+    return "Lax"
+
+
 def create_flask_app(
     # --- Updated Type Hints ---
     list_models_func: Callable[
@@ -352,8 +382,32 @@ def create_flask_app(
     # --- Configuration Setup ---
     # Set secret key for session management (required for Google OAuth)
     app.secret_key = os.environ.get(
-        "FLASK_SECRET_KEY", "von-dev-secret-key-change-in-production"
+        "FLASK_SECRET_KEY", _DEV_SECRET_KEY
     )
+    strict_oauth_startup = google_oauth_strict_startup_enabled()
+
+    # Cookie defaults are conservative, and become strict-by-default when OAuth
+    # strict startup mode is enabled for hosted HTTPS deployments.
+    app.config["SESSION_COOKIE_HTTPONLY"] = _env_bool(
+        "FLASK_SESSION_COOKIE_HTTPONLY", True
+    )
+    app.config["SESSION_COOKIE_SECURE"] = _env_bool(
+        "FLASK_SESSION_COOKIE_SECURE", strict_oauth_startup
+    )
+    app.config["SESSION_COOKIE_SAMESITE"] = _normalise_session_cookie_samesite(
+        os.getenv("FLASK_SESSION_COOKIE_SAMESITE")
+    )
+
+    if strict_oauth_startup:
+        if app.secret_key == _DEV_SECRET_KEY:
+            raise RuntimeError(
+                "GOOGLE_OAUTH_STRICT_STARTUP requires FLASK_SECRET_KEY to be set to a non-default value."
+            )
+        if len(str(app.secret_key)) < 32:
+            raise RuntimeError(
+                "GOOGLE_OAUTH_STRICT_STARTUP requires FLASK_SECRET_KEY length >= 32 characters."
+            )
+        validate_google_oauth_startup_or_raise()
 
     # Enable template auto-reload in development
     app.config["TEMPLATES_AUTO_RELOAD"] = True

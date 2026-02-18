@@ -43,6 +43,9 @@ def test_cloud_init_bootstrap_executes_non_interactive_bootstrap_deploy() -> Non
     assert "/usr/local/bin/von_monitor_health.sh" in content
     assert "/usr/local/bin/von_backup_snapshot.sh" in content
     assert "von-restore-drill.timer" in content
+    assert "GOOGLE_OAUTH_STRICT_STARTUP" in content
+    assert "GOOGLE_OAUTH_CLIENT_SECRET_FILE" in content
+    assert "FLASK_SESSION_COOKIE_SECURE" in content
 
 
 def test_workflow_contains_ci_gates_and_manual_deploy_trigger() -> None:

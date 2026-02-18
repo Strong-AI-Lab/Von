@@ -147,6 +147,25 @@ Operational incident runbooks:
 
 - `docs/engineering/openstack_operations_runbooks.md`
 
+## 8) Production OAuth hardening and startup validation
+
+Managed bootstrap can enforce secure Google OAuth startup checks:
+
+- set `bootstrap_google_oauth_strict_startup = true`
+- set `bootstrap_google_oauth_redirect_uri` to your hosted HTTPS callback URL
+- keep `bootstrap_google_oauth_enable_dynamic_redirects = false` for production
+
+Avoid committed plaintext secrets:
+
+- inject `bootstrap_flask_secret_key`, `bootstrap_google_oauth_client_id`, and
+  `bootstrap_google_oauth_client_secret` via `TF_VAR_*` runtime environment variables, or
+- pre-provision OAuth secret files at:
+  - `/etc/von/secrets/google_oauth_client_id`
+  - `/etc/von/secrets/google_oauth_client_secret`
+
+With strict startup enabled, Von fails fast with actionable diagnostics when
+OAuth configuration is missing, localhost/insecure, or otherwise unsafe.
+
 ## Related docs
 
 - `infra/openstack/README.md`

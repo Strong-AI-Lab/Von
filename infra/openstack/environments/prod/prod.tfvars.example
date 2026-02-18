@@ -72,3 +72,18 @@ bootstrap_enable_log_collection    = true
 bootstrap_enable_backup_automation = true
 bootstrap_enable_restore_drill     = true
 bootstrap_alert_webhook_url        = null
+
+# OAuth hardening for hosted production deployments.
+bootstrap_google_oauth_strict_startup          = true
+bootstrap_google_oauth_redirect_uri            = "https://von.example.org/von/api/auth/google/callback"
+bootstrap_google_oauth_enable_dynamic_redirects = false
+
+# Keep secrets out of committed config. Inject at runtime:
+# - TF_VAR_bootstrap_flask_secret_key (32+ chars)
+# - TF_VAR_bootstrap_google_oauth_client_id
+# - TF_VAR_bootstrap_google_oauth_client_secret
+# or pre-provision bootstrap_google_oauth_client_id_file and
+# bootstrap_google_oauth_client_secret_file on host.
+bootstrap_flask_secret_key            = null
+bootstrap_google_oauth_client_id      = null
+bootstrap_google_oauth_client_secret  = null

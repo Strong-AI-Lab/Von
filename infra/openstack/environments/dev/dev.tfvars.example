@@ -71,3 +71,15 @@ bootstrap_enable_log_collection    = true
 bootstrap_enable_backup_automation = true
 bootstrap_enable_restore_drill     = true
 bootstrap_alert_webhook_url        = null
+
+# OAuth hardening (set real values via secure runtime injection, not committed tfvars):
+# - Preferred: place secrets on host at bootstrap_google_oauth_client_id_file /
+#   bootstrap_google_oauth_client_secret_file.
+# - Optional: inject via TF_VAR_bootstrap_google_oauth_client_id,
+#   TF_VAR_bootstrap_google_oauth_client_secret, and TF_VAR_bootstrap_flask_secret_key.
+bootstrap_google_oauth_strict_startup          = false
+bootstrap_google_oauth_redirect_uri            = null
+bootstrap_google_oauth_enable_dynamic_redirects = false
+bootstrap_flask_secret_key                     = null
+bootstrap_google_oauth_client_id               = null
+bootstrap_google_oauth_client_secret           = null

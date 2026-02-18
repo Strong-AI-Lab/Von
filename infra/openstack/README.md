@@ -82,6 +82,7 @@ Bootstrap behaviour:
 - installs runtime dependencies (`python3`, `python3-venv`, `git`, `nginx`)
 - creates and configures service/runtime directories under `/opt/von`
 - writes `/etc/systemd/system/von.service` and `/etc/nginx/sites-available/von.conf`
+- writes `/etc/von/von.env` with secure cookie defaults and OAuth startup controls
 - enables and starts `nginx` and `von`
 - performs first deployment by invoking `/usr/local/bin/deploy_von_release.sh`
 
@@ -158,6 +159,22 @@ Runbooks:
 
 - `docs/engineering/openstack_operations_runbooks.md`
 
+## OAuth runtime secret injection
+
+Managed bootstrap supports production-safe OAuth startup hardening without
+committing plaintext credentials:
+
+- `bootstrap_google_oauth_strict_startup=true` enables fail-fast startup checks.
+- `bootstrap_google_oauth_redirect_uri` should be set to the deployed HTTPS callback URL.
+- OAuth secret values can be injected via runtime variables
+  (`TF_VAR_bootstrap_google_oauth_client_id`, `TF_VAR_bootstrap_google_oauth_client_secret`)
+  or by pre-provisioning secret files on host:
+  - `bootstrap_google_oauth_client_id_file` (default `/etc/von/secrets/google_oauth_client_id`)
+  - `bootstrap_google_oauth_client_secret_file` (default `/etc/von/secrets/google_oauth_client_secret`)
+- `bootstrap_flask_secret_key` should be set to a strong value (32+ characters) when strict startup is enabled.
+
+Do not commit real OAuth secrets in tracked tfvars files.
+
 ## Guardrails built in
 
 - Required input checks (`network_id`, `subnet_id`, `image_id`, `key_pair_name`, etc.).
@@ -168,3 +185,4 @@ Runbooks:
 - Deployment health gating with rollback in managed host deploy script.
 - Deployment audit logging (`deploy_audit.jsonl`) for version/time/outcome traceability.
 - Monitoring/backup/restore-drill timers with auditable JSONL event logs.
+- Strict OAuth startup mode rejects unsafe/missing hosted OAuth configuration.

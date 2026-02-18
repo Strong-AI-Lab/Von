@@ -64,10 +64,14 @@ Primary logs and audits:
    - `tail -n 20 /var/log/von/deploy_audit.jsonl`
 3. Confirm expected environment values exist:
    - `sudo test -f /etc/von/von.env`
+   - `sudo grep -E 'GOOGLE_OAUTH_(REDIRECT_URI|STRICT_STARTUP)' /etc/von/von.env`
+4. If file-based OAuth secrets are used, confirm files exist and are non-empty:
+   - `sudo test -s /etc/von/secrets/google_oauth_client_id`
+   - `sudo test -s /etc/von/secrets/google_oauth_client_secret`
 
 ### Recovery
 
-1. Rotate or restore valid credentials in `/etc/von/von.env` through secure process.
+1. Rotate or restore valid credentials in `/etc/von/von.env` and/or `/etc/von/secrets/*` through secure process.
 2. Restart service:
    - `sudo systemctl restart von.service`
 3. Validate:

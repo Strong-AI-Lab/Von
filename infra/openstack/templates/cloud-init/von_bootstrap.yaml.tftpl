@@ -35,6 +35,35 @@ write_files:
       VON_WAITRESS_THREADS=${bootstrap_waitress_threads}
       VON_EXPERT_TABS_ENABLED=1
       VON_EXPERT_FOOTER_ENABLED=1
+      FLASK_SESSION_COOKIE_HTTPONLY=1
+      FLASK_SESSION_COOKIE_SAMESITE=Lax
+      FLASK_SESSION_COOKIE_SECURE=${enable_https ? 1 : 0}
+      GOOGLE_OAUTH_STRICT_STARTUP=${google_oauth_strict_startup ? 1 : 0}
+      GOOGLE_OAUTH_ENABLE_DYNAMIC_REDIRECTS=${google_oauth_enable_dynamic_redirects ? "true" : "false"}
+%{ if flask_secret_key != null ~}
+      FLASK_SECRET_KEY=${jsonencode(flask_secret_key)}
+%{ endif ~}
+%{ if google_oauth_redirect_uri != null ~}
+      GOOGLE_OAUTH_REDIRECT_URI=${jsonencode(google_oauth_redirect_uri)}
+%{ endif ~}
+      GOOGLE_OAUTH_CLIENT_ID_FILE=${google_oauth_client_id_file}
+      GOOGLE_OAUTH_CLIENT_SECRET_FILE=${google_oauth_client_secret_file}
+
+%{ if google_oauth_client_id != null ~}
+  - path: ${google_oauth_client_id_file}
+    owner: root:root
+    permissions: "0600"
+    content: |
+      ${google_oauth_client_id}
+%{ endif ~}
+
+%{ if google_oauth_client_secret != null ~}
+  - path: ${google_oauth_client_secret_file}
+    owner: root:root
+    permissions: "0600"
+    content: |
+      ${google_oauth_client_secret}
+%{ endif ~}
 
   - path: /etc/systemd/system/von.service
     owner: root:root
@@ -136,6 +165,7 @@ runcmd:
   - [bash, -lc, "set -euo pipefail; install -d -m 0755 -o ${service_user} -g ${service_group} '${app_dir}' '${release_root}' '${current_symlink_parent}' '/var/log/von'"]
   - [bash, -lc, "set -euo pipefail; install -d -m 0755 -o root -g root '${backup_directory}' '${central_log_directory}'"]
   - [bash, -lc, "set -euo pipefail; install -d -m 0755 -o root -g root /etc/von"]
+  - [bash, -lc, "set -euo pipefail; install -d -m 0700 -o root -g root /etc/von/secrets"]
 %{ if enable_https && generate_self_signed_cert ~}
   - [bash, -lc, "set -euo pipefail; if [ ! -f '${tls_cert_path}' ] || [ ! -f '${tls_key_path}' ]; then install -d -m 0755 /etc/ssl/certs /etc/ssl/private; openssl req -x509 -nodes -newkey rsa:4096 -days 365 -subj '/CN=${domain_name}' -keyout '${tls_key_path}' -out '${tls_cert_path}'; chmod 0600 '${tls_key_path}'; fi"]
 %{ endif ~}
