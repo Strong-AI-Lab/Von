@@ -1,0 +1,46 @@
+# Copy this file to staging.tfvars and update values for your project.
+# Keep real *.tfvars files untracked (gitignored).
+
+environment = "staging"
+name_prefix = "vonlab"
+region_name = "REPLACE_WITH_REGION"
+
+network_id            = "REPLACE_WITH_NETWORK_UUID"
+subnet_id             = "REPLACE_WITH_SUBNET_UUID"
+external_network_pool = "REPLACE_WITH_EXTERNAL_NETWORK_POOL_OR_NAME"
+
+image_id      = "REPLACE_WITH_IMAGE_UUID"
+flavor_name   = "c1.c4r8"
+key_pair_name = "REPLACE_WITH_KEYPAIR_NAME"
+
+ssh_ingress_cidrs = [
+  "203.0.113.20/32"
+]
+
+application_ingress_rules = [
+  {
+    protocol         = "tcp"
+    port_range_min   = 5000
+    port_range_max   = 5000
+    remote_ip_prefix = "203.0.113.20/32"
+    description      = "Von web UI"
+  }
+]
+
+allowed_egress_cidrs = [
+  "0.0.0.0/0"
+]
+
+create_persistent_volume = true
+persistent_volume_size_gb = 160
+persistent_volume_type    = null
+volume_device             = "/dev/vdb"
+
+assign_floating_ip        = true
+create_floating_ip        = true
+existing_floating_ip_address = null
+
+metadata = {
+  owner       = "replace-with-owner"
+  cost_centre = "research-staging"
+}

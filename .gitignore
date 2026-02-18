@@ -136,3 +136,13 @@ cleanup_exe.ps1
 
 # PR body drafts (local)
 pr_body_*.md
+
+# Terraform/OpenStack IaC local artefacts
+infra/openstack/.terraform/
+infra/openstack/*.tfplan
+infra/openstack/*.tfstate
+infra/openstack/*.tfstate.*
+infra/openstack/**/terraform.tfstate
+infra/openstack/**/terraform.tfstate.*
+infra/openstack/environments/*/*.tfvars
+!infra/openstack/environments/*/*.tfvars.example
