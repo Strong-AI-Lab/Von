@@ -25,10 +25,17 @@ ssh_ingress_cidrs = [
 application_ingress_rules = [
   {
     protocol         = "tcp"
-    port_range_min   = 5000
-    port_range_max   = 5000
+    port_range_min   = 80
+    port_range_max   = 80
     remote_ip_prefix = "203.0.113.30/32"
-    description      = "Von web UI"
+    description      = "HTTP redirect to HTTPS (restricted source example)"
+  },
+  {
+    protocol         = "tcp"
+    port_range_min   = 443
+    port_range_max   = 443
+    remote_ip_prefix = "203.0.113.30/32"
+    description      = "Von HTTPS reverse proxy"
   }
 ]
 
@@ -49,3 +56,13 @@ metadata = {
   owner       = "replace-with-owner"
   cost_centre = "research-prod"
 }
+
+enable_managed_bootstrap = true
+bootstrap_repo_url       = "https://github.com/Strong-AI-Lab/Von.git"
+bootstrap_repo_ref       = "main"
+bootstrap_domain_name    = "von.example.org"
+bootstrap_enable_https   = true
+
+# Set to false and provide bootstrap_tls_cert_path/bootstrap_tls_key_path when
+# using pre-provisioned certificates.
+bootstrap_generate_self_signed_cert = true

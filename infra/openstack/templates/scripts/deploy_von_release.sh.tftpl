@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_NAME="${service_name}"
+SERVICE_USER="${service_user}"
+SERVICE_GROUP="${service_group}"
+RELEASE_ROOT="${release_root}"
+CURRENT_SYMLINK="${current_symlink}"
+DEPLOY_LOG_PATH="${deploy_log_path}"
+HEALTHCHECK_URL="http://127.0.0.1:${app_port}${healthcheck_path}"
+DEFAULT_REPO_URL="${bootstrap_repo_url}"
+DEFAULT_REPO_REF="${bootstrap_repo_ref}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  deploy_von_release.sh [--repo-url <url>] [--repo-ref <ref>] [--release-path <path>] [--bootstrap]
+
+Behaviour:
+  - Runs preflight checks.
+  - Deploys either a supplied release path or a git checkout into a versioned release directory.
+  - Restarts the systemd service and waits for health.
+  - Rolls back to previous release if health checks fail.
+USAGE
+}
+
+log() {
+  printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
+}
+
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    log "ERROR: required command '$cmd' is not available."
+    exit 1
+  fi
+}
+
+run_as_service_user() {
+  sudo -u "$SERVICE_USER" "$@"
+}
+
+wait_for_health() {
+  local attempts=30
+  local delay_seconds=2
+  local attempt
+  for attempt in $(seq 1 "$attempts"); do
+    if curl -fsS "$HEALTHCHECK_URL" >/dev/null; then
+      return 0
+    fi
+    sleep "$delay_seconds"
+  done
+  return 1
+}
+
+rollback_release() {
+  local previous_release="$1"
+  if [[ -z "$previous_release" ]] || [[ ! -d "$previous_release" ]]; then
+    log "ERROR: rollback requested but previous release is unavailable."
+    return 1
+  fi
+
+  log "Rolling back to previous release: $previous_release"
+  ln -sfn "$previous_release" "$CURRENT_SYMLINK"
+  systemctl restart "$SERVICE_NAME"
+  if wait_for_health; then
+    log "Rollback completed and service is healthy."
+    return 0
+  fi
+
+  log "ERROR: rollback failed to restore service health."
+  return 1
+}
+
+if [[ "${EUID}" -ne 0 ]]; then
+  log "ERROR: deploy_von_release.sh must run as root."
+  exit 1
+fi
+
+REPO_URL="$DEFAULT_REPO_URL"
+REPO_REF="$DEFAULT_REPO_REF"
+RELEASE_PATH=""
+BOOTSTRAP_MODE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo-url)
+      REPO_URL="$2"
+      shift 2
+      ;;
+    --repo-ref)
+      REPO_REF="$2"
+      shift 2
+      ;;
+    --release-path)
+      RELEASE_PATH="$2"
+      shift 2
+      ;;
+    --bootstrap)
+      BOOTSTRAP_MODE=1
+      shift 1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      log "ERROR: unknown argument '$1'."
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+mkdir -p "$(dirname "$DEPLOY_LOG_PATH")"
+touch "$DEPLOY_LOG_PATH"
+exec > >(tee -a "$DEPLOY_LOG_PATH") 2>&1
+
+log "Starting Von deployment pipeline (preflight -> restart -> health check -> rollback-on-failure)."
+
+require_cmd git
+require_cmd python3
+require_cmd systemctl
+require_cmd curl
+require_cmd sudo
+
+if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+  log "ERROR: service user '$SERVICE_USER' does not exist."
+  exit 1
+fi
+
+mkdir -p "$RELEASE_ROOT"
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$RELEASE_ROOT"
+
+PREVIOUS_RELEASE=""
+if [[ -L "$CURRENT_SYMLINK" ]]; then
+  PREVIOUS_RELEASE="$(readlink -f "$CURRENT_SYMLINK" || true)"
+fi
+
+NEW_RELEASE=""
+
+if [[ -n "$RELEASE_PATH" ]]; then
+  if [[ ! -d "$RELEASE_PATH" ]]; then
+    log "ERROR: supplied --release-path does not exist: $RELEASE_PATH"
+    exit 1
+  fi
+  NEW_RELEASE="$(realpath "$RELEASE_PATH")"
+  log "Using provided release path: $NEW_RELEASE"
+else
+  TIMESTAMP="$(date -u '+%Y%m%d%H%M%S')"
+  NEW_RELEASE="$RELEASE_ROOT/von-$TIMESTAMP"
+  log "Preparing release checkout into $NEW_RELEASE from $REPO_URL@$REPO_REF"
+
+  run_as_service_user git clone --depth 1 "$REPO_URL" "$NEW_RELEASE"
+  run_as_service_user git -C "$NEW_RELEASE" fetch --depth 1 origin "$REPO_REF" || true
+  run_as_service_user git -C "$NEW_RELEASE" checkout "$REPO_REF"
+
+  run_as_service_user python3 -m venv "$NEW_RELEASE/.venv"
+  run_as_service_user "$NEW_RELEASE/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
+  run_as_service_user "$NEW_RELEASE/.venv/bin/python" -m pip install -e "$NEW_RELEASE"
+fi
+
+if [[ ! -x "$NEW_RELEASE/.venv/bin/python" ]]; then
+  log "ERROR: release is missing virtual environment interpreter at $NEW_RELEASE/.venv/bin/python"
+  exit 1
+fi
+
+ln -sfn "$NEW_RELEASE" "$CURRENT_SYMLINK"
+chown -h "$SERVICE_USER:$SERVICE_GROUP" "$CURRENT_SYMLINK"
+
+systemctl daemon-reload
+systemctl restart "$SERVICE_NAME"
+
+if wait_for_health; then
+  if [[ "$BOOTSTRAP_MODE" -eq 1 ]]; then
+    log "Bootstrap deployment completed successfully."
+  else
+    log "Deployment completed successfully."
+  fi
+  log "Active release: $NEW_RELEASE"
+  exit 0
+fi
+
+log "ERROR: post-deploy health check failed."
+if rollback_release "$PREVIOUS_RELEASE"; then
+  exit 1
+fi
+
+exit 1

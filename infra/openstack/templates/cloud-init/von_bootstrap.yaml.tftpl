@@ -1,0 +1,67 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - nginx
+  - openssl
+  - sudo
+  - ${python_package}
+  - ${python_venv_package}
+
+groups:
+  - ${service_group}
+
+users:
+  - default
+  - name: ${service_user}
+    gecos: Von Service User
+    system: true
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+    primary_group: ${service_group}
+    home: ${app_dir}
+    create_home: true
+
+write_files:
+  - path: ${env_file}
+    owner: root:root
+    permissions: "0640"
+    content: |
+      VON_SKIP_BROWSER_LAUNCH=1
+      VON_WAITRESS_THREADS=${bootstrap_waitress_threads}
+      VON_EXPERT_TABS_ENABLED=1
+      VON_EXPERT_FOOTER_ENABLED=1
+
+  - path: /etc/systemd/system/von.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+${indent(6, service_unit_content)}
+
+  - path: /etc/nginx/sites-available/von.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+${indent(6, nginx_config_content)}
+
+  - path: /usr/local/bin/deploy_von_release.sh
+    owner: root:root
+    permissions: "0755"
+    content: |
+${indent(6, deploy_script_content)}
+
+runcmd:
+  - [bash, -lc, "set -euo pipefail; install -d -m 0755 -o ${service_user} -g ${service_group} '${app_dir}' '${release_root}' '${current_symlink_parent}' '/var/log/von'"]
+  - [bash, -lc, "set -euo pipefail; install -d -m 0755 -o root -g root /etc/von"]
+%{ if enable_https && generate_self_signed_cert ~}
+  - [bash, -lc, "set -euo pipefail; if [ ! -f '${tls_cert_path}' ] || [ ! -f '${tls_key_path}' ]; then install -d -m 0755 /etc/ssl/certs /etc/ssl/private; openssl req -x509 -nodes -newkey rsa:4096 -days 365 -subj '/CN=${domain_name}' -keyout '${tls_key_path}' -out '${tls_cert_path}'; chmod 0600 '${tls_key_path}'; fi"]
+%{ endif ~}
+  - [bash, -lc, "set -euo pipefail; ln -sfn /etc/nginx/sites-available/von.conf /etc/nginx/sites-enabled/von.conf; rm -f /etc/nginx/sites-enabled/default; nginx -t"]
+  - [bash, -lc, "set -euo pipefail; systemctl daemon-reload; systemctl enable von.service; systemctl enable nginx.service; systemctl restart nginx.service"]
+  - [bash, -lc, "set -euo pipefail; /usr/local/bin/deploy_von_release.sh --repo-url '${bootstrap_repo_url}' --repo-ref '${bootstrap_repo_ref}' --bootstrap"]
+
+final_message: "Von managed bootstrap completed."

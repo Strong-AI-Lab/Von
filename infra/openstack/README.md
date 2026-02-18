@@ -11,6 +11,14 @@ The stack composes four modules:
 - `modules/persistent_volume`: attachable block storage volume.
 - `modules/floating_ip`: floating IP allocation and association.
 
+When `enable_managed_bootstrap=true` (default), the stack also renders cloud-init
+bootstrap assets from `templates/` to configure a runnable Von host:
+
+- non-root Linux service account (`bootstrap_service_user` / `bootstrap_service_group`)
+- `systemd` service unit (`von.service`) with restart policy and boot-time enablement
+- NGINX reverse proxy with HTTP->HTTPS redirect and TLS termination
+- host-side deployment script with health checks and rollback-on-failure
+
 ## Prerequisites
 
 - Terraform `>= 1.5.0`.
@@ -63,9 +71,38 @@ Examples:
 
 Production applies and destroys are blocked unless `-AllowProdChanges` is supplied.
 
+## Managed bootstrap and deploy flow
+
+Managed bootstrap uses `user_data` generated from
+`templates/cloud-init/von_bootstrap.yaml.tftpl` unless you provide explicit
+`user_data`.
+
+Bootstrap behaviour:
+
+- installs runtime dependencies (`python3`, `python3-venv`, `git`, `nginx`)
+- creates and configures service/runtime directories under `/opt/von`
+- writes `/etc/systemd/system/von.service` and `/etc/nginx/sites-available/von.conf`
+- enables and starts `nginx` and `von`
+- performs first deployment by invoking `/usr/local/bin/deploy_von_release.sh`
+
+The generated deploy script executes:
+
+1. preflight checks (required tools, user, filesystem)
+2. release activation + `systemctl restart von`
+3. post-restart `GET /health` validation
+4. automatic rollback to the previous release if health checks fail
+
+You can trigger later deployments directly on the host:
+
+```bash
+sudo /usr/local/bin/deploy_von_release.sh --repo-url https://github.com/Strong-AI-Lab/Von.git --repo-ref main
+```
+
 ## Guardrails built in
 
 - Required input checks (`network_id`, `subnet_id`, `image_id`, `key_pair_name`, etc.).
 - Naming convention check for `name_prefix`.
 - CIDR validation on SSH ingress, app ingress, and egress lists.
 - Safety toggle for production change operations in the PowerShell runner.
+- HTTPS reverse proxy defaults (HTTP redirect + TLS files), with optional self-signed bootstrap cert generation.
+- Deployment health gating with rollback in managed host deploy script.

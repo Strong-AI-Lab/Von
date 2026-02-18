@@ -1,0 +1,25 @@
+[Unit]
+Description=Von application service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${service_user}
+Group=${service_group}
+WorkingDirectory=${working_directory}
+EnvironmentFile=-${env_file}
+Environment=PYTHONUNBUFFERED=1
+ExecStart=${working_directory}/.venv/bin/python -m src.workflows.von.main --host ${app_host} --port ${app_port}
+Restart=always
+RestartSec=5
+TimeoutStartSec=180
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/von /var/log/von /tmp
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

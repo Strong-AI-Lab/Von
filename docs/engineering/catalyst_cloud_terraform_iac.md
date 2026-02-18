@@ -10,6 +10,7 @@ The Terraform stack lives in `infra/openstack/` and is designed for environment-
 - Security group and ingress/egress network controls.
 - Persistent block storage volume (optional, enabled by default).
 - Floating IP allocation/association (configurable for new or existing addresses).
+- Managed VM bootstrap (cloud-init) for Von service user, systemd service, NGINX reverse proxy, and first deploy.
 
 ## 1) Prepare authentication (secrets at runtime)
 
@@ -41,6 +42,9 @@ Copy-Item .\infra\openstack\environments\dev\dev.tfvars.example .\infra\openstac
 ```
 
 Then fill in required values such as `network_id`, `subnet_id`, `image_id`, and `key_pair_name`.
+
+The examples now include managed bootstrap defaults (`enable_managed_bootstrap=true`)
+with HTTPS reverse proxy ingress on ports `80` and `443`.
 
 ## 3) Run the PowerShell entrypoint
 
@@ -77,6 +81,23 @@ Production safety:
 - Naming convention validation for `name_prefix`.
 - CIDR validation for SSH ingress, app ingress, and egress configuration.
 - Production-change safety gate in the PowerShell runner.
+- Managed deploy flow on host (`preflight -> restart -> health check -> rollback`) via `/usr/local/bin/deploy_von_release.sh`.
+- HTTPS-by-default reverse proxy config with optional self-signed bootstrap certificate generation.
+
+## 5) Host-side deployment and rollback
+
+After bootstrap, deploy updates on the VM without manual service wiring:
+
+```bash
+sudo /usr/local/bin/deploy_von_release.sh --repo-url https://github.com/Strong-AI-Lab/Von.git --repo-ref main
+```
+
+The deploy script will:
+
+1. validate prerequisites
+2. activate the new release and restart `von.service`
+3. poll `http://127.0.0.1:5000/health`
+4. roll back to the previous release automatically if health checks fail
 
 ## Related docs
 

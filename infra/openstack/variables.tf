@@ -211,3 +211,219 @@ variable "user_data" {
   description = "Optional cloud-init user_data for bootstrap."
   default     = null
 }
+
+variable "enable_managed_bootstrap" {
+  type        = bool
+  description = "When true, render and attach the managed Von cloud-init bootstrap if user_data is not explicitly provided."
+  default     = true
+}
+
+variable "bootstrap_service_user" {
+  type        = string
+  description = "Linux service user used to run Von."
+  default     = "von"
+
+  validation {
+    condition     = can(regex("^[a-z_][a-z0-9_-]*$", var.bootstrap_service_user))
+    error_message = "bootstrap_service_user must be a valid Linux account name."
+  }
+}
+
+variable "bootstrap_service_group" {
+  type        = string
+  description = "Linux service group used to run Von."
+  default     = "von"
+
+  validation {
+    condition     = can(regex("^[a-z_][a-z0-9_-]*$", var.bootstrap_service_group))
+    error_message = "bootstrap_service_group must be a valid Linux group name."
+  }
+}
+
+variable "bootstrap_app_dir" {
+  type        = string
+  description = "Application root directory on the VM."
+  default     = "/opt/von"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_app_dir))
+    error_message = "bootstrap_app_dir must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_release_root" {
+  type        = string
+  description = "Directory containing versioned Von releases."
+  default     = "/opt/von/releases"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_release_root))
+    error_message = "bootstrap_release_root must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_current_symlink" {
+  type        = string
+  description = "Symlink path that points to the currently active release."
+  default     = "/opt/von/current"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_current_symlink))
+    error_message = "bootstrap_current_symlink must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_env_file" {
+  type        = string
+  description = "Path to environment file loaded by systemd service."
+  default     = "/etc/von/von.env"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_env_file))
+    error_message = "bootstrap_env_file must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_repo_url" {
+  type        = string
+  description = "Git repository URL used for initial bootstrap and subsequent host-side deployments."
+  default     = "https://github.com/Strong-AI-Lab/Von.git"
+
+  validation {
+    condition     = trim(var.bootstrap_repo_url) != ""
+    error_message = "bootstrap_repo_url cannot be empty."
+  }
+}
+
+variable "bootstrap_repo_ref" {
+  type        = string
+  description = "Git ref (branch/tag/commit) used for bootstrap deployments."
+  default     = "main"
+
+  validation {
+    condition     = trim(var.bootstrap_repo_ref) != ""
+    error_message = "bootstrap_repo_ref cannot be empty."
+  }
+}
+
+variable "bootstrap_python_package" {
+  type        = string
+  description = "Package name for Python runtime install on Debian/Ubuntu images."
+  default     = "python3"
+
+  validation {
+    condition     = trim(var.bootstrap_python_package) != ""
+    error_message = "bootstrap_python_package cannot be empty."
+  }
+}
+
+variable "bootstrap_python_venv_package" {
+  type        = string
+  description = "Package name for Python venv tooling on Debian/Ubuntu images."
+  default     = "python3-venv"
+
+  validation {
+    condition     = trim(var.bootstrap_python_venv_package) != ""
+    error_message = "bootstrap_python_venv_package cannot be empty."
+  }
+}
+
+variable "bootstrap_app_host" {
+  type        = string
+  description = "Host bind address used by the Von application service."
+  default     = "127.0.0.1"
+
+  validation {
+    condition     = trim(var.bootstrap_app_host) != ""
+    error_message = "bootstrap_app_host cannot be empty."
+  }
+}
+
+variable "bootstrap_app_port" {
+  type        = number
+  description = "Port used by the Von application service behind the reverse proxy."
+  default     = 5000
+
+  validation {
+    condition     = var.bootstrap_app_port > 0 && var.bootstrap_app_port < 65536
+    error_message = "bootstrap_app_port must be between 1 and 65535."
+  }
+}
+
+variable "bootstrap_domain_name" {
+  type        = string
+  description = "Server name configured in NGINX."
+  default     = "localhost"
+
+  validation {
+    condition     = trim(var.bootstrap_domain_name) != ""
+    error_message = "bootstrap_domain_name cannot be empty."
+  }
+}
+
+variable "bootstrap_enable_https" {
+  type        = bool
+  description = "When true, configure NGINX for HTTPS termination with HTTP to HTTPS redirect."
+  default     = true
+}
+
+variable "bootstrap_generate_self_signed_cert" {
+  type        = bool
+  description = "When true, generate a self-signed certificate if TLS files are missing."
+  default     = true
+}
+
+variable "bootstrap_tls_cert_path" {
+  type        = string
+  description = "TLS certificate path consumed by NGINX."
+  default     = "/etc/ssl/certs/von-selfsigned.crt"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_tls_cert_path))
+    error_message = "bootstrap_tls_cert_path must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_tls_key_path" {
+  type        = string
+  description = "TLS private key path consumed by NGINX."
+  default     = "/etc/ssl/private/von-selfsigned.key"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_tls_key_path))
+    error_message = "bootstrap_tls_key_path must be an absolute Linux path."
+  }
+}
+
+variable "bootstrap_healthcheck_path" {
+  type        = string
+  description = "Application healthcheck path used by deploy validation."
+  default     = "/health"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_healthcheck_path))
+    error_message = "bootstrap_healthcheck_path must start with '/'."
+  }
+}
+
+variable "bootstrap_waitress_threads" {
+  type        = number
+  description = "VON_WAITRESS_THREADS value written to the managed environment file."
+  default     = 16
+
+  validation {
+    condition     = var.bootstrap_waitress_threads >= 4 && var.bootstrap_waitress_threads <= 256
+    error_message = "bootstrap_waitress_threads must be between 4 and 256."
+  }
+}
+
+variable "bootstrap_deploy_log_path" {
+  type        = string
+  description = "Deployment log file path used by /usr/local/bin/deploy_von_release.sh."
+  default     = "/var/log/von/deploy.log"
+
+  validation {
+    condition     = can(regex("^/", var.bootstrap_deploy_log_path))
+    error_message = "bootstrap_deploy_log_path must be an absolute Linux path."
+  }
+}

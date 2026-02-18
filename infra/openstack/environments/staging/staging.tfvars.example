@@ -20,10 +20,17 @@ ssh_ingress_cidrs = [
 application_ingress_rules = [
   {
     protocol         = "tcp"
-    port_range_min   = 5000
-    port_range_max   = 5000
+    port_range_min   = 80
+    port_range_max   = 80
     remote_ip_prefix = "203.0.113.20/32"
-    description      = "Von web UI"
+    description      = "HTTP redirect to HTTPS (restricted source example)"
+  },
+  {
+    protocol         = "tcp"
+    port_range_min   = 443
+    port_range_max   = 443
+    remote_ip_prefix = "203.0.113.20/32"
+    description      = "Von HTTPS reverse proxy"
   }
 ]
 
@@ -44,3 +51,13 @@ metadata = {
   owner       = "replace-with-owner"
   cost_centre = "research-staging"
 }
+
+enable_managed_bootstrap = true
+bootstrap_repo_url       = "https://github.com/Strong-AI-Lab/Von.git"
+bootstrap_repo_ref       = "main"
+bootstrap_domain_name    = "staging-von.example.org"
+bootstrap_enable_https   = true
+
+# For a first bootstrap on a new host, this creates a temporary self-signed cert.
+# Replace with managed cert paths for trusted production/staging TLS.
+bootstrap_generate_self_signed_cert = true
