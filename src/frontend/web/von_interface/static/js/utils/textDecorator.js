@@ -37,6 +37,40 @@ export function parseVontologyTokens(text) {
 	return segments;
 }
 
+const TRAILING_CONCEPT_ID_PUNCTUATION = new Set(['.', ',', ':', ';', '!', '?', ')', ']', '}', '…']);
+
+export function normalisePotentialConceptId(text) {
+	let raw = normaliseVontologyTokensForDisplay(String(text ?? '')).trim();
+	if (!raw) return '';
+
+	// Strip one layer of wrappers that commonly surround inline IDs.
+	if (
+		(raw.startsWith('`') && raw.endsWith('`'))
+		|| (raw.startsWith('"') && raw.endsWith('"'))
+		|| (raw.startsWith("'") && raw.endsWith("'"))
+	) {
+		raw = raw.slice(1, -1).trim();
+	}
+	if (!raw) return '';
+
+	let id = raw;
+	if (/^[Vv]#/.test(id)) id = `#${id}`;
+	if (id.startsWith('#v#')) id = `#V#${id.slice(3)}`;
+	if (!id.startsWith('#V#')) return '';
+
+	while (id.length > 3 && TRAILING_CONCEPT_ID_PUNCTUATION.has(id[id.length - 1])) {
+		id = id.slice(0, -1);
+	}
+	if (id.length <= 3 || !id.startsWith('#V#')) return '';
+
+	const slug = id.slice(3);
+	// Keep the same conservative character set used by token parsing.
+	if (!/^[A-Za-z0-9_\./:–—\-]+$/.test(slug)) {
+		return '';
+	}
+	return `#V#${slug}`;
+}
+
 /**
  * Create a safe DocumentFragment with anchors for Vontology tokens.
  * The anchors dispatch a custom event 'von:selectConceptById' when clicked,
@@ -126,15 +160,17 @@ export function getCartoucheAppearanceSettings() {
 export function applyCartoucheAppearance(cartoucheEl, prefs = getCartoucheAppearanceSettings()) {
 	if (!cartoucheEl) return;
 	if (cartoucheEl.classList.contains('vontology-cartouche-missing')) return;
-	const showName = prefs?.showName !== false;
-	const showId = prefs?.showId !== false;
-	const showKind = prefs?.showKind !== false;
-	const kindAsBackground = prefs?.kindAsBackground === true;
+	const compactKindBg = cartoucheEl?.dataset?.cartoucheMode === 'compact_kind_bg';
+	const showName = compactKindBg ? true : prefs?.showName !== false;
+	const showId = compactKindBg ? false : prefs?.showId !== false;
+	const showKind = compactKindBg ? false : prefs?.showKind !== false;
+	const kindAsBackground = compactKindBg ? true : prefs?.kindAsBackground === true;
 	try {
 		cartoucheEl.classList.toggle('cartouche-hide-name', !showName);
 		cartoucheEl.classList.toggle('cartouche-hide-id', !showId);
 		cartoucheEl.classList.toggle('cartouche-hide-kind', !showKind);
 		cartoucheEl.classList.toggle('cartouche-kind-as-bg', kindAsBackground);
+		cartoucheEl.classList.toggle('vontology-cartouche-compact-kind-bg', compactKindBg);
 
 		const kindValue = cartoucheEl.dataset?.kind || '';
 		const kindClass = normaliseKindClass(kindValue);
@@ -286,6 +322,7 @@ function openCartoucheContextMenu(evt, triggerEl, fullConceptId) {
 export function createVontologyCartouche(conceptId, opts = {}) {
 	const idRaw = (conceptId || '').toString();
 	const fullId = idRaw.startsWith('#V#') ? idRaw : `#V#${idRaw}`;
+	const compactKindBg = opts?.mode === 'compact_kind_bg' || opts?.compactKindBackground === true;
 
 	const btn = document.createElement('button');
 	btn.type = 'button';
@@ -308,6 +345,10 @@ export function createVontologyCartouche(conceptId, opts = {}) {
 	kind.className = `vontology-cartouche-kind ${kindClass}`;
 	kind.textContent = opts.kind ? formatKindLabel(opts.kind) : '…';
 	btn.dataset.kind = (opts.kind || '').toString();
+	if (compactKindBg) {
+		btn.dataset.cartoucheMode = 'compact_kind_bg';
+		btn.classList.add('vontology-cartouche-compact-kind-bg');
+	}
 
 	btn.appendChild(name);
 	btn.appendChild(id);

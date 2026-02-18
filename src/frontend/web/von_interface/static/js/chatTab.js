@@ -26,7 +26,15 @@ import {
     selectConversationHistorySessions
 } from './utils/conversationHistoryPreferences.js';
 import { getSessionScopedNamespace, getSessionScopedOrgContext } from './utils/sessionScopedStorage.js';
-import { applyCartoucheAppearance, cartouchifyElementText, cartouchifyVontologyTokensInElement, createVontologyCartouche, getCartoucheAppearanceSettings, linkifyVontologyTokensInElement } from './utils/textDecorator.js';
+import {
+    applyCartoucheAppearance,
+    cartouchifyElementText,
+    cartouchifyVontologyTokensInElement,
+    createVontologyCartouche,
+    getCartoucheAppearanceSettings,
+    linkifyVontologyTokensInElement,
+    normalisePotentialConceptId
+} from './utils/textDecorator.js';
 import { showToast } from './utils/toast.js';
 
 // Helper to build fetch headers with window session context (JVNAUTOSCI-1011)
@@ -1491,6 +1499,8 @@ const RELATION_GRAPH_MAX_NODES = 120;
 const RELATION_GRAPH_MAX_EDGES = 240;
 const RELATION_TRUTH_STATE_MAX_GROUPS = 50;
 const RELATION_TRUTH_STATE_MAX_ASSERTIONS_PER_GROUP = 200;
+const RELATION_TRUTH_STATE_FALLBACK_MAX_LINES = 300;
+const RELATION_TRUTH_STATE_FALLBACK_MAX_ASSERTIONS = 120;
 const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
 
 function normaliseTableSortMetadata(value, columns) {
@@ -2952,7 +2962,8 @@ function normaliseRelationTruthStateDisplayElement(element) {
     return {
         element_id: typeof element.element_id === 'string' ? element.element_id.trim() : null,
         title,
-        groups
+        groups,
+        source: 'structured'
     };
 }
 
@@ -2973,6 +2984,97 @@ function resolveRelationTruthStateDisplayElements(debugData) {
     return relationTruthStateElements;
 }
 
+function stripRelationTripleLinePrefix(rawLine) {
+    let line = typeof rawLine === 'string' ? rawLine.trim() : '';
+    if (!line) {
+        return '';
+    }
+
+    // Remove lightweight markdown wrappers before triple parsing.
+    line = line.replace(/^>\s*/, '');
+    line = line.replace(/^[-*+]\s+/, '');
+    line = line.replace(/^\d+\.\s+/, '');
+    if (line.startsWith('`') && line.endsWith('`') && line.length > 2) {
+        line = line.slice(1, -1).trim();
+    }
+    return line;
+}
+
+function parseRelationTripleLine(rawLine, index) {
+    const line = stripRelationTripleLinePrefix(rawLine);
+    if (!line) {
+        return null;
+    }
+
+    const match = line.match(/^(.+?)\s*--\s*(.+?)\s*-->\s*(.+?)$/);
+    if (!match) {
+        return null;
+    }
+
+    const arg1Raw = String(match[1] ?? '').trim();
+    const predicateRaw = String(match[2] ?? '').trim();
+    const arg2Raw = String(match[3] ?? '').trim();
+    if (!arg1Raw || !predicateRaw || !arg2Raw) {
+        return null;
+    }
+
+    return {
+        assertion_id: `derived_assertion_${index + 1}`,
+        arg1: normalisePotentialConceptId(arg1Raw) || arg1Raw,
+        predicate: normalisePotentialConceptId(predicateRaw) || predicateRaw,
+        arg2: normalisePotentialConceptId(arg2Raw) || arg2Raw,
+        is_asserted: true
+    };
+}
+
+function deriveRelationTruthStateDisplayElementsFromText(rawText) {
+    const text = typeof rawText === 'string' ? rawText : '';
+    if (!text.trim()) {
+        return {
+            elements: [],
+            parsedAssertions: 0,
+            scannedLines: 0
+        };
+    }
+
+    const lines = text.split(/\r?\n/).slice(0, RELATION_TRUTH_STATE_FALLBACK_MAX_LINES);
+    const assertions = [];
+
+    for (let index = 0; index < lines.length; index += 1) {
+        const assertion = parseRelationTripleLine(lines[index], index);
+        if (!assertion) {
+            continue;
+        }
+        assertions.push(assertion);
+        if (assertions.length >= RELATION_TRUTH_STATE_FALLBACK_MAX_ASSERTIONS) {
+            break;
+        }
+    }
+
+    if (!assertions.length) {
+        return {
+            elements: [],
+            parsedAssertions: 0,
+            scannedLines: lines.length
+        };
+    }
+
+    return {
+        elements: [{
+            element_id: 'derived_relation_truth_state',
+            title: 'Relation triples (parsed from text)',
+            source: 'derived_from_text',
+            groups: [{
+                label: 'Parsed from text',
+                status: 'uncertain',
+                assertions
+            }]
+        }],
+        parsedAssertions: assertions.length,
+        scannedLines: lines.length
+    };
+}
+
 function buildRelationTruthStateValueNode(rawValue) {
     const value = typeof rawValue === 'string' ? rawValue.trim() : '';
     if (!value) {
@@ -2982,7 +3084,8 @@ function buildRelationTruthStateValueNode(rawValue) {
     const conceptId = _normalisePotentialConceptId(value);
     if (conceptId) {
         const cartouche = createVontologyCartouche(conceptId, {
-            title: 'Open concept tab'
+            title: 'Open concept tab',
+            mode: 'compact_kind_bg'
         });
         cartouche.classList.add('chat-display-elements-relation-truth-state-cartouche');
         return cartouche;
@@ -3328,7 +3431,26 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     const calendarElements = resolveCalendarDisplayElements(debugData);
     const documentElements = resolveDocumentDisplayElements(debugData);
     const relationGraphElements = resolveRelationGraphDisplayElements(debugData);
-    const relationTruthStateElements = resolveRelationTruthStateDisplayElements(debugData);
+    let relationTruthStateElements = resolveRelationTruthStateDisplayElements(debugData);
+    let relationTruthStateSource = relationTruthStateElements.length ? 'structured' : 'none';
+    let relationTripleParseCount = 0;
+    if (!relationTruthStateElements.length) {
+        const fallbackText = (typeof container?.dataset?.originalText === 'string' && container.dataset.originalText.trim())
+            ? container.dataset.originalText
+            : (typeof debugData?.response === 'string' ? debugData.response : String(container?.textContent || ''));
+        const fallback = deriveRelationTruthStateDisplayElementsFromText(fallbackText);
+        relationTripleParseCount = fallback.parsedAssertions;
+        if (fallback.elements.length) {
+            relationTruthStateElements = fallback.elements;
+            relationTruthStateSource = 'derived_from_text';
+        }
+    }
+    try {
+        container.dataset.relationTruthStateSource = relationTruthStateSource;
+        container.dataset.relationTripleParseCount = String(relationTripleParseCount);
+    } catch (_) {
+        // Ignore dataset assignment failures.
+    }
     if (
         !tableElements.length
         && !workflowElements.length
@@ -3346,6 +3468,8 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     const root = document.createElement('div');
     root.className = 'chat-display-elements';
     root.style.cssText = 'margin-top: 10px; border: 1px solid #dce3ea; border-radius: 6px; background: #fff; padding: 8px;';
+    root.dataset.relationTruthStateSource = relationTruthStateSource;
+    root.dataset.relationTripleParseCount = String(relationTripleParseCount);
     root.addEventListener('click', (event) => {
         const target = event.target;
         if (!target || !(target instanceof HTMLElement)) {
@@ -4217,7 +4341,10 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         );
         const summary = document.createElement('div');
         summary.className = 'chat-display-elements-relation-truth-state-summary';
-        summary.textContent = `${totalAssertions} relation${totalAssertions === 1 ? '' : 's'}`;
+        const summarySuffix = relationElement.source === 'derived_from_text'
+            ? ' · derived from text'
+            : '';
+        summary.textContent = `${totalAssertions} relation${totalAssertions === 1 ? '' : 's'}${summarySuffix}`;
         summary.style.cssText = 'font-size: 0.78em; color: #5a6b7b; margin-bottom: 6px;';
         section.appendChild(summary);
 
@@ -7681,20 +7808,7 @@ function _normaliseChatSessionLinks(links) {
 }
 
 function _normalisePotentialConceptId(text) {
-    const raw = String(text ?? '').trim();
-    if (!raw) return '';
-
-    let id = raw;
-    if (id.startsWith('#v#')) id = `#V#${id.slice(3)}`;
-    if (!id.startsWith('#V#')) return '';
-
-    // Strip common trailing punctuation.
-    const trailingJunk = new Set(['.', ',', ':', ';', '!', '?', ')', ']', '}', '…']);
-    while (id.length > 3 && trailingJunk.has(id[id.length - 1])) {
-        id = id.slice(0, -1);
-    }
-
-    return id.trim();
+    return normalisePotentialConceptId(text);
 }
 
 function _deriveNameFromConceptId(conceptId) {

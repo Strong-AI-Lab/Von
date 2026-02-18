@@ -6584,6 +6584,22 @@ button.prompt-vontology-cartouche {
     color: #4a3871;
 }
 
+.vontology-cartouche.vontology-cartouche-compact-kind-bg {
+    gap: 4px;
+    padding: 1px 8px;
+    font-size: 12px;
+    min-height: 22px;
+}
+
+.vontology-cartouche.vontology-cartouche-compact-kind-bg .vontology-cartouche-name {
+    font-weight: 600;
+}
+
+.vontology-cartouche.vontology-cartouche-compact-kind-bg .vontology-cartouche-id,
+.vontology-cartouche.vontology-cartouche-compact-kind-bg .vontology-cartouche-kind {
+    display: none;
+}
+
 .settings-subsection {
     margin-top: 12px;
 }
@@ -9373,6 +9389,10 @@ body.settings-body {
     text-decoration: none !important;
     transition: all 0.15s ease;
     cursor: pointer;
+}
+
+.predicate-extent-table .vontology-cartouche {
+    vertical-align: middle;
 }
 
 /* Type cartouche - blue (higher specificity for extent table) */

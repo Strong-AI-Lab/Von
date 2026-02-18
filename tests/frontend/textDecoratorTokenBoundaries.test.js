@@ -59,4 +59,12 @@ describe('Vontology token boundaries', () => {
         expect(cartouches.length).toBe(1);
         expect(cartouches[0].dataset.fullConceptId).toBe('#V#mjw_todo_list_—_2026-01-03');
     });
+
+    test('normalises lower-case prefixes and trailing punctuation for concept-like values', () => {
+        const { normalisePotentialConceptId } = require(modulePath);
+
+        expect(normalisePotentialConceptId('#v#panel_4,')).toBe('#V#panel_4');
+        expect(normalisePotentialConceptId('V#michael_witbrock.')).toBe('#V#michael_witbrock');
+        expect(normalisePotentialConceptId('not_a_concept')).toBe('');
+    });
 });

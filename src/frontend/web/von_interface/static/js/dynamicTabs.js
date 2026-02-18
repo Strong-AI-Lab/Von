@@ -12,6 +12,7 @@ import { detectMarkdown, renderSmartTextAsync } from './markdownUtils.js';
 import { destroyPredicateView, initializePredicateView } from './predicateView.js';
 import { getConceptTypeDisplayNames, setCurrentConceptType, setCurrentlySelectedConceptId, setSelectedConceptOriginalName } from './state.js';
 import { activateTab } from './tabNavigation.js';
+import { createVontologyCartouche, normalisePotentialConceptId } from './utils/textDecorator.js';
 import { getSessionScopedOrgId } from './utils/sessionScopedStorage.js';
 import { getKeyConceptIds, updateTabHeaderStarButtons, updateTreeKeyConceptBadge } from './vontology.js';
 
@@ -5554,20 +5555,19 @@ async function renderRelationships(conceptId, suffix, kind) {
             if (!predicateId || typeof predicateId !== 'string') {
                 return '';
             }
-            if (predicateId.startsWith('#V#')) {
-                return predicateId;
+            const trimmed = predicateId.trim();
+            if (!trimmed) {
+                return '';
             }
-            return `#V#${predicateId}`;
+            return normalisePotentialConceptId(trimmed) || normalisePotentialConceptId(`#V#${trimmed}`) || '';
         };
 
         const conceptIds = new Set();
         rows.forEach((row) => {
-            if (row.arg1_is_concept && typeof row.arg1_value === 'string' && row.arg1_value.startsWith('#V#')) {
-                conceptIds.add(row.arg1_value);
-            }
-            if (row.arg2_is_concept && typeof row.arg2_value === 'string' && row.arg2_value.startsWith('#V#')) {
-                conceptIds.add(row.arg2_value);
-            }
+            const arg1ConceptId = normalisePotentialConceptId(row.arg1_value);
+            if (arg1ConceptId) conceptIds.add(arg1ConceptId);
+            const arg2ConceptId = normalisePotentialConceptId(row.arg2_value);
+            if (arg2ConceptId) conceptIds.add(arg2ConceptId);
             const predicateConceptId = toPredicateConceptId(row.predicate_id);
             if (predicateConceptId) {
                 conceptIds.add(predicateConceptId);
@@ -5582,39 +5582,23 @@ async function renderRelationships(conceptId, suffix, kind) {
             })
         );
 
-        const openConcept = (id, fallbackName) => {
-            const metadata = metadataMap.get(id) || { kind: 'individual', name: fallbackName || id };
-            const evt = new CustomEvent('open-concept-tab', {
-                detail: {
-                    conceptId: id,
-                    conceptName: metadata.name || fallbackName || id,
-                    kind: metadata.kind || 'individual',
-                    activate: true
-                }
-            });
-            document.dispatchEvent(evt);
-        };
-
         const createConceptCell = (conceptIdValue, fallbackName = null) => {
             const cell = document.createElement('td');
-            const conceptIdText = typeof conceptIdValue === 'string' ? conceptIdValue : '';
-            if (!conceptIdText || !conceptIdText.startsWith('#V#')) {
-                cell.textContent = fallbackName || conceptIdText || '';
+            const conceptIdText = normalisePotentialConceptId(conceptIdValue);
+            if (!conceptIdText) {
+                const rawText = typeof conceptIdValue === 'string' ? conceptIdValue : '';
+                cell.textContent = fallbackName || rawText || '';
                 return cell;
             }
 
             const metadata = metadataMap.get(conceptIdText) || { kind: 'individual', name: fallbackName || conceptIdText };
-            const chip = document.createElement('span');
-            chip.className = `concept-cartouche ${metadata.kind || 'individual'}`;
-            chip.textContent = metadata.name || fallbackName || conceptIdText;
-            chip.title = conceptIdText;
-            chip.style.cursor = 'pointer';
-            chip.addEventListener('click', () => openConcept(conceptIdText, fallbackName || conceptIdText));
-            chip.addEventListener('contextmenu', (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                copyConceptIdToClipboard(conceptIdText);
+            const chip = createVontologyCartouche(conceptIdText, {
+                name: metadata.name || fallbackName || conceptIdText,
+                kind: metadata.kind || 'individual',
+                title: conceptIdText,
+                mode: 'compact_kind_bg'
             });
+            chip.classList.add('dynamic-relationships-cartouche');
             cell.appendChild(chip);
             return cell;
         };
@@ -5662,14 +5646,16 @@ async function renderRelationships(conceptId, suffix, kind) {
             const predicateConceptId = toPredicateConceptId(row.predicate_id);
             tr.appendChild(createConceptCell(predicateConceptId, row.predicate_id || ''));
 
-            if (row.arg1_is_concept) {
-                tr.appendChild(createConceptCell(row.arg1_value, row.arg1_value));
+            const arg1ConceptId = normalisePotentialConceptId(row.arg1_value);
+            if (row.arg1_is_concept || arg1ConceptId) {
+                tr.appendChild(createConceptCell(arg1ConceptId || row.arg1_value, row.arg1_value));
             } else {
                 tr.appendChild(createTextCell(row.arg1_value || ''));
             }
 
-            if (row.arg2_is_concept) {
-                tr.appendChild(createConceptCell(row.arg2_value, row.arg2_value));
+            const arg2ConceptId = normalisePotentialConceptId(row.arg2_value);
+            if (row.arg2_is_concept || arg2ConceptId) {
+                tr.appendChild(createConceptCell(arg2ConceptId || row.arg2_value, row.arg2_value));
             } else {
                 tr.appendChild(createTextCell(row.arg2_value || '', row.arg2_lang || ''));
             }

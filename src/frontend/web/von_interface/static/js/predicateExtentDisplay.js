@@ -5,53 +5,17 @@
  * (all the instances/triples where the predicate is used).
  */
 
-import { createOrActivateConceptTab } from './dynamicTabs.js';
 import { fetchPredicateExtent } from './predicateUtils.js';
 import { selectBestNameForContext, selectShortestNameForContext } from './utils/nameSelection.js';
-import { getCartoucheAppearanceSettings } from './utils/textDecorator.js';
-import { showToast } from './utils/toast.js';
+import {
+    createVontologyCartouche,
+    getCartoucheAppearanceSettings,
+    normalisePotentialConceptId
+} from './utils/textDecorator.js';
 
 const CONCEPT_SEARCH_API = '/vontology/api/vontology/search';
 const CONCEPT_SEARCH_LIMIT = 8;
 const CONCEPT_SEARCH_DEBOUNCE_MS = 200;
-
-async function copyConceptIdToClipboard(conceptId) {
-    const value = String(conceptId ?? '').trim();
-    if (!value) return;
-
-    try {
-        if (navigator?.clipboard?.writeText) {
-            await navigator.clipboard.writeText(value);
-            showToast('Concept ID copied');
-            return;
-        }
-    } catch (_) {
-        // Fall through to legacy approach.
-    }
-
-    const textarea = document.createElement('textarea');
-    textarea.value = value;
-    textarea.setAttribute('readonly', '');
-    textarea.style.position = 'fixed';
-    textarea.style.left = '-9999px';
-    textarea.style.top = '-9999px';
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    try {
-        document.execCommand('copy');
-        showToast('Concept ID copied');
-    } catch (_) {
-        showToast('Copy failed', 'error');
-    } finally {
-        try { textarea.remove(); } catch (_) { }
-    }
-}
-
-/**
- * Cache for concept display names to avoid repeated fetches.
- */
-const conceptNameCache = new Map();
 
 /**
  * Cache for concept metadata (kind: type/predicate/individual).
@@ -67,21 +31,22 @@ const conceptMetadataCache = new Map();
  * @returns {Promise<{displayName: string, kind: string}>}
  */
 async function getConceptMetadata(conceptId) {
-    if (!conceptId || !conceptId.startsWith('#V#')) {
+    const normalisedConceptId = normalisePotentialConceptId(conceptId);
+    if (!normalisedConceptId) {
         return { displayName: conceptId, kind: 'unknown' };
     }
 
     // Check cache first
-    if (conceptMetadataCache.has(conceptId)) {
-        return conceptMetadataCache.get(conceptId);
+    if (conceptMetadataCache.has(normalisedConceptId)) {
+        return conceptMetadataCache.get(normalisedConceptId);
     }
 
     try {
         // Fetch concept data
-        const resp = await fetch(`/api/concepts/${encodeURIComponent(conceptId)}`);
+        const resp = await fetch(`/api/concepts/${encodeURIComponent(normalisedConceptId)}`);
         if (!resp.ok) {
-            const fallback = { displayName: conceptId, kind: 'unknown' };
-            conceptMetadataCache.set(conceptId, fallback);
+            const fallback = { displayName: normalisedConceptId, kind: 'unknown' };
+            conceptMetadataCache.set(normalisedConceptId, fallback);
             return fallback;
         }
 
@@ -100,23 +65,26 @@ async function getConceptMetadata(conceptId) {
 
         if (names.length === 0) {
             // Fallback to concept name field or ID
-            const displayName = doc.name || doc.display_name || conceptId;
+            const displayName = doc.name || doc.display_name || normalisedConceptId;
             const metadata = { displayName, kind };
-            conceptMetadataCache.set(conceptId, metadata);
+            conceptMetadataCache.set(normalisedConceptId, metadata);
             return metadata;
         }
 
         const bestName = selectBestNameForContext(names);
         const shortestName = selectShortestNameForContext(names);
         const prefs = getCartoucheAppearanceSettings();
-        const displayName = (prefs?.useShortestName ? (shortestName || bestName) : (bestName || shortestName)) || doc.name || doc.display_name || conceptId;
+        const displayName = (prefs?.useShortestName ? (shortestName || bestName) : (bestName || shortestName))
+            || doc.name
+            || doc.display_name
+            || normalisedConceptId;
         const metadata = { displayName, kind };
-        conceptMetadataCache.set(conceptId, metadata);
+        conceptMetadataCache.set(normalisedConceptId, metadata);
         return metadata;
     } catch (error) {
-        console.debug('[predicateExtentDisplay] Failed to fetch metadata for', conceptId, error);
-        const fallback = { displayName: conceptId, kind: 'unknown' };
-        conceptMetadataCache.set(conceptId, fallback);
+        console.debug('[predicateExtentDisplay] Failed to fetch metadata for', normalisedConceptId, error);
+        const fallback = { displayName: normalisedConceptId, kind: 'unknown' };
+        conceptMetadataCache.set(normalisedConceptId, fallback);
         return fallback;
     }
 }
@@ -409,20 +377,17 @@ export function createPredicateExtentDisplay(conceptId, container) {
         // Fetch display names for all concepts in parallel
         const conceptIds = new Set();
         state.data.extent.forEach(item => {
-            if (item.subject && item.subject.startsWith('#V#')) {
-                conceptIds.add(item.subject);
-            }
-            if (item.predicate && item.predicate.startsWith('#V#')) {
-                conceptIds.add(item.predicate);
-            }
+            const subjectId = normalisePotentialConceptId(item.subject);
+            if (subjectId) conceptIds.add(subjectId);
+            const predicateId = normalisePotentialConceptId(item.predicate || state.conceptId);
+            if (predicateId) conceptIds.add(predicateId);
             // Handle objects/arguments
             const objects = Array.isArray(item.object) ? item.object :
                 (item.arguments && Array.isArray(item.arguments) ? item.arguments :
                     (item.object ? [item.object] : []));
             objects.forEach(obj => {
-                if (obj && obj.startsWith('#V#')) {
-                    conceptIds.add(obj);
-                }
+                const objectId = normalisePotentialConceptId(obj);
+                if (objectId) conceptIds.add(objectId);
             });
         });
 
@@ -433,45 +398,32 @@ export function createPredicateExtentDisplay(conceptId, container) {
         const metadataResults = await Promise.all(metadataPromises);
         const conceptMetadata = new Map(metadataResults.map(r => [r.id, r.metadata]));
 
-        // Helper to create a clickable concept cell styled as a cartouche
+        const createConceptCartouche = (conceptId, fallbackLabel = '') => {
+            const normalisedConceptId = normalisePotentialConceptId(conceptId);
+            if (!normalisedConceptId) {
+                return null;
+            }
+            const metadata = conceptMetadata.get(normalisedConceptId) || { displayName: fallbackLabel || normalisedConceptId, kind: 'unknown' };
+            return createVontologyCartouche(normalisedConceptId, {
+                name: metadata.displayName || fallbackLabel || normalisedConceptId,
+                kind: metadata.kind || 'unknown',
+                title: normalisedConceptId,
+                mode: 'compact_kind_bg'
+            });
+        };
+
+        // Helper to create a concept cell using shared cartouche behaviour.
         const createConceptCell = (conceptId) => {
             const cell = document.createElement('td');
-
-            if (conceptId && conceptId.startsWith('#V#')) {
-                const metadata = conceptMetadata.get(conceptId) || { displayName: conceptId, kind: 'unknown' };
-                const displayName = metadata.displayName;
-
-                const link = document.createElement('a');
-                link.href = '#';
-                // Add cartouche styling based on kind (backend determines type/predicate/individual)
-                if (metadata.kind === 'predicate') {
-                    link.className = 'concept-link concept-cartouche predicate';
-                } else if (metadata.kind === 'type') {
-                    link.className = 'concept-link concept-cartouche type';
-                } else if (metadata.kind === 'individual') {
-                    link.className = 'concept-link concept-cartouche individual';
-                } else {
-                    link.className = 'concept-link concept-cartouche';
-                }
-                link.textContent = displayName;
-                link.title = conceptId; // Show full ID on hover
-                link.onclick = (e) => {
-                    e.preventDefault();
-                    e.stopPropagation(); // Prevent row selection
-                    createOrActivateConceptTab(conceptId, displayName, true);
-                };
-                link.addEventListener('contextmenu', (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    void copyConceptIdToClipboard(conceptId);
-                });
-
-                cell.appendChild(link);
-            } else {
-                cell.textContent = conceptId || 'N/A';
-                cell.title = conceptId || '';
+            const cartouche = createConceptCartouche(conceptId, conceptId);
+            if (cartouche) {
+                cartouche.classList.add('predicate-extent-cartouche');
+                cell.appendChild(cartouche);
+                return cell;
             }
-
+            const value = conceptId || 'N/A';
+            cell.textContent = value;
+            cell.title = value;
             return cell;
         };
 
@@ -498,36 +450,10 @@ export function createPredicateExtentDisplay(conceptId, container) {
                         objectCell.appendChild(document.createTextNode(', '));
                     }
 
-                    if (obj && obj.startsWith('#V#')) {
-                        const metadata = conceptMetadata.get(obj) || { displayName: obj, kind: 'unknown' };
-                        const displayName = metadata.displayName;
-
-                        const link = document.createElement('a');
-                        link.href = '#';
-                        // Add cartouche styling based on kind (backend determines type/predicate/individual)
-                        if (metadata.kind === 'predicate') {
-                            link.className = 'concept-link concept-cartouche predicate';
-                        } else if (metadata.kind === 'type') {
-                            link.className = 'concept-link concept-cartouche type';
-                        } else if (metadata.kind === 'individual') {
-                            link.className = 'concept-link concept-cartouche individual';
-                        } else {
-                            link.className = 'concept-link concept-cartouche';
-                        }
-                        link.textContent = displayName;
-                        link.title = obj; // Show full ID on hover
-                        link.onclick = (e) => {
-                            e.preventDefault();
-                            e.stopPropagation(); // Prevent row selection
-                            createOrActivateConceptTab(obj, displayName, true);
-                        };
-                        link.addEventListener('contextmenu', (e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            void copyConceptIdToClipboard(obj);
-                        });
-
-                        objectCell.appendChild(link);
+                    const cartouche = createConceptCartouche(obj, obj);
+                    if (cartouche) {
+                        cartouche.classList.add('predicate-extent-cartouche');
+                        objectCell.appendChild(cartouche);
                     } else {
                         objectCell.appendChild(document.createTextNode(obj || 'N/A'));
                     }

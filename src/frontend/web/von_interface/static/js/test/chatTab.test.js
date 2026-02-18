@@ -57,6 +57,15 @@ jest.mock('../utils/textDecorator.js', () => ({
         showKind: true,
         kindAsBackground: false
     })),
+    normalisePotentialConceptId: jest.fn((value) => {
+        let raw = String(value ?? '').trim();
+        if (!raw) return '';
+        if (/^[Vv]#/.test(raw)) raw = `#${raw}`;
+        if (raw.startsWith('#v#')) raw = `#V#${raw.slice(3)}`;
+        if (!raw.startsWith('#V#')) return '';
+        raw = raw.replace(/[.,:;!?\)\]\}…]+$/g, '');
+        return raw.startsWith('#V#') && raw.length > 3 ? raw : '';
+    }),
     linkifyVontologyTokensInElement: jest.fn()
 }));
 
@@ -549,8 +558,9 @@ describe('chat cartouche hydration retries', () => {
 
 describe('relation truth-state display elements', () => {
     beforeEach(() => {
-        const { createVontologyCartouche } = require('../utils/textDecorator.js');
+        const { createVontologyCartouche, normalisePotentialConceptId } = require('../utils/textDecorator.js');
         createVontologyCartouche.mockClear();
+        normalisePotentialConceptId.mockClear();
     });
 
     test('renders grouped asserted and missing relation rows using compact cartouches', () => {
@@ -614,6 +624,82 @@ describe('relation truth-state display elements', () => {
 
         const { createVontologyCartouche } = require('../utils/textDecorator.js');
         expect(createVontologyCartouche).toHaveBeenCalledTimes(6);
+    });
+
+    test('derives relation rows from triple-like text when structured elements are absent', () => {
+        const container = document.createElement('div');
+        container.dataset.originalText = [
+            '- #V#michael_witbrock -- #V#panelist_in_event --> #V#panel_4_ai_for_industry_ai_for_society_iaicgf_2025_melbourne',
+            'This line is not a triple.'
+        ].join('\n');
+
+        __testOnly_renderDisplayElementsIntoContainer(container, {});
+
+        const section = container.querySelector('.chat-display-elements-relation-truth-state-section');
+        expect(section).not.toBeNull();
+        expect(section.textContent).toContain('Relation triples (parsed from text)');
+        expect(section.textContent).toContain('derived from text');
+
+        const rows = container.querySelectorAll('.chat-display-elements-relation-truth-state-assertion');
+        expect(rows.length).toBe(1);
+
+        const root = container.querySelector('.chat-display-elements');
+        expect(root.dataset.relationTruthStateSource).toBe('derived_from_text');
+        expect(root.dataset.relationTripleParseCount).toBe('1');
+
+        const { createVontologyCartouche } = require('../utils/textDecorator.js');
+        expect(createVontologyCartouche).toHaveBeenCalledTimes(3);
+    });
+
+    test('prefers structured relation elements over text-derived fallback triples', () => {
+        const container = document.createElement('div');
+        container.dataset.originalText = '#V#a -- #V#p --> #V#b';
+        const debugData = {
+            display_elements: {
+                schema_version: 'turn_display_elements_v1',
+                elements: [
+                    {
+                        element_id: 'screen_relation_truth_state',
+                        element_type: 'relation_truth_state',
+                        channel: 'screen',
+                        order: 41,
+                        intent: 'truth_state_relation_view',
+                        payload: {
+                            title: 'Current truth state',
+                            groups: [
+                                {
+                                    label: 'Structured',
+                                    status: 'asserted',
+                                    assertions: [
+                                        {
+                                            assertion_id: 'a1',
+                                            arg1: '#V#left',
+                                            predicate: '#V#relates_to',
+                                            arg2: '#V#right',
+                                            is_asserted: true
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        };
+
+        __testOnly_renderDisplayElementsIntoContainer(container, debugData);
+
+        const section = container.querySelector('.chat-display-elements-relation-truth-state-section');
+        expect(section).not.toBeNull();
+        expect(section.textContent).toContain('Current truth state');
+        expect(section.textContent).not.toContain('derived from text');
+
+        const root = container.querySelector('.chat-display-elements');
+        expect(root.dataset.relationTruthStateSource).toBe('structured');
+        expect(root.dataset.relationTripleParseCount).toBe('0');
+
+        const { createVontologyCartouche } = require('../utils/textDecorator.js');
+        expect(createVontologyCartouche).toHaveBeenCalledTimes(3);
     });
 });
 

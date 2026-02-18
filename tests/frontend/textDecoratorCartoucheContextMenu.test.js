@@ -55,4 +55,20 @@ describe('Vontology cartouche context menu', () => {
         expect(seen[0].kind).toBe('type');
         expect(seen[0].modifierKeys.shiftKey).toBe(true);
     });
+
+    test('compact kind-background mode hides id/kind pill and keeps cartouche clickable', () => {
+        const { createVontologyCartouche } = require(modulePath);
+
+        const cartouche = createVontologyCartouche('#V#panelist_in_event', {
+            name: 'Panelist in event',
+            kind: 'predicate',
+            mode: 'compact_kind_bg'
+        });
+
+        expect(cartouche.dataset.cartoucheMode).toBe('compact_kind_bg');
+        expect(cartouche.classList.contains('vontology-cartouche-compact-kind-bg')).toBe(true);
+        expect(cartouche.classList.contains('cartouche-kind-as-bg')).toBe(true);
+        expect(cartouche.classList.contains('cartouche-hide-kind')).toBe(true);
+        expect(cartouche.classList.contains('cartouche-hide-id')).toBe(true);
+    });
 });

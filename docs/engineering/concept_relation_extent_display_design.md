@@ -216,3 +216,126 @@ This keeps relation-state rendering semantically distinct from generic tables an
 2. Each assertion renders three clickable cartouches (arg1, predicate, arg2).
 3. Asserted and not-asserted variants are visually distinct and accessible.
 4. Existing display element types continue to validate and render unchanged.
+
+## Execution Plan (Relates to `JVNAUTOSCI-865`)
+
+### Plan Intent
+Turn the above design into an implementation sequence that:
+- keeps `relation_truth_state` as the primary structured rendering pathway under `JVNAUTOSCI-865`,
+- closes current clickability/visibility gaps for concept and relation elements, and
+- introduces a compact cartouche mode that is visually obvious and space-efficient.
+
+### Workstream Map
+
+#### Workstream A: Shared Cartouche Unification (Foundation for `JVNAUTOSCI-865`)
+Objective:
+- Remove divergence between legacy `.concept-cartouche` usage and shared `.vontology-cartouche` usage.
+
+Scope:
+- Introduce a single renderer helper used by:
+  - concept relation extent table (`dynamicTabs.js`),
+  - predicate extent table (`predicateExtentDisplay.js`),
+  - chat relation truth-state rows (`chatTab.js`).
+- Keep existing behaviour (open concept, copy id, keyboard focus), but route through one cartouche constructor.
+
+Acceptance gate:
+- All concept-like cells in the two extent tables and relation truth-state rows use the same cartouche element family.
+- Right-click copy and click-to-open are consistent across all three surfaces.
+
+#### Workstream B: Compact Cartouche Variant (Core UX part of `JVNAUTOSCI-865`)
+Objective:
+- Add a dense cartouche presentation where kind colour is expressed as background and the right kind pill is omitted.
+
+Scope:
+- Add explicit compact variant support to cartouche rendering (`name-first`, optional id tooltip, no right-side kind pill).
+- Ensure kind colour mapping remains:
+  - `individual` -> green
+  - `type` -> blue
+  - `predicate` -> violet
+- Reuse existing settings toggle semantics (`kind-as-background`) so behaviour is predictable.
+
+Acceptance gate:
+- Relation-heavy rows can render in compact mode without loss of discoverability.
+- Visual distinction between type/individual/predicate remains clear in both standard and compact variants.
+
+#### Workstream C: Concept/Predicate Detection Hardening
+Objective:
+- Make clickability robust when values are concept-like but not already clean `#V#...` strings.
+
+Scope:
+- Add a shared value normaliser for renderer inputs (trimming, punctuation stripping, `#v#` normalisation, canonical prefix handling).
+- Use backend row metadata (`arg*_is_concept`, relation shape) plus normalisation before deciding plain text vs concept cartouche.
+- Keep conservative fallback to plain text for non-concept values.
+
+Acceptance gate:
+- Previously missed concept identifiers in extent rows become clickable cartouches.
+- No false-positive conversion of clear literal text values.
+
+#### Workstream D: Relation Rendering Priority and Fallback (Explicitly tied to `JVNAUTOSCI-865`)
+Objective:
+- Ensure relation special handling is visible even when the model emits markdown/prose instead of structured elements.
+
+Scope:
+- Primary path stays `display_elements.relation_truth_state` (authoritative for `JVNAUTOSCI-865`).
+- Add deterministic fallback parser for simple triple lines (`arg1 -- predicate --> arg2`) when no structured relation display element is present.
+- Mark fallback-rendered blocks with provenance metadata for diagnostics.
+
+Acceptance gate:
+- If structured `relation_truth_state` exists, renderer uses it.
+- If absent but parseable triples exist, relation block still renders with special relation styling.
+- If neither exists, existing plain markdown rendering remains unchanged.
+
+### Implementation Order
+1. Workstream A (shared cartouche helper in one place).
+2. Workstream B (compact variant on top of shared helper).
+3. Workstream C (hardening detection in extent renderers).
+4. Workstream D (chat relation fallback, preserving `JVNAUTOSCI-865` primary path).
+5. Cross-cutting clean-up and documentation update.
+
+Rationale:
+- This order minimises churn by stabilising rendering primitives before adding parser/fallback logic.
+
+### Test Plan
+
+#### Frontend Unit/Component Tests
+- Update/add tests in:
+  - `src/frontend/web/von_interface/static/js/test/chatTab.test.js`
+  - predicate extent and dynamic tab tests (new tests if missing)
+- Cover:
+  - compact cartouche class/structure,
+  - click and context menu behaviours,
+  - relation_truth_state render precedence,
+  - fallback triple parsing only when structured element is absent.
+
+#### Backend Contract Tests
+- Keep `relation_truth_state` schema validation tests in `display_elements_service` green.
+- Ensure `/relationships/extent` tests still pass and add cases for concept-id normalisation edge patterns where appropriate.
+
+#### Manual Verification Checklist
+- Chat response with structured `relation_truth_state` payload.
+- Chat response with plain triple markdown only.
+- Concept tab relation extent rows containing:
+  - canonical `#V#...`,
+  - lower-case `#v#...`,
+  - trailing punctuation variants.
+
+### Telemetry and Diagnostics
+- Add lightweight counters/flags (debug-safe) for:
+  - `relation_truth_state_source` (`structured` vs `derived_from_text`),
+  - `cartouche_render_count`,
+  - `concept_token_parse_miss_count`.
+- Include counters in existing debug pathways, not as separate infrastructure.
+
+### Risk Notes
+- Main risk is accidental over-linkification of plain text that resembles ids.
+- Mitigation:
+  - conservative normalisation rules,
+  - strict fallback conditions,
+  - tests for false positives.
+
+### Suggested Jira Decomposition (under `JVNAUTOSCI-865`)
+1. Subtask A: Shared cartouche helper adoption across relation/table renderers.
+2. Subtask B: Compact cartouche variant and settings harmonisation.
+3. Subtask C: Extent renderer concept-id detection hardening.
+4. Subtask D: Chat fallback parser for relation triple lines.
+5. Subtask E: Test and diagnostics completion pass.
