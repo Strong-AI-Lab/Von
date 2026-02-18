@@ -690,8 +690,6 @@ export function selectConceptWithSuffix(concept, suffix = '', radioId = null) {
   if (conceptNotesInput) {
     // First try to use notes data from the concept object directly
     const notesValue = concept.notes ||
-      concept.concept_data?.notes ||
-      concept.concept_data?.preserved_fields?.notes ||
       concept.description ||
       '';
 
@@ -807,8 +805,6 @@ async function fetchFullConceptData(conceptId, suffix = '') {
     if (conceptNotesInput && conceptData) {
       // Use the proper notes field from the API response
       const notes = conceptData.notes ||
-        conceptData.concept_data?.notes ||
-        conceptData.concept_data?.preserved_fields?.notes ||
         '';
       conceptNotesInput.value = notes;
       originalNotes = notes;

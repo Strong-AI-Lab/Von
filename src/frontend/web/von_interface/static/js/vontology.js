@@ -2193,7 +2193,7 @@ async function expandImmediateInstances(node, targetElement = null) {
       const instanceDiv = document.createElement('div');
       instanceDiv.className = 'vontology-instance-item';
       instanceDiv.textContent = instance.name;
-      instanceDiv.title = `Instance: ${instance.name}${(instance.notes || instance.concept_data?.notes || instance.concept_data?.preserved_fields?.notes) ? '\nNotes: ' + (instance.notes || instance.concept_data?.notes || instance.concept_data?.preserved_fields?.notes) : ''}`;
+      instanceDiv.title = `Instance: ${instance.name}${instance.notes ? '\nNotes: ' + instance.notes : ''}`;
       instanceDiv.dataset.id = instance.id;
 
       // Add click handler for instance selection -> open in a NEW tab (individual kind)

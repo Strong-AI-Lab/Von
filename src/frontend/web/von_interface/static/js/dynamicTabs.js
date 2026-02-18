@@ -304,7 +304,6 @@ function extractUpdatedAt(concept) {
     const candidates = [
         concept?.updated_at,
         concept?.concept_data?.updated_at,
-        concept?.concept_data?.preserved_fields?.updated_at,
         concept?.raw_doc?.updated_at,
         concept?.node_content?.updated_at
     ];
@@ -2182,7 +2181,7 @@ async function adaptIndividualConceptTabUI(conceptId, suffix) {
                 _id: conceptData?.id || conceptData?._id,
                 concept_id: conceptId,
                 name: conceptData?.name || nodeData?.name || conceptId,
-                notes: conceptData?.notes || conceptData?.concept_data?.notes || conceptData?.concept_data?.preserved_fields?.notes || ''
+                notes: conceptData?.notes || ''
             };
             selectConceptWithSuffix(conceptObj, suffix);
         } catch (selErr) {
