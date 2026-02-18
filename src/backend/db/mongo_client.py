@@ -1,13 +1,14 @@
 import os
 import sys
 import logging
+import time
 from pathlib import Path
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from pymongo.collection import Collection
 from pymongo.database import Database
 from pymongo.errors import ConnectionFailure, OperationFailure
 import datetime  # Added for type hinting and __main__ example
-from ..services.runtime_env import get_env_bool, load_secret_from_env_or_file
+from ..utils.runtime_env import get_env_bool, load_secret_from_env_or_file
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,54 @@ MONGO_DNS_FALLBACK_URI = _get_nonempty_env_value("MONGO_DNS_FALLBACK_URI")
 MONGO_ALLOW_LOCAL_FALLBACK = get_env_bool("MONGO_ALLOW_LOCAL_FALLBACK", True)
 
 
+def _get_positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        parsed = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _get_positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        parsed = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _mongo_auto_recovery_enabled() -> bool:
+    return get_env_bool("VON_MONGO_AUTO_RECOVERY", True)
+
+
+def _mongo_auto_recovery_check_interval_seconds() -> float:
+    return _get_positive_float_env(
+        "VON_MONGO_AUTO_RECOVERY_CHECK_INTERVAL_SECONDS", 15.0
+    )
+
+
+def _mongo_auto_recovery_ping_timeout_ms() -> int:
+    return _get_positive_int_env("VON_MONGO_AUTO_RECOVERY_PING_TIMEOUT_MS", 1500)
+
+
+def _mongo_server_selection_timeout_ms() -> int:
+    return _get_positive_int_env("MONGO_SERVER_SELECTION_TIMEOUT_MS", 5000)
+
+
+def _mongo_connect_timeout_ms() -> int:
+    return _get_positive_int_env("MONGO_CONNECT_TIMEOUT_MS", 5000)
+
+
+def _mongo_socket_timeout_ms() -> int:
+    return _get_positive_int_env("MONGO_SOCKET_TIMEOUT_MS", 5000)
+
+
 def _is_running_under_pytest() -> bool:
     # PYTEST_CURRENT_TEST is the most reliable indicator.
     if os.getenv("PYTEST_CURRENT_TEST"):
@@ -227,6 +276,53 @@ _mongo_client_mock = None
 # Track whether we are using a fallback URI (local) rather than the primary MONGO_URI
 _using_fallback_real = False
 _effective_uri_real = MONGO_URI  # The URI actually used to create the real client
+_last_auto_recovery_check_at = 0.0
+
+
+def _new_mongo_client(uri: str, server_selection_timeout_ms: int | None = None) -> MongoClient:
+    """Create a MongoClient with explicit timeout defaults for faster failure/recovery."""
+    return MongoClient(
+        uri,
+        serverSelectionTimeoutMS=server_selection_timeout_ms
+        or _mongo_server_selection_timeout_ms(),
+        connectTimeoutMS=_mongo_connect_timeout_ms(),
+        socketTimeoutMS=_mongo_socket_timeout_ms(),
+        retryWrites=True,
+        retryReads=True,
+    )
+
+
+def _should_run_auto_recovery_check() -> bool:
+    global _last_auto_recovery_check_at
+    if not _mongo_auto_recovery_enabled():
+        return False
+    now = time.monotonic()
+    if (now - _last_auto_recovery_check_at) < _mongo_auto_recovery_check_interval_seconds():
+        return False
+    _last_auto_recovery_check_at = now
+    return True
+
+
+def _invalidate_real_client_for_recovery(reason: str) -> None:
+    """Drop the active client reference so the next get_db() call rebuilds it."""
+    global _mongo_client_real, _effective_uri_real, _using_fallback_real
+    logger.warning("[mongo_recovery] Invalidating Mongo client: %s", reason)
+    _mongo_client_real = None
+    _effective_uri_real = MONGO_URI
+    _using_fallback_real = False
+
+
+def _ensure_active_client_is_healthy() -> None:
+    global _mongo_client_real
+    if _mongo_client_real is None:
+        return
+    if not _should_run_auto_recovery_check():
+        return
+    timeout_ms = _mongo_auto_recovery_ping_timeout_ms()
+    try:
+        _mongo_client_real.admin.command("ping", maxTimeMS=timeout_ms)
+    except Exception as exc:
+        _invalidate_real_client_for_recovery(f"periodic ping failed: {exc}")
 
 
 def get_db() -> Database | None:
@@ -235,7 +331,7 @@ def get_db() -> Database | None:
     and returns the database instance.
     """
     global _mongo_client_real, _mongo_client_mock
-    global _using_fallback_real, _effective_uri_real
+    global _using_fallback_real, _effective_uri_real, _last_auto_recovery_check_at
     db_name = get_configured_database_name()
     assert_safe_database_name_for_pytest(db_name)
 
@@ -249,14 +345,17 @@ def get_db() -> Database | None:
             _mongo_client_mock = mongomock.MongoClient()
         return _mongo_client_mock[db_name]
 
+    _ensure_active_client_is_healthy()
+
     if _mongo_client_real is None:
         try:
-            # Try without SSL/TLS as a last resort (INSECURE but may work for development)
-            _mongo_client_real = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+            # Create a fresh client when none exists, or when recovery invalidated it.
+            _mongo_client_real = _new_mongo_client(MONGO_URI)
             # The ismaster command is cheap and does not require auth.
             _mongo_client_real.admin.command("ismaster")
             _effective_uri_real = MONGO_URI
             _using_fallback_real = False
+            _last_auto_recovery_check_at = time.monotonic()
             if _debug_mongo_enabled():
                 try:
                     logger.debug(
@@ -313,12 +412,13 @@ def get_db() -> Database | None:
                     logger.warning(
                         "[mongo_fallback] Attempting local MongoDB fallback due to connection failure."
                     )
-                    _mongo_client_real = MongoClient(
-                        MONGO_LOCAL_URI, serverSelectionTimeoutMS=3000
+                    _mongo_client_real = _new_mongo_client(
+                        MONGO_LOCAL_URI, server_selection_timeout_ms=3000
                     )
                     _mongo_client_real.admin.command("ismaster")
                     _effective_uri_real = MONGO_LOCAL_URI
                     _using_fallback_real = True
+                    _last_auto_recovery_check_at = time.monotonic()
                     try:
                         logger.warning(
                             "[mongo_fallback] Using local fallback Mongo URI instead of primary (connection failure)."
@@ -359,12 +459,13 @@ def get_db() -> Database | None:
                         "[mongo_fallback] Attempting %s MongoDB fallback due to DNS/SRV error.",
                         fallback_label,
                     )
-                    _mongo_client_real = MongoClient(
-                        fallback_uri, serverSelectionTimeoutMS=3000
+                    _mongo_client_real = _new_mongo_client(
+                        fallback_uri, server_selection_timeout_ms=3000
                     )
                     _mongo_client_real.admin.command("ismaster")
                     _effective_uri_real = fallback_uri
                     _using_fallback_real = True
+                    _last_auto_recovery_check_at = time.monotonic()
                     try:
                         logger.warning(
                             "[mongo_fallback] Using %s Mongo URI instead of primary (DNS/SRV error).",
@@ -420,12 +521,13 @@ def is_using_fallback_uri() -> bool:
 
 def close_connection():
     """Closes the MongoDB connection."""
-    global _mongo_client_real, _mongo_client_mock
+    global _mongo_client_real, _mongo_client_mock, _last_auto_recovery_check_at
     if _mongo_client_real:
         _mongo_client_real.close()
         _mongo_client_real = None
     # mongomock doesn't require close(), but clear ref for correctness.
     _mongo_client_mock = None
+    _last_auto_recovery_check_at = 0.0
 
 
 def invalidate_connection():
@@ -438,9 +540,10 @@ def invalidate_connection():
     PyMongo's connection pool handles stale connections gracefully, so we can
     simply drop our reference and let GC clean up.
     """
-    global _mongo_client_real, _mongo_client_mock
+    global _mongo_client_real, _mongo_client_mock, _last_auto_recovery_check_at
     _mongo_client_real = None
     _mongo_client_mock = None
+    _last_auto_recovery_check_at = 0.0
 
 
 def test_connection(verbose: bool = False) -> bool:

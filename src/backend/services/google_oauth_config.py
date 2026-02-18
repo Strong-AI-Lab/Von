@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 from urllib.parse import urlparse
-from .runtime_env import (
+from ..utils.runtime_env import (
     clean_env_value,
     load_secret_from_env_or_file,
     truthy,

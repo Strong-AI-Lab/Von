@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
-from .runtime_env import clean_env_value, get_env_bool, load_secret_from_env_or_file
+from ..utils.runtime_env import clean_env_value, get_env_bool, load_secret_from_env_or_file
 
 
 def mongo_strict_startup_enabled() -> bool:

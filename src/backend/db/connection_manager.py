@@ -1,10 +1,13 @@
 import threading
 import time
 import random
+import logging
 from typing import Optional, Dict, Any
 from pymongo.errors import ConnectionFailure
 
 from . import mongo_client as _mc
+
+logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _monitor_started = False
@@ -142,11 +145,23 @@ def attempt_reconnect(
 def _monitor_loop(interval_sec: int, base_ms: int, max_ms: int, max_attempts: int):
     while True:
         time.sleep(interval_sec)
-        h = health_summary()
-        if not h["connected"]:
-            attempt_reconnect(
-                force=False, max_attempts=max_attempts, base_ms=base_ms, max_ms=max_ms
-            )
+        try:
+            h = health_summary()
+            if not h["connected"]:
+                attempt_reconnect(
+                    force=False,
+                    max_attempts=max_attempts,
+                    base_ms=base_ms,
+                    max_ms=max_ms,
+                )
+        except Exception as exc:
+            with _lock:
+                _state["consecutive_failures"] += 1
+                _state["last_error"] = f"monitor_loop_error: {exc}"
+            try:
+                logger.warning("Mongo reconnect monitor loop error: %s", exc)
+            except Exception:
+                pass
 
 
 def ensure_monitor_started(
