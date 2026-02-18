@@ -4,6 +4,7 @@ $blockedPatterns = @(
     '^data/rag_storage/',
     '^data/raw/',
     '^data/.+\.json$',
+    '^backups/',
     '^logs/'
 )
 

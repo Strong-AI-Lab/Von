@@ -188,6 +188,22 @@ If `jira_get_myself` returns `401 Unauthorised`, confirm the configured email/ba
 - If you need rolling rotation (accept old + new keys during a transition), the token verifier would need to support a key ring (try multiple keys) until the cutover completes.
 - The room-device records include a `token_revoked_before` field; the server can treat any token issued at or before that timestamp as revoked (per-device invalidation). There is no dedicated admin endpoint for this yet.
 
+### 8. Backup Tooling Scope and Guardrails
+
+**Context**: `run.ps1 backup` and `scripts/backup_von_db.py` can create full database dumps.
+
+**Risk**:
+- Backup operations are equivalent to broad data export.
+- Repository-local backup output increases accidental sharing/commit risk.
+
+**Current guardrails**:
+- Manual backup action requires explicit opt-in: `VON_ENABLE_BACKUP_ACTION=1`.
+- Backup apply mode is blocked for repository-local output unless explicitly overridden with `VON_ALLOW_BACKUP_IN_REPO=1`.
+- Scheduled daily backups use the same output-path safety check.
+- `.githooks/pre-commit.ps1` blocks staged files under `backups/`.
+
+See `docs/engineering/backup_tooling_security.md` for detailed threat model and operational policy.
+
 ## Security Checklist for Production Deployment
 
 - [x] **Remove client-provided user_id fallback** in `von_routes.py` ✅ (Dec 2024)
@@ -201,6 +217,7 @@ If `jira_get_myself` returns `401 Unauthorised`, confirm the configured email/ba
 - [ ] **Configure session timeouts** and rotation
 - [ ] **Enable HTTPS** and secure cookie flags
 - [ ] **Add database-level RLS** as defense in depth
+- [ ] **Keep backup roots outside repository paths** in all production/staging environments
 - [ ] **Penetration testing** for namespace isolation bypass attempts
 - [ ] **Code review** of all user context derivation paths
 

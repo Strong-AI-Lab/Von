@@ -110,6 +110,64 @@ function Set-EnvFromDotEnv {
 
 Set-EnvFromDotEnv -EnvPath (Join-Path $Root '.env')
 
+function Test-TruthySetting {
+    param([object]$Value)
+    if ($null -eq $Value) { return $false }
+    return $Value.ToString().Trim().ToLowerInvariant() -match '^(1|true|yes|y|on)$'
+}
+
+function Get-NormalisedAbsolutePath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path)
+    try {
+        $full = [System.IO.Path]::GetFullPath($expanded)
+    }
+    catch {
+        $full = $expanded
+    }
+    return ($full -replace '/', '\').TrimEnd('\')
+}
+
+function Test-IsPathInsideRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$CandidatePath,
+        [Parameter(Mandatory = $true)][string]$RootPath
+    )
+    $candidate = Get-NormalisedAbsolutePath -Path $CandidatePath
+    $rootPathNormalised = Get-NormalisedAbsolutePath -Path $RootPath
+    if ($candidate.Equals($rootPathNormalised, [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    return $candidate.StartsWith($rootPathNormalised + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+
+$AllowRepoBackupOutput = Test-TruthySetting $env:VON_ALLOW_BACKUP_IN_REPO
+
+function Test-BackupOutputPathAllowed {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Context,
+        [Parameter(Mandatory = $true)][bool]$ApplyMode
+    )
+    if (-not (Test-IsPathInsideRoot -CandidatePath $Path -RootPath $Root)) {
+        return $true
+    }
+
+    $resolved = Get-NormalisedAbsolutePath -Path $Path
+    if ($AllowRepoBackupOutput) {
+        Write-LauncherLog "[$Context] WARN: backup output resolves inside repo root ($resolved), but continuing due to VON_ALLOW_BACKUP_IN_REPO=1."
+        return $true
+    }
+
+    if ($ApplyMode) {
+        Write-LauncherLog "[$Context] ERROR: refusing backup apply mode with output under repo root ($resolved). Set VON_BACKUP_ROOT/-BackupOutDir outside repo, or override with VON_ALLOW_BACKUP_IN_REPO=1."
+        return $false
+    }
+
+    Write-LauncherLog "[$Context] WARN: backup output is under repo root ($resolved). Dry-run allowed, apply mode remains blocked unless VON_ALLOW_BACKUP_IN_REPO=1."
+    return $true
+}
+
 # Backup root resolution:
 # - Prefer explicit VON_BACKUP_ROOT if already present in environment.
 # - Else prefer W:\von_backups if W: exists and is writable.
@@ -797,6 +855,10 @@ function Invoke-DailyBackupIfDue {
     $pdmExe = if (Test-Path (Join-Path $Root '.venv\Scripts\pdm.exe')) { Join-Path $Root '.venv\Scripts\pdm.exe' } else { 'pdm' }
     $localFallback = Join-Path $Root 'backups'
     $effectiveBackupRoot = Resolve-BackupOutDir -OutDir $BackupRoot -FallbackDir $localFallback -Reason 'daily-backup'
+    if (-not (Test-BackupOutputPathAllowed -Path $effectiveBackupRoot -Context 'daily-backup' -ApplyMode $true)) {
+        Write-LauncherLog "[daily-backup] WARN: skipping scheduled backup until VON_BACKUP_ROOT points outside repo (or VON_ALLOW_BACKUP_IN_REPO=1)."
+        return
+    }
     Write-LauncherLog "[daily-backup] Launching background backup (interval ${intervalHours}h)..."
     Start-Job -Name 'von_daily_backup' -ScriptBlock {
         param($pdmExe, $root, $runDir, $sentinelPath, $backupRoot, $backupScript)
@@ -2241,6 +2303,10 @@ Von Launcher Help
         -BackupDryRun           For backup action: do not run mongodump (prints what would happen)
         -BackupTag <tag>        For backup action: tag suffix for backup dir (default manual)
         -BackupOutDir <path>    For backup action: output root dir (default VON_BACKUP_ROOT)
+    Backup safety environment variables:
+        VON_ENABLE_BACKUP_ACTION=1   Required to run on-demand ".\run.ps1 backup"
+        VON_BACKUP_ROOT=<path>       Recommended backup root outside this repo
+        VON_ALLOW_BACKUP_IN_REPO=1   Override safety block for in-repo backup apply mode
         -UpdateIntervalMinutes <n>  Minutes between git update checks (autoupdate action; default 60)
         -UpdateBranch <name>        Branch to track (default main)
         -UpdateNoRestartIfRunning   Skip restart if server already running (still pull code)
@@ -2253,7 +2319,7 @@ Von Launcher Help
         .\run.ps1 logs -Tail 200 -Follow
         .\run.ps1 backup -BackupDryRun
         .\run.ps1 backup -BackupTag manual
-        .\run.ps1 backup -BackupTag pre-change -BackupOutDir .\backups
+        .\run.ps1 backup -BackupTag pre-change -BackupOutDir C:\von_backups
         .\run.ps1 stop
     .\run.ps1 stop 12345        # kill specific PID directly
     .\run.ps1 stop force        # detect by port, verify command line, then kill
@@ -2330,6 +2396,11 @@ function Invoke-BackupNow {
           - Tag: "manual"
           - Mode: apply unless -BackupDryRun
     #>
+    if (-not (Test-TruthySetting $env:VON_ENABLE_BACKUP_ACTION)) {
+        Write-LauncherLog "[backup] ERROR: manual backup action is disabled by default. Set VON_ENABLE_BACKUP_ACTION=1 to acknowledge admin-level access and enable this action."
+        return
+    }
+
     $backupScript = Join-Path $Root 'scripts/backup_von_db.py'
     if (-not (Test-Path $backupScript)) {
         Write-LauncherLog "[backup] ERROR: backup script missing: $backupScript"
@@ -2340,6 +2411,9 @@ function Invoke-BackupNow {
     $requestedOutDir = if ($BackupOutDir) { $BackupOutDir } else { $BackupRoot }
     $outDir = Resolve-BackupOutDir -OutDir $requestedOutDir -FallbackDir (Join-Path $Root 'backups') -Reason 'manual-backup'
     $apply = -not $BackupDryRun
+    if (-not (Test-BackupOutputPathAllowed -Path $outDir -Context 'backup' -ApplyMode $apply)) {
+        return
+    }
     $mode = if ($apply) { 'apply' } else { 'dry-run' }
     Write-LauncherLog "[backup] Starting backup (mode=$mode tag=$tag out=$outDir root=$BackupRoot)"
 
