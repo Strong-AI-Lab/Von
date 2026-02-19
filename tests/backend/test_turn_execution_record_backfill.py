@@ -311,6 +311,68 @@ def test_backfill_turn_execution_records_synthesises_missing_records(monkeypatch
     )
 
 
+def test_backfill_synthesis_infers_workflow_selection_for_projection(monkeypatch):
+    from src.backend.services import turn_execution_record_service as service
+
+    docs = [
+        {
+            "namespace": "#V#user@org",
+            "user_id": "#V#user",
+            "session_id": "chat-5",
+            "organisation_concept_id": "#V#org",
+            "history": [
+                {"role": "user", "content": "Find matching concepts"},
+                {
+                    "role": "assistant",
+                    "content": "I searched the concepts.",
+                    "llm_debug_data": {
+                        "request_id": "req-synth-2",
+                        "tool_invocations": [
+                            {
+                                "name": "search_concepts",
+                                "arguments": {"query": "concept"},
+                                "status": "success",
+                            }
+                        ],
+                    },
+                },
+            ],
+        }
+    ]
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.get_db",
+        lambda: _DB(docs),
+    )
+
+    captured_record: dict[str, Any] = {}
+
+    def _capture_upsert(**kwargs: Any) -> dict[str, Any]:
+        record = kwargs.get("record")
+        if isinstance(record, dict):
+            captured_record.update(record)
+        return {"updated": True, "inserted": False}
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.upsert_turn_execution_record_projection",
+        _capture_upsert,
+    )
+
+    result = service.backfill_turn_execution_records_from_chat_history(
+        namespace="#V#user@org",
+        limit_sessions=10,
+        dry_run=False,
+        synthesise_missing_records=True,
+    )
+
+    assert result["success"] is True
+    assert result["upserted_count"] == 1
+    workflow_selection = captured_record.get("workflow_selection")
+    assert isinstance(workflow_selection, dict)
+    assert workflow_selection.get("selected_workflow_id") == "#V#tool_calling_workflow"
+    assert workflow_selection.get("selector_verdict") == "tool_seeking"
+
+
 def test_turn_execution_namespace_coverage_report_summarises_metrics(monkeypatch):
     from src.backend.services import turn_execution_record_service as service
 

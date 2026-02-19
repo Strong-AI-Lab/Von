@@ -1331,6 +1331,45 @@ def build_turn_execution_namespace_coverage_report(
     }
 
 
+def _infer_synthesised_workflow_routing(
+    *, llm_debug: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    existing = llm_debug.get("workflow_routing")
+    if isinstance(existing, Mapping):
+        cleaned: dict[str, Any] = {}
+        for key in ("workflow_id", "verdict", "source"):
+            value = _safe_str(existing.get(key))
+            if value:
+                cleaned[key] = value
+        if cleaned:
+            return cleaned
+
+    tool_invocations = (
+        llm_debug.get("tool_invocations")
+        if isinstance(llm_debug.get("tool_invocations"), list)
+        else []
+    )
+    if tool_invocations:
+        has_write_tools = False
+        for raw_invocation in tool_invocations:
+            if not isinstance(raw_invocation, Mapping):
+                continue
+            if _is_write_tool(_safe_str(raw_invocation.get("name"))):
+                has_write_tools = True
+                break
+        return {
+            "workflow_id": "#V#tool_calling_workflow",
+            "verdict": "mutation_tooling" if has_write_tools else "tool_seeking",
+            "source": "synthesised",
+        }
+
+    return {
+        "workflow_id": "#V#chat_assistant_workflow",
+        "verdict": "plain_response",
+        "source": "synthesised",
+    }
+
+
 def backfill_turn_execution_records_from_chat_history(
     *,
     namespace: str,
@@ -1429,6 +1468,12 @@ def backfill_turn_execution_records_from_chat_history(
             debug_request_id = _safe_str(llm_debug.get("request_id"))
             if debug_request_id:
                 assistant_messages_with_request_id += 1
+            tool_invocations = (
+                llm_debug.get("tool_invocations")
+                if isinstance(llm_debug.get("tool_invocations"), list)
+                else []
+            )
+            workflow_routing = _infer_synthesised_workflow_routing(llm_debug=llm_debug)
 
             record = llm_debug.get("turn_execution_record")
             record_source = "embedded"
@@ -1453,16 +1498,8 @@ def backfill_turn_execution_records_from_chat_history(
                             if isinstance(llm_debug.get("workflow_discovery"), Mapping)
                             else None
                         ),
-                        workflow_routing=(
-                            llm_debug.get("workflow_routing")
-                            if isinstance(llm_debug.get("workflow_routing"), Mapping)
-                            else None
-                        ),
-                        tool_invocations=(
-                            llm_debug.get("tool_invocations")
-                            if isinstance(llm_debug.get("tool_invocations"), list)
-                            else []
-                        ),
+                        workflow_routing=workflow_routing,
+                        tool_invocations=tool_invocations,
                         turn_execution_diagnostics=(
                             llm_debug.get("turn_execution_diagnostics")
                             if isinstance(
@@ -1492,6 +1529,24 @@ def backfill_turn_execution_records_from_chat_history(
 
             if not isinstance(record, Mapping):
                 continue
+            if isinstance(record, dict):
+                workflow_selection = record.get("workflow_selection")
+                if not isinstance(workflow_selection, dict):
+                    workflow_selection = {}
+                    record["workflow_selection"] = workflow_selection
+                if (
+                    not _safe_str(workflow_selection.get("selected_workflow_id"))
+                    and isinstance(workflow_routing, Mapping)
+                ):
+                    inferred_workflow_id = _safe_str(workflow_routing.get("workflow_id"))
+                    inferred_verdict = _safe_str(workflow_routing.get("verdict"))
+                    inferred_source = _safe_str(workflow_routing.get("source"))
+                    if inferred_workflow_id:
+                        workflow_selection["selected_workflow_id"] = inferred_workflow_id
+                    if inferred_verdict:
+                        workflow_selection["selector_verdict"] = inferred_verdict
+                    if inferred_source:
+                        workflow_selection["selector_source"] = inferred_source
             records_found += 1
             if record_source == "embedded":
                 embedded_records_found += 1
