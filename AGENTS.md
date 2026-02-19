@@ -25,6 +25,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 19. **DRY first**: Create central helpers FIRST, then replace all usages. See "DRY refactoring discipline" in Workflow section.
 20. **Comment for evolution**: Add comments that guide future modifications. See "Self-Documenting, Evolvable Code" section.
 21. **Proactive hygiene**: Periodically review touched files and their neighbours for inconsistency, duplication, and drift. Fix proactively.
+22. In docs/examples for secret env vars, use explicit placeholders like `<YOUR-CLIENT-SECRET-HERE>` and avoid token-like sample strings that can trigger secret scanners.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
@@ -99,6 +100,13 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 - If Vontology or Vonrag MCP tools are not exposed in this session, use the stdio proxy scripts (`scripts/query_vontology_mcp.py`, `scripts/query_vonrag_mcp.py`) and check cached tool lists in `data/mcp_tool_cache/`.
 - After implementing a fix and tests pass, post a Jira summary comment and transition the issue to the correct state.
 - Do not emit JSON tool-call payloads as text; invoke tools directly.
+
+### Vontology/Vonrag MCP Field Notes (2026-02)
+- When searching Jira for possible duplicates, prefer `jira_search` with explicit `fields` (at minimum: summary, status, assignee, issuetype, parent). Default search responses can be id-only and create avoidable follow-up calls.
+- Treat `jira_get_issue` 404 responses as potentially permission-related, not just non-existence. Cross-check with `jira_search` results before deciding to create a new issue.
+- For canonical singleton text predicates (especially workflow `hasDescription` in one language), use `upsert_singleton_text_relation` with `garbage_collect=true` rather than repeated `upsert_text_relation`.
+- After creating or updating workflow concepts, run `concept_exists` and `get_text_relations_summary` as a quick integrity check.
+- Use Vonrag `search_knowledge_base` for semantic recall, but do not rely on it for deterministic structured failure triage. When turn-level structured analysis is needed, propose/add dedicated tools and document the gap in Jira.
 
 ## Atlassian MCP Reliability (Pause + Checkpoint)
 If Atlassian MCP is flaky (timeouts, empty responses, 401/403/5xx):
