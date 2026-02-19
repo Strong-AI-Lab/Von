@@ -44,6 +44,26 @@ DEFAULT_COMPLETED_TTL_SECONDS = 30 * 24 * 60 * 60
 _indexes_ensured = False
 
 
+def _parse_datetime_filter(value: datetime | str | None) -> datetime | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        normalised = cleaned.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalised)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
 def _ensure_indexes() -> None:
     """Create indexes for workflow collections (idempotent, best-effort)."""
     global _indexes_ensured
@@ -450,6 +470,10 @@ class WorkflowInstanceManager:
         workflow_id: str | None = None,
         source_event_type: str | None = None,
         source_event_id: str | None = None,
+        conversation_session_id: str | None = None,
+        request_id: str | None = None,
+        from_utc: datetime | str | None = None,
+        to_utc: datetime | str | None = None,
         limit: int = 50,
     ) -> list[WorkflowInstance]:
         """List workflow instances with optional filters.
@@ -460,6 +484,10 @@ class WorkflowInstanceManager:
             namespace: Filter by namespace.
             status: Filter by status.
             workflow_id: Filter by workflow definition.
+            conversation_session_id: Filter by `inputs.conversation_session_id`.
+            request_id: Filter by `inputs.turn_id` (request/turn identifier).
+            from_utc: Optional lower bound for created_at.
+            to_utc: Optional upper bound for created_at.
             limit: Maximum results to return.
 
         Returns:
@@ -487,6 +515,20 @@ class WorkflowInstanceManager:
             query["source_event_type"] = source_event_type
         if source_event_id:
             query["source_event_id"] = source_event_id
+        if conversation_session_id:
+            query["inputs.conversation_session_id"] = conversation_session_id
+        if request_id:
+            query["inputs.turn_id"] = request_id
+
+        created_range: dict[str, Any] = {}
+        from_dt = _parse_datetime_filter(from_utc)
+        to_dt = _parse_datetime_filter(to_utc)
+        if from_dt is not None:
+            created_range["$gte"] = from_dt
+        if to_dt is not None:
+            created_range["$lte"] = to_dt
+        if created_range:
+            query["created_at"] = created_range
 
         cursor = coll.find(query).sort("created_at", -1).limit(limit)
         return [WorkflowInstance.from_doc(doc) for doc in cursor]

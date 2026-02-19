@@ -6401,6 +6401,10 @@ def _workflow_list_instances(**kwargs):
     workflow_id = kwargs.get("workflow_id")
     source_event_type = kwargs.get("source_event_type")
     source_event_id = kwargs.get("source_event_id")
+    session_id = kwargs.get("session_id") or kwargs.get("conversation_session_id")
+    request_id = kwargs.get("request_id") or kwargs.get("turn_id")
+    from_utc = kwargs.get("from_utc")
+    to_utc = kwargs.get("to_utc")
     namespace = (
         namespace_raw.strip()
         if isinstance(namespace_raw, str) and namespace_raw.strip()
@@ -6431,6 +6435,12 @@ def _workflow_list_instances(**kwargs):
         workflow_id=workflow_id,
         source_event_type=source_event_type,
         source_event_id=source_event_id,
+        conversation_session_id=session_id
+        if isinstance(session_id, str) and session_id.strip()
+        else None,
+        request_id=request_id if isinstance(request_id, str) and request_id.strip() else None,
+        from_utc=from_utc if isinstance(from_utc, str) and from_utc.strip() else None,
+        to_utc=to_utc if isinstance(to_utc, str) and to_utc.strip() else None,
         limit=limit,
     )
 
@@ -12796,6 +12806,10 @@ def build_default_catalogue() -> MethodCatalogue:
                     "workflow_id": (str, type(None)),
                     "source_event_type": (str, type(None)),
                     "source_event_id": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "request_id": (str, type(None)),
+                    "from_utc": (str, type(None)),
+                    "to_utc": (str, type(None)),
                     "limit": int,
                 },
                 allow_unknown=True,
@@ -12810,7 +12824,8 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "List durable workflow instances. Filter by user, org, namespace, status, or workflow_id. "
-                "Supports source_event_type/source_event_id filters for event-to-workflow traceability. "
+                "Supports source_event_type/source_event_id filters for event-to-workflow traceability, "
+                "session_id/request_id filters for turn traceability, and from_utc/to_utc date windows. "
                 "Valid statuses: pending, running, completed, failed, cancelled, paused."
             ),
         ),
