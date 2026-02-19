@@ -1495,13 +1495,16 @@
                     },
                     "dry_run": {
                         "type": "boolean"
+                    },
+                    "synthesise_missing_records": {
+                        "type": "boolean"
                     }
                 },
                 "required": [
                     "namespace"
                 ],
                 "additionalProperties": true,
-                "description": "Backfill turn execution projection records from assistant chat history for a specific namespace. Defaults to dry-run mode."
+                "description": "Backfill turn execution projection records from assistant chat history for a specific namespace. Defaults to dry-run mode and enables record synthesis from llm_debug_data when embedded payloads are absent."
             }
         },
         {

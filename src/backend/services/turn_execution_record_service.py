@@ -1336,13 +1336,15 @@ def backfill_turn_execution_records_from_chat_history(
     namespace: str,
     limit_sessions: int = 500,
     dry_run: bool = True,
+    synthesise_missing_records: bool = True,
 ) -> dict[str, Any]:
     """Backfill turn_execution_records from chat_history assistant messages.
 
     This scans sessions in the provided namespace and extracts
     `history[].llm_debug_data.turn_execution_record` payloads for assistant turns.
-    By default this runs in dry-run mode to report potential backfill volume
-    without mutating Mongo.
+    When embedded records are missing, optional synthesis can reconstruct records
+    from legacy llm_debug_data + message context. By default this runs in dry-run
+    mode to report potential backfill volume without mutating Mongo.
     """
 
     namespace_value = _safe_str(namespace)
@@ -1356,6 +1358,7 @@ def backfill_turn_execution_records_from_chat_history(
         maximum=5000,
     )
     run_dry = bool(dry_run)
+    run_synthesis = bool(synthesise_missing_records)
 
     db = get_db()
     if db is None:
@@ -1372,13 +1375,19 @@ def backfill_turn_execution_records_from_chat_history(
         "session_id": 1,
         "organisation_concept_id": 1,
         "history.role": 1,
-        "history.llm_debug_data.turn_execution_record": 1,
+        "history.content": 1,
+        "history.timestamp": 1,
+        "history.llm_debug_data": 1,
     }
     cursor = chat_history_coll.find(query, projection).limit(session_limit)
 
     sessions_scanned = 0
     assistant_messages_scanned = 0
+    assistant_messages_with_llm_debug_data = 0
+    assistant_messages_with_request_id = 0
     records_found = 0
+    embedded_records_found = 0
+    synthesised_records_found = 0
     candidate_records = 0
     upserted_count = 0
     inserted_count = 0
@@ -1400,20 +1409,94 @@ def backfill_turn_execution_records_from_chat_history(
         if not isinstance(history, list):
             continue
 
+        latest_user_prompt: str | None = None
         for message in history:
             if not isinstance(message, Mapping):
                 continue
-            if message.get("role") != "assistant":
+            role = message.get("role")
+            if role == "user":
+                latest_user_prompt = _safe_str(message.get("content")) or latest_user_prompt
+                continue
+            if role != "assistant":
                 continue
             assistant_messages_scanned += 1
 
             llm_debug = message.get("llm_debug_data")
             if not isinstance(llm_debug, Mapping):
                 continue
+            assistant_messages_with_llm_debug_data += 1
+
+            debug_request_id = _safe_str(llm_debug.get("request_id"))
+            if debug_request_id:
+                assistant_messages_with_request_id += 1
+
             record = llm_debug.get("turn_execution_record")
+            record_source = "embedded"
+            if not isinstance(record, Mapping):
+                if not run_synthesis or not debug_request_id:
+                    continue
+                try:
+                    record = build_turn_execution_record(
+                        request_id=debug_request_id,
+                        session_id=session_id,
+                        namespace=namespace_value,
+                        user_id=user_id,
+                        org_id=org_id,
+                        prompt_text=latest_user_prompt,
+                        response_text=_safe_str(message.get("content")),
+                        interaction_timestamp_utc=(
+                            llm_debug.get("interaction_timestamp_utc")
+                            or message.get("timestamp")
+                        ),
+                        workflow_discovery=(
+                            llm_debug.get("workflow_discovery")
+                            if isinstance(llm_debug.get("workflow_discovery"), Mapping)
+                            else None
+                        ),
+                        workflow_routing=(
+                            llm_debug.get("workflow_routing")
+                            if isinstance(llm_debug.get("workflow_routing"), Mapping)
+                            else None
+                        ),
+                        tool_invocations=(
+                            llm_debug.get("tool_invocations")
+                            if isinstance(llm_debug.get("tool_invocations"), list)
+                            else []
+                        ),
+                        turn_execution_diagnostics=(
+                            llm_debug.get("turn_execution_diagnostics")
+                            if isinstance(
+                                llm_debug.get("turn_execution_diagnostics"), Mapping
+                            )
+                            else None
+                        ),
+                        aux_llm_calls=(
+                            llm_debug.get("aux_llm_calls")
+                            if isinstance(llm_debug.get("aux_llm_calls"), list)
+                            else []
+                        ),
+                    )
+                    if isinstance(record, dict):
+                        record["reconstruction"] = {
+                            "source": "chat_history.llm_debug_data",
+                            "method": "build_turn_execution_record",
+                            "synthesised_at_utc": _iso_utc(),
+                        }
+                    record_source = "synthesised_from_llm_debug_data"
+                except Exception:
+                    skipped_reasons["record_synthesis_failed"] = (
+                        skipped_reasons.get("record_synthesis_failed", 0) + 1
+                    )
+                    failure_count += 1
+                    continue
+
             if not isinstance(record, Mapping):
                 continue
             records_found += 1
+            if record_source == "embedded":
+                embedded_records_found += 1
+            else:
+                synthesised_records_found += 1
 
             request_id = _safe_str(record.get("request_id"))
             if not request_id:
@@ -1467,10 +1550,21 @@ def backfill_turn_execution_records_from_chat_history(
                 "severity": "high",
                 "description": (
                     "Assistant messages were present but none contained "
-                    "llm_debug_data.turn_execution_record, so direct projection backfill "
-                    "cannot populate turn_execution_records."
+                    "recoverable turn execution records in llm_debug_data."
                 ),
                 "assistant_messages_scanned": assistant_messages_scanned,
+            }
+        )
+    if embedded_records_found == 0 and synthesised_records_found > 0:
+        gap_signals.append(
+            {
+                "gap_id": "embedded_turn_execution_records_missing_recovered_by_synthesis",
+                "severity": "medium",
+                "description": (
+                    "Embedded turn_execution_record payloads were absent, but record "
+                    "synthesis from llm_debug_data recovered candidate records."
+                ),
+                "synthesised_records_found": synthesised_records_found,
             }
         )
     if records_found > 0 and candidate_records == 0:
@@ -1491,9 +1585,14 @@ def backfill_turn_execution_records_from_chat_history(
         "namespace": namespace_value,
         "dry_run": run_dry,
         "limit_sessions": session_limit,
+        "synthesise_missing_records": run_synthesis,
         "sessions_scanned": sessions_scanned,
         "assistant_messages_scanned": assistant_messages_scanned,
+        "assistant_messages_with_llm_debug_data": assistant_messages_with_llm_debug_data,
+        "assistant_messages_with_request_id": assistant_messages_with_request_id,
         "records_found": records_found,
+        "embedded_records_found": embedded_records_found,
+        "synthesised_records_found": synthesised_records_found,
         "candidate_records": candidate_records,
         "upserted_count": upserted_count,
         "inserted_count": inserted_count,

@@ -249,6 +249,7 @@ The existing `message.direct_created` binding to `#V#chat_assistant_workflow` sh
 5. `turn_execution_backfill_from_chat_history` (implemented)
 - Replays assistant-message `llm_debug_data.turn_execution_record` payloads into `turn_execution_records`.
 - Namespace-scoped and dry-run by default for safe backfill planning.
+- Supports synthesis from legacy `llm_debug_data` + message context when embedded records are absent.
 
 6. `turn_execution_namespace_coverage_report` (implemented)
 - Produces namespace-level instrumentation/projection coverage, request-id overlap, and gap signals.

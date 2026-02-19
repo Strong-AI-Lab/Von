@@ -534,6 +534,7 @@ def test_turn_execution_backfill_wrapper_returns_provenance(monkeypatch):
             "success": True,
             "namespace": kwargs.get("namespace"),
             "dry_run": kwargs.get("dry_run"),
+            "synthesise_missing_records": kwargs.get("synthesise_missing_records"),
             "candidate_records": 3,
             "upserted_count": 0,
         },
@@ -543,10 +544,12 @@ def test_turn_execution_backfill_wrapper_returns_provenance(monkeypatch):
         namespace="#V#user@org",
         dry_run=True,
         limit_sessions=100,
+        synthesise_missing_records=False,
     )
 
     assert result["success"] is True
     assert result["namespace"] == "#V#user@org"
+    assert result["synthesise_missing_records"] is False
     assert result["candidate_records"] == 3
     assert result["provenance"]["item_kind"] == "turn_execution_backfill_report"
 

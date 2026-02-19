@@ -243,6 +243,7 @@ def test_backfill_turn_execution_records_reports_gap_when_history_has_no_records
         namespace="#V#user@org",
         limit_sessions=10,
         dry_run=True,
+        synthesise_missing_records=False,
     )
 
     assert result["success"] is True
@@ -252,6 +253,60 @@ def test_backfill_turn_execution_records_reports_gap_when_history_has_no_records
     assert isinstance(gap_signals, list)
     assert any(
         gap.get("gap_id") == "no_embedded_turn_execution_record_in_history"
+        for gap in gap_signals
+    )
+
+
+def test_backfill_turn_execution_records_synthesises_missing_records(monkeypatch):
+    from src.backend.services import turn_execution_record_service as service
+
+    docs = [
+        {
+            "namespace": "#V#user@org",
+            "user_id": "#V#user",
+            "session_id": "chat-4",
+            "organisation_concept_id": "#V#org",
+            "history": [
+                {"role": "user", "content": "Please update the relation"},
+                {
+                    "role": "assistant",
+                    "content": "Done.",
+                    "llm_debug_data": {
+                        "request_id": "req-synth-1",
+                        "tool_invocations": [
+                            {"name": "search_concepts", "arguments": {"query": "x"}}
+                        ],
+                    },
+                },
+            ],
+        }
+    ]
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.get_db",
+        lambda: _DB(docs),
+    )
+
+    result = service.backfill_turn_execution_records_from_chat_history(
+        namespace="#V#user@org",
+        limit_sessions=10,
+        dry_run=True,
+        synthesise_missing_records=True,
+    )
+
+    assert result["success"] is True
+    assert result["assistant_messages_scanned"] == 1
+    assert result["assistant_messages_with_llm_debug_data"] == 1
+    assert result["assistant_messages_with_request_id"] == 1
+    assert result["embedded_records_found"] == 0
+    assert result["synthesised_records_found"] == 1
+    assert result["records_found"] == 1
+    assert result["candidate_records"] == 1
+    gap_signals = result.get("gap_signals")
+    assert isinstance(gap_signals, list)
+    assert any(
+        gap.get("gap_id")
+        == "embedded_turn_execution_records_missing_recovered_by_synthesis"
         for gap in gap_signals
     )
 

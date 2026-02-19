@@ -5333,6 +5333,7 @@ def _turn_execution_backfill_from_chat_history(**kwargs):
         namespace=namespace.strip(),
         limit_sessions=kwargs.get("limit_sessions", 500),
         dry_run=kwargs.get("dry_run", True),
+        synthesise_missing_records=kwargs.get("synthesise_missing_records", True),
     )
     if not isinstance(result, dict):
         return result
@@ -11996,11 +11997,13 @@ def build_default_catalogue() -> MethodCatalogue:
                 optional={
                     "limit_sessions": (int,),
                     "dry_run": (bool,),
+                    "synthesise_missing_records": (bool,),
                 },
                 allow_unknown=True,
                 description=(
                     "Backfill turn execution projection records from assistant chat history "
-                    "for a specific namespace. Defaults to dry-run mode."
+                    "for a specific namespace. Defaults to dry-run mode and enables "
+                    "record synthesis from llm_debug_data when embedded payloads are absent."
                 ),
             ),
             output_schema=None,
