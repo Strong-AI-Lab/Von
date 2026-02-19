@@ -9907,6 +9907,277 @@ class InternalMCPChatOrchestrator:
         )
         resolved_stage = data.get("workflow_episode_stage")
 
+        def _safe_scalar_text(value: Any) -> str | None:
+            if not isinstance(value, str):
+                return None
+            cleaned = value.strip()
+            return cleaned or None
+
+        def _safe_mapping_snapshot(
+            payload: Any,
+            *,
+            max_depth: int = 3,
+            max_items: int = 30,
+        ) -> dict[str, Any] | None:
+            def _walk(value: Any, depth: int) -> Any:
+                if depth >= max_depth:
+                    if isinstance(value, (str, int, float, bool)) or value is None:
+                        return value
+                    return str(type(value).__name__)
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    return value
+                if isinstance(value, Mapping):
+                    out: dict[str, Any] = {}
+                    for idx, (k, v) in enumerate(value.items()):
+                        if idx >= max_items:
+                            break
+                        if not isinstance(k, str):
+                            continue
+                        if callable(v):
+                            continue
+                        out[k] = _walk(v, depth + 1)
+                    return out
+                if isinstance(value, (list, tuple)):
+                    out_list: list[Any] = []
+                    for idx, item in enumerate(value):
+                        if idx >= max_items:
+                            break
+                        out_list.append(_walk(item, depth + 1))
+                    return out_list
+                return str(value)
+
+            if not isinstance(payload, Mapping):
+                return None
+            snapshot = _walk(payload, 0)
+            if isinstance(snapshot, dict):
+                return snapshot
+            return None
+
+        def _build_turn_execution_summary(payload: Any) -> dict[str, Any] | None:
+            if not isinstance(payload, Mapping):
+                return None
+            raw_completion_gate = payload.get("completion_gate")
+            completion_gate: Mapping[str, Any] = (
+                raw_completion_gate if isinstance(raw_completion_gate, Mapping) else {}
+            )
+            raw_workflow_selection = payload.get("workflow_selection")
+            workflow_selection: Mapping[str, Any] = (
+                raw_workflow_selection
+                if isinstance(raw_workflow_selection, Mapping)
+                else {}
+            )
+            raw_required_effects = payload.get("required_effects")
+            required_effects: list[Any] = (
+                raw_required_effects if isinstance(raw_required_effects, list) else []
+            )
+            unresolved_effect_count = 0
+            for effect in required_effects:
+                if not isinstance(effect, Mapping):
+                    continue
+                status = effect.get("status")
+                if isinstance(status, str) and status in {"not_executed", "not_satisfied"}:
+                    unresolved_effect_count += 1
+            return {
+                "request_id": _safe_scalar_text(payload.get("request_id")),
+                "decision": completion_gate.get("decision"),
+                "decision_reason": completion_gate.get("decision_reason"),
+                "requires_follow_up": completion_gate.get("requires_follow_up"),
+                "safe_to_claim_completion": completion_gate.get(
+                    "safe_to_claim_completion"
+                ),
+                "blocking_effect_ids": completion_gate.get("blocking_effect_ids"),
+                "selected_workflow_id": workflow_selection.get("selected_workflow_id"),
+                "selector_verdict": workflow_selection.get("selector_verdict"),
+                "required_effect_count": len(required_effects),
+                "unresolved_effect_count": unresolved_effect_count,
+            }
+
+        resolved_user_id = _safe_scalar_text(data.get("user_concept_id"))
+        resolved_org_id = _safe_scalar_text(data.get("org_concept_id"))
+        resolved_namespace = (
+            _safe_scalar_text(user_namespace)
+            or _safe_scalar_text(data.get("namespace"))
+            or _safe_scalar_text(data.get("user_namespace"))
+        )
+
+        durable_instance_manager = None
+        durable_instance_id: str | None = None
+        durable_instance_created_new: bool | None = None
+
+        def _build_durable_inputs_snapshot() -> dict[str, Any]:
+            prompt = data.get("prompt")
+            prompt_preview = prompt[:1000] if isinstance(prompt, str) else None
+            return {
+                "conversation_session_id": _safe_scalar_text(resolved_session_id),
+                "turn_id": _safe_scalar_text(resolved_turn_id),
+                "episode_source": str(resolved_source),
+                "episode_stage": (
+                    str(resolved_stage).strip()
+                    if isinstance(resolved_stage, str) and resolved_stage.strip()
+                    else None
+                ),
+                "prompt_preview": prompt_preview,
+                "workflow_routing": _safe_mapping_snapshot(data.get("workflow_routing")),
+                "workflow_discovery_result": _safe_mapping_snapshot(
+                    data.get("workflow_discovery_result")
+                ),
+            }
+
+        def _build_durable_outputs_snapshot(
+            *,
+            completed: bool,
+            final_state: str | None,
+            termination_code: str | None,
+            termination_detail: str | None,
+            workflow_data: Any,
+        ) -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "completed": bool(completed),
+                "final_state": final_state,
+                "termination_code": termination_code,
+                "termination_detail": termination_detail,
+            }
+            if not isinstance(workflow_data, Mapping):
+                return payload
+
+            turn_record = workflow_data.get("turn_execution_record")
+            turn_summary = _build_turn_execution_summary(turn_record)
+            if isinstance(turn_summary, dict):
+                payload["turn_execution"] = turn_summary
+
+            critic_summary = workflow_data.get("critic_summary")
+            if isinstance(critic_summary, Mapping):
+                payload["critic_summary"] = _safe_mapping_snapshot(critic_summary)
+
+            for key in (
+                "completion_gate_decision",
+                "completion_gate_decision_reason",
+                "completion_gate_requires_follow_up",
+                "completion_gate_safe_to_claim_completion",
+            ):
+                if key in workflow_data:
+                    payload[key] = workflow_data.get(key)
+
+            workflow_routing = workflow_data.get("workflow_routing")
+            if isinstance(workflow_routing, Mapping):
+                payload["workflow_routing"] = _safe_mapping_snapshot(workflow_routing)
+            workflow_discovery = workflow_data.get("workflow_discovery_result")
+            if isinstance(workflow_discovery, Mapping):
+                payload["workflow_discovery_result"] = _safe_mapping_snapshot(
+                    workflow_discovery
+                )
+
+            return payload
+
+        def _finalise_durable_instance(
+            *,
+            completed: bool,
+            final_state: str | None,
+            terminal_stage: str | None,
+            termination_code: str | None,
+            termination_detail: str | None,
+            workflow_data: Any,
+        ) -> None:
+            if durable_instance_manager is None or not isinstance(durable_instance_id, str):
+                return
+            try:
+                if completed:
+                    durable_instance_manager.mark_completed(
+                        durable_instance_id,
+                        outputs=_build_durable_outputs_snapshot(
+                            completed=True,
+                            final_state=final_state,
+                            termination_code=termination_code,
+                            termination_detail=termination_detail,
+                            workflow_data=workflow_data,
+                        ),
+                        final_state=final_state or terminal_stage or "completed",
+                    )
+                    return
+                failure_code = (
+                    str(termination_code).strip().lower()
+                    if isinstance(termination_code, str) and termination_code.strip()
+                    else "terminated"
+                )
+                failure_detail = (
+                    str(termination_detail).strip()
+                    if isinstance(termination_detail, str) and termination_detail.strip()
+                    else "workflow_execution_terminated"
+                )
+                durable_instance_manager.mark_failed(
+                    durable_instance_id,
+                    error=f"{failure_code}:{failure_detail}",
+                    error_step=terminal_stage,
+                    increment_retry=False,
+                )
+            except Exception as exc:
+                self._logger.warning(
+                    "[workflow_instance_telemetry] Failed to finalise durable instance "
+                    "%s for workflow %s: %s",
+                    durable_instance_id,
+                    workflow_id,
+                    exc,
+                )
+
+        if (
+            isinstance(workflow_id, str)
+            and workflow_id.strip()
+            and resolved_user_id
+            and resolved_org_id
+            and resolved_namespace
+        ):
+            try:
+                from ...workflows.durable import WorkflowInstanceManager
+
+                durable_instance_manager = WorkflowInstanceManager()
+                source_event_type = (
+                    str(resolved_source).strip() if str(resolved_source).strip() else None
+                )
+                source_event_id = (
+                    _safe_scalar_text(resolved_turn_id)
+                    or _safe_scalar_text(resolved_session_id)
+                )
+                if source_event_type and source_event_id:
+                    idempotency_key = (
+                        "orchestrator.execute_workflow:"
+                        f"{workflow_id}:{source_event_type}:{source_event_id}:"
+                        f"{str(resolved_stage or '').strip()}"
+                    )
+                    (
+                        durable_instance_id,
+                        durable_instance_created_new,
+                    ) = durable_instance_manager.create_instance_for_event(
+                        workflow_id=workflow_id,
+                        user_id=resolved_user_id,
+                        org_id=resolved_org_id,
+                        namespace=resolved_namespace,
+                        event_idempotency_key=idempotency_key,
+                        source_event_type=source_event_type,
+                        source_event_id=source_event_id,
+                        inputs=_build_durable_inputs_snapshot(),
+                        max_retries=0,
+                    )
+                else:
+                    durable_instance_id = durable_instance_manager.create_instance(
+                        workflow_id,
+                        user_id=resolved_user_id,
+                        org_id=resolved_org_id,
+                        namespace=resolved_namespace,
+                        inputs=_build_durable_inputs_snapshot(),
+                        max_retries=0,
+                    )
+                    durable_instance_created_new = True
+            except Exception as exc:
+                self._logger.warning(
+                    "[workflow_instance_telemetry] Failed to create durable instance "
+                    "for workflow %s: %s",
+                    workflow_id,
+                    exc,
+                )
+                durable_instance_manager = None
+                durable_instance_id = None
+                durable_instance_created_new = None
+
         episode_id: str | None = None
         stable_key: str | None = None
         start_episode_fn = None
@@ -9950,6 +10221,8 @@ class InternalMCPChatOrchestrator:
                 {
                     "type": "workflow_use_episode",
                     "episode_id": episode_id,
+                    "workflow_instance_id": durable_instance_id,
+                    "workflow_instance_created_new": durable_instance_created_new,
                     "workflow_id": workflow_id,
                     "source": str(resolved_source),
                     "session_id": (
@@ -10055,6 +10328,14 @@ class InternalMCPChatOrchestrator:
                 termination_code="workflow_not_registered",
                 termination_detail="workflow_definition_not_found",
             )
+            _finalise_durable_instance(
+                completed=False,
+                final_state=None,
+                terminal_stage="workflow_lookup",
+                termination_code="workflow_not_registered",
+                termination_detail="workflow_definition_not_found",
+                workflow_data=data,
+            )
             return None
 
         env = environment or WorkflowEnvironment(
@@ -10109,6 +10390,14 @@ class InternalMCPChatOrchestrator:
                 termination_code=termination_code,
                 termination_detail=termination_detail,
             )
+            _finalise_durable_instance(
+                completed=completed,
+                final_state=final_state,
+                terminal_stage=terminal_stage,
+                termination_code=termination_code,
+                termination_detail=termination_detail,
+                workflow_data=getattr(result, "data", None),
+            )
             return result
         except Exception as exc:
             if callable(finalise_episode_fn):
@@ -10134,6 +10423,14 @@ class InternalMCPChatOrchestrator:
                 final_state=None,
                 termination_code="exception",
                 termination_detail=str(exc),
+            )
+            _finalise_durable_instance(
+                completed=False,
+                final_state=None,
+                terminal_stage="workflow_exception",
+                termination_code="exception",
+                termination_detail=str(exc),
+                workflow_data=data,
             )
             raise
 
