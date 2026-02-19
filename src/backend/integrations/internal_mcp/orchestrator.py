@@ -14813,6 +14813,21 @@ class InternalMCPChatOrchestrator:
             tool_messages_for_validation=tuple(tool_messages),
         )
 
+        gate_requires_follow_up = bool(
+            tc_result.data.get("completion_gate_requires_follow_up", False)
+        )
+        gate_safe_to_claim_completion = bool(
+            tc_result.data.get(
+                "completion_gate_safe_to_claim_completion",
+                not gate_requires_follow_up,
+            )
+        )
+        terminal_trace_status = (
+            "completed"
+            if gate_safe_to_claim_completion and not gate_requires_follow_up
+            else "follow_up_required"
+        )
+
         # JVNAUTOSCI-984: Emit completed phase transition.
         _emit_phase_transition_local(
             self.PHASE_COMPLETED,
@@ -14833,7 +14848,7 @@ class InternalMCPChatOrchestrator:
             workflow_routing=routing_info,
             render_plan=_result_render_plan(),
         )
-        _persist_trace(status="completed")
+        _persist_trace(status=terminal_trace_status)
         return result
 
 

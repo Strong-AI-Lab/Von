@@ -329,9 +329,10 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
                 to_state="validate",
                 reason="tool_calls_found",
             ),
-            # No tool calls found (or error with pre-built result) → done
+            # No tool calls found (or error with pre-built result) still flows
+            # through turn-execution critic + completion gate.
             WorkflowTransitionSpec(
-                to_state="completed",
+                to_state="postcondition_critic",
                 condition=lambda ctx: True,
                 reason="direct_response",
             ),
@@ -352,9 +353,10 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
                 to_state="execute",
                 reason="validation_passed",
             ),
-            # Validation error → completed with error result
+            # Validation errors must still pass through critic + completion gate
+            # so unresolved required effects cannot be marked as safely complete.
             WorkflowTransitionSpec(
-                to_state="completed",
+                to_state="postcondition_critic",
                 condition=lambda ctx: True,
                 reason="validation_error",
             ),

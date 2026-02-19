@@ -244,3 +244,53 @@ def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch)
     assert tool_entry["batchSize"] == 2
     assert tool_entry["resultSummary"] == "ok"
     assert tool_entry["success"] is True
+
+
+def test_latest_turn_completion_gate_uses_latest_entry() -> None:
+    gate = von_routes._latest_turn_completion_gate(
+        [
+            {
+                "type": "turn_completion_gate",
+                "decision": "completed",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+            },
+            {"type": "something_else"},
+            {
+                "type": "turn_completion_gate",
+                "decision": "escalation_required",
+                "decision_reason": "Required mutation was not executed.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_1"],
+            },
+        ]
+    )
+    assert gate is not None
+    assert gate["decision"] == "escalation_required"
+    assert gate["decision_reason"] == "Required mutation was not executed."
+    assert gate["safe_to_claim_completion"] is False
+    assert gate["requires_follow_up"] is True
+    assert gate["blocking_effect_ids"] == ["effect_1"]
+
+
+def test_terminal_progress_payload_reflects_completion_gate_follow_up() -> None:
+    payload = von_routes._build_terminal_tool_progress_payload(
+        request_id="req-f",
+        aux_calls=[
+            {
+                "type": "turn_completion_gate",
+                "decision": "escalation_required",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_1"],
+            }
+        ],
+    )
+    assert payload["request_id"] == "req-f"
+    assert payload["status"] == "completed"
+    assert payload["success"] is False
+    assert payload["completion_gate_decision"] == "escalation_required"
+    assert payload["completion_gate_requires_follow_up"] is True
+    assert payload["completion_gate_safe_to_claim_completion"] is False
+    assert payload["orchestrator_status"] == "follow_up_required"

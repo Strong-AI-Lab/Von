@@ -14,6 +14,18 @@ def test_tool_calling_workflow_includes_turn_execution_critic_and_gate() -> None
     assert "postcondition_critic" in workflow.states
     assert "completion_gate" in workflow.states
 
+    plan = workflow.states["plan"]
+    assert any(
+        t.to_state == "postcondition_critic" and t.reason == "direct_response"
+        for t in plan.transitions
+    )
+
+    validate = workflow.states["validate"]
+    assert any(
+        t.to_state == "postcondition_critic" and t.reason == "validation_error"
+        for t in validate.transitions
+    )
+
     backfill = workflow.states["backfill"]
     assert any(t.to_state == "postcondition_critic" for t in backfill.transitions)
 

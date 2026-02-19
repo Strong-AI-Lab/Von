@@ -1940,6 +1940,79 @@ def _normalise_workflow_routing_payload(
     return None
 
 
+def _latest_turn_completion_gate(aux_calls: Any) -> dict[str, Any] | None:
+    if not isinstance(aux_calls, list):
+        return None
+
+    for entry in reversed(aux_calls):
+        if not isinstance(entry, Mapping):
+            continue
+        call_type = entry.get("type")
+        if not isinstance(call_type, str) or call_type.strip() != "turn_completion_gate":
+            continue
+
+        decision = _progress_str(entry.get("decision"))
+        decision_reason = _progress_str(entry.get("decision_reason"))
+        requires_follow_up = bool(entry.get("requires_follow_up", False))
+        safe_to_claim_completion = bool(
+            entry.get("safe_to_claim_completion", not requires_follow_up)
+        )
+        blocking_effect_ids_raw = entry.get("blocking_effect_ids")
+        blocking_effect_ids: list[str] = []
+        if isinstance(blocking_effect_ids_raw, list):
+            for item in blocking_effect_ids_raw:
+                effect_id = _progress_str(item)
+                if effect_id:
+                    blocking_effect_ids.append(effect_id)
+
+        return {
+            "decision": decision,
+            "decision_reason": decision_reason,
+            "requires_follow_up": requires_follow_up,
+            "safe_to_claim_completion": safe_to_claim_completion,
+            "blocking_effect_ids": blocking_effect_ids,
+        }
+
+    return None
+
+
+def _build_terminal_tool_progress_payload(
+    *, request_id: str, aux_calls: Any
+) -> dict[str, Any]:
+    completion_gate = _latest_turn_completion_gate(aux_calls)
+    requires_follow_up = bool(
+        completion_gate.get("requires_follow_up", False)
+        if isinstance(completion_gate, dict)
+        else False
+    )
+    safe_to_claim_completion = bool(
+        completion_gate.get("safe_to_claim_completion", not requires_follow_up)
+        if isinstance(completion_gate, dict)
+        else True
+    )
+    progress_success = bool(safe_to_claim_completion and not requires_follow_up)
+
+    payload: dict[str, Any] = {
+        "status": "completed",
+        "stage": "completed",
+        "phase_label": "Complete",
+        "request_id": request_id,
+        "success": progress_success,
+        "completion_gate_requires_follow_up": requires_follow_up,
+        "completion_gate_safe_to_claim_completion": safe_to_claim_completion,
+        "orchestrator_status": (
+            "completed" if progress_success else "follow_up_required"
+        ),
+    }
+    if isinstance(completion_gate, dict):
+        payload["completion_gate_decision"] = completion_gate.get("decision")
+        payload["completion_gate_decision_reason"] = completion_gate.get("decision_reason")
+        blocking_effect_ids = completion_gate.get("blocking_effect_ids")
+        if isinstance(blocking_effect_ids, list):
+            payload["completion_gate_blocking_effect_ids"] = list(blocking_effect_ids)
+    return payload
+
+
 def _finalise_llm_debug_info(
     *,
     llm_debug_info: dict[str, Any],
@@ -6146,18 +6219,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             applied_tool_batch_cap = None
 
         if show_tool_use_progress:
+            final_progress_payload = _build_terminal_tool_progress_payload(
+                request_id=request_id,
+                aux_calls=auxiliary_llm_calls,
+            )
             _stop_tool_progress_heartbeat(
                 progress_heartbeat_stop_event, progress_heartbeat_thread
             )
             _set_tool_progress(
                 progress_scope_key,
                 request_id,
-                {
-                    "status": "completed",
-                    "stage": "completed",
-                    "phase_label": "Complete",
-                    "request_id": request_id,
-                },
+                final_progress_payload,
             )
 
         tool_progress_snapshot = _snapshot_tool_progress_for_request(
