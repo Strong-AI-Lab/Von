@@ -381,3 +381,119 @@ def test_turn_execution_search_failures_reports_modes_and_recommendations(monkey
         "route through #V#conversation_turn_execution_workflow" in rec
         for rec in result["recommendations"]
     )
+
+
+def test_turn_execution_build_benchmark_returns_metrics_and_replay_cases(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    docs = [
+        {
+            "request_id": "req-fail-1",
+            "session_id": "chat-fail-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-19T00:57:25Z",
+            "completion_gate": {
+                "decision": "escalation_required",
+                "decision_reason": "Required mutation was not executed.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_1"],
+            },
+            "required_effects": [{"effect_id": "effect_1", "status": "not_executed"}],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selector_verdict": "tool_seeking",
+            },
+            "prompt": {"preview": "Relations were not added"},
+            "critic": {"summary": {"not_verified_count": 1}},
+            "final_response": {
+                "completion_claim_detected": True,
+                "completion_claim_validated": False,
+            },
+        },
+        {
+            "request_id": "req-fail-2",
+            "session_id": "chat-fail-2",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-19T01:00:10Z",
+            "completion_gate": {
+                "decision": "partial",
+                "decision_reason": "Mutation execution observed but verification is inconclusive.",
+                "safe_to_claim_completion": False,
+                "requires_follow_up": True,
+                "blocking_effect_ids": ["effect_2"],
+            },
+            "required_effects": [{"effect_id": "effect_2", "status": "satisfied"}],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#tool_calling_workflow",
+                "selector_verdict": "tool_seeking",
+            },
+            "prompt": {"preview": "Proceed with predicate update"},
+            "critic": {"summary": {"inconclusive_count": 1}},
+            "final_response": {
+                "completion_claim_detected": True,
+                "completion_claim_validated": False,
+            },
+        },
+        {
+            "request_id": "req-ok-1",
+            "session_id": "chat-ok-1",
+            "namespace": "#V#user@org",
+            "created_at_utc": "2026-02-19T01:10:00Z",
+            "completion_gate": {
+                "decision": "completed",
+                "decision_reason": "No blocking effect detected.",
+                "safe_to_claim_completion": True,
+                "requires_follow_up": False,
+                "blocking_effect_ids": [],
+            },
+            "required_effects": [],
+            "workflow_selection": {
+                "selected_workflow_id": "#V#chat_assistant_workflow",
+                "selector_verdict": "plain_response",
+            },
+            "prompt": {"preview": "What is the current status?"},
+            "critic": {"summary": {"not_verified_count": 0}},
+            "final_response": {
+                "completion_claim_detected": False,
+                "completion_claim_validated": True,
+            },
+        },
+    ]
+
+    coll = _TurnExecutionCollection(docs)
+    monkeypatch.setattr(
+        "src.backend.db.connection_manager.get_db",
+        lambda: _DB({"turn_execution_records": coll}),
+    )
+
+    result = cat._turn_execution_build_benchmark(
+        namespace="#V#user@org",
+        limit=20,
+        offset=0,
+        max_cases=2,
+    )
+
+    assert result["success"] is True
+    assert result["collection"] == "turn_execution_records"
+    assert result["provenance"]["item_kind"] == "turn_execution_benchmark_report"
+
+    metrics = result.get("metrics")
+    assert isinstance(metrics, dict)
+    assert metrics["scanned_count"] == 3
+    assert metrics["likely_failure_count"] == 2
+    assert metrics["likely_failure_rate_pct"] == 66.67
+    assert metrics["failure_mode_counts"]["mutation_not_executed"] == 1
+
+    replay_cases = result.get("replay_cases")
+    assert isinstance(replay_cases, list)
+    assert len(replay_cases) == 2
+    first_case = replay_cases[0]
+    assert first_case["failure_mode"] == "mutation_not_executed"
+    assert first_case["confidence"] == "high"
+    assert first_case["pass_criteria"]["action_attempted"] is True
+    assert first_case["pass_criteria"]["postcondition_satisfied"] is True
+    assert first_case["pass_criteria"]["no_false_success"] is True
+
+    seeded_cases = result.get("seeded_cases")
+    assert replay_cases == seeded_cases

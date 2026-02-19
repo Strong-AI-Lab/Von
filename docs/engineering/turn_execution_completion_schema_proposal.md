@@ -242,6 +242,10 @@ The existing `message.direct_created` binding to `#V#chat_assistant_workflow` sh
 - Returns filtered turn records with deterministic failure-mode classification and aggregate counts.
 - Adds recommendations for workflow/critic/gate hardening based on observed patterns.
 
+4. `turn_execution_build_benchmark` (implemented)
+- Produces reproducible corpus-level metrics, seeded replay cases, and capability-gap signals.
+- Intended for ongoing reliability benchmarking and regression tracking.
+
 ### 6.2 Why this was needed
 
 - `search_knowledge_base` is text-centric and not deterministic for structured failure triage.
