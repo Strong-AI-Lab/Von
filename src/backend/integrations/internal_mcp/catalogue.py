@@ -7265,7 +7265,8 @@ def _jira_get_auth_config_input_schema() -> Schema:
     return Schema(
         required={},
         optional={},
-        allow_unknown=False,
+        # Accept orchestrator context keys (for example namespace); this tool ignores them.
+        allow_unknown=True,
         description="jira_get_auth_config input: no arguments",
     )
 
@@ -11080,7 +11081,8 @@ def build_default_catalogue() -> MethodCatalogue:
             input_schema=Schema(
                 required={},
                 optional={},
-                allow_unknown=False,
+                # Accept orchestrator context keys (for example namespace); handler has no required inputs.
+                allow_unknown=True,
                 description="get_context input: no parameters required",
             ),
             output_schema=Schema(
@@ -11108,7 +11110,8 @@ def build_default_catalogue() -> MethodCatalogue:
             input_schema=Schema(
                 required={},
                 optional={},
-                allow_unknown=False,
+                # Accept orchestrator context keys (for example namespace); handler reads session state only.
+                allow_unknown=True,
                 description="Return the current session's last reported client capabilities snapshot (no input parameters).",
             ),
             output_schema=Schema(
