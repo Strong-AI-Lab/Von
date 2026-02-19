@@ -55,6 +55,7 @@ class _StubInstance:
         self.max_retries = max_retries
         self.source_event_type = None
         self.source_event_id = None
+        self.created_at = datetime.now(timezone.utc)
 
     def to_status_dict(self) -> dict[str, object]:
         return {
@@ -107,8 +108,21 @@ class _StubWorkflowManager:
         workflow_id: str | None = None,
         source_event_type: str | None = None,
         source_event_id: str | None = None,
+        conversation_session_id: str | None = None,
+        request_id: str | None = None,
+        from_utc: datetime | str | None = None,
+        to_utc: datetime | str | None = None,
         limit: int = 50,
     ) -> list[_StubInstance]:
+        def _parse(value: datetime | str | None) -> datetime | None:
+            if isinstance(value, datetime):
+                return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            if isinstance(value, str) and value.strip():
+                return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            return None
+
+        from_dt = _parse(from_utc)
+        to_dt = _parse(to_utc)
         status_value = getattr(status, "value", status)
         instances = list(self.instances.values())
         filtered = [
@@ -124,6 +138,14 @@ class _StubWorkflowManager:
                 or inst.source_event_type == source_event_type
             )
             and (source_event_id is None or inst.source_event_id == source_event_id)
+            and (
+                conversation_session_id is None
+                or str(inst.inputs.get("conversation_session_id"))
+                == conversation_session_id
+            )
+            and (request_id is None or str(inst.inputs.get("turn_id")) == request_id)
+            and (from_dt is None or inst.created_at >= from_dt)
+            and (to_dt is None or inst.created_at <= to_dt)
         ]
         return filtered[:limit]
 
@@ -368,6 +390,64 @@ def test_workflow_create_list_get_instance_gateway_paths(monkeypatch):
     assert detail.get("workflow_id") == workflow_id
     assert detail.get("namespace") == "#V#user/#V#org"
     assert detail.get("inputs") == {"seed": "value"}
+
+
+def test_workflow_list_instances_supports_turn_and_date_filters(monkeypatch):
+    manager = _StubWorkflowManager()
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager",
+        lambda: manager,
+    )
+    gateway = _build_gateway()
+
+    created_a = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#generate_considerations_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user/#V#org",
+            "inputs": {
+                "conversation_session_id": "session-A",
+                "turn_id": "req-A",
+            },
+        },
+    ).payload
+    created_b = gateway.invoke(
+        "workflow_create_instance",
+        {
+            "workflow_id": "#V#generate_considerations_workflow",
+            "user_id": "#V#user",
+            "org_id": "#V#org",
+            "namespace": "#V#user/#V#org",
+            "inputs": {
+                "conversation_session_id": "session-B",
+                "turn_id": "req-B",
+            },
+        },
+    ).payload
+    assert created_a.get("success") is True
+    assert created_b.get("success") is True
+    instance_a = manager.instances[str(created_a.get("instance_id"))]
+    instance_b = manager.instances[str(created_b.get("instance_id"))]
+    instance_a.created_at = datetime(2026, 2, 18, 12, 0, tzinfo=timezone.utc)
+    instance_b.created_at = datetime(2026, 2, 19, 12, 0, tzinfo=timezone.utc)
+
+    listed = gateway.invoke(
+        "workflow_list_instances",
+        {
+            "namespace": "#V#user/#V#org",
+            "session_id": "session-B",
+            "request_id": "req-B",
+            "from_utc": "2026-02-19T00:00:00Z",
+            "to_utc": "2026-02-19T23:59:59Z",
+            "limit": 10,
+        },
+    ).payload
+
+    assert listed.get("success") is True
+    assert listed.get("count") == 1
+    assert listed["instances"][0]["instance_id"] == created_b.get("instance_id")
 
 
 def test_workflow_create_instance_normalises_inputs(monkeypatch):

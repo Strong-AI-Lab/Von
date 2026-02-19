@@ -24,6 +24,7 @@ class _FakeWorkflowInstanceManager:
     def __init__(self) -> None:
         self.create_for_event_calls: list[dict[str, Any]] = []
         self.create_calls: list[dict[str, Any]] = []
+        self.checkpoint_calls: list[dict[str, Any]] = []
         self.mark_completed_calls: list[dict[str, Any]] = []
         self.mark_failed_calls: list[dict[str, Any]] = []
 
@@ -39,6 +40,12 @@ class _FakeWorkflowInstanceManager:
         call = {"instance_id": instance_id}
         call.update(kwargs)
         self.mark_completed_calls.append(call)
+        return True
+
+    def checkpoint(self, instance_id: str, **kwargs: Any) -> bool:
+        call = {"instance_id": instance_id}
+        call.update(kwargs)
+        self.checkpoint_calls.append(call)
         return True
 
     def mark_failed(self, instance_id: str, **kwargs: Any) -> bool:
@@ -129,8 +136,30 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
 
     assert result is workflow_result
     assert len(fake_manager.create_for_event_calls) == 1
+    assert len(fake_manager.checkpoint_calls) == 1
     assert len(fake_manager.mark_completed_calls) == 1
     assert len(fake_manager.mark_failed_calls) == 0
+
+    create_call = fake_manager.create_for_event_calls[0]
+    create_inputs = create_call.get("inputs")
+    assert isinstance(create_inputs, dict)
+    turn_contract = create_inputs.get("turn_execution_contract")
+    assert isinstance(turn_contract, dict)
+    assert turn_contract.get("schema_version") == "turn_execution_contract.v1"
+    selection_contract = turn_contract.get("selection")
+    assert isinstance(selection_contract, dict)
+    assert selection_contract.get("selected_workflow_id") == "#V#tool_calling_workflow"
+    assert selection_contract.get("selector_verdict") == "tool_seeking"
+    assert isinstance(selection_contract.get("selection_rationale"), str)
+
+    checkpoint_call = fake_manager.checkpoint_calls[0]
+    checkpoint_data = checkpoint_call.get("workflow_data")
+    assert isinstance(checkpoint_data, dict)
+    runtime_snapshot = checkpoint_data.get("turn_execution_runtime")
+    assert isinstance(runtime_snapshot, dict)
+    assert runtime_snapshot.get("schema_version") == "turn_execution_runtime.v1"
+    assert isinstance(runtime_snapshot.get("step_instances"), list)
+    assert isinstance(runtime_snapshot.get("check_instances"), list)
 
     completed_call = fake_manager.mark_completed_calls[0]
     assert completed_call["instance_id"] == "wf-inst-1"
@@ -142,6 +171,19 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     assert isinstance(turn_execution, dict)
     assert turn_execution.get("request_id") == "req-123"
     assert turn_execution.get("decision") == "escalation_required"
+    outcome = outputs.get("turn_execution_outcome")
+    assert isinstance(outcome, dict)
+    assert outcome.get("schema_version") == "turn_execution_outcome.v1"
+    selection = outcome.get("selection")
+    assert isinstance(selection, dict)
+    assert selection.get("selected_workflow_id") == "#V#tool_calling_workflow"
+    assert isinstance(outcome.get("step_instances"), list)
+    assert len(outcome["step_instances"]) == 2
+    assert isinstance(outcome.get("check_instances"), list)
+    completion_state = outcome.get("completion_state")
+    assert isinstance(completion_state, dict)
+    assert completion_state.get("decision") == "escalation_required"
+    assert completion_state.get("requires_follow_up") is True
 
 
 def test_execute_workflow_marks_durable_instance_failed_on_exception(
@@ -179,7 +221,18 @@ def test_execute_workflow_marks_durable_instance_failed_on_exception(
         )
 
     assert len(fake_manager.create_for_event_calls) == 1
+    assert len(fake_manager.checkpoint_calls) == 1
     assert len(fake_manager.mark_failed_calls) == 1
+    checkpoint_call = fake_manager.checkpoint_calls[0]
+    checkpoint_data = checkpoint_call.get("workflow_data")
+    assert isinstance(checkpoint_data, dict)
+    runtime_snapshot = checkpoint_data.get("turn_execution_runtime")
+    assert isinstance(runtime_snapshot, dict)
+    assert runtime_snapshot.get("schema_version") == "turn_execution_runtime.v1"
+    completion_state = runtime_snapshot.get("completion_state")
+    assert isinstance(completion_state, dict)
+    assert completion_state.get("decision") == "failed"
+    assert completion_state.get("requires_follow_up") is True
     failed_call = fake_manager.mark_failed_calls[0]
     assert failed_call["instance_id"] == "wf-inst-1"
     assert failed_call.get("error_step") == "workflow_exception"

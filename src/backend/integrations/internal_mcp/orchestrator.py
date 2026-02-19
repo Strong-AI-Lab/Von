@@ -8,6 +8,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import (
     Any,
     cast,
@@ -9953,6 +9954,152 @@ class InternalMCPChatOrchestrator:
                 return snapshot
             return None
 
+        def _extract_workflow_ids(payload: Any, *, key: str) -> list[str]:
+            if not isinstance(payload, Mapping):
+                return []
+            raw_values = payload.get(key)
+            if not isinstance(raw_values, list):
+                return []
+            workflow_ids: list[str] = []
+            seen: set[str] = set()
+            for item in raw_values:
+                workflow_id: str | None = None
+                if isinstance(item, str):
+                    workflow_id = _safe_scalar_text(item)
+                elif isinstance(item, Mapping):
+                    for candidate_key in ("workflow_id", "concept_id", "id"):
+                        workflow_id = _safe_scalar_text(item.get(candidate_key))
+                        if workflow_id:
+                            break
+                if not workflow_id:
+                    continue
+                lowered = workflow_id.lower()
+                if lowered in seen:
+                    continue
+                seen.add(lowered)
+                workflow_ids.append(workflow_id)
+            return workflow_ids
+
+        def _derive_selection_rationale(
+            *,
+            selected_workflow_id: str | None,
+            selector_verdict: str | None,
+            selector_source: str | None,
+            candidate_workflow_ids: Sequence[str],
+        ) -> str:
+            source = (selector_source or "default").strip().lower() or "default"
+            selected = (selected_workflow_id or "").strip()
+            verdict = (selector_verdict or "").strip()
+            candidate_set = {item.strip().lower() for item in candidate_workflow_ids}
+            if source == "selector":
+                if selected and selected.lower() in candidate_set:
+                    return "selector_selected_discovered_candidate"
+                if verdict:
+                    return f"selector_verdict:{verdict}"
+                return "selector_route_without_explicit_verdict"
+            if source == "presenter_mode":
+                return "presenter_mode_route"
+            if source == "default":
+                return "default_routing_fallback"
+            return f"routing_source:{source}"
+
+        def _build_turn_execution_selection_snapshot(
+            *,
+            workflow_data: Any,
+            turn_record: Mapping[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            workflow_routing = (
+                workflow_data.get("workflow_routing")
+                if isinstance(workflow_data, Mapping)
+                else None
+            )
+            workflow_routing_payload: Mapping[str, Any] = (
+                workflow_routing if isinstance(workflow_routing, Mapping) else {}
+            )
+            workflow_discovery = (
+                workflow_data.get("workflow_discovery_result")
+                if isinstance(workflow_data, Mapping)
+                else None
+            )
+            workflow_discovery_payload: Mapping[str, Any] = (
+                workflow_discovery if isinstance(workflow_discovery, Mapping) else {}
+            )
+
+            turn_workflow_selection = (
+                turn_record.get("workflow_selection")
+                if isinstance(turn_record, Mapping)
+                else None
+            )
+            turn_workflow_selection_payload: Mapping[str, Any] = (
+                turn_workflow_selection
+                if isinstance(turn_workflow_selection, Mapping)
+                else {}
+            )
+            turn_workflow_discovery = turn_workflow_selection_payload.get(
+                "workflow_discovery"
+            )
+            turn_workflow_discovery_payload: Mapping[str, Any] = (
+                turn_workflow_discovery
+                if isinstance(turn_workflow_discovery, Mapping)
+                else {}
+            )
+
+            selected_workflow_id = (
+                _safe_scalar_text(turn_workflow_selection_payload.get("selected_workflow_id"))
+                or _safe_scalar_text(workflow_routing_payload.get("workflow_id"))
+                or _safe_scalar_text(workflow_id)
+            )
+            selector_verdict = (
+                _safe_scalar_text(turn_workflow_selection_payload.get("selector_verdict"))
+                or _safe_scalar_text(workflow_routing_payload.get("verdict"))
+            )
+            selector_source = (
+                _safe_scalar_text(turn_workflow_selection_payload.get("selector_source"))
+                or _safe_scalar_text(workflow_routing_payload.get("source"))
+                or "default"
+            )
+
+            candidate_workflow_ids = (
+                _extract_workflow_ids(workflow_discovery_payload, key="candidate_ids")
+                or _extract_workflow_ids(workflow_discovery_payload, key="candidates")
+                or _extract_workflow_ids(workflow_discovery_payload, key="matches")
+                or _extract_workflow_ids(
+                    turn_workflow_discovery_payload, key="candidate_ids"
+                )
+            )
+            excluded_candidate_ids = (
+                _extract_workflow_ids(
+                    workflow_discovery_payload, key="excluded_candidate_ids"
+                )
+                or _extract_workflow_ids(workflow_discovery_payload, key="excluded")
+                or _extract_workflow_ids(
+                    workflow_discovery_payload, key="excluded_candidates"
+                )
+                or _extract_workflow_ids(
+                    turn_workflow_discovery_payload, key="excluded_candidate_ids"
+                )
+            )
+
+            selection_rationale = (
+                _safe_scalar_text(workflow_routing_payload.get("selection_rationale"))
+                or _safe_scalar_text(turn_workflow_selection_payload.get("selection_rationale"))
+                or _derive_selection_rationale(
+                    selected_workflow_id=selected_workflow_id,
+                    selector_verdict=selector_verdict,
+                    selector_source=selector_source,
+                    candidate_workflow_ids=candidate_workflow_ids,
+                )
+            )
+
+            return {
+                "selected_workflow_id": selected_workflow_id,
+                "selector_verdict": selector_verdict,
+                "selector_source": selector_source,
+                "selection_rationale": selection_rationale,
+                "candidate_workflow_ids": list(candidate_workflow_ids),
+                "excluded_candidate_ids": list(excluded_candidate_ids),
+            }
+
         def _build_turn_execution_summary(payload: Any) -> dict[str, Any] | None:
             if not isinstance(payload, Mapping):
                 return None
@@ -9977,6 +10124,12 @@ class InternalMCPChatOrchestrator:
                 status = effect.get("status")
                 if isinstance(status, str) and status in {"not_executed", "not_satisfied"}:
                     unresolved_effect_count += 1
+            selection = _build_turn_execution_selection_snapshot(
+                workflow_data={"turn_execution_record": payload}
+                if isinstance(payload, Mapping)
+                else {},
+                turn_record=payload,
+            )
             return {
                 "request_id": _safe_scalar_text(payload.get("request_id")),
                 "decision": completion_gate.get("decision"),
@@ -9986,11 +10139,292 @@ class InternalMCPChatOrchestrator:
                     "safe_to_claim_completion"
                 ),
                 "blocking_effect_ids": completion_gate.get("blocking_effect_ids"),
-                "selected_workflow_id": workflow_selection.get("selected_workflow_id"),
-                "selector_verdict": workflow_selection.get("selector_verdict"),
+                "selected_workflow_id": selection.get("selected_workflow_id")
+                or workflow_selection.get("selected_workflow_id"),
+                "selector_verdict": selection.get("selector_verdict")
+                or workflow_selection.get("selector_verdict"),
                 "required_effect_count": len(required_effects),
                 "unresolved_effect_count": unresolved_effect_count,
             }
+
+        def _build_turn_execution_contract_snapshot(
+            workflow_data: Any,
+        ) -> dict[str, Any]:
+            prompt = (
+                workflow_data.get("prompt")
+                if isinstance(workflow_data, Mapping)
+                else data.get("prompt")
+            )
+            prompt_preview = prompt[:1000] if isinstance(prompt, str) else None
+            selection = _build_turn_execution_selection_snapshot(
+                workflow_data=workflow_data,
+                turn_record=(
+                    workflow_data.get("turn_execution_record")
+                    if isinstance(workflow_data, Mapping)
+                    and isinstance(workflow_data.get("turn_execution_record"), Mapping)
+                    else None
+                ),
+            )
+            return {
+                "schema_version": "turn_execution_contract.v1",
+                "workflow_id": _safe_scalar_text(workflow_id),
+                "request_id": _safe_scalar_text(resolved_turn_id),
+                "conversation_session_id": _safe_scalar_text(resolved_session_id),
+                "turn_id": _safe_scalar_text(resolved_turn_id),
+                "episode_source": str(resolved_source),
+                "episode_stage": (
+                    str(resolved_stage).strip()
+                    if isinstance(resolved_stage, str) and resolved_stage.strip()
+                    else None
+                ),
+                "prompt_preview": prompt_preview,
+                "selection": selection,
+            }
+
+        def _build_turn_execution_outcome(
+            *,
+            workflow_data: Any,
+            completed: bool,
+            final_state: str | None,
+            terminal_stage: str | None,
+            termination_code: str | None,
+            termination_detail: str | None,
+        ) -> dict[str, Any] | None:
+            if not isinstance(workflow_data, Mapping):
+                return None
+
+            raw_turn_record = workflow_data.get("turn_execution_record")
+            turn_record: Mapping[str, Any] = (
+                raw_turn_record if isinstance(raw_turn_record, Mapping) else {}
+            )
+            if not turn_record and not any(
+                key in workflow_data
+                for key in (
+                    "completion_gate_decision",
+                    "completion_gate_requires_follow_up",
+                    "completion_gate_safe_to_claim_completion",
+                    "critic_summary",
+                )
+            ):
+                return None
+
+            required_effects_raw = turn_record.get("required_effects")
+            required_effects: list[Mapping[str, Any]] = (
+                [item for item in required_effects_raw if isinstance(item, Mapping)]
+                if isinstance(required_effects_raw, list)
+                else []
+            )
+            postcondition_checks_raw = turn_record.get("postcondition_checks")
+            postcondition_checks: list[Mapping[str, Any]] = (
+                [item for item in postcondition_checks_raw if isinstance(item, Mapping)]
+                if isinstance(postcondition_checks_raw, list)
+                else []
+            )
+            critic_payload_raw = turn_record.get("critic")
+            critic_payload: Mapping[str, Any] = (
+                critic_payload_raw if isinstance(critic_payload_raw, Mapping) else {}
+            )
+            critic_summary_raw = workflow_data.get("critic_summary")
+            if not isinstance(critic_summary_raw, Mapping):
+                critic_summary_raw = critic_payload.get("summary")
+            critic_summary: Mapping[str, Any] = (
+                critic_summary_raw if isinstance(critic_summary_raw, Mapping) else {}
+            )
+
+            completion_gate_raw = turn_record.get("completion_gate")
+            completion_gate: Mapping[str, Any] = (
+                completion_gate_raw if isinstance(completion_gate_raw, Mapping) else {}
+            )
+            decision = _safe_scalar_text(workflow_data.get("completion_gate_decision")) or (
+                _safe_scalar_text(completion_gate.get("decision"))
+                or ("completed" if completed else "failed")
+            )
+            decision_reason = _safe_scalar_text(
+                workflow_data.get("completion_gate_decision_reason")
+            ) or _safe_scalar_text(completion_gate.get("decision_reason"))
+            requires_follow_up = bool(
+                workflow_data.get(
+                    "completion_gate_requires_follow_up",
+                    completion_gate.get("requires_follow_up", False),
+                )
+            )
+            safe_to_claim_completion = bool(
+                workflow_data.get(
+                    "completion_gate_safe_to_claim_completion",
+                    completion_gate.get("safe_to_claim_completion", not requires_follow_up),
+                )
+            )
+
+            blocking_effect_ids_raw = workflow_data.get("completion_gate_blocking_effect_ids")
+            if not isinstance(blocking_effect_ids_raw, list):
+                blocking_effect_ids_raw = completion_gate.get("blocking_effect_ids")
+            blocking_effect_ids: list[str] = []
+            if isinstance(blocking_effect_ids_raw, list):
+                for item in blocking_effect_ids_raw:
+                    item_text = _safe_scalar_text(item)
+                    if item_text:
+                        blocking_effect_ids.append(item_text)
+
+            check_instances: list[dict[str, Any]] = []
+            for check in postcondition_checks:
+                observed_payload = check.get("observed")
+                check_instances.append(
+                    {
+                        "check_id": _safe_scalar_text(check.get("check_id")),
+                        "effect_id": _safe_scalar_text(check.get("effect_id")),
+                        "check_type": _safe_scalar_text(check.get("check_type")),
+                        "check_tool": _safe_scalar_text(check.get("check_tool")),
+                        "status": _safe_scalar_text(check.get("status")),
+                        "evidence": _safe_scalar_text(check.get("evidence")),
+                        "error": _safe_scalar_text(check.get("error")),
+                        "observed": (
+                            _safe_mapping_snapshot(observed_payload, max_depth=2, max_items=20)
+                            if isinstance(observed_payload, Mapping)
+                            else None
+                        ),
+                    }
+                )
+
+            required_effect_instances: list[dict[str, Any]] = []
+            for effect in required_effects:
+                required_effect_instances.append(
+                    {
+                        "effect_id": _safe_scalar_text(effect.get("effect_id")),
+                        "effect_type": _safe_scalar_text(effect.get("effect_type")),
+                        "status": _safe_scalar_text(effect.get("status")),
+                        "status_reason": _safe_scalar_text(effect.get("status_reason")),
+                        "postcondition_required": bool(
+                            effect.get("postcondition_required", False)
+                        ),
+                    }
+                )
+
+            critic_workflow_id = _safe_scalar_text(critic_payload.get("workflow_id"))
+            completion_gate_workflow_id = _safe_scalar_text(
+                completion_gate.get("workflow_id")
+            ) or TURN_COMPLETION_GATE_WORKFLOW_ID
+            step_instances = [
+                {
+                    "step_id": "step_turn_execution_critic",
+                    "step_key": "turn_execution_critic",
+                    "workflow_id": (
+                        critic_workflow_id
+                        or KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+                    ),
+                    "status": "completed",
+                    "evidence": {
+                        "check_count": len(check_instances),
+                        "required_effect_count": len(required_effect_instances),
+                    },
+                },
+                {
+                    "step_id": "step_turn_completion_gate",
+                    "step_key": "turn_completion_gate",
+                    "workflow_id": completion_gate_workflow_id,
+                    "status": "completed",
+                    "evidence": {
+                        "decision": decision,
+                        "requires_follow_up": requires_follow_up,
+                    },
+                },
+            ]
+
+            selection = _build_turn_execution_selection_snapshot(
+                workflow_data=workflow_data,
+                turn_record=turn_record,
+            )
+
+            not_verified_count = int(critic_summary.get("not_verified_count") or 0)
+            inconclusive_count = int(critic_summary.get("inconclusive_count") or 0)
+            error_count = int(critic_summary.get("error_count") or 0)
+            unresolved_check_count = not_verified_count + inconclusive_count + error_count
+
+            return {
+                "schema_version": "turn_execution_outcome.v1",
+                "workflow_instance_id": durable_instance_id,
+                "workflow_id": _safe_scalar_text(workflow_id),
+                "request_id": _safe_scalar_text(turn_record.get("request_id"))
+                or _safe_scalar_text(resolved_turn_id),
+                "session_id": _safe_scalar_text(turn_record.get("session_id"))
+                or _safe_scalar_text(resolved_session_id),
+                "turn_id": _safe_scalar_text(resolved_turn_id),
+                "selection": selection,
+                "step_instances": step_instances,
+                "required_effect_instances": required_effect_instances,
+                "check_instances": check_instances,
+                "critic_verdict": {
+                    "workflow_id": (
+                        critic_workflow_id
+                        or KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID
+                    ),
+                    "summary": _safe_mapping_snapshot(critic_summary, max_depth=2, max_items=20)
+                    or {},
+                    "has_unresolved_checks": unresolved_check_count > 0,
+                    "unresolved_check_count": unresolved_check_count,
+                },
+                "completion_state": {
+                    "decision": decision,
+                    "decision_reason": decision_reason,
+                    "safe_to_claim_completion": safe_to_claim_completion,
+                    "requires_follow_up": requires_follow_up,
+                    "blocking_effect_ids": blocking_effect_ids,
+                },
+                "terminal": {
+                    "completed": bool(completed),
+                    "final_state": final_state,
+                    "terminal_stage": terminal_stage,
+                    "termination_code": termination_code,
+                    "termination_detail": termination_detail,
+                },
+            }
+
+        def _build_turn_execution_runtime_snapshot(
+            *,
+            workflow_data: Any,
+            completed: bool,
+            final_state: str | None,
+            terminal_stage: str | None,
+            termination_code: str | None,
+            termination_detail: str | None,
+        ) -> dict[str, Any]:
+            outcome = _build_turn_execution_outcome(
+                workflow_data=workflow_data,
+                completed=completed,
+                final_state=final_state,
+                terminal_stage=terminal_stage,
+                termination_code=termination_code,
+                termination_detail=termination_detail,
+            )
+            contract = _build_turn_execution_contract_snapshot(workflow_data)
+            runtime: dict[str, Any] = {
+                "schema_version": "turn_execution_runtime.v1",
+                "workflow_instance_id": durable_instance_id,
+                "updated_at_utc": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "contract": contract,
+                "terminal_stage": terminal_stage,
+                "termination_code": termination_code,
+            }
+            if isinstance(outcome, dict):
+                runtime["request_id"] = outcome.get("request_id")
+                runtime["selection"] = outcome.get("selection")
+                runtime["step_instances"] = outcome.get("step_instances", [])
+                runtime["check_instances"] = outcome.get("check_instances", [])
+                runtime["completion_state"] = outcome.get("completion_state")
+            else:
+                runtime["request_id"] = _safe_scalar_text(resolved_turn_id)
+                runtime["selection"] = contract.get("selection")
+                runtime["step_instances"] = []
+                runtime["check_instances"] = []
+                runtime["completion_state"] = {
+                    "decision": "failed" if not completed else "completed",
+                    "decision_reason": _safe_scalar_text(termination_detail),
+                    "safe_to_claim_completion": bool(completed),
+                    "requires_follow_up": not bool(completed),
+                    "blocking_effect_ids": [],
+                }
+            return runtime
 
         resolved_user_id = _safe_scalar_text(data.get("user_concept_id"))
         resolved_org_id = _safe_scalar_text(data.get("org_concept_id"))
@@ -10021,12 +10455,15 @@ class InternalMCPChatOrchestrator:
                 "workflow_discovery_result": _safe_mapping_snapshot(
                     data.get("workflow_discovery_result")
                 ),
+                # Canonical per-turn contract persisted at workflow start.
+                "turn_execution_contract": _build_turn_execution_contract_snapshot(data),
             }
 
         def _build_durable_outputs_snapshot(
             *,
             completed: bool,
             final_state: str | None,
+            terminal_stage: str | None,
             termination_code: str | None,
             termination_detail: str | None,
             workflow_data: Any,
@@ -10067,6 +10504,17 @@ class InternalMCPChatOrchestrator:
                     workflow_discovery
                 )
 
+            turn_execution_outcome = _build_turn_execution_outcome(
+                workflow_data=workflow_data,
+                completed=completed,
+                final_state=final_state,
+                terminal_stage=terminal_stage,
+                termination_code=termination_code,
+                termination_detail=termination_detail,
+            )
+            if isinstance(turn_execution_outcome, dict):
+                payload["turn_execution_outcome"] = turn_execution_outcome
+
             return payload
 
         def _finalise_durable_instance(
@@ -10081,12 +10529,37 @@ class InternalMCPChatOrchestrator:
             if durable_instance_manager is None or not isinstance(durable_instance_id, str):
                 return
             try:
+                runtime_snapshot = _build_turn_execution_runtime_snapshot(
+                    workflow_data=workflow_data,
+                    completed=completed,
+                    final_state=final_state,
+                    terminal_stage=terminal_stage,
+                    termination_code=termination_code,
+                    termination_detail=termination_detail,
+                )
+                try:
+                    durable_instance_manager.checkpoint(
+                        durable_instance_id,
+                        current_state=terminal_stage
+                        or final_state
+                        or ("completed" if completed else "terminated"),
+                        workflow_data={"turn_execution_runtime": runtime_snapshot},
+                        progress_message="turn_execution_runtime_persisted",
+                    )
+                except Exception as checkpoint_exc:
+                    self._logger.warning(
+                        "[workflow_instance_telemetry] Failed to checkpoint runtime "
+                        "snapshot for %s: %s",
+                        durable_instance_id,
+                        checkpoint_exc,
+                    )
                 if completed:
                     durable_instance_manager.mark_completed(
                         durable_instance_id,
                         outputs=_build_durable_outputs_snapshot(
                             completed=True,
                             final_state=final_state,
+                            terminal_stage=terminal_stage,
                             termination_code=termination_code,
                             termination_detail=termination_detail,
                             workflow_data=workflow_data,
