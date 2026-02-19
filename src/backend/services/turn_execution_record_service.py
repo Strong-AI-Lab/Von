@@ -19,6 +19,10 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import OperationFailure, PyMongoError
 
 from ..db.mongo_client import get_db
+from ..workflows.conversation_turn_stage_model import (
+    build_conversation_turn_stage_model_snapshot,
+    build_conversation_turn_stage_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -647,6 +651,41 @@ def build_turn_execution_record(
             retry["budget"] = 0
         retry["reason"] = _safe_str(latest_progress.get("retry_reason"))
 
+    runtime_stages: list[str] = []
+    for event in diagnostic_events:
+        if not isinstance(event, Mapping):
+            continue
+        phase = _safe_str(event.get("phase"))
+        stage = _safe_str(event.get("stage"))
+        if phase:
+            runtime_stages.append(phase)
+        if stage:
+            runtime_stages.append(stage)
+
+    phase_history = (
+        turn_execution_diagnostics.get("phase_history")
+        if isinstance(turn_execution_diagnostics, Mapping)
+        else None
+    )
+    if isinstance(phase_history, list):
+        for entry in phase_history:
+            if not isinstance(entry, Mapping):
+                continue
+            phase = _safe_str(entry.get("phase"))
+            if phase:
+                runtime_stages.append(phase)
+
+    workflow_stage_path = (
+        turn_execution_diagnostics.get("workflow_stage_path")
+        if isinstance(turn_execution_diagnostics, Mapping)
+        else None
+    )
+    if not isinstance(workflow_stage_path, Mapping):
+        workflow_stage_path = build_conversation_turn_stage_path(
+            runtime_stages=runtime_stages,
+            workflow_id=selected_workflow_id,
+        )
+
     return {
         "schema_version": TURN_EXECUTION_RECORD_SCHEMA_VERSION,
         "request_id": _safe_str(request_id),
@@ -673,6 +712,8 @@ def build_turn_execution_record(
             "tool_invocations": serialised_invocations,
             "diagnostic_events": diagnostic_events,
             "retry": retry,
+            "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
+            "workflow_stage_path": workflow_stage_path,
         },
         "postcondition_checks": postcondition_checks,
         "critic": {

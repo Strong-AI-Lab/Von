@@ -50,6 +50,10 @@ from ...workflows import (
     WorkflowExecutionTrace,
     insert_workflow_execution_trace,
 )
+from ...workflows.conversation_turn_stage_model import (
+    build_conversation_turn_stage_model_snapshot,
+    build_conversation_turn_stage_path,
+)
 
 # NOTE: Previous relative template_folder path ('../../frontend/...') was incorrect.
 # From this file (src/backend/server/routes/von_routes.py) we need to traverse up THREE levels
@@ -499,6 +503,13 @@ def _build_turn_execution_diagnostics(
     if effective_request_id is None and isinstance(latest_progress, dict):
         effective_request_id = _progress_str(latest_progress.get("request_id"))
 
+    phase_history = _derive_phase_history_from_diagnostic_events(diagnostic_events)
+    runtime_stages = [entry.get("phase") for entry in phase_history]
+    workflow_stage_path = build_conversation_turn_stage_path(
+        runtime_stages=runtime_stages,
+        workflow_id=None,
+    )
+
     return {
         "generated_at_utc": _progress_str(generated_at_utc) or _now_utc_iso(),
         "request_id": effective_request_id,
@@ -508,9 +519,11 @@ def _build_turn_execution_diagnostics(
         "progress_events": _normalise_progress_events_from_diagnostic_events(
             diagnostic_events
         ),
-        "phase_history": _derive_phase_history_from_diagnostic_events(diagnostic_events),
+        "phase_history": phase_history,
         "tool_history": _derive_tool_history_from_diagnostic_events(diagnostic_events),
         "workflow_discovery": workflow_payload,
+        "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
+        "workflow_stage_path": workflow_stage_path,
     }
 
 

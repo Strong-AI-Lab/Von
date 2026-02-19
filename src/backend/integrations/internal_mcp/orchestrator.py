@@ -50,6 +50,10 @@ from ...workflows.definitions import (
     TURN_COMPLETION_GATE_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
+from ...workflows.conversation_turn_stage_model import (
+    build_conversation_turn_stage_model_snapshot,
+    build_conversation_turn_stage_path,
+)
 from ...workflows.engine import WorkflowExecutor
 from ...workflows.workflow_selector import WorkflowSelector
 from ...workflows.durable.registry_factory import (
@@ -10100,6 +10104,97 @@ class InternalMCPChatOrchestrator:
                 "excluded_candidate_ids": list(excluded_candidate_ids),
             }
 
+        def _extract_stage_tokens_from_diagnostics(
+            diagnostics_payload: Mapping[str, Any] | None,
+        ) -> list[str]:
+            if not isinstance(diagnostics_payload, Mapping):
+                return []
+
+            stages: list[str] = []
+
+            phase_history = diagnostics_payload.get("phase_history")
+            if isinstance(phase_history, list):
+                for phase_entry in phase_history:
+                    if not isinstance(phase_entry, Mapping):
+                        continue
+                    phase = _safe_scalar_text(phase_entry.get("phase"))
+                    if phase:
+                        stages.append(phase)
+
+            progress_events = diagnostics_payload.get("progress_events")
+            if isinstance(progress_events, list):
+                for event in progress_events:
+                    if not isinstance(event, Mapping):
+                        continue
+                    stage = _safe_scalar_text(event.get("stage"))
+                    if stage:
+                        stages.append(stage)
+
+            return stages
+
+        def _collect_turn_runtime_stage_sequence(
+            *,
+            workflow_data: Any,
+            final_state: str | None = None,
+            terminal_stage: str | None = None,
+        ) -> list[str]:
+            runtime_stages: list[str] = []
+
+            if isinstance(resolved_stage, str) and resolved_stage.strip():
+                runtime_stages.append(resolved_stage.strip())
+
+            diagnostics_sources: list[Mapping[str, Any]] = []
+            if isinstance(data.get("turn_execution_diagnostics"), Mapping):
+                diagnostics_sources.append(
+                    cast(Mapping[str, Any], data.get("turn_execution_diagnostics"))
+                )
+            if isinstance(workflow_data, Mapping):
+                workflow_diagnostics = workflow_data.get("turn_execution_diagnostics")
+                if isinstance(workflow_diagnostics, Mapping):
+                    diagnostics_sources.append(workflow_diagnostics)
+                turn_record = workflow_data.get("turn_execution_record")
+                if isinstance(turn_record, Mapping):
+                    execution_payload = turn_record.get("execution")
+                    if isinstance(execution_payload, Mapping):
+                        diagnostic_events = execution_payload.get("diagnostic_events")
+                        if isinstance(diagnostic_events, list):
+                            for event in diagnostic_events:
+                                if not isinstance(event, Mapping):
+                                    continue
+                                phase = _safe_scalar_text(event.get("phase"))
+                                stage = _safe_scalar_text(event.get("stage"))
+                                if phase:
+                                    runtime_stages.append(phase)
+                                if stage:
+                                    runtime_stages.append(stage)
+
+            for diagnostics_payload in diagnostics_sources:
+                runtime_stages.extend(
+                    _extract_stage_tokens_from_diagnostics(diagnostics_payload)
+                )
+
+            if isinstance(final_state, str) and final_state.strip():
+                runtime_stages.append(final_state.strip())
+            if isinstance(terminal_stage, str) and terminal_stage.strip():
+                runtime_stages.append(terminal_stage.strip())
+
+            return runtime_stages
+
+        def _build_turn_execution_stage_path_snapshot(
+            *,
+            workflow_data: Any,
+            final_state: str | None = None,
+            terminal_stage: str | None = None,
+        ) -> dict[str, Any]:
+            return build_conversation_turn_stage_path(
+                runtime_stages=_collect_turn_runtime_stage_sequence(
+                    workflow_data=workflow_data,
+                    final_state=final_state,
+                    terminal_stage=terminal_stage,
+                ),
+                workflow_id=_safe_scalar_text(workflow_id),
+            )
+
         def _build_turn_execution_summary(payload: Any) -> dict[str, Any] | None:
             if not isinstance(payload, Mapping):
                 return None
@@ -10165,6 +10260,9 @@ class InternalMCPChatOrchestrator:
                     else None
                 ),
             )
+            stage_path = _build_turn_execution_stage_path_snapshot(
+                workflow_data=workflow_data
+            )
             return {
                 "schema_version": "turn_execution_contract.v1",
                 "workflow_id": _safe_scalar_text(workflow_id),
@@ -10179,6 +10277,10 @@ class InternalMCPChatOrchestrator:
                 ),
                 "prompt_preview": prompt_preview,
                 "selection": selection,
+                # Canonical mapping of runtime stage tokens into one
+                # conversation-turn orchestration representation.
+                "workflow_stage_model": build_conversation_turn_stage_model_snapshot(),
+                "workflow_stage_path": stage_path,
             }
 
         def _build_turn_execution_outcome(
@@ -10333,6 +10435,11 @@ class InternalMCPChatOrchestrator:
                 workflow_data=workflow_data,
                 turn_record=turn_record,
             )
+            stage_path = _build_turn_execution_stage_path_snapshot(
+                workflow_data=workflow_data,
+                final_state=final_state,
+                terminal_stage=terminal_stage,
+            )
 
             not_verified_count = int(critic_summary.get("not_verified_count") or 0)
             inconclusive_count = int(critic_summary.get("inconclusive_count") or 0)
@@ -10349,6 +10456,7 @@ class InternalMCPChatOrchestrator:
                 or _safe_scalar_text(resolved_session_id),
                 "turn_id": _safe_scalar_text(resolved_turn_id),
                 "selection": selection,
+                "workflow_stage_path": stage_path,
                 "step_instances": step_instances,
                 "required_effect_instances": required_effect_instances,
                 "check_instances": check_instances,
@@ -10406,6 +10514,18 @@ class InternalMCPChatOrchestrator:
                 "terminal_stage": terminal_stage,
                 "termination_code": termination_code,
             }
+            stage_path = (
+                outcome.get("workflow_stage_path")
+                if isinstance(outcome, dict)
+                else None
+            )
+            if not isinstance(stage_path, Mapping):
+                stage_path = _build_turn_execution_stage_path_snapshot(
+                    workflow_data=workflow_data,
+                    final_state=final_state,
+                    terminal_stage=terminal_stage,
+                )
+            runtime["workflow_stage_path"] = stage_path
             if isinstance(outcome, dict):
                 runtime["request_id"] = outcome.get("request_id")
                 runtime["selection"] = outcome.get("selection")

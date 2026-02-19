@@ -151,6 +151,12 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     assert selection_contract.get("selected_workflow_id") == "#V#tool_calling_workflow"
     assert selection_contract.get("selector_verdict") == "tool_seeking"
     assert isinstance(selection_contract.get("selection_rationale"), str)
+    contract_stage_model = turn_contract.get("workflow_stage_model")
+    assert isinstance(contract_stage_model, dict)
+    assert contract_stage_model.get("schema_version") == "conversation_turn_stage_model.v1"
+    contract_stage_path = turn_contract.get("workflow_stage_path")
+    assert isinstance(contract_stage_path, dict)
+    assert contract_stage_path.get("schema_version") == "conversation_turn_stage_path.v1"
 
     checkpoint_call = fake_manager.checkpoint_calls[0]
     checkpoint_data = checkpoint_call.get("workflow_data")
@@ -160,6 +166,13 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     assert runtime_snapshot.get("schema_version") == "turn_execution_runtime.v1"
     assert isinstance(runtime_snapshot.get("step_instances"), list)
     assert isinstance(runtime_snapshot.get("check_instances"), list)
+    runtime_stage_path = runtime_snapshot.get("workflow_stage_path")
+    assert isinstance(runtime_stage_path, dict)
+    assert runtime_stage_path.get("schema_version") == "conversation_turn_stage_path.v1"
+    runtime_path_entries = runtime_stage_path.get("path")
+    assert isinstance(runtime_path_entries, list)
+    assert runtime_path_entries
+    assert runtime_path_entries[-1].get("stage_id") == "completed"
 
     completed_call = fake_manager.mark_completed_calls[0]
     assert completed_call["instance_id"] == "wf-inst-1"
@@ -177,6 +190,13 @@ def test_execute_workflow_persists_completed_durable_instance_with_turn_summary(
     selection = outcome.get("selection")
     assert isinstance(selection, dict)
     assert selection.get("selected_workflow_id") == "#V#tool_calling_workflow"
+    outcome_stage_path = outcome.get("workflow_stage_path")
+    assert isinstance(outcome_stage_path, dict)
+    assert outcome_stage_path.get("schema_version") == "conversation_turn_stage_path.v1"
+    outcome_path_entries = outcome_stage_path.get("path")
+    assert isinstance(outcome_path_entries, list)
+    assert outcome_path_entries
+    assert outcome_path_entries[-1].get("stage_id") == "completed"
     assert isinstance(outcome.get("step_instances"), list)
     assert len(outcome["step_instances"]) == 2
     assert isinstance(outcome.get("check_instances"), list)
@@ -229,6 +249,13 @@ def test_execute_workflow_marks_durable_instance_failed_on_exception(
     runtime_snapshot = checkpoint_data.get("turn_execution_runtime")
     assert isinstance(runtime_snapshot, dict)
     assert runtime_snapshot.get("schema_version") == "turn_execution_runtime.v1"
+    stage_path = runtime_snapshot.get("workflow_stage_path")
+    assert isinstance(stage_path, dict)
+    assert stage_path.get("schema_version") == "conversation_turn_stage_path.v1"
+    path_entries = stage_path.get("path")
+    assert isinstance(path_entries, list)
+    assert path_entries
+    assert path_entries[-1].get("stage_id") == "failed"
     completion_state = runtime_snapshot.get("completion_state")
     assert isinstance(completion_state, dict)
     assert completion_state.get("decision") == "failed"

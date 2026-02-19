@@ -245,6 +245,59 @@ def test_turn_execution_diagnostics_rebuilds_phase_and_tool_history(monkeypatch)
     assert tool_entry["resultSummary"] == "ok"
     assert tool_entry["success"] is True
 
+    workflow_stage_model = diagnostics.get("workflow_stage_model")
+    assert isinstance(workflow_stage_model, dict)
+    assert workflow_stage_model.get("schema_version") == "conversation_turn_stage_model.v1"
+
+    workflow_stage_path = diagnostics.get("workflow_stage_path")
+    assert isinstance(workflow_stage_path, dict)
+    assert workflow_stage_path.get("schema_version") == "conversation_turn_stage_path.v1"
+    path = workflow_stage_path.get("path")
+    assert isinstance(path, list)
+    assert [entry.get("stage_id") for entry in path] == [
+        "workflow_discovery",
+        "tool_execute",
+    ]
+    assert workflow_stage_path.get("has_unmapped_runtime_stages") is False
+
+
+def test_turn_execution_diagnostics_stage_path_fallback_for_unknown_phase(
+    monkeypatch,
+) -> None:
+    clock = _set_clock(monkeypatch, start=5300.0)
+
+    von_routes._set_tool_progress(
+        "scope-e2",
+        "req-e2",
+        {
+            "status": "phase_transition",
+            "phase": "new_stage_not_in_catalogue",
+            "request_id": "req-e2",
+        },
+    )
+    clock["now"] += 0.1
+
+    snapshot = von_routes._snapshot_tool_progress_for_request("scope-e2", "req-e2")
+    assert snapshot is not None
+
+    diagnostics = von_routes._build_turn_execution_diagnostics(
+        request_id="req-e2",
+        prompt_text="Diagnose a new stage",
+        tool_progress_state=snapshot,
+    )
+
+    workflow_stage_path = diagnostics.get("workflow_stage_path")
+    assert isinstance(workflow_stage_path, dict)
+    assert workflow_stage_path.get("has_unmapped_runtime_stages") is True
+    assert workflow_stage_path.get("unmapped_runtime_stages") == [
+        "new_stage_not_in_catalogue"
+    ]
+    path = workflow_stage_path.get("path")
+    assert isinstance(path, list)
+    assert len(path) == 1
+    assert path[0].get("mapping_status") == "fallback_unmapped_runtime_stage"
+    assert path[0].get("runtime_stage_normalised") == "new_stage_not_in_catalogue"
+
 
 def test_latest_turn_completion_gate_uses_latest_entry() -> None:
     gate = von_routes._latest_turn_completion_gate(

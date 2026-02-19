@@ -90,6 +90,8 @@ def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_
     assert isinstance(diagnostics.get("progress_events"), list)
     assert isinstance(diagnostics.get("phase_history"), list)
     assert isinstance(diagnostics.get("tool_history"), list)
+    assert isinstance(diagnostics.get("workflow_stage_model"), dict)
+    assert isinstance(diagnostics.get("workflow_stage_path"), dict)
 
     turn_execution_record = llm_debug.get("turn_execution_record")
     assert isinstance(turn_execution_record, dict)
@@ -97,3 +99,7 @@ def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_
     completion_gate = turn_execution_record.get("completion_gate")
     assert isinstance(completion_gate, dict)
     assert isinstance(completion_gate.get("decision"), str)
+    execution = turn_execution_record.get("execution")
+    assert isinstance(execution, dict)
+    assert isinstance(execution.get("workflow_stage_model"), dict)
+    assert isinstance(execution.get("workflow_stage_path"), dict)

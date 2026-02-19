@@ -133,6 +133,8 @@ def test_prompt_introspection_fastpath_returns_prompt_text(app):
     assert isinstance(diagnostics.get("progress_events"), list)
     assert isinstance(diagnostics.get("phase_history"), list)
     assert isinstance(diagnostics.get("tool_history"), list)
+    assert isinstance(diagnostics.get("workflow_stage_model"), dict)
+    assert isinstance(diagnostics.get("workflow_stage_path"), dict)
 
     meta = llm_debug.get("prompt_introspection_fastpath") or {}
     assert meta.get("enabled") is True
