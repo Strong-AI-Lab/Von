@@ -1661,6 +1661,33 @@
             }
         },
         {
+            "name": "turn_execution_namespace_coverage_report",
+            "description": "Report namespace-by-namespace turn execution coverage, request-id overlap, and gap signals so benchmark readiness can be validated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "limit_namespaces": {
+                        "type": "integer"
+                    },
+                    "limit_sessions_per_namespace": {
+                        "type": "integer"
+                    },
+                    "limit_projected_records_per_namespace": {
+                        "type": "integer"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Build namespace-level coverage metrics for turn execution instrumentation in chat history and turn_execution_records projection."
+            }
+        },
+        {
             "name": "turn_execution_search_failures",
             "description": "Mine turn execution records for mutation-not-executed, blocked writes, inconclusive postconditions, and false completion claims.",
             "inputSchema": {

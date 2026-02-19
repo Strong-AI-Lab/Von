@@ -97,6 +97,7 @@ VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES: tuple[str, ...] = (
     "turn_execution_search_failures",
     "turn_execution_build_benchmark",
     "turn_execution_backfill_from_chat_history",
+    "turn_execution_namespace_coverage_report",
     "update_concept",
     "update_task_status",
     "update_text_relation",

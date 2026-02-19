@@ -11,6 +11,7 @@ def test_internal_mcp_catalogue_builds_and_includes_relationship_tools():
     assert "turn_execution_search_failures" in methods
     assert "turn_execution_build_benchmark" in methods
     assert "turn_execution_backfill_from_chat_history" in methods
+    assert "turn_execution_namespace_coverage_report" in methods
 
 
 def test_internal_mcp_gmail_list_messages_accepts_max_results_aliases():

@@ -5345,6 +5345,30 @@ def _turn_execution_backfill_from_chat_history(**kwargs):
     )
 
 
+def _turn_execution_namespace_coverage_report(**kwargs):
+    from ...services.turn_execution_record_service import (
+        build_turn_execution_namespace_coverage_report,
+    )
+
+    result = build_turn_execution_namespace_coverage_report(
+        namespace=kwargs.get("namespace"),
+        limit_namespaces=kwargs.get("limit_namespaces", 25),
+        limit_sessions_per_namespace=kwargs.get("limit_sessions_per_namespace", 200),
+        limit_projected_records_per_namespace=kwargs.get(
+            "limit_projected_records_per_namespace", 10000
+        ),
+    )
+    if not isinstance(result, dict):
+        return result
+    if not result.get("success", False):
+        return result
+    return _with_rag_provenance(
+        payload=result,
+        item_kind="turn_execution_namespace_coverage_report",
+        source_system="mongo.turn_execution_records",
+    )
+
+
 def _turn_execution_list(**kwargs):
     forwarded = dict(kwargs)
     forwarded["collection"] = "turn_execution_records"
@@ -11984,6 +12008,30 @@ def build_default_catalogue() -> MethodCatalogue:
             timeout_sec=60.0,
             description=(
                 "Rebuild turn_execution_records from historical chat messages with llm_debug_data.turn_execution_record payloads."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_namespace_coverage_report",
+            handler=_turn_execution_namespace_coverage_report,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "limit_namespaces": (int,),
+                    "limit_sessions_per_namespace": (int,),
+                    "limit_projected_records_per_namespace": (int,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build namespace-level coverage metrics for turn execution instrumentation "
+                    "in chat history and turn_execution_records projection."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Report namespace-by-namespace turn execution coverage, request-id overlap, "
+                "and gap signals so benchmark readiness can be validated."
             ),
         ),
         MethodDefinition(

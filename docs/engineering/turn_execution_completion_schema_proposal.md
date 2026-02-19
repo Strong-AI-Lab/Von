@@ -250,6 +250,10 @@ The existing `message.direct_created` binding to `#V#chat_assistant_workflow` sh
 - Replays assistant-message `llm_debug_data.turn_execution_record` payloads into `turn_execution_records`.
 - Namespace-scoped and dry-run by default for safe backfill planning.
 
+6. `turn_execution_namespace_coverage_report` (implemented)
+- Produces namespace-level instrumentation/projection coverage, request-id overlap, and gap signals.
+- Intended to validate benchmark readiness before interpreting failure-rate metrics.
+
 ### 6.2 Why this was needed
 
 - `search_knowledge_base` is text-centric and not deterministic for structured failure triage.

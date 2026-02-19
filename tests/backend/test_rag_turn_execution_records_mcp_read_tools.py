@@ -549,3 +549,39 @@ def test_turn_execution_backfill_wrapper_returns_provenance(monkeypatch):
     assert result["namespace"] == "#V#user@org"
     assert result["candidate_records"] == 3
     assert result["provenance"]["item_kind"] == "turn_execution_backfill_report"
+
+
+def test_turn_execution_namespace_coverage_wrapper_returns_provenance(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.build_turn_execution_namespace_coverage_report",
+        lambda **kwargs: {
+            "success": True,
+            "namespace_filter": kwargs.get("namespace"),
+            "namespaces_scanned": 1,
+            "coverage_by_namespace": [
+                {
+                    "namespace": "#V#user@org",
+                    "assistant_messages_scanned": 10,
+                    "assistant_messages_with_turn_execution_record": 4,
+                    "projected_records_total": 4,
+                }
+            ],
+        },
+    )
+
+    result = cat._turn_execution_namespace_coverage_report(
+        namespace="#V#user@org",
+        limit_namespaces=5,
+        limit_sessions_per_namespace=50,
+        limit_projected_records_per_namespace=500,
+    )
+
+    assert result["success"] is True
+    assert result["namespace_filter"] == "#V#user@org"
+    assert result["namespaces_scanned"] == 1
+    assert (
+        result["provenance"]["item_kind"]
+        == "turn_execution_namespace_coverage_report"
+    )

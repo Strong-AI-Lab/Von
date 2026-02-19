@@ -116,6 +116,9 @@ from src.backend.integrations.internal_mcp.catalogue import (
     _turn_execution_search_failures,
 )
 from src.backend.integrations.internal_mcp.catalogue import (
+    _turn_execution_namespace_coverage_report,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
     _renderer_resolve_applicability,
 )
 from src.backend.integrations.internal_mcp.catalogue import _upsert_renderer_profile
@@ -2583,6 +2586,16 @@ async def _handle_turn_execution_backfill_from_chat_history(
     )
 
 
+async def _handle_turn_execution_namespace_coverage_report(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_namespace_coverage_report,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
 # Task management handlers (JVNAUTOSCI-1040)
 async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
     title = arguments.get("title")
@@ -2751,6 +2764,7 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "turn_execution_search_failures": _handle_turn_execution_search_failures,
     "turn_execution_build_benchmark": _handle_turn_execution_build_benchmark,
     "turn_execution_backfill_from_chat_history": _handle_turn_execution_backfill_from_chat_history,
+    "turn_execution_namespace_coverage_report": _handle_turn_execution_namespace_coverage_report,
     "jira_search": _handle_jira_search,
     "jira_get_issue": _handle_jira_get_issue,
     "jira_get_transitions": _handle_jira_get_transitions,

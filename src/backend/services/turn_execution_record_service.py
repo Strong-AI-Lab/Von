@@ -832,6 +832,505 @@ def _normalise_positive_int(
     return max(minimum, min(maximum, parsed))
 
 
+def _get_nested_value(payload: Any, path: str) -> Any:
+    if not isinstance(payload, Mapping):
+        return None
+    current: Any = payload
+    for raw_part in path.split("."):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _safe_percentage(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round((float(numerator) / float(denominator)) * 100.0, 2)
+
+
+def _safe_count_documents(collection: Any, query: Mapping[str, Any]) -> int:
+    if collection is None:
+        return 0
+    if hasattr(collection, "count_documents"):
+        try:
+            return int(collection.count_documents(dict(query)))
+        except Exception:
+            pass
+    try:
+        return sum(1 for _ in collection.find(dict(query), {"_id": 1}))
+    except Exception:
+        return 0
+
+
+def _normalise_timestamp_for_range(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        return _iso_utc(value)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _append_unique_text(
+    target: list[str],
+    seen: set[str],
+    *,
+    value: Any,
+    limit: int,
+) -> None:
+    if len(target) >= limit:
+        return
+    text = _safe_str(value)
+    if not text:
+        return
+    lowered = text.lower()
+    if lowered in seen:
+        return
+    seen.add(lowered)
+    target.append(text)
+
+
+def _collect_namespace_candidates(
+    *,
+    chat_history_coll: Any,
+    turn_records_coll: Any,
+    limit_namespaces: int,
+) -> list[str]:
+    namespace_items: list[str] = []
+    seen: set[str] = set()
+
+    def _collect_from_distinct(collection: Any, field: str) -> None:
+        if collection is None or len(namespace_items) >= limit_namespaces:
+            return
+        if hasattr(collection, "distinct"):
+            try:
+                values = collection.distinct(field)
+            except TypeError:
+                try:
+                    values = collection.distinct(field, {})
+                except Exception:
+                    values = None
+            except Exception:
+                values = None
+            if isinstance(values, list):
+                for raw_value in values:
+                    _append_unique_text(
+                        namespace_items,
+                        seen,
+                        value=raw_value,
+                        limit=limit_namespaces,
+                    )
+                    if len(namespace_items) >= limit_namespaces:
+                        return
+
+    def _collect_from_find(collection: Any, field: str) -> None:
+        if collection is None or len(namespace_items) >= limit_namespaces:
+            return
+        try:
+            cursor = collection.find({}, {field: 1})
+        except Exception:
+            return
+        for doc in cursor:
+            value = _get_nested_value(doc, field)
+            _append_unique_text(
+                namespace_items,
+                seen,
+                value=value,
+                limit=limit_namespaces,
+            )
+            if len(namespace_items) >= limit_namespaces:
+                return
+
+    _collect_from_distinct(chat_history_coll, "namespace")
+    _collect_from_distinct(turn_records_coll, "namespace")
+    if not namespace_items:
+        _collect_from_find(chat_history_coll, "namespace")
+        _collect_from_find(turn_records_coll, "namespace")
+    namespace_items.sort()
+    return namespace_items
+
+
+def build_turn_execution_namespace_coverage_report(
+    *,
+    namespace: str | None = None,
+    limit_namespaces: int = 25,
+    limit_sessions_per_namespace: int = 200,
+    limit_projected_records_per_namespace: int = 10000,
+) -> dict[str, Any]:
+    """Build namespace-level turn execution coverage metrics.
+
+    This report compares assistant-message instrumentation in chat history
+    against projected turn_execution_records so reliability gaps can be
+    quantified before failure-mining benchmarks are interpreted.
+    """
+
+    namespace_filter = _safe_str(namespace)
+    namespaces_limit = _normalise_positive_int(
+        limit_namespaces,
+        default=25,
+        minimum=1,
+        maximum=500,
+    )
+    session_limit = _normalise_positive_int(
+        limit_sessions_per_namespace,
+        default=200,
+        minimum=1,
+        maximum=10000,
+    )
+    projected_limit = _normalise_positive_int(
+        limit_projected_records_per_namespace,
+        default=10000,
+        minimum=1,
+        maximum=200000,
+    )
+
+    db = get_db()
+    if db is None:
+        return {"success": False, "error": "db_unavailable"}
+
+    try:
+        chat_history_coll = db["chat_history"]
+        turn_records_coll = db[TURN_EXECUTION_RECORDS_COLLECTION]
+    except Exception:
+        return {"success": False, "error": "collection_unavailable"}
+
+    if namespace_filter:
+        namespaces = [namespace_filter]
+    else:
+        namespaces = _collect_namespace_candidates(
+            chat_history_coll=chat_history_coll,
+            turn_records_coll=turn_records_coll,
+            limit_namespaces=namespaces_limit,
+        )
+
+    namespace_reports: list[dict[str, Any]] = []
+    aggregate_assistant = 0
+    aggregate_embedded = 0
+    aggregate_debug = 0
+    aggregate_projected = 0
+    aggregate_overlap = 0
+    aggregate_history_request_ids = 0
+    capability_gap_index: dict[str, dict[str, Any]] = {}
+
+    for namespace_value in namespaces[:namespaces_limit]:
+        session_query = {"namespace": namespace_value}
+        session_projection = {
+            "user_id": 1,
+            "session_id": 1,
+            "history.role": 1,
+            "history.timestamp": 1,
+            "history.llm_debug_data": 1,
+        }
+        try:
+            session_cursor = chat_history_coll.find(session_query, session_projection).limit(
+                session_limit
+            )
+        except Exception:
+            session_cursor = []
+
+        sessions_scanned = 0
+        assistant_messages_scanned = 0
+        assistant_messages_with_llm_debug_data = 0
+        assistant_messages_with_request_id = 0
+        assistant_messages_with_turn_execution_record = 0
+        history_request_ids: set[str] = set()
+        earliest_assistant_timestamp: str | None = None
+        latest_assistant_timestamp: str | None = None
+
+        for session_doc in session_cursor:
+            if not isinstance(session_doc, Mapping):
+                continue
+            sessions_scanned += 1
+            history_items = session_doc.get("history")
+            if not isinstance(history_items, list):
+                continue
+
+            for message in history_items:
+                if not isinstance(message, Mapping):
+                    continue
+                if message.get("role") != "assistant":
+                    continue
+                assistant_messages_scanned += 1
+
+                timestamp_value = _normalise_timestamp_for_range(
+                    message.get("timestamp")
+                )
+                if timestamp_value:
+                    if (
+                        earliest_assistant_timestamp is None
+                        or timestamp_value < earliest_assistant_timestamp
+                    ):
+                        earliest_assistant_timestamp = timestamp_value
+                    if (
+                        latest_assistant_timestamp is None
+                        or timestamp_value > latest_assistant_timestamp
+                    ):
+                        latest_assistant_timestamp = timestamp_value
+
+                llm_debug_data = message.get("llm_debug_data")
+                if not isinstance(llm_debug_data, Mapping):
+                    continue
+                assistant_messages_with_llm_debug_data += 1
+
+                debug_request_id = _safe_str(llm_debug_data.get("request_id"))
+                if debug_request_id:
+                    assistant_messages_with_request_id += 1
+                    history_request_ids.add(debug_request_id)
+
+                turn_record = llm_debug_data.get("turn_execution_record")
+                if not isinstance(turn_record, Mapping):
+                    continue
+                assistant_messages_with_turn_execution_record += 1
+
+                record_request_id = _safe_str(turn_record.get("request_id"))
+                if record_request_id:
+                    history_request_ids.add(record_request_id)
+
+        projected_query = {"namespace": namespace_value}
+        projected_records_total = _safe_count_documents(turn_records_coll, projected_query)
+        projected_projection = {
+            "request_id": 1,
+            "created_at_utc": 1,
+            "completion_gate.decision": 1,
+            "workflow_selection.selected_workflow_id": 1,
+        }
+        try:
+            projected_cursor = turn_records_coll.find(
+                projected_query, projected_projection
+            ).limit(projected_limit)
+        except Exception:
+            projected_cursor = []
+
+        projected_records_scanned = 0
+        projected_records_missing_request_id = 0
+        projected_records_missing_decision = 0
+        projected_records_missing_workflow = 0
+        projected_request_ids: set[str] = set()
+        projected_created_min: str | None = None
+        projected_created_max: str | None = None
+
+        for projected_doc in projected_cursor:
+            if not isinstance(projected_doc, Mapping):
+                continue
+            projected_records_scanned += 1
+
+            request_id = _safe_str(projected_doc.get("request_id"))
+            if request_id:
+                projected_request_ids.add(request_id)
+            else:
+                projected_records_missing_request_id += 1
+
+            decision = _safe_str(
+                _get_nested_value(projected_doc, "completion_gate.decision")
+            )
+            if not decision:
+                projected_records_missing_decision += 1
+
+            workflow_id = _safe_str(
+                _get_nested_value(
+                    projected_doc,
+                    "workflow_selection.selected_workflow_id",
+                )
+            )
+            if not workflow_id:
+                projected_records_missing_workflow += 1
+
+            created_at_utc = _normalise_timestamp_for_range(
+                projected_doc.get("created_at_utc")
+            )
+            if created_at_utc:
+                if projected_created_min is None or created_at_utc < projected_created_min:
+                    projected_created_min = created_at_utc
+                if projected_created_max is None or created_at_utc > projected_created_max:
+                    projected_created_max = created_at_utc
+
+        overlap_count = len(history_request_ids.intersection(projected_request_ids))
+        history_request_id_count = len(history_request_ids)
+
+        namespace_gaps: list[dict[str, Any]] = []
+        if assistant_messages_scanned > 0 and assistant_messages_with_turn_execution_record == 0:
+            namespace_gaps.append(
+                {
+                    "gap_id": "no_embedded_turn_execution_record_in_history",
+                    "severity": "high",
+                    "description": (
+                        "Assistant turns exist but none include llm_debug_data.turn_execution_record."
+                    ),
+                }
+            )
+        if assistant_messages_scanned > 0 and projected_records_total == 0:
+            namespace_gaps.append(
+                {
+                    "gap_id": "no_turn_execution_records_projection",
+                    "severity": "high",
+                    "description": (
+                        "No projected turn_execution_records were found for this namespace."
+                    ),
+                }
+            )
+        if history_request_id_count > 0 and overlap_count == 0:
+            namespace_gaps.append(
+                {
+                    "gap_id": "no_request_id_overlap_between_history_and_projection",
+                    "severity": "medium",
+                    "description": (
+                        "History request IDs and projected request IDs did not overlap in the sampled window."
+                    ),
+                }
+            )
+        if projected_records_scanned > 0 and projected_records_missing_decision > 0:
+            namespace_gaps.append(
+                {
+                    "gap_id": "projection_missing_completion_decision",
+                    "severity": "medium",
+                    "description": (
+                        "Some projected records are missing completion_gate.decision."
+                    ),
+                    "missing_count": projected_records_missing_decision,
+                }
+            )
+        if projected_records_scanned > 0 and projected_records_missing_workflow > 0:
+            namespace_gaps.append(
+                {
+                    "gap_id": "projection_missing_selected_workflow_id",
+                    "severity": "low",
+                    "description": (
+                        "Some projected records are missing workflow_selection.selected_workflow_id."
+                    ),
+                    "missing_count": projected_records_missing_workflow,
+                }
+            )
+
+        for gap in namespace_gaps:
+            gap_id = _safe_str(gap.get("gap_id"))
+            if not gap_id:
+                continue
+            bucket = capability_gap_index.setdefault(
+                gap_id,
+                {
+                    "gap_id": gap_id,
+                    "severity": _safe_str(gap.get("severity")) or "medium",
+                    "title": gap_id.replace("_", " "),
+                    "description": _safe_str(gap.get("description")) or "",
+                    "evidence_count": 0,
+                    "namespaces": [],
+                },
+            )
+            bucket["evidence_count"] = int(bucket.get("evidence_count", 0)) + 1
+            namespaces_with_gap = bucket.get("namespaces")
+            if isinstance(namespaces_with_gap, list):
+                if namespace_value not in namespaces_with_gap:
+                    namespaces_with_gap.append(namespace_value)
+
+        namespace_report = {
+            "namespace": namespace_value,
+            "sessions_scanned": sessions_scanned,
+            "assistant_messages_scanned": assistant_messages_scanned,
+            "assistant_messages_with_llm_debug_data": assistant_messages_with_llm_debug_data,
+            "assistant_messages_with_request_id": assistant_messages_with_request_id,
+            "assistant_messages_with_turn_execution_record": (
+                assistant_messages_with_turn_execution_record
+            ),
+            "history_request_id_count": history_request_id_count,
+            "projected_records_total": projected_records_total,
+            "projected_records_scanned": projected_records_scanned,
+            "projected_records_scan_truncated": projected_records_total
+            > projected_records_scanned,
+            "projected_records_missing_request_id": projected_records_missing_request_id,
+            "projected_records_missing_completion_decision": projected_records_missing_decision,
+            "projected_records_missing_selected_workflow_id": projected_records_missing_workflow,
+            "request_id_overlap_count": overlap_count,
+            "assistant_embedded_record_rate_pct": _safe_percentage(
+                assistant_messages_with_turn_execution_record,
+                assistant_messages_scanned,
+            ),
+            "assistant_llm_debug_rate_pct": _safe_percentage(
+                assistant_messages_with_llm_debug_data,
+                assistant_messages_scanned,
+            ),
+            "request_id_overlap_rate_pct": _safe_percentage(
+                overlap_count,
+                history_request_id_count,
+            ),
+            "assistant_message_timestamp_range": {
+                "earliest": earliest_assistant_timestamp,
+                "latest": latest_assistant_timestamp,
+            },
+            "projected_created_at_utc_range": {
+                "earliest": projected_created_min,
+                "latest": projected_created_max,
+            },
+            "gap_signals": namespace_gaps,
+        }
+        namespace_reports.append(namespace_report)
+
+        aggregate_assistant += assistant_messages_scanned
+        aggregate_embedded += assistant_messages_with_turn_execution_record
+        aggregate_debug += assistant_messages_with_llm_debug_data
+        aggregate_projected += projected_records_total
+        aggregate_overlap += overlap_count
+        aggregate_history_request_ids += history_request_id_count
+
+    capability_gaps = sorted(
+        capability_gap_index.values(),
+        key=lambda item: (
+            {"high": 0, "medium": 1, "low": 2}.get(
+                _safe_str(item.get("severity")) or "medium", 3
+            ),
+            -int(item.get("evidence_count", 0)),
+            _safe_str(item.get("gap_id")) or "",
+        ),
+    )
+
+    if not namespaces and not namespace_filter:
+        capability_gaps.append(
+            {
+                "gap_id": "no_namespaces_found",
+                "severity": "high",
+                "title": "No namespaces found",
+                "description": (
+                    "No namespaces were discovered in chat_history or turn_execution_records."
+                ),
+                "evidence_count": 0,
+                "namespaces": [],
+            }
+        )
+
+    return {
+        "success": True,
+        "generated_at_utc": _iso_utc(),
+        "namespace_filter": namespace_filter,
+        "limit_namespaces": namespaces_limit,
+        "limit_sessions_per_namespace": session_limit,
+        "limit_projected_records_per_namespace": projected_limit,
+        "namespaces_scanned": len(namespace_reports),
+        "coverage_by_namespace": namespace_reports,
+        "aggregate": {
+            "assistant_messages_scanned": aggregate_assistant,
+            "assistant_messages_with_llm_debug_data": aggregate_debug,
+            "assistant_messages_with_turn_execution_record": aggregate_embedded,
+            "projected_records_total": aggregate_projected,
+            "history_request_id_count": aggregate_history_request_ids,
+            "request_id_overlap_count": aggregate_overlap,
+            "assistant_embedded_record_rate_pct": _safe_percentage(
+                aggregate_embedded, aggregate_assistant
+            ),
+            "assistant_llm_debug_rate_pct": _safe_percentage(
+                aggregate_debug, aggregate_assistant
+            ),
+            "request_id_overlap_rate_pct": _safe_percentage(
+                aggregate_overlap, aggregate_history_request_ids
+            ),
+        },
+        "capability_gaps": capability_gaps,
+    }
+
+
 def backfill_turn_execution_records_from_chat_history(
     *,
     namespace: str,

@@ -95,6 +95,7 @@ def test_turn_execution_tools_are_exposed_on_vontology_stdio_surface() -> None:
         "turn_execution_search_failures",
         "turn_execution_build_benchmark",
         "turn_execution_backfill_from_chat_history",
+        "turn_execution_namespace_coverage_report",
     }
     assert expected.issubset(names)
     for tool_name in expected:
