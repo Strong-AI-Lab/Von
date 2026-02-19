@@ -4,6 +4,7 @@ from typing import Any, cast
 from src.backend.integrations.internal_mcp.tool_contract_registry import (
     JIRA_FAMILY_SERVER_EXPOSED_TOOL_NAMES,
     SURFACE_JIRA_FAMILY_SERVER,
+    SURFACE_VONTOLOGY_STDIO,
     SURFACE_VONRAG_STDIO,
     get_canonical_tool_registry,
     get_surface_tool_payloads,
@@ -82,3 +83,20 @@ def test_jira_family_surface_is_sourced_from_canonical_registry() -> None:
     for name in names:
         assert name in registry
         assert registry[name].internal_method_name == name
+
+
+def test_turn_execution_tools_are_exposed_on_vontology_stdio_surface() -> None:
+    payloads = get_surface_tool_payloads(SURFACE_VONTOLOGY_STDIO)
+    names = {item["name"] for item in payloads}
+
+    expected = {
+        "turn_execution_list",
+        "turn_execution_get",
+        "turn_execution_search_failures",
+        "turn_execution_build_benchmark",
+        "turn_execution_backfill_from_chat_history",
+        "turn_execution_namespace_coverage_report",
+    }
+    assert expected.issubset(names)
+    for tool_name in expected:
+        assert tool_name in mcp_stdio_server._TOOL_HANDLERS

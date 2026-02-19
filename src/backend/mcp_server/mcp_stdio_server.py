@@ -105,6 +105,20 @@ from src.backend.integrations.internal_mcp.catalogue import _jira_transition_iss
 from src.backend.integrations.internal_mcp.catalogue import _jira_update_issue
 from src.backend.integrations.internal_mcp.catalogue import _remove_relationship
 from src.backend.integrations.internal_mcp.catalogue import (
+    _turn_execution_build_benchmark,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _turn_execution_backfill_from_chat_history,
+)
+from src.backend.integrations.internal_mcp.catalogue import _turn_execution_get
+from src.backend.integrations.internal_mcp.catalogue import _turn_execution_list
+from src.backend.integrations.internal_mcp.catalogue import (
+    _turn_execution_search_failures,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
+    _turn_execution_namespace_coverage_report,
+)
+from src.backend.integrations.internal_mcp.catalogue import (
     _renderer_resolve_applicability,
 )
 from src.backend.integrations.internal_mcp.catalogue import _upsert_renderer_profile
@@ -2526,6 +2540,62 @@ async def _handle_workflow_trigger_schedule(
     )
 
 
+async def _handle_turn_execution_list(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_list,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
+async def _handle_turn_execution_get(arguments: dict[str, Any]) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_get,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
+async def _handle_turn_execution_search_failures(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_search_failures,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
+async def _handle_turn_execution_build_benchmark(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_build_benchmark,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
+async def _handle_turn_execution_backfill_from_chat_history(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_backfill_from_chat_history,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
+async def _handle_turn_execution_namespace_coverage_report(
+    arguments: dict[str, Any],
+) -> list[TextContent]:
+    return _run_catalogue_proxy_handler(
+        _turn_execution_namespace_coverage_report,
+        arguments,
+        tool_family_label="TurnExecution",
+    )
+
+
 # Task management handlers (JVNAUTOSCI-1040)
 async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
     title = arguments.get("title")
@@ -2689,6 +2759,12 @@ _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]
     "merge_concepts": _handle_merge_concepts,
     "update_concept": _handle_update_concept,
     "search_knowledge_base": _handle_search_knowledge_base,
+    "turn_execution_list": _handle_turn_execution_list,
+    "turn_execution_get": _handle_turn_execution_get,
+    "turn_execution_search_failures": _handle_turn_execution_search_failures,
+    "turn_execution_build_benchmark": _handle_turn_execution_build_benchmark,
+    "turn_execution_backfill_from_chat_history": _handle_turn_execution_backfill_from_chat_history,
+    "turn_execution_namespace_coverage_report": _handle_turn_execution_namespace_coverage_report,
     "jira_search": _handle_jira_search,
     "jira_get_issue": _handle_jira_get_issue,
     "jira_get_transitions": _handle_jira_get_transitions,

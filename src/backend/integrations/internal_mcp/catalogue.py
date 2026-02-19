@@ -25,7 +25,7 @@ See JVNAUTOSCI-1044 for an example of namespace rejection breaking tool calls.
 
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any, List, Mapping, Sequence
 
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema, make_error_response
@@ -33,6 +33,12 @@ from .workflow_surface_capabilities import (
     build_workflow_surface_capability_matrix,
 )
 from src.backend.services.prompt_template_service import PromptTemplateService
+
+
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _get_internal_mcp_chat_orchestrator_cls():
@@ -4824,6 +4830,658 @@ def _with_rag_provenance(*, payload: dict, item_kind: str, source_system: str) -
     return result
 
 
+def _classify_turn_execution_failure_mode(item: dict[str, Any]) -> str:
+    """Classify a turn execution record into a reliability failure mode."""
+
+    decision_raw = item.get("decision")
+    decision = str(decision_raw).strip().lower() if decision_raw is not None else ""
+
+    unresolved_effect_count_raw = item.get("unresolved_effect_count")
+    try:
+        unresolved_effect_count = int(unresolved_effect_count_raw or 0)
+    except Exception:
+        unresolved_effect_count = 0
+
+    safe_to_claim_completion = bool(item.get("safe_to_claim_completion", True))
+
+    critic_summary_raw = item.get("critic_summary")
+    critic_summary: dict[str, Any]
+    if isinstance(critic_summary_raw, dict):
+        critic_summary = critic_summary_raw
+    else:
+        critic_summary = {}
+    try:
+        not_verified_count = int(critic_summary.get("not_verified_count") or 0)
+    except Exception:
+        not_verified_count = 0
+    try:
+        inconclusive_count = int(critic_summary.get("inconclusive_count") or 0)
+    except Exception:
+        inconclusive_count = 0
+    try:
+        error_count = int(critic_summary.get("error_count") or 0)
+    except Exception:
+        error_count = 0
+
+    completion_claim_detected = bool(item.get("completion_claim_detected", False))
+    completion_claim_validated = bool(item.get("completion_claim_validated", True))
+
+    if decision == "failed":
+        return "mutation_failed_or_blocked"
+    if decision == "escalation_required":
+        return "mutation_not_executed"
+    if decision == "partial":
+        if unresolved_effect_count > 0:
+            return "unresolved_required_effects"
+        if (not_verified_count + inconclusive_count + error_count) > 0:
+            return "postcondition_inconclusive"
+        return "partial_unspecified"
+    if decision == "completed":
+        if not safe_to_claim_completion:
+            return "false_completion_gate_state"
+        if unresolved_effect_count > 0:
+            return "false_completion_claim"
+        if (not_verified_count + inconclusive_count + error_count) > 0:
+            return "false_completion_claim"
+        if completion_claim_detected and not completion_claim_validated:
+            return "unvalidated_completion_claim"
+        return "completed_verified"
+    if completion_claim_detected and not completion_claim_validated:
+        return "unvalidated_completion_claim"
+    return "unknown"
+
+
+def _is_likely_failure_to_act(failure_mode: str) -> bool:
+    return failure_mode in {
+        "mutation_failed_or_blocked",
+        "mutation_not_executed",
+        "unresolved_required_effects",
+        "postcondition_inconclusive",
+        "false_completion_gate_state",
+        "false_completion_claim",
+        "unvalidated_completion_claim",
+        "partial_unspecified",
+    }
+
+
+def _derive_turn_execution_failure_recommendations(
+    failure_mode_counts: dict[str, int],
+) -> list[str]:
+    recommendations: list[str] = []
+    mutation_not_executed = int(failure_mode_counts.get("mutation_not_executed", 0))
+    failed_or_blocked = int(failure_mode_counts.get("mutation_failed_or_blocked", 0))
+    verification_issues = (
+        int(failure_mode_counts.get("postcondition_inconclusive", 0))
+        + int(failure_mode_counts.get("unresolved_required_effects", 0))
+    )
+    false_completion = int(failure_mode_counts.get("false_completion_claim", 0))
+
+    if mutation_not_executed > 0:
+        recommendations.append(
+            "Increase selector pressure for mutation-intent turns so they route through #V#conversation_turn_execution_workflow and execute write-capable tools."
+        )
+    if failed_or_blocked > 0:
+        recommendations.append(
+            "Capture and surface write-tool failure causes (blocked/permissions/tool errors) and attach deterministic recovery steps."
+        )
+    if verification_issues > 0:
+        recommendations.append(
+            "Strengthen postcondition checks to require state re-query verification before completion is allowed."
+        )
+    if false_completion > 0:
+        recommendations.append(
+            "Tighten completion-gate invariants so completed decisions are impossible while unresolved effects or unverified checks remain."
+        )
+    if not recommendations:
+        recommendations.append(
+            "No dominant failure pattern detected in the sampled window. Expand filters or time range to gather more evidence."
+        )
+    return recommendations
+
+
+def _turn_execution_failure_mode_priority(failure_mode: str) -> int:
+    order = {
+        "false_completion_claim": 0,
+        "false_completion_gate_state": 1,
+        "mutation_not_executed": 2,
+        "mutation_failed_or_blocked": 3,
+        "unresolved_required_effects": 4,
+        "postcondition_inconclusive": 5,
+        "unvalidated_completion_claim": 6,
+        "partial_unspecified": 7,
+        "completed_verified": 8,
+        "unknown": 9,
+    }
+    return order.get(failure_mode, 99)
+
+
+def _turn_execution_failure_mode_confidence(failure_mode: str) -> str:
+    if failure_mode in {
+        "false_completion_claim",
+        "false_completion_gate_state",
+        "mutation_not_executed",
+        "mutation_failed_or_blocked",
+    }:
+        return "high"
+    if failure_mode in {
+        "unresolved_required_effects",
+        "postcondition_inconclusive",
+        "unvalidated_completion_claim",
+        "partial_unspecified",
+    }:
+        return "medium"
+    return "low"
+
+
+def _turn_execution_failure_mode_expected_action(failure_mode: str) -> str:
+    if failure_mode in {"mutation_not_executed", "mutation_failed_or_blocked"}:
+        return (
+            "Attempt and complete the required mutation tools, then verify state changes."
+        )
+    if failure_mode in {"unresolved_required_effects", "postcondition_inconclusive"}:
+        return "Run deterministic postcondition checks and require verified satisfied status."
+    if failure_mode in {"false_completion_claim", "false_completion_gate_state"}:
+        return "Block completion claims until required effects and checks are fully satisfied."
+    if failure_mode == "unvalidated_completion_claim":
+        return "Validate completion claims against execution evidence before narrating success."
+    return "Preserve deterministic execution and verification evidence for this turn."
+
+
+def _turn_execution_failure_mode_observed_action(item: Mapping[str, Any]) -> str:
+    decision = item.get("decision")
+    decision_text = str(decision).strip() if isinstance(decision, str) else "unknown"
+    unresolved = int(item.get("unresolved_effect_count") or 0)
+    safe_completion = item.get("safe_to_claim_completion")
+    requires_follow_up = bool(item.get("requires_follow_up"))
+
+    return (
+        f"decision={decision_text}; unresolved_effect_count={unresolved}; "
+        f"safe_to_claim_completion={safe_completion}; requires_follow_up={requires_follow_up}"
+    )
+
+
+def _build_turn_execution_case_id(request_id: Any, index: int) -> str:
+    if isinstance(request_id, str) and request_id.strip():
+        cleaned_chars: list[str] = []
+        for char in request_id.strip():
+            if char.isalnum() or char in {"_", "-"}:
+                cleaned_chars.append(char)
+            else:
+                cleaned_chars.append("_")
+        token = "".join(cleaned_chars).strip("_")
+        if token:
+            return f"turn_exec_{token}"
+    return f"turn_exec_case_{index:03d}"
+
+
+def _build_turn_execution_replay_case(
+    item: Mapping[str, Any],
+    *,
+    index: int,
+) -> dict[str, Any]:
+    failure_mode = (
+        str(item.get("failure_mode")).strip()
+        if isinstance(item.get("failure_mode"), str)
+        else "unknown"
+    )
+    request_id = item.get("request_id")
+    return {
+        "case_id": _build_turn_execution_case_id(request_id, index),
+        "request_id": request_id,
+        "session_id": item.get("chat_session_id"),
+        "created_at_utc": item.get("created_at_utc"),
+        "workflow_id": item.get("selected_workflow_id"),
+        "failure_mode": failure_mode,
+        "confidence": _turn_execution_failure_mode_confidence(failure_mode),
+        "expected_action": _turn_execution_failure_mode_expected_action(failure_mode),
+        "observed_action": _turn_execution_failure_mode_observed_action(item),
+        "pass_criteria": {
+            "action_attempted": True,
+            "postcondition_satisfied": True,
+            "no_false_success": True,
+        },
+        "evidence": {
+            "decision": item.get("decision"),
+            "decision_reason": item.get("decision_reason"),
+            "requires_follow_up": item.get("requires_follow_up"),
+            "safe_to_claim_completion": item.get("safe_to_claim_completion"),
+            "unresolved_effect_count": item.get("unresolved_effect_count"),
+            "blocking_effect_ids": (
+                item.get("blocking_effect_ids")
+                if isinstance(item.get("blocking_effect_ids"), list)
+                else []
+            ),
+            "prompt_preview": item.get("prompt_preview"),
+        },
+    }
+
+
+def _derive_turn_execution_capability_gaps(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    failure_mode_counts: Mapping[str, int],
+) -> list[dict[str, Any]]:
+    gaps: list[dict[str, Any]] = []
+
+    if not items:
+        gaps.append(
+            {
+                "gap_id": "no_turn_execution_records",
+                "title": "No turn execution records found in selected window",
+                "evidence_count": 0,
+                "severity": "high",
+                "description": (
+                    "Benchmark cannot evaluate failure-to-act rates because no "
+                    "turn_execution_records are available for the selected namespace "
+                    "and filters."
+                ),
+            }
+        )
+        return gaps
+
+    missing_request_id_count = 0
+    missing_workflow_selection_count = 0
+    missing_prompt_preview_count = 0
+    for item in items:
+        request_id = item.get("request_id")
+        if not isinstance(request_id, str) or not request_id.strip():
+            missing_request_id_count += 1
+        selected_workflow_id = item.get("selected_workflow_id")
+        if not isinstance(selected_workflow_id, str) or not selected_workflow_id.strip():
+            missing_workflow_selection_count += 1
+        prompt_preview = item.get("prompt_preview")
+        if not isinstance(prompt_preview, str) or not prompt_preview.strip():
+            missing_prompt_preview_count += 1
+
+    if missing_request_id_count > 0:
+        gaps.append(
+            {
+                "gap_id": "missing_request_id",
+                "title": "Turn execution records missing request_id",
+                "evidence_count": missing_request_id_count,
+                "severity": "high",
+                "description": (
+                    "Some turn execution records cannot be joined to replay cases because "
+                    "request_id is absent."
+                ),
+            }
+        )
+    if missing_workflow_selection_count > 0:
+        gaps.append(
+            {
+                "gap_id": "missing_workflow_selection",
+                "title": "Turn execution records missing selected_workflow_id",
+                "evidence_count": missing_workflow_selection_count,
+                "severity": "medium",
+                "description": (
+                    "Workflow routing metadata is incomplete for part of the corpus, "
+                    "which weakens per-workflow reliability breakdowns."
+                ),
+            }
+        )
+    if missing_prompt_preview_count > 0:
+        gaps.append(
+            {
+                "gap_id": "missing_prompt_preview",
+                "title": "Turn execution records missing prompt preview",
+                "evidence_count": missing_prompt_preview_count,
+                "severity": "low",
+                "description": (
+                    "Prompt previews are absent for some records, reducing triage readability."
+                ),
+            }
+        )
+
+    false_success_evidence = int(
+        failure_mode_counts.get("false_completion_claim", 0)
+    ) + int(failure_mode_counts.get("false_completion_gate_state", 0))
+    if false_success_evidence > 0:
+        gaps.append(
+            {
+                "gap_id": "false_success_regressions",
+                "title": "False-success completion signals still present",
+                "evidence_count": false_success_evidence,
+                "severity": "high",
+                "description": (
+                    "At least one turn indicates completion was claimed while execution "
+                    "evidence remained unresolved."
+                ),
+            }
+        )
+
+    unknown_failures = int(failure_mode_counts.get("unknown", 0))
+    if unknown_failures > 0:
+        gaps.append(
+            {
+                "gap_id": "unknown_failure_mode",
+                "title": "Unclassifiable turn execution outcomes",
+                "evidence_count": unknown_failures,
+                "severity": "medium",
+                "description": (
+                    "Some records do not fit current failure-mode taxonomy and should "
+                    "be reviewed for schema or classifier extension."
+                ),
+            }
+        )
+
+    return gaps
+
+
+def _format_turn_execution_rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round((float(numerator) / float(denominator)) * 100.0, 2)
+
+
+def _turn_execution_build_benchmark(**kwargs):
+    include_completed = bool(kwargs.get("include_completed", True))
+    max_cases_raw = kwargs.get("max_cases")
+    max_cases = 25
+    if isinstance(max_cases_raw, int):
+        max_cases = max(1, min(200, max_cases_raw))
+
+    forwarded = dict(kwargs)
+    forwarded["include_completed"] = include_completed
+    result = _turn_execution_search_failures(**forwarded)
+    if not isinstance(result, dict):
+        return result
+    if not result.get("success", False):
+        return result
+
+    raw_items = result.get("items")
+    items = [dict(item) for item in raw_items] if isinstance(raw_items, list) else []
+    sorted_items = sorted(
+        items,
+        key=lambda item: (
+            _turn_execution_failure_mode_priority(
+                str(item.get("failure_mode"))
+                if isinstance(item.get("failure_mode"), str)
+                else "unknown"
+            ),
+            str(item.get("request_id") or ""),
+            str(item.get("created_at_utc") or ""),
+        ),
+    )
+
+    likely_items = [
+        item for item in sorted_items if bool(item.get("likely_failure_to_act", False))
+    ]
+    selected_cases = likely_items[:max_cases]
+
+    replay_cases: list[dict[str, Any]] = []
+    for idx, item in enumerate(selected_cases, start=1):
+        replay_cases.append(_build_turn_execution_replay_case(item, index=idx))
+
+    workflow_counts: dict[str, int] = {}
+    workflow_failure_counts: dict[str, int] = {}
+    for item in sorted_items:
+        workflow_id = item.get("selected_workflow_id")
+        workflow_key = (
+            workflow_id.strip()
+            if isinstance(workflow_id, str) and workflow_id.strip()
+            else "unknown"
+        )
+        workflow_counts[workflow_key] = workflow_counts.get(workflow_key, 0) + 1
+        if bool(item.get("likely_failure_to_act", False)):
+            workflow_failure_counts[workflow_key] = (
+                workflow_failure_counts.get(workflow_key, 0) + 1
+            )
+
+    scanned_count = len(sorted_items)
+    likely_failure_count = len(likely_items)
+    false_success_count = sum(
+        1
+        for item in sorted_items
+        if item.get("failure_mode")
+        in {"false_completion_claim", "false_completion_gate_state"}
+    )
+    unresolved_follow_up_count = sum(
+        1 for item in sorted_items if bool(item.get("requires_follow_up", False))
+    )
+
+    failure_mode_counts: dict[str, int] = {}
+    failure_mode_counts_raw = result.get("failure_mode_counts")
+    if isinstance(failure_mode_counts_raw, dict):
+        for key, value in failure_mode_counts_raw.items():
+            key_text = str(key).strip() or "unknown"
+            try:
+                failure_mode_counts[key_text] = int(value)
+            except Exception:
+                failure_mode_counts[key_text] = 0
+    payload = {
+        "collection": "turn_execution_records",
+        "benchmark_generated_at_utc": _utc_now_iso(),
+        "filters": {
+            "namespace": kwargs.get("namespace"),
+            "limit": kwargs.get("limit"),
+            "offset": kwargs.get("offset"),
+            "decision": kwargs.get("decision"),
+            "decisions": kwargs.get("decisions"),
+            "workflow_id": kwargs.get("workflow_id"),
+            "requires_follow_up": kwargs.get("requires_follow_up"),
+            "prompt_contains": kwargs.get("prompt_contains"),
+            "from_utc": kwargs.get("from_utc"),
+            "to_utc": kwargs.get("to_utc"),
+            "include_completed": include_completed,
+            "max_cases": max_cases,
+        },
+        "metrics": {
+            "scanned_count": scanned_count,
+            "likely_failure_count": likely_failure_count,
+            "likely_failure_rate_pct": _format_turn_execution_rate(
+                likely_failure_count, scanned_count
+            ),
+            "false_success_count": false_success_count,
+            "false_success_rate_pct": _format_turn_execution_rate(
+                false_success_count, scanned_count
+            ),
+            "unresolved_follow_up_count": unresolved_follow_up_count,
+            "unresolved_follow_up_rate_pct": _format_turn_execution_rate(
+                unresolved_follow_up_count, scanned_count
+            ),
+            "failure_mode_counts": failure_mode_counts,
+            "decision_counts": (
+                result.get("decision_counts")
+                if isinstance(result.get("decision_counts"), dict)
+                else {}
+            ),
+            "workflow_counts": workflow_counts,
+            "workflow_failure_counts": workflow_failure_counts,
+        },
+        "seeded_cases": replay_cases,
+        "replay_cases": replay_cases,
+        "capability_gaps": _derive_turn_execution_capability_gaps(
+            sorted_items,
+            failure_mode_counts=failure_mode_counts,
+        ),
+        "recommendations": (
+            result.get("recommendations")
+            if isinstance(result.get("recommendations"), list)
+            else _derive_turn_execution_failure_recommendations(failure_mode_counts)
+        ),
+        "effective_namespace": result.get("effective_namespace"),
+        "effective_namespace_source": result.get("effective_namespace_source"),
+        "namespace": result.get("namespace"),
+        "namespace_source": result.get("namespace_source"),
+        "namespace_resolution_note": result.get("namespace_resolution_note"),
+        "success": True,
+    }
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="turn_execution_benchmark_report",
+        source_system="mongo.turn_execution_records",
+    )
+
+
+def _turn_execution_backfill_from_chat_history(**kwargs):
+    from ...services.turn_execution_record_service import (
+        backfill_turn_execution_records_from_chat_history,
+    )
+
+    namespace = kwargs.get("namespace")
+    if not isinstance(namespace, str) or not namespace.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: namespace",
+            details={"missing": ["namespace"]},
+            suggestions=[
+                "Provide namespace to scope backfill (for example #V#user@organisation)"
+            ],
+        )
+
+    result = backfill_turn_execution_records_from_chat_history(
+        namespace=namespace.strip(),
+        limit_sessions=kwargs.get("limit_sessions", 500),
+        dry_run=kwargs.get("dry_run", True),
+        synthesise_missing_records=kwargs.get("synthesise_missing_records", True),
+    )
+    if not isinstance(result, dict):
+        return result
+    if not result.get("success", False):
+        return result
+    return _with_rag_provenance(
+        payload=result,
+        item_kind="turn_execution_backfill_report",
+        source_system="mongo.turn_execution_records",
+    )
+
+
+def _turn_execution_namespace_coverage_report(**kwargs):
+    from ...services.turn_execution_record_service import (
+        build_turn_execution_namespace_coverage_report,
+    )
+
+    result = build_turn_execution_namespace_coverage_report(
+        namespace=kwargs.get("namespace"),
+        limit_namespaces=kwargs.get("limit_namespaces", 25),
+        limit_sessions_per_namespace=kwargs.get("limit_sessions_per_namespace", 200),
+        limit_projected_records_per_namespace=kwargs.get(
+            "limit_projected_records_per_namespace", 10000
+        ),
+    )
+    if not isinstance(result, dict):
+        return result
+    if not result.get("success", False):
+        return result
+    return _with_rag_provenance(
+        payload=result,
+        item_kind="turn_execution_namespace_coverage_report",
+        source_system="mongo.turn_execution_records",
+    )
+
+
+def _turn_execution_list(**kwargs):
+    forwarded = dict(kwargs)
+    forwarded["collection"] = "turn_execution_records"
+    return _rag_list_indexed(**forwarded)
+
+
+def _turn_execution_get(**kwargs):
+    request_id = kwargs.get("request_id")
+    session_id = kwargs.get("session_id")
+    target = request_id if request_id is not None else session_id
+    if not isinstance(target, str) or not target.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: request_id",
+            details={"missing": ["request_id"]},
+            suggestions=["Provide request_id (or session_id alias)"],
+        )
+    forwarded = dict(kwargs)
+    forwarded["collection"] = "turn_execution_records"
+    forwarded["session_id"] = target.strip()
+    return _rag_get_item(**forwarded)
+
+
+def _turn_execution_search_failures(**kwargs):
+    include_completed = bool(kwargs.get("include_completed", False))
+    forwarded = dict(kwargs)
+    forwarded["collection"] = "turn_execution_records"
+
+    # Failure search defaults to follow-up-required records unless explicitly
+    # overridden by caller-provided filters.
+    if (
+        not include_completed
+        and "requires_follow_up" not in forwarded
+        and "decision" not in forwarded
+        and "decisions" not in forwarded
+    ):
+        forwarded["requires_follow_up"] = True
+
+    result = _rag_list_indexed(**forwarded)
+    if not isinstance(result, dict):
+        return result
+    if not result.get("success", False):
+        return result
+
+    raw_items = result.get("items")
+    if not isinstance(raw_items, list):
+        raw_items = []
+
+    analysed_items: list[dict[str, Any]] = []
+    failure_mode_counts: dict[str, int] = {}
+    likely_failure_count = 0
+    example_request_ids: list[str] = []
+
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        failure_mode = _classify_turn_execution_failure_mode(item)
+        likely_failure = _is_likely_failure_to_act(failure_mode)
+        item["failure_mode"] = failure_mode
+        item["likely_failure_to_act"] = likely_failure
+
+        if likely_failure and isinstance(item.get("request_id"), str):
+            request_id = item["request_id"].strip()
+            if request_id and request_id not in example_request_ids:
+                example_request_ids.append(request_id)
+
+        if likely_failure:
+            likely_failure_count += 1
+
+        failure_mode_counts[failure_mode] = failure_mode_counts.get(failure_mode, 0) + 1
+        analysed_items.append(item)
+
+    if not include_completed:
+        analysed_items = [
+            item
+            for item in analysed_items
+            if bool(item.get("likely_failure_to_act", False))
+        ]
+
+    payload = {
+        "collection": "turn_execution_records",
+        "items": analysed_items,
+        "returned_count": len(analysed_items),
+        "total": result.get("total"),
+        "limit": result.get("limit"),
+        "offset": result.get("offset"),
+        "decision_counts": (
+            result.get("decision_counts")
+            if isinstance(result.get("decision_counts"), dict)
+            else {}
+        ),
+        "failure_mode_counts": failure_mode_counts,
+        "likely_failure_count": likely_failure_count,
+        "example_request_ids": example_request_ids[:10],
+        "recommendations": _derive_turn_execution_failure_recommendations(
+            failure_mode_counts
+        ),
+        "effective_namespace": result.get("effective_namespace"),
+        "effective_namespace_source": result.get("effective_namespace_source"),
+        "namespace": result.get("namespace"),
+        "namespace_source": result.get("namespace_source"),
+        "namespace_resolution_note": result.get("namespace_resolution_note"),
+        "success": True,
+    }
+    return _with_rag_provenance(
+        payload=payload,
+        item_kind="turn_execution_failure_report",
+        source_system="mongo.turn_execution_records",
+    )
+
+
 def _search_knowledge_base(**kwargs):
     from ...services.rag_service import get_rag_service, RAGBackendUnavailable
 
@@ -6776,6 +7434,13 @@ def _resolve_rag_collection_from_kwargs(kwargs: dict) -> dict[str, object]:
         "text_relation": "vontology_text_relations",
         "text": "vontology_text_relations",
         "vontology_text_relations": "vontology_text_relations",
+        "turn_execution": "turn_execution_records",
+        "turn_execution_record": "turn_execution_records",
+        "turn_execution_records": "turn_execution_records",
+        "execution_record": "turn_execution_records",
+        "execution_records": "turn_execution_records",
+        "turn_record": "turn_execution_records",
+        "turn_records": "turn_execution_records",
     }
     effective = aliases.get(lowered, lowered)
     return {
@@ -6839,6 +7504,25 @@ def _rag_list_collections(**kwargs):
             "get_supported_reason": None,
             "item_kind": "chat_history_session",
             "source_system": "mongo.chat_history",
+        },
+        {
+            "collection": "turn_execution_records",
+            "label": "Turn execution records",
+            "description": (
+                "Assistant turn execution records stored in MongoDB (turn_execution_records). "
+                "Includes workflow selection, required effects, postcondition checks, and completion-gate decisions. "
+                "Use to analyse failed or incomplete action execution across conversations."
+            ),
+            "list_tool": "rag_list_indexed",
+            "get_tool": "rag_get_item",
+            "search_tool": None,
+            "list_supported": True,
+            "get_supported": True,
+            "search_supported": False,
+            "list_supported_reason": None,
+            "get_supported_reason": None,
+            "item_kind": "turn_execution_record",
+            "source_system": "mongo.turn_execution_records",
         },
         {
             "collection": "rag_documents",
@@ -7056,6 +7740,190 @@ def _rag_list_indexed(**kwargs):
             payload=payload,
             item_kind="rag_chat_session_list",
             source_system="mongo.chat_history",
+        )
+
+    if collection == "turn_execution_records":
+        coll = db["turn_execution_records"]
+
+        query: dict[str, Any] = {"namespace": ns}
+
+        decision_values: list[str] = []
+        decision_single = kwargs.get("decision")
+        if isinstance(decision_single, str) and decision_single.strip():
+            decision_values.append(decision_single.strip())
+        decisions_many = kwargs.get("decisions")
+        if isinstance(decisions_many, list):
+            for item in decisions_many:
+                if isinstance(item, str) and item.strip():
+                    decision_values.append(item.strip())
+        if decision_values:
+            unique_decisions: list[str] = []
+            seen_decisions: set[str] = set()
+            for value in decision_values:
+                lowered = value.lower()
+                if lowered in seen_decisions:
+                    continue
+                seen_decisions.add(lowered)
+                unique_decisions.append(value)
+            if len(unique_decisions) == 1:
+                query["completion_gate.decision"] = unique_decisions[0]
+            else:
+                query["completion_gate.decision"] = {"$in": unique_decisions}
+
+        workflow_id = kwargs.get("workflow_id")
+        if isinstance(workflow_id, str) and workflow_id.strip():
+            query["workflow_selection.selected_workflow_id"] = workflow_id.strip()
+
+        requires_follow_up = kwargs.get("requires_follow_up")
+        if isinstance(requires_follow_up, bool):
+            query["completion_gate.requires_follow_up"] = requires_follow_up
+
+        prompt_contains = kwargs.get("prompt_contains")
+        if isinstance(prompt_contains, str) and prompt_contains.strip():
+            query["prompt.preview"] = {
+                "$regex": prompt_contains.strip(),
+                "$options": "i",
+            }
+
+        from_utc = kwargs.get("from_utc")
+        to_utc = kwargs.get("to_utc")
+        created_range: dict[str, str] = {}
+        if isinstance(from_utc, str) and from_utc.strip():
+            created_range["$gte"] = from_utc.strip()
+        if isinstance(to_utc, str) and to_utc.strip():
+            created_range["$lte"] = to_utc.strip()
+        if created_range:
+            query["created_at_utc"] = created_range
+
+        cursor = (
+            coll.find(
+                query,
+                {
+                    "request_id": 1,
+                    "session_id": 1,
+                    "created_at_utc": 1,
+                    "namespace": 1,
+                    "completion_gate": 1,
+                    "required_effects": 1,
+                    "workflow_selection": 1,
+                    "prompt": 1,
+                    "critic": 1,
+                    "final_response": 1,
+                },
+            )
+            .skip(offset)
+            .limit(limit)
+        )
+
+        items: list[dict[str, Any]] = []
+        for doc in cursor:
+            completion_gate = (
+                doc.get("completion_gate") if isinstance(doc.get("completion_gate"), dict) else {}
+            )
+            required_effects = (
+                doc.get("required_effects") if isinstance(doc.get("required_effects"), list) else []
+            )
+            unresolved_effect_count = 0
+            for effect in required_effects:
+                if not isinstance(effect, dict):
+                    continue
+                status = effect.get("status")
+                if isinstance(status, str) and status in {"not_executed", "not_satisfied"}:
+                    unresolved_effect_count += 1
+
+            workflow_selection = (
+                doc.get("workflow_selection")
+                if isinstance(doc.get("workflow_selection"), dict)
+                else {}
+            )
+            prompt_payload = doc.get("prompt") if isinstance(doc.get("prompt"), dict) else {}
+            critic_payload = doc.get("critic") if isinstance(doc.get("critic"), dict) else {}
+            critic_summary = (
+                critic_payload.get("summary")
+                if isinstance(critic_payload.get("summary"), dict)
+                else {}
+            )
+            final_response_payload = (
+                doc.get("final_response")
+                if isinstance(doc.get("final_response"), dict)
+                else {}
+            )
+            blocking_effect_ids_raw = completion_gate.get("blocking_effect_ids")
+            blocking_effect_ids: list[str] = []
+            if isinstance(blocking_effect_ids_raw, list):
+                for effect_id in blocking_effect_ids_raw:
+                    if isinstance(effect_id, str) and effect_id.strip():
+                        blocking_effect_ids.append(effect_id.strip())
+
+            items.append(
+                {
+                    "collection": collection,
+                    "session_id": doc.get("request_id"),
+                    "request_id": doc.get("request_id"),
+                    "chat_session_id": doc.get("session_id"),
+                    "created_at_utc": doc.get("created_at_utc"),
+                    "namespace": doc.get("namespace"),
+                    "decision": completion_gate.get("decision"),
+                    "decision_reason": completion_gate.get("decision_reason"),
+                    "safe_to_claim_completion": completion_gate.get(
+                        "safe_to_claim_completion"
+                    ),
+                    "requires_follow_up": completion_gate.get("requires_follow_up"),
+                    "blocking_effect_ids": blocking_effect_ids,
+                    "required_effect_count": len(required_effects),
+                    "unresolved_effect_count": unresolved_effect_count,
+                    "selected_workflow_id": workflow_selection.get(
+                        "selected_workflow_id"
+                    ),
+                    "selector_verdict": workflow_selection.get("selector_verdict"),
+                    "prompt_preview": prompt_payload.get("preview"),
+                    "completion_claim_detected": final_response_payload.get(
+                        "completion_claim_detected"
+                    ),
+                    "completion_claim_validated": final_response_payload.get(
+                        "completion_claim_validated"
+                    ),
+                    "critic_summary": critic_summary,
+                    "item_kind": "turn_execution_record",
+                    "source_system": "mongo.turn_execution_records",
+                    "namespace_source": ns_report.get("namespace_source"),
+                }
+            )
+
+        total = coll.count_documents(query)
+        decision_counts: dict[str, int] = {}
+        try:
+            decision_pipeline = [
+                {"$match": query},
+                {"$group": {"_id": "$completion_gate.decision", "count": {"$sum": 1}}},
+            ]
+            for row in coll.aggregate(decision_pipeline):
+                key = row.get("_id")
+                if key is None:
+                    key = "unknown"
+                key_text = str(key).strip() or "unknown"
+                decision_counts[key_text] = int(row.get("count") or 0)
+        except Exception:
+            decision_counts = {}
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "decision_counts": decision_counts,
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="turn_execution_record_list",
+            source_system="mongo.turn_execution_records",
         )
 
     if collection == "vontology_text_relations":
@@ -7289,6 +8157,74 @@ def _rag_get_item(**kwargs):
             payload=payload,
             item_kind="rag_chat_session_item",
             source_system="mongo.chat_history",
+        )
+
+    if collection == "turn_execution_records":
+        coll = db["turn_execution_records"]
+        doc = coll.find_one({"request_id": session_id, "namespace": ns})
+        if not doc:
+            return make_error_response(
+                "not_found",
+                f"Turn execution record {session_id} not found",
+                details={"request_id": session_id, "namespace": ns},
+                suggestions=["Check the request_id and namespace"],
+            )
+
+        completion_gate = (
+            doc.get("completion_gate")
+            if isinstance(doc.get("completion_gate"), dict)
+            else {}
+        )
+        workflow_selection = (
+            doc.get("workflow_selection")
+            if isinstance(doc.get("workflow_selection"), dict)
+            else {}
+        )
+        prompt_payload = doc.get("prompt") if isinstance(doc.get("prompt"), dict) else {}
+        required_effects = (
+            doc.get("required_effects") if isinstance(doc.get("required_effects"), list) else []
+        )
+        postcondition_checks = (
+            doc.get("postcondition_checks")
+            if isinstance(doc.get("postcondition_checks"), list)
+            else []
+        )
+        critic_payload = doc.get("critic") if isinstance(doc.get("critic"), dict) else {}
+
+        payload = {
+            "collection": collection,
+            **collection_report,
+            "session_id": doc.get("request_id"),
+            "request_id": doc.get("request_id"),
+            "chat_session_id": doc.get("session_id"),
+            "created_at_utc": doc.get("created_at_utc"),
+            "updated_at_utc": doc.get("updated_at_utc"),
+            "namespace": doc.get("namespace"),
+            "decision": completion_gate.get("decision"),
+            "decision_reason": completion_gate.get("decision_reason"),
+            "safe_to_claim_completion": completion_gate.get(
+                "safe_to_claim_completion"
+            ),
+            "requires_follow_up": completion_gate.get("requires_follow_up"),
+            "blocking_effect_ids": completion_gate.get("blocking_effect_ids"),
+            "selected_workflow_id": workflow_selection.get("selected_workflow_id"),
+            "selector_verdict": workflow_selection.get("selector_verdict"),
+            "prompt_preview": prompt_payload.get("preview"),
+            "required_effects": required_effects,
+            "postcondition_checks": postcondition_checks,
+            "critic": critic_payload,
+            "item_kind": "turn_execution_record",
+            "source_system": "mongo.turn_execution_records",
+            "namespace_source": ns_report.get("namespace_source"),
+            "effective_namespace": ns,
+            "effective_namespace_source": ns_report.get("namespace_source"),
+            **ns_report,
+            "success": True,
+        }
+        return _with_rag_provenance(
+            payload=payload,
+            item_kind="turn_execution_record_item",
+            source_system="mongo.turn_execution_records",
         )
 
     if collection == "vontology_text_relations":
@@ -10942,6 +11878,164 @@ def build_default_catalogue() -> MethodCatalogue:
             output_schema=None,
             category="read",
             description="Get one indexed item (session) with a safe text preview. Respects namespace isolation.",
+        ),
+        MethodDefinition(
+            name="turn_execution_list",
+            handler=_turn_execution_list,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "limit": (int,),
+                    "offset": (int,),
+                    "decision": (str, type(None)),
+                    "decisions": (list,),
+                    "workflow_id": (str, type(None)),
+                    "requires_follow_up": (bool,),
+                    "prompt_contains": (str, type(None)),
+                    "from_utc": (str, type(None)),
+                    "to_utc": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "List turn execution records with structured filters. "
+                    "This is a convenience wrapper over rag_list_indexed(collection='turn_execution_records')."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "List assistant turn execution records (workflow selection, required effects, postcondition checks, completion gate). "
+                "Use for deterministic evidence triage across conversations."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_get",
+            handler=_turn_execution_get,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "request_id": (str, type(None)),
+                    "session_id": (str, type(None)),
+                    "namespace": (str, type(None)),
+                },
+                allow_unknown=True,
+                description=(
+                    "Get one turn execution record by request_id (session_id accepted as alias)."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Fetch a single turn execution record by request_id for detailed failure analysis."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_search_failures",
+            handler=_turn_execution_search_failures,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "limit": (int,),
+                    "offset": (int,),
+                    "decision": (str, type(None)),
+                    "decisions": (list,),
+                    "workflow_id": (str, type(None)),
+                    "requires_follow_up": (bool,),
+                    "prompt_contains": (str, type(None)),
+                    "from_utc": (str, type(None)),
+                    "to_utc": (str, type(None)),
+                    "include_completed": (bool,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Search turn execution records for likely failure-to-act patterns and return aggregated failure modes."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Mine turn execution records for mutation-not-executed, blocked writes, inconclusive postconditions, and false completion claims."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_build_benchmark",
+            handler=_turn_execution_build_benchmark,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "limit": (int,),
+                    "offset": (int,),
+                    "decision": (str, type(None)),
+                    "decisions": (list,),
+                    "workflow_id": (str, type(None)),
+                    "requires_follow_up": (bool,),
+                    "prompt_contains": (str, type(None)),
+                    "from_utc": (str, type(None)),
+                    "to_utc": (str, type(None)),
+                    "include_completed": (bool,),
+                    "max_cases": (int,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build reproducible failure-mining benchmark metrics and replay cases from turn execution records."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Generate corpus-level turn execution reliability metrics, seeded replay cases, and capability-gap signals."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_backfill_from_chat_history",
+            handler=_turn_execution_backfill_from_chat_history,
+            input_schema=Schema(
+                required={"namespace": str},
+                optional={
+                    "limit_sessions": (int,),
+                    "dry_run": (bool,),
+                    "synthesise_missing_records": (bool,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Backfill turn execution projection records from assistant chat history "
+                    "for a specific namespace. Defaults to dry-run mode and enables "
+                    "record synthesis from llm_debug_data when embedded payloads are absent."
+                ),
+            ),
+            output_schema=None,
+            category="write",
+            timeout_sec=60.0,
+            description=(
+                "Rebuild turn_execution_records from historical chat messages with llm_debug_data.turn_execution_record payloads."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_namespace_coverage_report",
+            handler=_turn_execution_namespace_coverage_report,
+            input_schema=Schema(
+                required={},
+                optional={
+                    "namespace": (str, type(None)),
+                    "limit_namespaces": (int,),
+                    "limit_sessions_per_namespace": (int,),
+                    "limit_projected_records_per_namespace": (int,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Build namespace-level coverage metrics for turn execution instrumentation "
+                    "in chat history and turn_execution_records projection."
+                ),
+            ),
+            output_schema=None,
+            category="read",
+            description=(
+                "Report namespace-by-namespace turn execution coverage, request-id overlap, "
+                "and gap signals so benchmark readiness can be validated."
+            ),
         ),
         MethodDefinition(
             name="rag_sync_text_relations",

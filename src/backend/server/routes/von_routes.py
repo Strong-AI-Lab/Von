@@ -13,8 +13,9 @@ import time
 import threading
 import secrets
 import uuid
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any, Mapping, cast
 from src.workflows.onboarding_workflow import run_onboarding_workflow
 from ...languagemodels.llm_interface import get_llm_client, get_active_model_name
 from .settings_routes import get_all_settings_data
@@ -43,6 +44,7 @@ from ...services.display_elements_service import (
     build_canonical_table_payload_from_records,
     build_turn_display_elements,
 )
+from ...services.turn_execution_record_service import build_turn_execution_record
 from ...workflows import (
     CHAT_NARRATION_WORKFLOW_ID,
     WorkflowExecutionTrace,
@@ -1906,6 +1908,110 @@ def _derive_llm_debug_warnings(debug_info: dict) -> list[str]:
     return unique_warnings
 
 
+def _normalise_workflow_routing_payload(
+    workflow_routing: Any,
+) -> dict[str, Any] | None:
+    if workflow_routing is None:
+        return None
+    if isinstance(workflow_routing, Mapping):
+        return {
+            str(key): value
+            for key, value in workflow_routing.items()
+            if isinstance(key, str)
+        }
+    if is_dataclass(workflow_routing) and not isinstance(workflow_routing, type):
+        try:
+            payload = asdict(workflow_routing)
+            if isinstance(payload, dict):
+                return {
+                    str(key): value
+                    for key, value in payload.items()
+                    if isinstance(key, str)
+                }
+        except Exception:
+            return None
+    raw_dict = getattr(workflow_routing, "__dict__", None)
+    if isinstance(raw_dict, dict):
+        return {
+            str(key): value
+            for key, value in raw_dict.items()
+            if isinstance(key, str)
+        }
+    return None
+
+
+def _finalise_llm_debug_info(
+    *,
+    llm_debug_info: dict[str, Any],
+    prompt_text: str | None,
+    response_text: str | None,
+    session_id: str | None,
+    namespace: str | None,
+    user_id: str | None,
+    org_id: str | None,
+    workflow_discovery: dict[str, Any] | None = None,
+    workflow_routing: Any = None,
+) -> dict[str, Any]:
+    if not isinstance(llm_debug_info, dict):
+        return llm_debug_info
+
+    workflow_discovery_payload = workflow_discovery
+    if workflow_discovery_payload is None:
+        raw_discovery = llm_debug_info.get("workflow_discovery")
+        if isinstance(raw_discovery, dict):
+            workflow_discovery_payload = dict(raw_discovery)
+
+    workflow_routing_payload = _normalise_workflow_routing_payload(workflow_routing)
+    if workflow_routing_payload is None:
+        raw_routing = llm_debug_info.get("workflow_routing")
+        workflow_routing_payload = _normalise_workflow_routing_payload(raw_routing)
+
+    try:
+        turn_execution_record = build_turn_execution_record(
+            request_id=llm_debug_info.get("request_id"),
+            session_id=session_id,
+            namespace=namespace,
+            user_id=user_id,
+            org_id=org_id,
+            prompt_text=prompt_text,
+            response_text=(
+                response_text
+                if isinstance(response_text, str)
+                else llm_debug_info.get("response")
+            ),
+            interaction_timestamp_utc=llm_debug_info.get("interaction_timestamp_utc"),
+            workflow_discovery=workflow_discovery_payload,
+            workflow_routing=workflow_routing_payload,
+            tool_invocations=(
+                llm_debug_info.get("tool_invocations")
+                if isinstance(llm_debug_info.get("tool_invocations"), list)
+                else []
+            ),
+            turn_execution_diagnostics=(
+                llm_debug_info.get("turn_execution_diagnostics")
+                if isinstance(llm_debug_info.get("turn_execution_diagnostics"), dict)
+                else None
+            ),
+            aux_llm_calls=(
+                llm_debug_info.get("aux_llm_calls")
+                if isinstance(llm_debug_info.get("aux_llm_calls"), list)
+                else []
+            ),
+        )
+        llm_debug_info["turn_execution_record"] = turn_execution_record
+    except Exception as exc:
+        try:
+            current_app.logger.warning(
+                "[turn_execution_record] Failed to build turn execution record: %s",
+                exc,
+            )
+        except Exception:
+            pass
+
+    llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+    return llm_debug_info
+
+
 _FENCED_CODE_BLOCK_PATTERN = re.compile(
     r"```[\w+\-]*\n.*?(?:```|$)",
     flags=re.DOTALL,
@@ -3092,12 +3198,6 @@ def _maybe_handle_prompt_introspection_fastpath(
             chat_history_service.add_message_to_history(
                 history_user_id, session_id, tool_msg
             )
-    if history_user_id:
-        chat_history_service.add_message_to_history(
-            history_user_id,
-            session_id,
-            {"role": "assistant", "content": response_text},
-        )
 
     current_app.config["CONTEXT"] = _limit_context_size(
         current_app.config.get("CONTEXT", []), max_messages=20
@@ -3119,6 +3219,7 @@ def _maybe_handle_prompt_introspection_fastpath(
 
     llm_debug_info = {
         "interaction_timestamp_utc": interaction_timestamp_utc,
+        "request_id": request_id,
         "model": model_name,
         "llm_interaction": {
             "requested_model": model_name,
@@ -3146,7 +3247,23 @@ def _maybe_handle_prompt_introspection_fastpath(
         },
         "turn_execution_diagnostics": turn_execution_diagnostics,
     }
-    llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+    llm_debug_info = _finalise_llm_debug_info(
+        llm_debug_info=llm_debug_info,
+        prompt_text=prompt_text,
+        response_text=response_text,
+        session_id=session_id,
+        namespace=user_concept_id,
+        user_id=history_user_id or user_concept_id,
+        org_id=None,
+    )
+
+    if history_user_id:
+        chat_history_service.add_message_to_history(
+            history_user_id,
+            session_id,
+            {"role": "assistant", "content": response_text},
+            llm_debug_data=llm_debug_info,
+        )
 
     return jsonify(
         {
@@ -3210,6 +3327,7 @@ def _maybe_handle_tool_inventory_fastpath(
 
     llm_debug_info = {
         "interaction_timestamp_utc": interaction_timestamp_utc,
+        "request_id": request_id,
         "model": model_name,
         "llm_interaction": {
             "requested_model": model_name,
@@ -3248,8 +3366,17 @@ def _maybe_handle_tool_inventory_fastpath(
         },
         "turn_execution_diagnostics": turn_execution_diagnostics,
     }
-
-    llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+    llm_debug_info = _finalise_llm_debug_info(
+        llm_debug_info=llm_debug_info,
+        prompt_text=prompt_text,
+        response_text=(
+            response_text if isinstance(response_text, str) else str(response_text)
+        ),
+        session_id=session_id,
+        namespace=user_concept_id,
+        user_id=history_user_id or user_concept_id,
+        org_id=None,
+    )
 
     if history_user_id:
         chat_history_service.add_message_to_history(
@@ -3265,6 +3392,7 @@ def _maybe_handle_tool_inventory_fastpath(
             history_user_id,
             session_id,
             {"role": "assistant", "content": response_text},
+            llm_debug_data=llm_debug_info,
         )
     else:
         stored_context = current_app.config.get("CONTEXT", [])
@@ -3373,12 +3501,6 @@ def _maybe_handle_rag_status_fastpath(
             chat_history_service.add_message_to_history(
                 history_user_id, session_id, tool_msg
             )
-    if history_user_id:
-        chat_history_service.add_message_to_history(
-            history_user_id,
-            session_id,
-            {"role": "assistant", "content": response_text},
-        )
 
     current_app.config["CONTEXT"] = _limit_context_size(
         current_app.config.get("CONTEXT", []), max_messages=20
@@ -3400,6 +3522,7 @@ def _maybe_handle_rag_status_fastpath(
 
     llm_debug_info = {
         "interaction_timestamp_utc": interaction_timestamp_utc,
+        "request_id": request_id,
         "model": model_name,
         "llm_interaction": {
             "requested_model": model_name,
@@ -3426,7 +3549,23 @@ def _maybe_handle_rag_status_fastpath(
         },
         "turn_execution_diagnostics": turn_execution_diagnostics,
     }
-    llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+    llm_debug_info = _finalise_llm_debug_info(
+        llm_debug_info=llm_debug_info,
+        prompt_text=prompt_text,
+        response_text=response_text,
+        session_id=session_id,
+        namespace=user_concept_id,
+        user_id=history_user_id or user_concept_id,
+        org_id=None,
+    )
+
+    if history_user_id:
+        chat_history_service.add_message_to_history(
+            history_user_id,
+            session_id,
+            {"role": "assistant", "content": response_text},
+            llm_debug_data=llm_debug_info,
+        )
 
     return jsonify(
         {
@@ -4329,12 +4468,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                     chat_history_service.add_message_to_history(
                         user_id_for_history, session_id, tool_msg
                     )
-            if user_id_for_history:
-                chat_history_service.add_message_to_history(
-                    user_id_for_history,
-                    session_id,
-                    {"role": "assistant", "content": response_text},
-                )
             current_app.config["CONTEXT"] = _limit_context_size(
                 current_app.config["CONTEXT"], max_messages=20
             )
@@ -4356,6 +4489,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
             llm_debug_info = {
                 "interaction_timestamp_utc": interaction_timestamp_utc,
+                "request_id": request_id,
                 "model": model_name,
                 "llm_interaction": {
                     "requested_model": model_name,
@@ -4385,7 +4519,23 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 },
                 "turn_execution_diagnostics": turn_execution_diagnostics,
             }
-            llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+            llm_debug_info = _finalise_llm_debug_info(
+                llm_debug_info=llm_debug_info,
+                prompt_text=prompt_text,
+                response_text=response_text,
+                session_id=session_id,
+                namespace=user_namespace,
+                user_id=user_id_for_history or user_concept_id,
+                org_id=org_concept_id,
+            )
+
+            if user_id_for_history:
+                chat_history_service.add_message_to_history(
+                    user_id_for_history,
+                    session_id,
+                    {"role": "assistant", "content": response_text},
+                    llm_debug_data=llm_debug_info,
+                )
 
             return jsonify(
                 {
@@ -4488,11 +4638,6 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                             chat_history_service.add_message_to_history(
                                 history_user_id, session_id, tool_msg
                             )
-                        chat_history_service.add_message_to_history(
-                            history_user_id,
-                            session_id,
-                            {"role": "assistant", "content": response_text},
-                        )
                     else:
                         current_app.config["CONTEXT"].append(
                             {"role": "user", "content": prompt_text}
@@ -4532,6 +4677,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
 
                     llm_debug_info = {
                         "interaction_timestamp_utc": interaction_timestamp_utc,
+                        "request_id": request_id,
                         "model": model_name,
                         "llm_interaction": {
                             "requested_model": model_name,
@@ -4557,6 +4703,23 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                         "aux_llm_calls": [],
                         "turn_execution_diagnostics": turn_execution_diagnostics,
                     }
+                    llm_debug_info = _finalise_llm_debug_info(
+                        llm_debug_info=llm_debug_info,
+                        prompt_text=prompt_text,
+                        response_text=response_text,
+                        session_id=session_id,
+                        namespace=user_namespace,
+                        user_id=history_user_id or user_concept_id,
+                        org_id=org_concept_id,
+                    )
+
+                    if history_user_id:
+                        chat_history_service.add_message_to_history(
+                            history_user_id,
+                            session_id,
+                            {"role": "assistant", "content": response_text},
+                            llm_debug_data=llm_debug_info,
+                        )
 
                     rag_trace["tools_invoked"] = [
                         inv.get("tool")
@@ -4583,6 +4746,7 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "calls": [],
         }
         render_plan_debug: dict[str, Any] | None = None
+        workflow_routing_info: dict[str, Any] | None = None
 
         def _infer_provider(model_id: str | None) -> str | None:
             if not isinstance(model_id, str):
@@ -4840,6 +5004,12 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 raw_render_plan = getattr(orchestrator_result, "render_plan", None)
                 if isinstance(raw_render_plan, dict):
                     render_plan_debug = dict(raw_render_plan)
+                workflow_routing_raw = getattr(
+                    orchestrator_result, "workflow_routing", None
+                )
+                workflow_routing_info = _normalise_workflow_routing_payload(
+                    workflow_routing_raw
+                )
 
                 invoked_tools = []
                 for inv in tool_invocations:
@@ -6073,14 +6243,24 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             "buttonify": buttonify_meta,
             # JVNAUTOSCI-1076: Workflow discovery results for Thinking context
             "workflow_discovery": workflow_discovery_result,
+            "workflow_routing": workflow_routing_info,
             "display_elements": display_elements_contract,
             "turn_execution_diagnostics": turn_execution_diagnostics,
         }
         if isinstance(render_plan_debug, dict):
             llm_debug_info["render_plan"] = dict(render_plan_debug)
 
-        # Derive warnings from debug info and add to structure
-        llm_debug_info["warnings"] = _derive_llm_debug_warnings(llm_debug_info)
+        llm_debug_info = _finalise_llm_debug_info(
+            llm_debug_info=llm_debug_info,
+            prompt_text=prompt_text,
+            response_text=response_text,
+            session_id=session_id,
+            namespace=user_namespace,
+            user_id=history_user_id or user_concept_id,
+            org_id=org_concept_id,
+            workflow_discovery=workflow_discovery_result,
+            workflow_routing=workflow_routing_info,
+        )
 
         # Now save messages to history/context with debug info
         # Truncate large tool results to prevent context explosion
@@ -6193,6 +6373,14 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
             if "request_start_perf" in locals()
             else None
         )
+        error_workflow_routing = (
+            workflow_routing_info
+            if (
+                "workflow_routing_info" in locals()
+                and isinstance(workflow_routing_info, dict)
+            )
+            else None
+        )
 
         error_debug_info = {
             "interaction_timestamp_utc": interaction_timestamp_utc,
@@ -6214,7 +6402,17 @@ def generate():  # pyright: ignore[reportGeneralTypeIssues]
                 workflow_discovery=error_workflow_discovery,
             ),
         }
-        error_debug_info["warnings"] = _derive_llm_debug_warnings(error_debug_info)
+        error_debug_info = _finalise_llm_debug_info(
+            llm_debug_info=error_debug_info,
+            prompt_text=prompt_text if "prompt_text" in locals() else None,
+            response_text=None,
+            session_id=session_id if "session_id" in locals() else None,
+            namespace=user_namespace if "user_namespace" in locals() else None,
+            user_id=history_user_id if "history_user_id" in locals() else None,
+            org_id=org_concept_id if "org_concept_id" in locals() else None,
+            workflow_discovery=error_workflow_discovery,
+            workflow_routing=error_workflow_routing,
+        )
         body = {
             "request_id": request_id,
             "error": str(e),

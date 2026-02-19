@@ -43,8 +43,10 @@ from ...workflows.action_registry import (
 from ...workflows.definitions import (
     CHAT_ASSISTANT_WORKFLOW_ID,
     CHAT_NARRATION_WORKFLOW_ID,
+    KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
     MISSING_TOOL_CALL_WORKFLOW_ID,
     TOOL_CALLING_WORKFLOW_ID,
+    TURN_COMPLETION_GATE_WORKFLOW_ID,
     WRITE_TOOL_POLICY_WORKFLOW_ID,
 )
 from ...workflows.engine import WorkflowExecutor
@@ -58,6 +60,7 @@ from src.backend.workflows.write_tool_policy import (
     compute_allowed_write_tools,
     prompt_explicitly_denies_write,
 )
+from ...services.turn_execution_record_service import build_turn_execution_record
 
 # Tool metadata service for Vontology-driven tool display (JVNAUTOSCI-1073)
 from src.backend.services.tool_metadata_service import (
@@ -889,6 +892,20 @@ class InternalMCPChatOrchestrator:
                 action_id="tool_calling.backfill",
                 handler=self._action_tool_calling_backfill,
                 description="Summariser LLM call; detect chained tool calls.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="turn_execution.critic",
+                handler=self._action_turn_execution_critic,
+                description="Evaluate required effects and postcondition checks for the turn.",
+            )
+        )
+        registry.register(
+            ActionSpec(
+                action_id="turn_execution.completion_gate",
+                handler=self._action_turn_execution_completion_gate,
+                description="Apply completion gate and prevent false completion claims.",
             )
         )
 
@@ -3468,6 +3485,218 @@ class InternalMCPChatOrchestrator:
                     missing_tool_call_retry_budget - missing_tool_call_retry_attempts,
                 ),
                 "missing_tool_call_retry_suppressed": missing_tool_call_retry_suppressed,
+            }
+        )
+
+    def _action_turn_execution_critic(self, request: Any) -> WorkflowActionResult:
+        """Build turn execution evidence and postcondition checks."""
+
+        data = request.data
+        env = request.environment
+
+        prompt_text = data.get("prompt")
+        if not isinstance(prompt_text, str):
+            prompt_text = str(prompt_text or "")
+
+        response_text = data.get("final_response")
+        if not isinstance(response_text, str):
+            current_response = data.get("current_response")
+            response_text = (
+                current_response if isinstance(current_response, str) else ""
+            )
+
+        raw_tool_invocations = data.get("invocations")
+        tool_invocations: Sequence[Mapping[str, Any]]
+        if isinstance(raw_tool_invocations, (list, tuple)):
+            tool_invocations = cast(Sequence[Mapping[str, Any]], raw_tool_invocations)
+        else:
+            tool_invocations = ()
+
+        raw_aux = data.get("aux_llm_calls")
+        aux_calls: Sequence[Mapping[str, Any]]
+        if isinstance(raw_aux, list):
+            aux_calls = cast(Sequence[Mapping[str, Any]], raw_aux)
+        else:
+            aux_calls = ()
+
+        workflow_discovery = data.get("workflow_discovery_result")
+        workflow_discovery_payload = (
+            dict(workflow_discovery) if isinstance(workflow_discovery, Mapping) else None
+        )
+        workflow_routing = data.get("workflow_routing")
+        workflow_routing_payload = (
+            dict(workflow_routing) if isinstance(workflow_routing, Mapping) else None
+        )
+
+        turn_execution_record = build_turn_execution_record(
+            request_id=data.get("turn_id"),
+            session_id=data.get("conversation_session_id"),
+            namespace=env.user_namespace,
+            user_id=data.get("user_concept_id"),
+            org_id=data.get("org_concept_id"),
+            prompt_text=prompt_text,
+            response_text=response_text,
+            interaction_timestamp_utc=data.get("turn_execution_record_generated_at"),
+            workflow_discovery=workflow_discovery_payload,
+            workflow_routing=workflow_routing_payload,
+            tool_invocations=tool_invocations,
+            turn_execution_diagnostics=data.get("turn_execution_diagnostics"),
+            aux_llm_calls=aux_calls,
+        )
+
+        completion_gate = turn_execution_record.get("completion_gate")
+        gate_requires_follow_up = False
+        gate_decision = None
+        gate_safe_to_claim = True
+        if isinstance(completion_gate, Mapping):
+            gate_requires_follow_up = bool(
+                completion_gate.get("requires_follow_up", False)
+            )
+            raw_gate_decision = completion_gate.get("decision")
+            if isinstance(raw_gate_decision, str) and raw_gate_decision.strip():
+                gate_decision = raw_gate_decision.strip()
+            gate_safe_to_claim = bool(
+                completion_gate.get("safe_to_claim_completion", True)
+            )
+
+        critic_summary: Mapping[str, Any] = {}
+        critic_payload = turn_execution_record.get("critic")
+        if isinstance(critic_payload, Mapping):
+            raw_summary = critic_payload.get("summary")
+            if isinstance(raw_summary, Mapping):
+                critic_summary = dict(raw_summary)
+
+        required_effects = turn_execution_record.get("required_effects")
+        if not isinstance(required_effects, list):
+            required_effects = []
+        postcondition_checks = turn_execution_record.get("postcondition_checks")
+        if not isinstance(postcondition_checks, list):
+            postcondition_checks = []
+
+        if isinstance(raw_aux, list):
+            try:
+                raw_aux.append(
+                    {
+                        "type": "turn_execution_critic",
+                        "workflow_id": KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+                        "decision_preview": gate_decision,
+                        "requires_follow_up": gate_requires_follow_up,
+                        "required_effect_count": len(required_effects),
+                        "postcondition_check_count": len(postcondition_checks),
+                        "request_id": turn_execution_record.get("request_id"),
+                    }
+                )
+            except Exception:
+                pass
+
+        return WorkflowActionResult(
+            outputs={
+                "turn_execution_record": turn_execution_record,
+                "required_effects": list(required_effects),
+                "postcondition_checks": list(postcondition_checks),
+                "critic_summary": dict(critic_summary),
+                "completion_gate_decision": gate_decision,
+                "completion_gate_requires_follow_up": gate_requires_follow_up,
+                "completion_gate_safe_to_claim_completion": gate_safe_to_claim,
+            }
+        )
+
+    def _action_turn_execution_completion_gate(
+        self, request: Any
+    ) -> WorkflowActionResult:
+        """Apply completion gate policy and annotate unresolved execution."""
+
+        data = request.data
+        record = data.get("turn_execution_record")
+        if not isinstance(record, Mapping):
+            # Rebuild critic payload defensively when gate is invoked directly.
+            critic_result = self._action_turn_execution_critic(request)
+            rebuilt_record = critic_result.outputs.get("turn_execution_record")
+            record = rebuilt_record if isinstance(rebuilt_record, Mapping) else {}
+
+        completion_gate_payload = record.get("completion_gate")
+        if not isinstance(completion_gate_payload, Mapping):
+            completion_gate_payload = {}
+
+        decision = completion_gate_payload.get("decision")
+        if not isinstance(decision, str) or not decision.strip():
+            decision = "completed"
+        decision = decision.strip()
+
+        decision_reason = completion_gate_payload.get("decision_reason")
+        if not isinstance(decision_reason, str):
+            decision_reason = ""
+        decision_reason = decision_reason.strip()
+
+        blocking_effect_ids_raw = completion_gate_payload.get("blocking_effect_ids")
+        blocking_effect_ids: list[str] = []
+        if isinstance(blocking_effect_ids_raw, list):
+            for item in blocking_effect_ids_raw:
+                if isinstance(item, str) and item.strip():
+                    blocking_effect_ids.append(item.strip())
+
+        safe_to_claim_completion = bool(
+            completion_gate_payload.get("safe_to_claim_completion", True)
+        )
+        requires_follow_up = bool(
+            completion_gate_payload.get("requires_follow_up", False)
+        )
+
+        final_response = data.get("final_response")
+        if not isinstance(final_response, str):
+            current_response = data.get("current_response")
+            final_response = (
+                current_response if isinstance(current_response, str) else ""
+            )
+
+        if not safe_to_claim_completion:
+            if decision == "failed":
+                status_line = "Execution status: requested mutation failed or was blocked."
+            elif decision == "escalation_required":
+                status_line = "Execution status: requested mutation was not executed."
+            elif decision == "partial":
+                status_line = "Execution status: mutation may have run but verification is inconclusive."
+            else:
+                status_line = "Execution status: follow-up verification is required."
+
+            if decision_reason:
+                status_line = f"{status_line} {decision_reason}"
+            if blocking_effect_ids:
+                status_line = (
+                    f"{status_line} Blocking effect IDs: {', '.join(blocking_effect_ids)}."
+                )
+
+            if isinstance(final_response, str) and final_response.strip():
+                if "Execution status:" not in final_response:
+                    final_response = f"{final_response.rstrip()}\n\n{status_line}"
+            else:
+                final_response = status_line
+
+        aux_llm_calls = data.get("aux_llm_calls")
+        if isinstance(aux_llm_calls, list):
+            try:
+                aux_llm_calls.append(
+                    {
+                        "type": "turn_completion_gate",
+                        "workflow_id": TURN_COMPLETION_GATE_WORKFLOW_ID,
+                        "decision": decision,
+                        "decision_reason": decision_reason,
+                        "safe_to_claim_completion": safe_to_claim_completion,
+                        "requires_follow_up": requires_follow_up,
+                        "blocking_effect_ids": list(blocking_effect_ids),
+                    }
+                )
+            except Exception:
+                pass
+
+        return WorkflowActionResult(
+            outputs={
+                "final_response": final_response,
+                "completion_gate_decision": decision,
+                "completion_gate_decision_reason": decision_reason,
+                "completion_gate_blocking_effect_ids": list(blocking_effect_ids),
+                "completion_gate_safe_to_claim_completion": safe_to_claim_completion,
+                "completion_gate_requires_follow_up": requires_follow_up,
             }
         )
 
@@ -9678,6 +9907,277 @@ class InternalMCPChatOrchestrator:
         )
         resolved_stage = data.get("workflow_episode_stage")
 
+        def _safe_scalar_text(value: Any) -> str | None:
+            if not isinstance(value, str):
+                return None
+            cleaned = value.strip()
+            return cleaned or None
+
+        def _safe_mapping_snapshot(
+            payload: Any,
+            *,
+            max_depth: int = 3,
+            max_items: int = 30,
+        ) -> dict[str, Any] | None:
+            def _walk(value: Any, depth: int) -> Any:
+                if depth >= max_depth:
+                    if isinstance(value, (str, int, float, bool)) or value is None:
+                        return value
+                    return str(type(value).__name__)
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    return value
+                if isinstance(value, Mapping):
+                    out: dict[str, Any] = {}
+                    for idx, (k, v) in enumerate(value.items()):
+                        if idx >= max_items:
+                            break
+                        if not isinstance(k, str):
+                            continue
+                        if callable(v):
+                            continue
+                        out[k] = _walk(v, depth + 1)
+                    return out
+                if isinstance(value, (list, tuple)):
+                    out_list: list[Any] = []
+                    for idx, item in enumerate(value):
+                        if idx >= max_items:
+                            break
+                        out_list.append(_walk(item, depth + 1))
+                    return out_list
+                return str(value)
+
+            if not isinstance(payload, Mapping):
+                return None
+            snapshot = _walk(payload, 0)
+            if isinstance(snapshot, dict):
+                return snapshot
+            return None
+
+        def _build_turn_execution_summary(payload: Any) -> dict[str, Any] | None:
+            if not isinstance(payload, Mapping):
+                return None
+            raw_completion_gate = payload.get("completion_gate")
+            completion_gate: Mapping[str, Any] = (
+                raw_completion_gate if isinstance(raw_completion_gate, Mapping) else {}
+            )
+            raw_workflow_selection = payload.get("workflow_selection")
+            workflow_selection: Mapping[str, Any] = (
+                raw_workflow_selection
+                if isinstance(raw_workflow_selection, Mapping)
+                else {}
+            )
+            raw_required_effects = payload.get("required_effects")
+            required_effects: list[Any] = (
+                raw_required_effects if isinstance(raw_required_effects, list) else []
+            )
+            unresolved_effect_count = 0
+            for effect in required_effects:
+                if not isinstance(effect, Mapping):
+                    continue
+                status = effect.get("status")
+                if isinstance(status, str) and status in {"not_executed", "not_satisfied"}:
+                    unresolved_effect_count += 1
+            return {
+                "request_id": _safe_scalar_text(payload.get("request_id")),
+                "decision": completion_gate.get("decision"),
+                "decision_reason": completion_gate.get("decision_reason"),
+                "requires_follow_up": completion_gate.get("requires_follow_up"),
+                "safe_to_claim_completion": completion_gate.get(
+                    "safe_to_claim_completion"
+                ),
+                "blocking_effect_ids": completion_gate.get("blocking_effect_ids"),
+                "selected_workflow_id": workflow_selection.get("selected_workflow_id"),
+                "selector_verdict": workflow_selection.get("selector_verdict"),
+                "required_effect_count": len(required_effects),
+                "unresolved_effect_count": unresolved_effect_count,
+            }
+
+        resolved_user_id = _safe_scalar_text(data.get("user_concept_id"))
+        resolved_org_id = _safe_scalar_text(data.get("org_concept_id"))
+        resolved_namespace = (
+            _safe_scalar_text(user_namespace)
+            or _safe_scalar_text(data.get("namespace"))
+            or _safe_scalar_text(data.get("user_namespace"))
+        )
+
+        durable_instance_manager = None
+        durable_instance_id: str | None = None
+        durable_instance_created_new: bool | None = None
+
+        def _build_durable_inputs_snapshot() -> dict[str, Any]:
+            prompt = data.get("prompt")
+            prompt_preview = prompt[:1000] if isinstance(prompt, str) else None
+            return {
+                "conversation_session_id": _safe_scalar_text(resolved_session_id),
+                "turn_id": _safe_scalar_text(resolved_turn_id),
+                "episode_source": str(resolved_source),
+                "episode_stage": (
+                    str(resolved_stage).strip()
+                    if isinstance(resolved_stage, str) and resolved_stage.strip()
+                    else None
+                ),
+                "prompt_preview": prompt_preview,
+                "workflow_routing": _safe_mapping_snapshot(data.get("workflow_routing")),
+                "workflow_discovery_result": _safe_mapping_snapshot(
+                    data.get("workflow_discovery_result")
+                ),
+            }
+
+        def _build_durable_outputs_snapshot(
+            *,
+            completed: bool,
+            final_state: str | None,
+            termination_code: str | None,
+            termination_detail: str | None,
+            workflow_data: Any,
+        ) -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "completed": bool(completed),
+                "final_state": final_state,
+                "termination_code": termination_code,
+                "termination_detail": termination_detail,
+            }
+            if not isinstance(workflow_data, Mapping):
+                return payload
+
+            turn_record = workflow_data.get("turn_execution_record")
+            turn_summary = _build_turn_execution_summary(turn_record)
+            if isinstance(turn_summary, dict):
+                payload["turn_execution"] = turn_summary
+
+            critic_summary = workflow_data.get("critic_summary")
+            if isinstance(critic_summary, Mapping):
+                payload["critic_summary"] = _safe_mapping_snapshot(critic_summary)
+
+            for key in (
+                "completion_gate_decision",
+                "completion_gate_decision_reason",
+                "completion_gate_requires_follow_up",
+                "completion_gate_safe_to_claim_completion",
+            ):
+                if key in workflow_data:
+                    payload[key] = workflow_data.get(key)
+
+            workflow_routing = workflow_data.get("workflow_routing")
+            if isinstance(workflow_routing, Mapping):
+                payload["workflow_routing"] = _safe_mapping_snapshot(workflow_routing)
+            workflow_discovery = workflow_data.get("workflow_discovery_result")
+            if isinstance(workflow_discovery, Mapping):
+                payload["workflow_discovery_result"] = _safe_mapping_snapshot(
+                    workflow_discovery
+                )
+
+            return payload
+
+        def _finalise_durable_instance(
+            *,
+            completed: bool,
+            final_state: str | None,
+            terminal_stage: str | None,
+            termination_code: str | None,
+            termination_detail: str | None,
+            workflow_data: Any,
+        ) -> None:
+            if durable_instance_manager is None or not isinstance(durable_instance_id, str):
+                return
+            try:
+                if completed:
+                    durable_instance_manager.mark_completed(
+                        durable_instance_id,
+                        outputs=_build_durable_outputs_snapshot(
+                            completed=True,
+                            final_state=final_state,
+                            termination_code=termination_code,
+                            termination_detail=termination_detail,
+                            workflow_data=workflow_data,
+                        ),
+                        final_state=final_state or terminal_stage or "completed",
+                    )
+                    return
+                failure_code = (
+                    str(termination_code).strip().lower()
+                    if isinstance(termination_code, str) and termination_code.strip()
+                    else "terminated"
+                )
+                failure_detail = (
+                    str(termination_detail).strip()
+                    if isinstance(termination_detail, str) and termination_detail.strip()
+                    else "workflow_execution_terminated"
+                )
+                durable_instance_manager.mark_failed(
+                    durable_instance_id,
+                    error=f"{failure_code}:{failure_detail}",
+                    error_step=terminal_stage,
+                    increment_retry=False,
+                )
+            except Exception as exc:
+                self._logger.warning(
+                    "[workflow_instance_telemetry] Failed to finalise durable instance "
+                    "%s for workflow %s: %s",
+                    durable_instance_id,
+                    workflow_id,
+                    exc,
+                )
+
+        if (
+            isinstance(workflow_id, str)
+            and workflow_id.strip()
+            and resolved_user_id
+            and resolved_org_id
+            and resolved_namespace
+        ):
+            try:
+                from ...workflows.durable import WorkflowInstanceManager
+
+                durable_instance_manager = WorkflowInstanceManager()
+                source_event_type = (
+                    str(resolved_source).strip() if str(resolved_source).strip() else None
+                )
+                source_event_id = (
+                    _safe_scalar_text(resolved_turn_id)
+                    or _safe_scalar_text(resolved_session_id)
+                )
+                if source_event_type and source_event_id:
+                    idempotency_key = (
+                        "orchestrator.execute_workflow:"
+                        f"{workflow_id}:{source_event_type}:{source_event_id}:"
+                        f"{str(resolved_stage or '').strip()}"
+                    )
+                    (
+                        durable_instance_id,
+                        durable_instance_created_new,
+                    ) = durable_instance_manager.create_instance_for_event(
+                        workflow_id=workflow_id,
+                        user_id=resolved_user_id,
+                        org_id=resolved_org_id,
+                        namespace=resolved_namespace,
+                        event_idempotency_key=idempotency_key,
+                        source_event_type=source_event_type,
+                        source_event_id=source_event_id,
+                        inputs=_build_durable_inputs_snapshot(),
+                        max_retries=0,
+                    )
+                else:
+                    durable_instance_id = durable_instance_manager.create_instance(
+                        workflow_id,
+                        user_id=resolved_user_id,
+                        org_id=resolved_org_id,
+                        namespace=resolved_namespace,
+                        inputs=_build_durable_inputs_snapshot(),
+                        max_retries=0,
+                    )
+                    durable_instance_created_new = True
+            except Exception as exc:
+                self._logger.warning(
+                    "[workflow_instance_telemetry] Failed to create durable instance "
+                    "for workflow %s: %s",
+                    workflow_id,
+                    exc,
+                )
+                durable_instance_manager = None
+                durable_instance_id = None
+                durable_instance_created_new = None
+
         episode_id: str | None = None
         stable_key: str | None = None
         start_episode_fn = None
@@ -9721,6 +10221,8 @@ class InternalMCPChatOrchestrator:
                 {
                     "type": "workflow_use_episode",
                     "episode_id": episode_id,
+                    "workflow_instance_id": durable_instance_id,
+                    "workflow_instance_created_new": durable_instance_created_new,
                     "workflow_id": workflow_id,
                     "source": str(resolved_source),
                     "session_id": (
@@ -9826,6 +10328,14 @@ class InternalMCPChatOrchestrator:
                 termination_code="workflow_not_registered",
                 termination_detail="workflow_definition_not_found",
             )
+            _finalise_durable_instance(
+                completed=False,
+                final_state=None,
+                terminal_stage="workflow_lookup",
+                termination_code="workflow_not_registered",
+                termination_detail="workflow_definition_not_found",
+                workflow_data=data,
+            )
             return None
 
         env = environment or WorkflowEnvironment(
@@ -9880,6 +10390,14 @@ class InternalMCPChatOrchestrator:
                 termination_code=termination_code,
                 termination_detail=termination_detail,
             )
+            _finalise_durable_instance(
+                completed=completed,
+                final_state=final_state,
+                terminal_stage=terminal_stage,
+                termination_code=termination_code,
+                termination_detail=termination_detail,
+                workflow_data=getattr(result, "data", None),
+            )
             return result
         except Exception as exc:
             if callable(finalise_episode_fn):
@@ -9905,6 +10423,14 @@ class InternalMCPChatOrchestrator:
                 final_state=None,
                 termination_code="exception",
                 termination_detail=str(exc),
+            )
+            _finalise_durable_instance(
+                completed=False,
+                final_state=None,
+                terminal_stage="workflow_exception",
+                termination_code="exception",
+                termination_detail=str(exc),
+                workflow_data=data,
             )
             raise
 
@@ -13707,6 +14233,7 @@ class InternalMCPChatOrchestrator:
         except Exception:
             pass
 
+        routing_info_payload = asdict(routing_info) if routing_info is not None else None
         tc_data: dict[str, Any] = {
             # Inputs.
             "prompt": prompt,
@@ -13719,6 +14246,8 @@ class InternalMCPChatOrchestrator:
             "turn_id": turn_id,
             "recent_user_prompts": recent_user_prompts,
             "gmail_profile": gmail_profile or self._default_gmail_profile,
+            "workflow_discovery_result": workflow_discovery_result,
+            "workflow_routing": routing_info_payload,
             "auto_proceed_minimal_imposition_enabled": bool(
                 auto_proceed_minimal_imposition_enabled
             ),

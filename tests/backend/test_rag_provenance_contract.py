@@ -193,6 +193,7 @@ def test_rag_list_collections_includes_expected_collections():
     collections = {c["collection"] for c in result["collections"]}
     assert "ka_sessions" in collections
     assert "chat_history_sessions" in collections
+    assert "turn_execution_records" in collections
     assert "rag_documents" in collections
     assert "vontology_text_relations" in collections
 
@@ -200,6 +201,8 @@ def test_rag_list_collections_includes_expected_collections():
     by_name = {c["collection"]: c for c in result["collections"]}
     assert by_name["ka_sessions"]["list_supported"] is True
     assert by_name["ka_sessions"]["get_supported"] is True
+    assert by_name["turn_execution_records"]["list_supported"] is True
+    assert by_name["turn_execution_records"]["get_supported"] is True
     assert by_name["rag_documents"]["list_supported"] is False
     assert by_name["rag_documents"]["get_supported"] is False
 

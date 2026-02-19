@@ -90,3 +90,10 @@ def test_generate_debug_stored_context_uses_persisted_history_for_authenticated_
     assert isinstance(diagnostics.get("progress_events"), list)
     assert isinstance(diagnostics.get("phase_history"), list)
     assert isinstance(diagnostics.get("tool_history"), list)
+
+    turn_execution_record = llm_debug.get("turn_execution_record")
+    assert isinstance(turn_execution_record, dict)
+    assert turn_execution_record.get("schema_version") == "turn_execution_record.v1"
+    completion_gate = turn_execution_record.get("completion_gate")
+    assert isinstance(completion_gate, dict)
+    assert isinstance(completion_gate.get("decision"), str)

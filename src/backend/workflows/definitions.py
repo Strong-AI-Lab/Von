@@ -19,6 +19,11 @@ CHAT_ASSISTANT_WORKFLOW_ID = "#V#chat_assistant_workflow"
 TODO_REFRESH_WORKFLOW_ID = "#V#todo_refresh_workflow"
 WRITE_TOOL_POLICY_WORKFLOW_ID = "#V#write_tool_policy_workflow"
 TOOL_CALLING_WORKFLOW_ID = "#V#tool_calling_workflow"
+KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID = (
+    "#V#kb_mutation_postcondition_critic_workflow"
+)
+TURN_COMPLETION_GATE_WORKFLOW_ID = "#V#turn_completion_gate_workflow"
+CONVERSATION_TURN_EXECUTION_WORKFLOW_ID = "#V#conversation_turn_execution_workflow"
 
 
 def _transition_if_flag_set(
@@ -391,9 +396,48 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
                 reason="chained_tool_calls",
             ),
             WorkflowTransitionSpec(
-                to_state="completed",
+                to_state="postcondition_critic",
                 condition=lambda ctx: True,
                 reason="backfill_done",
+            ),
+        ),
+    )
+
+    postcondition_critic = WorkflowStateSpec(
+        state_id="postcondition_critic",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="turn_execution.critic",
+                description="Evaluate required effects and postcondition checks.",
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="completion_gate",
+                condition=lambda ctx: True,
+                reason="critic_completed",
+            ),
+        ),
+    )
+
+    completion_gate = WorkflowStateSpec(
+        state_id="completion_gate",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="turn_execution.completion_gate",
+                description="Decide whether completion can be claimed safely.",
+            ),
+        ),
+        transitions=(
+            _transition_if_flag_set(
+                "completion_gate_requires_follow_up",
+                to_state="completed",
+                reason="follow_up_required",
+            ),
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda ctx: True,
+                reason="completion_gate_passed",
             ),
         ),
     )
@@ -409,11 +453,132 @@ def build_tool_calling_workflow() -> WorkflowDefinition:
             "validate": validate,
             "execute": execute,
             "backfill": backfill,
+            "postcondition_critic": postcondition_critic,
+            "completion_gate": completion_gate,
             "completed": completed,
             "failed": failed,
         },
         termination_states=("completed", "failed"),
-        purpose="Standard tool-calling pipeline: plan → validate → execute → backfill.",
+        purpose=(
+            "Standard tool-calling pipeline: plan → validate → execute → backfill "
+            "→ postcondition critic → completion gate."
+        ),
+    )
+
+
+def build_kb_mutation_postcondition_critic_workflow() -> WorkflowDefinition:
+    evaluate = WorkflowStateSpec(
+        state_id="evaluate",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="turn_execution.critic",
+                description="Evaluate KB mutation postconditions.",
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda ctx: True,
+                reason="evaluated",
+            ),
+        ),
+    )
+
+    completed = WorkflowStateSpec(state_id="completed", terminal=True)
+
+    return WorkflowDefinition(
+        workflow_id=KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+        initial_state="evaluate",
+        states={
+            "evaluate": evaluate,
+            "completed": completed,
+        },
+        termination_states=("completed",),
+        purpose=(
+            "Evaluate whether implicit KB mutation effects were executed and verified."
+        ),
+    )
+
+
+def build_turn_completion_gate_workflow() -> WorkflowDefinition:
+    decide = WorkflowStateSpec(
+        state_id="decide",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="turn_execution.completion_gate",
+                description="Apply completion gate policy for turn execution.",
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda ctx: True,
+                reason="decided",
+            ),
+        ),
+    )
+
+    completed = WorkflowStateSpec(state_id="completed", terminal=True)
+
+    return WorkflowDefinition(
+        workflow_id=TURN_COMPLETION_GATE_WORKFLOW_ID,
+        initial_state="decide",
+        states={
+            "decide": decide,
+            "completed": completed,
+        },
+        termination_states=("completed",),
+        purpose="Determine if it is safe to claim turn completion.",
+    )
+
+
+def build_conversation_turn_execution_workflow() -> WorkflowDefinition:
+    critic = WorkflowStateSpec(
+        state_id="critic",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="turn_execution.critic",
+                description="Build execution evidence and postcondition checks.",
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="completion_gate",
+                condition=lambda ctx: True,
+                reason="critic_completed",
+            ),
+        ),
+    )
+
+    completion_gate = WorkflowStateSpec(
+        state_id="completion_gate",
+        actions=(
+            WorkflowActionInvocation(
+                action_id="turn_execution.completion_gate",
+                description="Apply completion gate to execution evidence.",
+            ),
+        ),
+        transitions=(
+            WorkflowTransitionSpec(
+                to_state="completed",
+                condition=lambda ctx: True,
+                reason="completion_gate_decided",
+            ),
+        ),
+    )
+
+    completed = WorkflowStateSpec(state_id="completed", terminal=True)
+
+    return WorkflowDefinition(
+        workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+        initial_state="critic",
+        states={
+            "critic": critic,
+            "completion_gate": completion_gate,
+            "completed": completed,
+        },
+        termination_states=("completed",),
+        purpose="Canonical turn execution workflow with critic and completion gate.",
     )
 
 
@@ -455,6 +620,24 @@ def register_default_workflows(registry: WorkflowRegistry) -> None:
             workflow_id=WRITE_TOOL_POLICY_WORKFLOW_ID,
             definition=build_write_tool_policy_workflow(),
             purpose="Write-tool policy decision pipeline.",
+            source="built_in",
+        ),
+        WorkflowRegistration(
+            workflow_id=KB_MUTATION_POSTCONDITION_CRITIC_WORKFLOW_ID,
+            definition=build_kb_mutation_postcondition_critic_workflow(),
+            purpose="KB mutation postcondition critic.",
+            source="built_in",
+        ),
+        WorkflowRegistration(
+            workflow_id=TURN_COMPLETION_GATE_WORKFLOW_ID,
+            definition=build_turn_completion_gate_workflow(),
+            purpose="Turn completion gate policy workflow.",
+            source="built_in",
+        ),
+        WorkflowRegistration(
+            workflow_id=CONVERSATION_TURN_EXECUTION_WORKFLOW_ID,
+            definition=build_conversation_turn_execution_workflow(),
+            purpose="Conversation turn execution workflow.",
             source="built_in",
         ),
         WorkflowRegistration(
