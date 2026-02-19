@@ -18,6 +18,27 @@ from typing import Any, Callable, Dict, Mapping, Optional
 logger = logging.getLogger(__name__)
 
 
+WORKFLOW_ACTION_OUTCOME_SUCCESS = "success"
+WORKFLOW_ACTION_OUTCOME_FAILURE = "failure"
+WORKFLOW_ACTION_OUTCOME_UNKNOWN = "unknown"
+
+
+def normalise_action_outcome(status: str | None) -> str:
+    """Map raw action statuses onto canonical workflow outcomes.
+
+    The workflow engine reasons over a tri-state envelope:
+    ``success | failure | unknown``. Unknown remains first-class so callers can
+    route explicitly (for example via ``on_unknown`` transitions) instead of
+    silently treating ambiguous tool responses as success.
+    """
+    raw_status = str(status or "").strip().lower()
+    if raw_status == "success":
+        return WORKFLOW_ACTION_OUTCOME_SUCCESS
+    if raw_status in {"failed", "failure", "error"}:
+        return WORKFLOW_ACTION_OUTCOME_FAILURE
+    return WORKFLOW_ACTION_OUTCOME_UNKNOWN
+
+
 @dataclass(frozen=True)
 class WorkflowEnvironment:
     """Runtime dependencies available to workflow actions."""
@@ -49,8 +70,12 @@ class WorkflowActionResult:
     duration_ms: float | None = None
 
     @property
+    def outcome(self) -> str:
+        return normalise_action_outcome(self.status)
+
+    @property
     def ok(self) -> bool:
-        return self.status == "success"
+        return self.outcome == WORKFLOW_ACTION_OUTCOME_SUCCESS
 
 
 @dataclass(frozen=True)
@@ -75,10 +100,15 @@ def _apply_action_outcome_context(
     Keep these keys centralised here so every execution path (conversation-turn
     and durable) observes identical post-action state.
     """
+    outcome = normalise_action_outcome(result.status)
     context["last_action_id"] = action_id
     context["last_action_status"] = result.status
-    context["last_action_failed"] = not result.ok
-    context["last_step_ok"] = result.ok
+    context["last_action_outcome"] = outcome
+    context["last_action_succeeded"] = outcome == WORKFLOW_ACTION_OUTCOME_SUCCESS
+    context["last_action_failed"] = outcome == WORKFLOW_ACTION_OUTCOME_FAILURE
+    context["last_action_unknown"] = outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN
+    context["last_step_ok"] = outcome == WORKFLOW_ACTION_OUTCOME_SUCCESS
+    context["last_step_outcome"] = outcome
     context["last_action_error"] = result.error
     context["last_action_call_id"] = result.call_id
     context["last_action_duration_ms"] = result.duration_ms

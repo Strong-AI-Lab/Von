@@ -157,7 +157,9 @@ class TestActionOutcomeEnvelope:
         assert result.ok
         assert context["last_action_id"] == "ok.action"
         assert context["last_action_status"] == "success"
+        assert context["last_action_outcome"] == "success"
         assert context["last_action_failed"] is False
+        assert context["last_action_unknown"] is False
         assert context["last_step_ok"] is True
         assert context["last_action_error"] is None
         assert context["last_action_call_id"] == "call-1"
@@ -181,9 +183,35 @@ class TestActionOutcomeEnvelope:
         assert not result.ok
         assert context["last_action_id"] == "fail.action"
         assert context["last_action_status"] == "failed"
+        assert context["last_action_outcome"] == "failure"
         assert context["last_action_failed"] is True
+        assert context["last_action_unknown"] is False
         assert context["last_step_ok"] is False
         assert context["last_action_error"] == "boom"
+
+    def test_unknown_stamps_context_outcome_fields(self):
+        def handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+            return WorkflowActionResult(status="unknown", error="ambiguous_result")
+
+        registry = ActionRegistry()
+        registry.register(ActionSpec(action_id="unknown.action", handler=handler))
+        context: dict[str, Any] = {}
+
+        result = registry.execute(
+            "unknown.action",
+            inputs={},
+            context=context,
+            env=WorkflowEnvironment(llm_client=None),
+        )
+
+        assert not result.ok
+        assert context["last_action_id"] == "unknown.action"
+        assert context["last_action_status"] == "unknown"
+        assert context["last_action_outcome"] == "unknown"
+        assert context["last_action_failed"] is False
+        assert context["last_action_unknown"] is True
+        assert context["last_step_ok"] is False
+        assert context["last_action_error"] == "ambiguous_result"
 
     def test_invalid_handler_result_fails_closed(self):
         def bad_handler(request: WorkflowActionRequest) -> Any:
@@ -202,6 +230,7 @@ class TestActionOutcomeEnvelope:
 
         assert not result.ok
         assert "invalid_action_result_type:bad.action:dict" == (result.error or "")
+        assert context["last_action_outcome"] == "failure"
         assert context["last_action_failed"] is True
         assert context["last_step_ok"] is False
 

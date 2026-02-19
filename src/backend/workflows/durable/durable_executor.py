@@ -16,6 +16,7 @@ from ..engine import (
     apply_tool_output_context_mappings,
     resolve_action_inputs_from_context,
     state_has_on_failure_transition,
+    state_has_on_unknown_transition,
 )
 from ..metadata_validation import (
     METADATA_VALIDATION_MODE_OFF,
@@ -28,7 +29,13 @@ from ..metadata_validation import (
     validate_state_metadata_post_action,
     validate_state_metadata_pre_action,
 )
-from ..action_registry import ActionRegistry, WorkflowEnvironment
+from ..action_registry import (
+    ActionRegistry,
+    WORKFLOW_ACTION_OUTCOME_FAILURE,
+    WORKFLOW_ACTION_OUTCOME_UNKNOWN,
+    WorkflowEnvironment,
+    normalise_action_outcome,
+)
 from ..trace_model import WorkflowExecutionTrace
 from .instance_manager import WorkflowInstanceManager
 from .models import WorkflowInstance, WorkflowInstanceStatus
@@ -268,6 +275,7 @@ class DurableWorkflowExecutor:
 
             # Execute actions
             state_has_failure_route = state_has_on_failure_transition(state_spec)
+            state_has_unknown_route = state_has_on_unknown_transition(state_spec)
             context_before_actions = dict(context)
             for action in state_spec.actions:
                 resolved_inputs = resolve_action_inputs_from_context(
@@ -292,7 +300,21 @@ class DurableWorkflowExecutor:
                     duration_ms=result.duration_ms,
                 )
 
-                if not result.ok:
+                action_outcome = normalise_action_outcome(result.status)
+                if (
+                    action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE
+                    and isinstance(result.outputs, Mapping)
+                ):
+                    context.update(result.outputs)
+                    apply_tool_output_context_mappings(
+                        context=context,
+                        metadata=state_spec.metadata,
+                        action_outputs=result.outputs,
+                        state_id=current_state,
+                        action_id=action.action_id,
+                    )
+
+                if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
                     if state_has_failure_route:
                         # Safety envelope (JVNAUTOSCI-1087): if the state defines
                         # an explicit on_failure branch, do not fail-fast here.
@@ -320,18 +342,41 @@ class DurableWorkflowExecutor:
                         error=error,
                         step_count=step_index,
                     )
-
-                if isinstance(result.outputs, Mapping):
-                    context.update(result.outputs)
-                    apply_tool_output_context_mappings(
-                        context=context,
-                        metadata=state_spec.metadata,
-                        action_outputs=result.outputs,
-                        state_id=current_state,
-                        action_id=action.action_id,
+                if action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN:
+                    if state_has_unknown_route:
+                        # Unknown outcomes require explicit routing; do not
+                        # silently continue via default transitions.
+                        break
+                    error = result.error or "action_unknown"
+                    self._instance_manager.checkpoint(
+                        instance_id,
+                        current_state=current_state,
+                        workflow_data=context,
+                        step_index=step_index,
+                        error=error,
+                        error_step=action.action_id,
+                        progress_current=step_index,
+                        progress_total=total_steps,
+                        progress_message=current_state,
+                    )
+                    trace.finish_failed(error)
+                    return DurableWorkflowResult(
+                        instance_id=instance_id,
+                        data=context,
+                        completed=False,
+                        final_state=current_state,
+                        error=error,
+                        step_count=step_index,
                     )
 
-            if state_has_failure_route and bool(context.get("last_action_failed")):
+            if state_has_unknown_route and bool(context.get("last_action_unknown")):
+                post_validation = skipped_metadata_validation(
+                    state_id=current_state,
+                    phase="post_action",
+                    reason="action_unknown_with_on_unknown_route",
+                    mode=validation_mode,
+                )
+            elif state_has_failure_route and bool(context.get("last_action_failed")):
                 post_validation = skipped_metadata_validation(
                     state_id=current_state,
                     phase="post_action",

@@ -397,3 +397,91 @@ def test_metadata_validation_blocks_missing_writes_context_key() -> None:
     assert result.error.startswith(
         "metadata_validation_failed:metadata_write_context_key_missing:write:"
     )
+
+
+def test_workflow_executor_routes_on_unknown_transition() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#unknown_outcome_routing_workflow",
+        initial_state="probe",
+        states={
+            "probe": WorkflowStateSpec(
+                state_id="probe",
+                actions=(WorkflowActionInvocation(action_id="probe.action"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="escalate",
+                        condition=lambda ctx: bool(ctx.get("last_action_unknown")),
+                        reason="on_unknown",
+                    ),
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        condition=lambda _ctx: True,
+                        reason="next_step",
+                    ),
+                ),
+            ),
+            "escalate": WorkflowStateSpec(state_id="escalate", terminal=True),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+    )
+    registry = ActionRegistry()
+
+    def handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            status="unknown",
+            error="classification_inconclusive",
+            outputs={"probe_summary": "insufficient evidence"},
+        )
+
+    registry.register(ActionSpec(action_id="probe.action", handler=handler))
+    executor = WorkflowExecutor(registry=registry, max_transitions=5)
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is True
+    assert result.error is None
+    assert result.final_state == "escalate"
+    assert result.data.get("last_action_unknown") is True
+    assert result.data.get("probe_summary") == "insufficient evidence"
+
+
+def test_workflow_executor_rejects_unknown_without_route() -> None:
+    definition = WorkflowDefinition(
+        workflow_id="#V#unknown_outcome_without_route",
+        initial_state="probe",
+        states={
+            "probe": WorkflowStateSpec(
+                state_id="probe",
+                actions=(WorkflowActionInvocation(action_id="probe.action"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="done",
+                        condition=lambda _ctx: True,
+                        reason="next_step",
+                    ),
+                ),
+            ),
+            "done": WorkflowStateSpec(state_id="done", terminal=True),
+        },
+    )
+    registry = ActionRegistry()
+
+    def handler(_request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(status="unknown")
+
+    registry.register(ActionSpec(action_id="probe.action", handler=handler))
+    executor = WorkflowExecutor(registry=registry, max_transitions=5)
+
+    result = executor.run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None),
+        data={},
+    )
+
+    assert result.completed is False
+    assert result.final_state == "probe"
+    assert result.error == "action_unknown"

@@ -164,6 +164,137 @@ def test_durable_executor_still_fails_without_on_failure_route() -> None:
     )
 
 
+def test_durable_executor_routes_to_on_unknown_recovery() -> None:
+    """Unknown outcomes should route via explicit `on_unknown` transitions."""
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_unknown_recovery",
+        initial_state="probe",
+        states={
+            "probe": WorkflowStateSpec(
+                state_id="probe",
+                actions=(WorkflowActionInvocation(action_id="probe.action"),),
+                transitions=(
+                    WorkflowTransitionSpec(
+                        to_state="escalate",
+                        reason="on_unknown",
+                        condition=lambda ctx: bool(ctx.get("last_action_unknown")),
+                    ),
+                ),
+            ),
+            "escalate": WorkflowStateSpec(
+                state_id="escalate",
+                actions=(WorkflowActionInvocation(action_id="recover.action"),),
+                terminal=True,
+            ),
+        },
+    )
+
+    registry = ActionRegistry()
+
+    def unknown_handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(
+            status="unknown",
+            error="insufficient_confidence",
+            outputs={"probe_summary": "need escalation"},
+        )
+
+    def recover_handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(outputs={"escalated": True})
+
+    registry.register(ActionSpec(action_id="probe.action", handler=unknown_handler))
+    registry.register(ActionSpec(action_id="recover.action", handler=recover_handler))
+
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is True
+    assert result.final_state == "escalate"
+    assert result.data.get("last_action_unknown") is False
+    assert result.data.get("probe_summary") == "need escalation"
+    assert result.data.get("escalated") is True
+    checkpoint_errors = [
+        call.kwargs.get("error")
+        for call in manager.checkpoint.call_args_list
+        if isinstance(call.kwargs, dict)
+    ]
+    assert "action_unknown" not in checkpoint_errors
+
+
+def test_durable_executor_fails_unknown_without_on_unknown_route() -> None:
+    """Without on_unknown route, unknown outcomes should fail closed."""
+    definition = WorkflowDefinition(
+        workflow_id="#V#durable_unknown_fail_closed",
+        initial_state="probe",
+        states={
+            "probe": WorkflowStateSpec(
+                state_id="probe",
+                actions=(WorkflowActionInvocation(action_id="probe.action"),),
+                terminal=True,
+            ),
+        },
+    )
+
+    registry = ActionRegistry()
+
+    def unknown_handler(request: WorkflowActionRequest) -> WorkflowActionResult:
+        return WorkflowActionResult(status="unknown")
+
+    registry.register(ActionSpec(action_id="probe.action", handler=unknown_handler))
+
+    manager = MagicMock()
+    manager.get_instance.return_value = _build_instance(definition.workflow_id)
+    manager.is_cancelled.return_value = False
+    manager.extend_lock.return_value = True
+    manager.checkpoint.return_value = True
+
+    executor = DurableWorkflowExecutor(registry=registry, instance_manager=manager)
+
+    with (
+        patch(
+            "src.backend.languagemodels.llm_interface.get_llm_client",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "src.backend.languagemodels.llm_interface.get_active_model_name",
+            return_value="test-model",
+        ),
+    ):
+        result = executor.run_durable(
+            "instance-1",
+            definition,
+            resume_from_checkpoint=False,
+        )
+
+    assert result.completed is False
+    assert result.final_state == "probe"
+    assert result.error == "action_unknown"
+    assert any(
+        isinstance(call.kwargs, dict) and call.kwargs.get("error") == "action_unknown"
+        for call in manager.checkpoint.call_args_list
+    )
+
+
 def test_durable_executor_blocks_unsatisfied_metadata_precondition() -> None:
     """Metadata precondition failures should block execution with a reason code."""
     definition = WorkflowDefinition(

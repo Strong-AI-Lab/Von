@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
-from .action_registry import ActionRegistry, WorkflowActionResult, WorkflowEnvironment
+from .action_registry import (
+    ActionRegistry,
+    WORKFLOW_ACTION_OUTCOME_FAILURE,
+    WORKFLOW_ACTION_OUTCOME_UNKNOWN,
+    WorkflowActionResult,
+    WorkflowEnvironment,
+    normalise_action_outcome,
+)
 from .metadata_validation import (
     METADATA_VALIDATION_MODE_OFF,
     apply_metadata_validation_mode,
@@ -296,9 +303,23 @@ class WorkflowResult:
 
 def state_has_on_failure_transition(state_spec: WorkflowStateSpec) -> bool:
     """Return True when a state declares an explicit `on_failure` route."""
+    return state_has_transition_reason(state_spec, "on_failure")
+
+
+def state_has_on_unknown_transition(state_spec: WorkflowStateSpec) -> bool:
+    """Return True when a state declares an explicit `on_unknown` route."""
+    return state_has_transition_reason(state_spec, "on_unknown")
+
+
+def state_has_transition_reason(state_spec: WorkflowStateSpec, reason: str) -> bool:
+    """Return True when a state declares a transition with `reason`."""
+    desired_reason = str(reason or "").strip().lower()
     for transition in state_spec.transitions:
-        reason = transition.reason
-        if isinstance(reason, str) and reason.strip().lower() == "on_failure":
+        transition_reason = transition.reason
+        if (
+            isinstance(transition_reason, str)
+            and transition_reason.strip().lower() == desired_reason
+        ):
             return True
     return False
 
@@ -394,6 +415,7 @@ class WorkflowExecutor:
                 )
 
             state_has_failure_route = state_has_on_failure_transition(state_spec)
+            state_has_unknown_route = state_has_on_unknown_transition(state_spec)
             context_before_actions = dict(context)
             for action in state_spec.actions:
                 resolved_inputs = resolve_action_inputs_from_context(
@@ -417,7 +439,20 @@ class WorkflowExecutor:
                         call_id=result.call_id,
                         duration_ms=result.duration_ms,
                     )
-                if not result.ok:
+                action_outcome = normalise_action_outcome(result.status)
+                if (
+                    action_outcome != WORKFLOW_ACTION_OUTCOME_FAILURE
+                    and isinstance(result.outputs, Mapping)
+                ):
+                    context.update(result.outputs)
+                    apply_tool_output_context_mappings(
+                        context=context,
+                        metadata=state_spec.metadata,
+                        action_outputs=result.outputs,
+                        state_id=current_state,
+                        action_id=action.action_id,
+                    )
+                if action_outcome == WORKFLOW_ACTION_OUTCOME_FAILURE:
                     if state_has_failure_route:
                         # Safety envelope (JVNAUTOSCI-1087): preserve the failure
                         # in context and let transition rules decide recovery.
@@ -430,17 +465,29 @@ class WorkflowExecutor:
                         final_state=current_state,
                         error=result.error or "action_failed",
                     )
-                if isinstance(result.outputs, Mapping):
-                    context.update(result.outputs)
-                    apply_tool_output_context_mappings(
-                        context=context,
-                        metadata=state_spec.metadata,
-                        action_outputs=result.outputs,
-                        state_id=current_state,
-                        action_id=action.action_id,
+                if action_outcome == WORKFLOW_ACTION_OUTCOME_UNKNOWN:
+                    if state_has_unknown_route:
+                        # Explicit unknown-routing is required to avoid silent
+                        # progression on ambiguous action outcomes.
+                        break
+                    unknown_error = result.error or "action_unknown"
+                    if trace is not None:
+                        trace.finish_failed(unknown_error)
+                    return WorkflowResult(
+                        data=context,
+                        completed=False,
+                        final_state=current_state,
+                        error=unknown_error,
                     )
 
-            if state_has_failure_route and bool(context.get("last_action_failed")):
+            if state_has_unknown_route and bool(context.get("last_action_unknown")):
+                post_validation = skipped_metadata_validation(
+                    state_id=current_state,
+                    phase="post_action",
+                    reason="action_unknown_with_on_unknown_route",
+                    mode=validation_mode,
+                )
+            elif state_has_failure_route and bool(context.get("last_action_failed")):
                 post_validation = skipped_metadata_validation(
                     state_id=current_state,
                     phase="post_action",

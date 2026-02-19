@@ -6,6 +6,7 @@ including:
 - initial_step key resolution
 - Lambda closure correctness (no late-binding bugs)
 - on_failure transition support
+- on_unknown transition support
 - Input mapping via hasInputMap
 - Semantic context mapping via workflow_step_maps_context_key_to_tool_param
 - Output context contracts via workflow_step_writes_context_key
@@ -70,6 +71,7 @@ def _make_step(
     on_true: str | None = None,
     on_false: str | None = None,
     on_failure: str | None = None,
+    on_unknown: str | None = None,
     preconditions: List[str] | None = None,
     effects: List[str] | None = None,
     reads_variables: List[str] | None = None,
@@ -94,6 +96,7 @@ def _make_step(
             "on_true": on_true,
             "on_false": on_false,
             "on_failure": on_failure,
+            "on_unknown": on_unknown,
         },
     }
 
@@ -385,6 +388,57 @@ class TestWorkflowGraphPredicateCompatibility:
             for item in warnings
         )
 
+    def test_build_graph_reads_on_unknown_next_step_predicate(self):
+        workflow_doc = {
+            "concept_id": "#V#workflow_on_unknown_predicate",
+            "relationships": {
+                "hasInitialStep": "#V#step_a",
+                "hasStep": ["#V#step_a", "#V#escalate_step", "#V#done_step"],
+            },
+        }
+        step_docs = {
+            "#V#step_a": {
+                "concept_id": "#V#step_a",
+                "name": "Step A",
+                "relationships": {
+                    "invokesAction": "probe_tool",
+                    "onUnknownNextStep": "#V#escalate_step",
+                    "nextStep": "#V#done_step",
+                },
+            },
+            "#V#escalate_step": {
+                "concept_id": "#V#escalate_step",
+                "name": "Escalate Step",
+                "relationships": {},
+            },
+            "#V#done_step": {
+                "concept_id": "#V#done_step",
+                "name": "Done Step",
+                "relationships": {},
+            },
+        }
+
+        with patch(
+            "src.backend.workflows.vontology_loader.ConceptsRepository.find_one",
+            return_value=workflow_doc,
+        ):
+            with patch(
+                "src.backend.workflows.vontology_loader._fetch_concepts_by_id",
+                return_value=step_docs,
+            ):
+                graph, _warnings = build_workflow_process_graph(
+                    "#V#workflow_on_unknown_predicate"
+                )
+
+        assert graph is not None
+        step = graph["steps"][0]
+        assert step["control_flow"]["on_unknown"] == "#V#escalate_step"
+        assert any(
+            edge["predicate"] == "onUnknownNextStep"
+            and edge["to"] == "#V#escalate_step"
+            for edge in graph["edges"]
+        )
+
 
 # ---------------------------------------------------------------------------
 # Key fix: initial_step key (not initial_state).
@@ -564,6 +618,71 @@ class TestOnFailureTransitions:
         assert defn is not None
         transitions = defn.states["#V#step"].transitions
         assert transitions[0].reason == "on_failure"
+        assert transitions[1].reason == "next_step"
+
+
+# ---------------------------------------------------------------------------
+# on_unknown transition support.
+# ---------------------------------------------------------------------------
+
+
+class TestOnUnknownTransitions:
+    def test_on_unknown_becomes_transition(self):
+        """on_unknown should produce a transition keyed by last_action_unknown."""
+        steps = [
+            _make_step(
+                "#V#probe",
+                invokes_action="probe.action",
+                on_unknown="#V#escalate",
+                next_step="#V#ok",
+            ),
+            _make_step("#V#escalate"),
+            _make_step("#V#ok"),
+        ]
+        graph = _make_graph(initial_step="#V#probe", steps=steps)
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        probe = defn.states["#V#probe"]
+        unknown_transition = next(
+            (t for t in probe.transitions if t.reason == "on_unknown"), None
+        )
+        assert unknown_transition is not None
+        assert unknown_transition.to_state == "#V#escalate"
+        assert unknown_transition.condition({"last_action_unknown": True}) is True
+        assert unknown_transition.condition({"last_action_unknown": False}) is False
+        assert unknown_transition.condition({}) is False
+
+    def test_on_unknown_has_priority_over_next(self):
+        """on_unknown transitions should be ordered before next transitions."""
+        steps = [
+            _make_step(
+                "#V#step",
+                invokes_action="act",
+                on_unknown="#V#retry",
+                next_step="#V#ok",
+            ),
+            _make_step("#V#retry"),
+            _make_step("#V#ok"),
+        ]
+        graph = _make_graph(initial_step="#V#step", steps=steps)
+
+        with _stub_fetch_concepts(), _stub_narrative():
+            with patch(
+                "src.backend.workflows.vontology_loader.build_workflow_process_graph",
+                return_value=(graph, []),
+            ):
+                defn = load_workflow_definition_from_vontology("#V#test_workflow")
+
+        assert defn is not None
+        transitions = defn.states["#V#step"].transitions
+        assert transitions[0].reason == "on_unknown"
         assert transitions[1].reason == "next_step"
 
 
@@ -1130,7 +1249,7 @@ class TestFullWorkflowConversion:
         assert defn is None
 
     def test_branching_workflow(self):
-        """A workflow with on_true/on_false branching and on_failure."""
+        """A workflow with on_true/on_false branching and failure/unknown routes."""
         steps = [
             _make_step(
                 "#V#check",
@@ -1138,10 +1257,12 @@ class TestFullWorkflowConversion:
                 on_true="#V#proceed",
                 on_false="#V#retry",
                 on_failure="#V#abort",
+                on_unknown="#V#escalate",
             ),
             _make_step("#V#proceed"),  # terminal
             _make_step("#V#retry", invokes_action="retry", next_step="#V#check"),
             _make_step("#V#abort"),  # terminal
+            _make_step("#V#escalate"),  # terminal
         ]
         graph = _make_graph(initial_step="#V#check", steps=steps)
 
@@ -1154,21 +1275,24 @@ class TestFullWorkflowConversion:
 
         assert defn is not None
         check = defn.states["#V#check"]
-        # Should have 3 transitions: on_failure, on_true, on_false
-        assert len(check.transitions) == 3
+        # Should have 4 transitions: on_failure, on_unknown, on_true, on_false.
+        assert len(check.transitions) == 4
         reasons = [t.reason for t in check.transitions]
-        assert reasons == ["on_failure", "on_true", "on_false"]
+        assert reasons == ["on_failure", "on_unknown", "on_true", "on_false"]
 
         # Verify condition semantics.
         # on_failure fires when last_action_failed.
         assert check.transitions[0].condition({"last_action_failed": True}) is True
+        # on_unknown fires when last_action_unknown.
+        assert check.transitions[1].condition({"last_action_unknown": True}) is True
         # on_true fires when result is truthy.
-        assert check.transitions[1].condition({"result": True}) is True
-        assert check.transitions[1].condition({"result": False}) is False
+        assert check.transitions[2].condition({"result": True}) is True
+        assert check.transitions[2].condition({"result": False}) is False
 
         # Terminal states.
         assert defn.states["#V#proceed"].terminal is True
         assert defn.states["#V#abort"].terminal is True
+        assert defn.states["#V#escalate"].terminal is True
         assert defn.states["#V#retry"].terminal is False
 
 

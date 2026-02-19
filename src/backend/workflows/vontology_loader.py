@@ -60,6 +60,12 @@ WORKFLOW_GRAPH_PREDICATE_ALIASES: Dict[str, Tuple[str, ...]] = {
         "#V#on_failure_next_step",
         "on_failure_next_step",
     ),
+    "onUnknownNextStep": (
+        "#V#onUnknownNextStep",
+        "onUnknownNextStep",
+        "#V#on_unknown_next_step",
+        "on_unknown_next_step",
+    ),
     "hasPrecondition": (
         "#V#hasPrecondition",
         "hasPrecondition",
@@ -929,6 +935,17 @@ def build_workflow_process_graph(
             matched_predicates=(on_failure_predicate,),
         )
 
+        on_unknown_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["onUnknownNextStep"]
+        on_unknown, on_unknown_predicate = _first_relationship_target_with_predicate(
+            step_rels,
+            on_unknown_candidates,
+        )
+        _record_legacy_alias_use(
+            legacy_aliases=legacy_aliases,
+            canonical_predicate=on_unknown_candidates[0],
+            matched_predicates=(on_unknown_predicate,),
+        )
+
         precondition_candidates = WORKFLOW_GRAPH_PREDICATE_ALIASES["hasPrecondition"]
         preconditions, precondition_predicates = _all_relationship_targets_with_predicates(
             step_rels,
@@ -1035,6 +1052,7 @@ def build_workflow_process_graph(
                     "on_true": on_true,
                     "on_false": on_false,
                     "on_failure": on_failure,
+                    "on_unknown": on_unknown,
                 },
             }
         )
@@ -1043,6 +1061,7 @@ def build_workflow_process_graph(
         _edge(step_id, "onTrueNextStep", on_true)
         _edge(step_id, "onFalseNextStep", on_false)
         _edge(step_id, "onFailureNextStep", on_failure)
+        _edge(step_id, "onUnknownNextStep", on_unknown)
 
     if legacy_aliases:
         warnings.append(
@@ -1075,6 +1094,9 @@ def load_workflow_definition_from_vontology(
       default-argument binding to avoid Python late-binding closure bugs.
     - ``on_failure`` transitions: mapped to a condition checking the
       ``last_action_failed`` context flag (set by the action registry on error).
+    - ``on_unknown`` transitions: mapped to a condition checking the
+      ``last_action_unknown`` context flag so ambiguous outcomes are routed
+      explicitly.
     - Input mapping: reads ``hasInputMap`` / ``has_input_map`` relationships
       from step concepts to populate ``WorkflowActionInvocation.inputs``.
     - Context mapping: reads ``workflow_step_maps_context_key_to_tool_param``
@@ -1224,11 +1246,13 @@ def load_workflow_definition_from_vontology(
         # loop iteration's values, avoiding Python's late-binding closure bug.
 
         on_failure_target = control_flow.get("on_failure")
+        on_unknown_target = control_flow.get("on_unknown")
         on_true_target = control_flow.get("on_true")
         on_false_target = control_flow.get("on_false")
         next_target = control_flow.get("next")
 
-        # Priority: on_failure → on_true/on_false → next (unconditional).
+        # Priority: on_failure → on_unknown → on_true/on_false → next
+        # (unconditional).
 
         if on_failure_target:
             transitions.append(
@@ -1238,6 +1262,17 @@ def load_workflow_definition_from_vontology(
                         ctx.get("last_action_failed")
                     ),
                     reason="on_failure",
+                )
+            )
+
+        if on_unknown_target:
+            transitions.append(
+                WorkflowTransitionSpec(
+                    to_state=on_unknown_target,
+                    condition=lambda ctx, _t=on_unknown_target: bool(
+                        ctx.get("last_action_unknown")
+                    ),
+                    reason="on_unknown",
                 )
             )
 
