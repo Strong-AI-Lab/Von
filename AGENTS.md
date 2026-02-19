@@ -26,6 +26,7 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 20. **Comment for evolution**: Add comments that guide future modifications. See "Self-Documenting, Evolvable Code" section.
 21. **Proactive hygiene**: Periodically review touched files and their neighbours for inconsistency, duplication, and drift. Fix proactively.
 22. In docs/examples for secret env vars, use explicit placeholders like `<YOUR-CLIENT-SECRET-HERE>` and avoid token-like sample strings that can trigger secret scanners.
+23. **Workflow-first behaviours**: strongly prefer Vontology workflows (definitions, instances, event bindings, schedules) to drive Von behaviour instead of adding specialised orchestration code. Add bespoke code only when workflow primitives cannot express the behaviour, and document the gap in Jira.
 
 ## Core AI-Focused Documents
 - `docs/AINotes.md`: short-term memory and tactical log.
@@ -75,6 +76,12 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 	2. Check for existing predicate/type concepts before inventing anything.
 	3. If a list of concepts is needed, prefer a Vontology type and query its instances.
 	4. Record the chosen canonical IDs in the Jira issue.
+- **Workflow-first behaviour checklist (mandatory for behaviour/orchestration changes):**
+	1. Inspect existing workflow definitions before coding (`workflow_list_definitions`).
+	2. Prefer creating/updating workflow instances and definitions over adding task-specific Python orchestration (`workflow_create_instance`, `workflow_get_instance`, `workflow_list_instances`).
+	3. Prefer durable bindings/schedules for repeat behaviour (`workflow_bind_event`, `workflow_create_schedule`, `workflow_set_schedule_enabled`, `workflow_trigger_schedule`).
+	4. Use operational controls instead of ad-hoc runtime flags (`workflow_cancel_instance`, `workflow_retry_instance`, `workflow_delete_schedule`).
+	5. If workflow tools cannot express the requirement, explicitly document the constraint and create/link a Jira capability-gap issue before introducing specialised code.
 - For fairly complex capability improvements, run a background search for related Jira issues, Confluence design docs, and existing Vontology concepts before proposing a plan.
 - **No hard-coded ontology lists**: do not add fixed lists of predicate/type IDs or names in code. If you believe a hard-coded list is unavoidable, you must:
 	- explain why Vontology lookup is not viable,
@@ -93,6 +100,13 @@ All AI agents must read this file and `docs/engineering/security_considerations.
 ## Tooling and Automation
 - Activate required external tool categories (Jira, Vontology, MongoDB, GitHub) without asking, when clearly needed.
 - Treat tool categories as opt-in per session: activate before first use, and occasionally check whether a matching tool deactivation call exists (to disable categories when no longer needed).
+- **Vontology workflow tools are the default control surface for behaviour**:
+	- Discovery/introspection: `workflow_list_definitions`, `workflow_list_event_bindings`, `workflow_list_instances`, `workflow_mcp_health_check`.
+	- Execute behaviour: `workflow_create_instance`, then monitor via `workflow_get_instance`.
+	- Event-driven behaviour: `workflow_bind_event` (avoid hard-coded dispatch tables where workflow binding can be used).
+	- Scheduled behaviour: `workflow_create_schedule`, `workflow_list_schedules`, `workflow_get_schedule`, `workflow_trigger_schedule`, `workflow_set_schedule_enabled`, `workflow_delete_schedule`.
+	- Runtime safety/recovery: `workflow_cancel_instance`, `workflow_retry_instance`.
+	- Prefer these pathways over bespoke orchestration code whenever behaviour can be represented as workflow definitions + inputs.
 - **Jira default access path**: it's OK to use the Atlassian MCP tools, but if they fail, switch immediately to using Von's internal Jira proxy/tools first  for the rest of the session (`jira_get_auth_config`, `jira_get_myself`, `jira_search`, `jira_get_issue`, write helpers in `src/backend/integrations/internal_mcp/catalogue.py`). This path uses `ATLASSIAN_BASE_URL` + `ATLASSIAN_EMAIL` + `ATLASSIAN_API_TOKEN` and is independent of Atlassian MCP OAuth reliability.
 - Use Atlassian MCP OAuth tools only when explicitly needed for capabilities not available in Von's internal Jira tools.
 - When Jira friction is discovered, prefer improving Von's internal Jira path (tooling, diagnostics, schemas, guardrails) and document the issue/capability gap in code/docs/Jira so reliability improves over time.
