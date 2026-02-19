@@ -1482,6 +1482,29 @@
             }
         },
         {
+            "name": "turn_execution_backfill_from_chat_history",
+            "description": "Rebuild turn_execution_records from historical chat messages with llm_debug_data.turn_execution_record payloads.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": {
+                        "type": "string"
+                    },
+                    "limit_sessions": {
+                        "type": "integer"
+                    },
+                    "dry_run": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "namespace"
+                ],
+                "additionalProperties": true,
+                "description": "Backfill turn execution projection records from assistant chat history for a specific namespace. Defaults to dry-run mode."
+            }
+        },
+        {
             "name": "turn_execution_build_benchmark",
             "description": "Generate corpus-level turn execution reliability metrics, seeded replay cases, and capability-gap signals.",
             "inputSchema": {

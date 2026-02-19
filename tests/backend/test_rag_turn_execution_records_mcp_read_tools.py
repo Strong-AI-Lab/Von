@@ -523,3 +523,29 @@ def test_turn_execution_build_benchmark_reports_gap_when_no_records(monkeypatch)
     capability_gaps = result.get("capability_gaps")
     assert isinstance(capability_gaps, list)
     assert any(gap.get("gap_id") == "no_turn_execution_records" for gap in capability_gaps)
+
+
+def test_turn_execution_backfill_wrapper_returns_provenance(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue as cat
+
+    monkeypatch.setattr(
+        "src.backend.services.turn_execution_record_service.backfill_turn_execution_records_from_chat_history",
+        lambda **kwargs: {
+            "success": True,
+            "namespace": kwargs.get("namespace"),
+            "dry_run": kwargs.get("dry_run"),
+            "candidate_records": 3,
+            "upserted_count": 0,
+        },
+    )
+
+    result = cat._turn_execution_backfill_from_chat_history(
+        namespace="#V#user@org",
+        dry_run=True,
+        limit_sessions=100,
+    )
+
+    assert result["success"] is True
+    assert result["namespace"] == "#V#user@org"
+    assert result["candidate_records"] == 3
+    assert result["provenance"]["item_kind"] == "turn_execution_backfill_report"

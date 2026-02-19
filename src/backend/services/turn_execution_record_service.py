@@ -817,3 +817,192 @@ def upsert_turn_execution_record_projection(
             "request_id": request_id,
         }
 
+
+def _normalise_positive_int(
+    value: Any,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def backfill_turn_execution_records_from_chat_history(
+    *,
+    namespace: str,
+    limit_sessions: int = 500,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Backfill turn_execution_records from chat_history assistant messages.
+
+    This scans sessions in the provided namespace and extracts
+    `history[].llm_debug_data.turn_execution_record` payloads for assistant turns.
+    By default this runs in dry-run mode to report potential backfill volume
+    without mutating Mongo.
+    """
+
+    namespace_value = _safe_str(namespace)
+    if not namespace_value:
+        return {"success": False, "error": "namespace_required"}
+
+    session_limit = _normalise_positive_int(
+        limit_sessions,
+        default=500,
+        minimum=1,
+        maximum=5000,
+    )
+    run_dry = bool(dry_run)
+
+    db = get_db()
+    if db is None:
+        return {"success": False, "error": "db_unavailable"}
+
+    try:
+        chat_history_coll = db["chat_history"]
+    except Exception:
+        return {"success": False, "error": "chat_history_collection_unavailable"}
+
+    query = {"namespace": namespace_value}
+    projection = {
+        "user_id": 1,
+        "session_id": 1,
+        "organisation_concept_id": 1,
+        "history.role": 1,
+        "history.llm_debug_data.turn_execution_record": 1,
+    }
+    cursor = chat_history_coll.find(query, projection).limit(session_limit)
+
+    sessions_scanned = 0
+    assistant_messages_scanned = 0
+    records_found = 0
+    candidate_records = 0
+    upserted_count = 0
+    inserted_count = 0
+    skipped_missing_request_id = 0
+    skipped_invalid_record = 0
+    skipped_missing_user_or_session = 0
+    failure_count = 0
+    skipped_reasons: dict[str, int] = {}
+    example_request_ids: list[str] = []
+
+    for session_doc in cursor:
+        if not isinstance(session_doc, Mapping):
+            continue
+        sessions_scanned += 1
+        user_id = _safe_str(session_doc.get("user_id"))
+        session_id = _safe_str(session_doc.get("session_id"))
+        org_id = _safe_str(session_doc.get("organisation_concept_id"))
+        history = session_doc.get("history")
+        if not isinstance(history, list):
+            continue
+
+        for message in history:
+            if not isinstance(message, Mapping):
+                continue
+            if message.get("role") != "assistant":
+                continue
+            assistant_messages_scanned += 1
+
+            llm_debug = message.get("llm_debug_data")
+            if not isinstance(llm_debug, Mapping):
+                continue
+            record = llm_debug.get("turn_execution_record")
+            if not isinstance(record, Mapping):
+                continue
+            records_found += 1
+
+            request_id = _safe_str(record.get("request_id"))
+            if not request_id:
+                skipped_missing_request_id += 1
+                skipped_reasons["missing_request_id"] = (
+                    skipped_reasons.get("missing_request_id", 0) + 1
+                )
+                continue
+
+            if request_id not in example_request_ids:
+                example_request_ids.append(request_id)
+
+            if not user_id or not session_id:
+                skipped_missing_user_or_session += 1
+                skipped_reasons["missing_user_or_session"] = (
+                    skipped_reasons.get("missing_user_or_session", 0) + 1
+                )
+                continue
+
+            candidate_records += 1
+            if run_dry:
+                continue
+
+            outcome = upsert_turn_execution_record_projection(
+                record=record,
+                user_id=user_id,
+                session_id=session_id,
+                namespace=namespace_value,
+                org_id=org_id,
+            )
+            if bool(outcome.get("updated", False)):
+                upserted_count += 1
+                if bool(outcome.get("inserted", False)):
+                    inserted_count += 1
+                continue
+
+            reason = _safe_str(outcome.get("reason")) or "unknown"
+            if reason == "invalid_record":
+                skipped_invalid_record += 1
+            elif reason == "missing_request_id":
+                skipped_missing_request_id += 1
+            elif reason in {"mongo_error", "collection_unavailable"}:
+                failure_count += 1
+            skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+
+    gap_signals: list[dict[str, Any]] = []
+    if sessions_scanned > 0 and assistant_messages_scanned > 0 and records_found == 0:
+        gap_signals.append(
+            {
+                "gap_id": "no_embedded_turn_execution_record_in_history",
+                "severity": "high",
+                "description": (
+                    "Assistant messages were present but none contained "
+                    "llm_debug_data.turn_execution_record, so direct projection backfill "
+                    "cannot populate turn_execution_records."
+                ),
+                "assistant_messages_scanned": assistant_messages_scanned,
+            }
+        )
+    if records_found > 0 and candidate_records == 0:
+        gap_signals.append(
+            {
+                "gap_id": "no_backfill_candidates_after_validation",
+                "severity": "medium",
+                "description": (
+                    "Turn execution records were found in history but none qualified for "
+                    "upsert (likely missing request_id or user/session context)."
+                ),
+                "records_found": records_found,
+            }
+        )
+
+    return {
+        "success": True,
+        "namespace": namespace_value,
+        "dry_run": run_dry,
+        "limit_sessions": session_limit,
+        "sessions_scanned": sessions_scanned,
+        "assistant_messages_scanned": assistant_messages_scanned,
+        "records_found": records_found,
+        "candidate_records": candidate_records,
+        "upserted_count": upserted_count,
+        "inserted_count": inserted_count,
+        "skipped_missing_request_id": skipped_missing_request_id,
+        "skipped_invalid_record": skipped_invalid_record,
+        "skipped_missing_user_or_session": skipped_missing_user_or_session,
+        "failure_count": failure_count,
+        "skipped_reasons": skipped_reasons,
+        "example_request_ids": example_request_ids[:20],
+        "gap_signals": gap_signals,
+    }

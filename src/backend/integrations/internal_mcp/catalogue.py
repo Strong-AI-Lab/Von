@@ -5313,6 +5313,38 @@ def _turn_execution_build_benchmark(**kwargs):
     )
 
 
+def _turn_execution_backfill_from_chat_history(**kwargs):
+    from ...services.turn_execution_record_service import (
+        backfill_turn_execution_records_from_chat_history,
+    )
+
+    namespace = kwargs.get("namespace")
+    if not isinstance(namespace, str) or not namespace.strip():
+        return make_error_response(
+            "missing_parameter",
+            "Missing required parameter: namespace",
+            details={"missing": ["namespace"]},
+            suggestions=[
+                "Provide namespace to scope backfill (for example #V#user@organisation)"
+            ],
+        )
+
+    result = backfill_turn_execution_records_from_chat_history(
+        namespace=namespace.strip(),
+        limit_sessions=kwargs.get("limit_sessions", 500),
+        dry_run=kwargs.get("dry_run", True),
+    )
+    if not isinstance(result, dict):
+        return result
+    if not result.get("success", False):
+        return result
+    return _with_rag_provenance(
+        payload=result,
+        item_kind="turn_execution_backfill_report",
+        source_system="mongo.turn_execution_records",
+    )
+
+
 def _turn_execution_list(**kwargs):
     forwarded = dict(kwargs)
     forwarded["collection"] = "turn_execution_records"
@@ -11930,6 +11962,28 @@ def build_default_catalogue() -> MethodCatalogue:
             category="read",
             description=(
                 "Generate corpus-level turn execution reliability metrics, seeded replay cases, and capability-gap signals."
+            ),
+        ),
+        MethodDefinition(
+            name="turn_execution_backfill_from_chat_history",
+            handler=_turn_execution_backfill_from_chat_history,
+            input_schema=Schema(
+                required={"namespace": str},
+                optional={
+                    "limit_sessions": (int,),
+                    "dry_run": (bool,),
+                },
+                allow_unknown=True,
+                description=(
+                    "Backfill turn execution projection records from assistant chat history "
+                    "for a specific namespace. Defaults to dry-run mode."
+                ),
+            ),
+            output_schema=None,
+            category="write",
+            timeout_sec=60.0,
+            description=(
+                "Rebuild turn_execution_records from historical chat messages with llm_debug_data.turn_execution_record payloads."
             ),
         ),
         MethodDefinition(

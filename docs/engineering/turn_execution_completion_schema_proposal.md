@@ -246,6 +246,10 @@ The existing `message.direct_created` binding to `#V#chat_assistant_workflow` sh
 - Produces reproducible corpus-level metrics, seeded replay cases, and capability-gap signals.
 - Intended for ongoing reliability benchmarking and regression tracking.
 
+5. `turn_execution_backfill_from_chat_history` (implemented)
+- Replays assistant-message `llm_debug_data.turn_execution_record` payloads into `turn_execution_records`.
+- Namespace-scoped and dry-run by default for safe backfill planning.
+
 ### 6.2 Why this was needed
 
 - `search_knowledge_base` is text-centric and not deterministic for structured failure triage.
