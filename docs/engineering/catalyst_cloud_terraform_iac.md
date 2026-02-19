@@ -193,6 +193,7 @@ URI policy or startup connectivity/auth/read/write probe checks fail.
 
 ## Related docs
 
+- `docs/engineering/openstack_deployment.md`
 - `infra/openstack/README.md`
 - `docs/engineering/catalyst_cloud_swift_setup.md`
 - `docs/engineering/openstack_operations_runbooks.md`

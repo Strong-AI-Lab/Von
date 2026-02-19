@@ -2,6 +2,10 @@
 
 This directory provides reusable Terraform infrastructure for deploying Von on OpenStack/Catalyst Cloud.
 
+If you want a plain-language, researcher-focused walkthrough, start with:
+
+- `docs/engineering/openstack_deployment.md`
+
 ## Scope
 
 The stack composes four modules:
